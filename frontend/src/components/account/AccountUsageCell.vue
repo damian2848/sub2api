@@ -115,6 +115,7 @@
       <div v-else class="space-y-1">
         <div class="text-xs text-gray-400">-</div>
       </div>
+      <ClaudeResetCreditsCell :account="account" />
     </template>
 
     <!-- OpenAI Codex accounts: ticket status; usage querying remains OAuth-only. -->
@@ -767,6 +768,7 @@ import { isOfficialGeminiBaseUrl } from '@/utils/geminiExplicitCache'
 import { supportsAccountQuota } from '@/utils/accountQuota'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
+import ClaudeResetCreditsCell from './ClaudeResetCreditsCell.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
 import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
 import CNProviderQuotaCell from './CNProviderQuotaCell.vue'
