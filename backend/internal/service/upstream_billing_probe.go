@@ -649,7 +649,7 @@ func (s *UpstreamBillingProbeService) probeLoadedAccount(ctx context.Context, ac
 		return s.persistProbeFailure(ctx, account, intervalMinutes, now, 0, "missing_api_key", 0)
 	}
 	baseURL := account.GetCredential("base_url")
-	if account.IsCNProvider() && account.IsAdaptiveAPIProtocol() {
+	if account.RoutesProtocolByInbound() && account.IsAdaptiveAPIProtocol() {
 		baseURL = account.GetCNProtocolBaseURL(APIProtocolChatCompletions)
 	}
 	if account.Platform == PlatformOpenAI {

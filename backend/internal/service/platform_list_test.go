@@ -116,3 +116,59 @@ func TestProviderProfilesUseOpenAIGateway(t *testing.T) {
 		require.Equal(t, domain.PlatformGatewayOpenAI, spec.Gateway, platform)
 	}
 }
+
+// 转发、探测与计费中"多协议供应商"类判断改为查 profile：现有平台上与改动前的
+// 国产厂商 / 国产厂商 ∪ OpenCode 判断逐一相同。
+func TestProviderProfileAccountPredicatesMatchLegacy(t *testing.T) {
+	for _, platform := range platformProbeValues {
+		account := &Account{Platform: platform, Type: AccountTypeAPIKey}
+		require.Equal(t, legacyIsCNProvider(platform), account.RoutesProtocolByInbound(), platform)
+		require.Equal(t, legacyIsCNProvider(platform) || platform == PlatformOpenCodeGo, account.IsMultiProtocolAPIKey(), platform)
+	}
+	var nilAccount *Account
+	require.False(t, nilAccount.RoutesProtocolByInbound())
+}
+
+// 仅在 providerProfiles 中登记的新供应商按分流方式自动获得对应行为：按入站协议
+// 分流的与国产厂商一致，按模型分流的与 OpenCode 一致。
+func TestNewlyRegisteredProviderInheritsRoutingBehaviour(t *testing.T) {
+	const byInbound, byModel = "test_inbound_provider", "test_model_provider"
+	providerProfiles[byInbound] = &ProviderProfile{
+		Platform: byInbound, DefaultMode: AccountModePayG, Routing: ProviderRoutingByInbound,
+		Modes: map[string]ProviderEndpoints{AccountModePayG: {BaseURLs: map[string]string{
+			APIProtocolChatCompletions: "https://inbound.example.com/v1",
+			APIProtocolAnthropic:       "https://inbound.example.com/anthropic",
+		}}},
+	}
+	providerProfiles[byModel] = &ProviderProfile{
+		Platform: byModel, DefaultMode: AccountModePayG, Routing: ProviderRoutingByModel,
+		Modes: map[string]ProviderEndpoints{AccountModePayG: {BaseURLs: map[string]string{
+			APIProtocolChatCompletions: "https://model.example.com/v1",
+		}}},
+	}
+	t.Cleanup(func() {
+		delete(providerProfiles, byInbound)
+		delete(providerProfiles, byModel)
+	})
+
+	inbound := &Account{Platform: byInbound, Type: AccountTypeAPIKey, Credentials: map[string]any{
+		"api_key": "sk-test", "api_protocol": APIProtocolAdaptive,
+		"base_url": "https://inbound.example.com/v1",
+	}}
+	require.True(t, inbound.IsMultiProtocolAPIKey())
+	require.True(t, inbound.RoutesProtocolByInbound())
+	// 无原生 Responses 端点的 adaptive 账号回退 Chat Completions（与 GLM 相同）。
+	require.True(t, shouldForwardOpenAIResponsesViaRawChatCompletions(inbound))
+	require.True(t, shouldEstimateOpenAIInputTokensLocally(inbound))
+	require.Equal(t, "https://inbound.example.com/v1", upstreamModelRegistryBaseURL(inbound))
+
+	model := &Account{Platform: byModel, Type: AccountTypeAPIKey, Credentials: map[string]any{
+		"api_key": "sk-test", "api_protocol": APIProtocolAdaptive,
+		"base_url": "https://model.example.com/v1",
+	}}
+	require.True(t, model.IsMultiProtocolAPIKey())
+	require.False(t, model.RoutesProtocolByInbound())
+	// 按模型分流：protocol_rules 决定协议，不按 Responses 能力标记回退（与 OpenCode 相同）。
+	require.False(t, shouldForwardOpenAIResponsesViaRawChatCompletions(model))
+	require.Equal(t, "https://model.example.com/v1", upstreamModelRegistryBaseURL(model))
+}

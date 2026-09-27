@@ -204,3 +204,12 @@ func (a *Account) routesByModel() bool {
 	profile := a.providerProfile()
 	return profile != nil && profile.Routing == ProviderRoutingByModel
 }
+
+// RoutesProtocolByInbound 报告账号是否为按入站协议分流的多协议 API Key 供应商
+// （单一厂商型，目前即国产厂商）。这类账号共享"显式协议优先、adaptive 选同协议
+// 原生端点"的转发、Responses 能力标记与本地 token 估算逻辑；按模型分流的聚合
+// 平台由 protocol_rules 决定协议，走 routesByModel 分支。
+func (a *Account) RoutesProtocolByInbound() bool {
+	profile := a.providerProfile()
+	return profile != nil && profile.Routing != ProviderRoutingByModel
+}
