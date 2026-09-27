@@ -173,6 +173,24 @@ export default {
     lastUsedAt: 'Last Used',
     lastUsedIP: 'Last Used IP',
     useKey: 'Use Key',
+    quickConfigure: 'Quick Configure',
+    quickConfigureModal: {
+      title: 'Configure Codex Automatically',
+      warning: 'This script contains the current API key. Run it only on your own computer and never share or commit it.',
+      description: 'Download and run the script to generate the Codex configuration and replace the existing file.',
+      macLinux: 'macOS / Linux',
+      windows: 'Windows',
+      importCatalog: 'Include the model catalog for this API key',
+      importCatalogHint: 'Off by default. When enabled, the script fetches available models and also writes codex-models.json.',
+      importCatalogLoading: 'Fetching the model catalog…',
+      importCatalogReady: 'Model catalog ready with {count} models.',
+      importCatalogError: 'Could not fetch the model catalog. Uncheck and retry, or verify the API key.',
+      copy: 'Copy Script',
+      copied: 'Copied',
+      download: 'Download Script',
+      runTitle: 'Run with',
+      windowsRun: 'Download the .cmd file and double-click it. The window closes after success.'
+    },
     useKeyModal: {
       title: 'Use API Key',
       description:
