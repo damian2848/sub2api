@@ -1519,7 +1519,8 @@ func (a *Account) GetAPIProtocol() string {
 	case APIProtocolChatCompletions:
 		return APIProtocolChatCompletions
 	}
-	if a.IsOpenCodeGo() {
+	// 按模型分流的供应商（多模型聚合平台）未显式配置时默认 adaptive。
+	if a.routesByModel() {
 		return APIProtocolAdaptive
 	}
 	return APIProtocolChatCompletions

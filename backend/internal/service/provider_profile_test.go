@@ -150,7 +150,7 @@ func TestProviderProfile_BaseURLKeysAreNativeProtocols(t *testing.T) {
 		for mode, endpoints := range profile.Modes {
 			require.NotEmpty(t, endpoints.BaseURLs[APIProtocolChatCompletions], "%s/%s must have a chat_completions base", platform, mode)
 			for protocol, baseURL := range endpoints.BaseURLs {
-				require.True(t, isNativeOpenCodeGoProtocol(protocol), "%s/%s has unknown protocol key %q", platform, mode, protocol)
+				require.True(t, isNativeUpstreamProtocol(protocol), "%s/%s has unknown protocol key %q", platform, mode, protocol)
 				require.NotEmpty(t, baseURL, "%s/%s/%s", platform, mode, protocol)
 			}
 		}
@@ -180,8 +180,9 @@ func TestProviderProfile_ResponsesPathMatchesLegacy(t *testing.T) {
 func TestProviderProfile_OpenCodeProtocolRulesByMode(t *testing.T) {
 	t.Parallel()
 
-	require.Equal(t, DefaultOpenCodeGoProtocolRules(), defaultOpenCodeProtocolRules(AccountModeGo))
-	require.Equal(t, DefaultOpenCodeGoProtocolRules(), defaultOpenCodeProtocolRules(""))
-	require.Equal(t, DefaultOpenCodeZenProtocolRules(), defaultOpenCodeProtocolRules(AccountModeZen))
+	openCode := LookupProviderProfile(PlatformOpenCodeGo)
+	require.Equal(t, DefaultOpenCodeGoProtocolRules(), openCode.Endpoints(AccountModeGo).ProtocolRules)
+	require.Equal(t, DefaultOpenCodeGoProtocolRules(), openCode.Endpoints("").ProtocolRules)
+	require.Equal(t, DefaultOpenCodeZenProtocolRules(), openCode.Endpoints(AccountModeZen).ProtocolRules)
 	require.Empty(t, LookupProviderProfile(PlatformKimi).Endpoints(AccountModeCoding).ProtocolRules)
 }

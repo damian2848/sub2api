@@ -67,7 +67,7 @@ func TestResolveOpenCodeGoUpstreamProtocolUsesAccountRules(t *testing.T) {
 		Platform: PlatformOpenCodeGo,
 		Credentials: map[string]any{
 			"api_protocol": APIProtocolAdaptive,
-			openCodeGoProtocolRulesKey: []any{
+			protocolRulesCredentialKey: []any{
 				map[string]any{"pattern": "grok-*", "protocol": APIProtocolChatCompletions},
 				map[string]any{"pattern": "deepseek-v4-flash", "protocol": APIProtocolResponses},
 				map[string]any{"pattern": "qwen*", "protocol": APIProtocolAnthropic},
@@ -86,7 +86,7 @@ func TestResolveOpenCodeGoUpstreamProtocolEmptyRulesAreAllChatCompletions(t *tes
 	account := &Account{
 		Platform: PlatformOpenCodeGo,
 		Credentials: map[string]any{
-			openCodeGoProtocolRulesKey: []any{},
+			protocolRulesCredentialKey: []any{},
 		},
 	}
 	require.Equal(t, APIProtocolChatCompletions, account.ResolveOpenCodeGoUpstreamProtocol("grok-4.6"))
@@ -98,7 +98,7 @@ func TestResolveOpenCodeGoUpstreamProtocolFirstMatchWins(t *testing.T) {
 	account := &Account{
 		Platform: PlatformOpenCodeGo,
 		Credentials: map[string]any{
-			openCodeGoProtocolRulesKey: []any{
+			protocolRulesCredentialKey: []any{
 				map[string]any{"pattern": "gpt-5.6-luna", "protocol": APIProtocolChatCompletions},
 				map[string]any{"pattern": "gpt-*", "protocol": APIProtocolResponses},
 			},
@@ -114,7 +114,7 @@ func TestOpenCodeGoNativeProtocolUnmatchedFallsBackToChatCompletions(t *testing.
 		Platform: PlatformOpenCodeGo,
 		Credentials: map[string]any{
 			"api_protocol": APIProtocolAdaptive,
-			openCodeGoProtocolRulesKey: []any{
+			protocolRulesCredentialKey: []any{
 				map[string]any{"pattern": "grok-*", "protocol": APIProtocolResponses},
 				map[string]any{"pattern": "gpt-*", "protocol": APIProtocolResponses},
 				map[string]any{"pattern": "qwen*", "protocol": APIProtocolAnthropic},
@@ -136,12 +136,12 @@ func TestOpenCodeGoNativeProtocolUnmatchedFallsBackToChatCompletions(t *testing.
 
 func TestParseOpenCodeGoProtocolRulesAcceptsTypedMaps(t *testing.T) {
 	t.Parallel()
-	rules, err := parseOpenCodeGoProtocolRules([]map[string]any{
+	rules, err := parseProtocolRules([]map[string]any{
 		{"pattern": "grok-*", "protocol": APIProtocolResponses},
 		{"pattern": "qwen*", "protocol": APIProtocolAnthropic},
 	})
 	require.NoError(t, err)
-	require.Equal(t, []OpenCodeGoProtocolRule{
+	require.Equal(t, []ProtocolRule{
 		{Pattern: "grok-*", Protocol: APIProtocolResponses},
 		{Pattern: "qwen*", Protocol: APIProtocolAnthropic},
 	}, rules)
@@ -178,31 +178,31 @@ func TestStampOpenAIResponsesUpstreamEndpoint(t *testing.T) {
 
 func TestNormalizeOpenCodeGoProtocolRulesCredentials(t *testing.T) {
 	t.Parallel()
-	require.NoError(t, NormalizeOpenCodeGoProtocolRulesCredentials(nil))
-	require.NoError(t, NormalizeOpenCodeGoProtocolRulesCredentials(map[string]any{}))
+	require.NoError(t, NormalizeProtocolRulesCredentials(nil))
+	require.NoError(t, NormalizeProtocolRulesCredentials(map[string]any{}))
 
 	creds := map[string]any{
-		openCodeGoProtocolRulesKey: []any{
+		protocolRulesCredentialKey: []any{
 			map[string]any{"pattern": " Grok-* ", "protocol": APIProtocolResponses},
 		},
 	}
-	require.NoError(t, NormalizeOpenCodeGoProtocolRulesCredentials(creds))
-	rules, ok := creds[openCodeGoProtocolRulesKey].([]any)
+	require.NoError(t, NormalizeProtocolRulesCredentials(creds))
+	rules, ok := creds[protocolRulesCredentialKey].([]any)
 	require.True(t, ok)
 	require.NotEmpty(t, rules)
 	entry, ok := rules[0].(map[string]any)
 	require.True(t, ok)
 	require.Equal(t, "grok-*", entry["pattern"])
 
-	err := NormalizeOpenCodeGoProtocolRulesCredentials(map[string]any{
-		openCodeGoProtocolRulesKey: []any{
+	err := NormalizeProtocolRulesCredentials(map[string]any{
+		protocolRulesCredentialKey: []any{
 			map[string]any{"pattern": "*grok", "protocol": APIProtocolResponses},
 		},
 	})
 	require.Error(t, err)
 
-	err = NormalizeOpenCodeGoProtocolRulesCredentials(map[string]any{
-		openCodeGoProtocolRulesKey: []any{
+	err = NormalizeProtocolRulesCredentials(map[string]any{
+		protocolRulesCredentialKey: []any{
 			map[string]any{"pattern": "grok-*", "protocol": "adaptive"},
 		},
 	})

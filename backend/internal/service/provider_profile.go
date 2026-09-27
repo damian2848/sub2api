@@ -11,8 +11,20 @@ type ProviderEndpoints struct {
 	BaseURLs map[string]string
 	// ProtocolRules 是按模型分流的内置默认表（首条命中生效）；为空表示该模式
 	// 不按模型分流，由账号 api_protocol 决定上游协议。
-	ProtocolRules []OpenCodeGoProtocolRule
+	ProtocolRules []ProtocolRule
 }
+
+// ProviderRouting 决定多协议供应商账号如何选择上游协议。
+type ProviderRouting string
+
+const (
+	// ProviderRoutingByInbound 适用于单一厂商：模型在各原生端点都可用，adaptive 账号
+	// 按入站协议选同协议端点，供应商不提供该协议时回落 Chat Completions。
+	ProviderRoutingByInbound ProviderRouting = "by_inbound"
+	// ProviderRoutingByModel 适用于多模型聚合平台：每个模型只在某一协议端点提供，
+	// 按 protocol_rules 以模型名选协议，与入站协议无关。
+	ProviderRoutingByModel ProviderRouting = "by_model"
+)
 
 // ProviderProfile 描述一个多协议 API Key 供应商（国产厂商或多模型聚合平台）的
 // 静态数据：各接入模式的默认端点、内置分流规则与端点路径约定。
@@ -22,6 +34,8 @@ type ProviderProfile struct {
 	// DefaultMode 在 credentials.account_mode 缺失或不在 Modes 中时使用。
 	DefaultMode string
 	Modes       map[string]ProviderEndpoints
+	// Routing 为空时按 ProviderRoutingByInbound 处理。
+	Routing ProviderRouting
 	// ResponsesPath 覆盖 Responses 端点路径（按 buildOpenAIEndpointURL 的版本感知
 	// 规则拼接），空值为 /v1/responses。对自定义 base_url 的账号同样生效。
 	ResponsesPath string
@@ -50,12 +64,13 @@ func (p *ProviderProfile) SupportsProtocol(mode, protocol string) bool {
 
 // providerProfiles 是多协议 API Key 供应商的单一数据来源。新增同类供应商时在此
 // 登记一条即可获得默认端点、原生 Responses 能力判定（有 responses 条目即支持）、
-// Responses 路径约定与 IsMultiProtocolAPIKeyProvider 归属。
+// 上游协议分流方式、Responses 路径约定与 IsMultiProtocolAPIKeyProvider 归属。
 // 默认端点需与前端 credentialsBuilder.ts 的预设保持一致。
 var providerProfiles = map[string]*ProviderProfile{
 	PlatformKimi: {
 		Platform:    PlatformKimi,
 		DefaultMode: AccountModePayG,
+		Routing:     ProviderRoutingByInbound,
 		Modes: map[string]ProviderEndpoints{
 			AccountModePayG: {
 				BaseURLs: map[string]string{
@@ -76,6 +91,7 @@ var providerProfiles = map[string]*ProviderProfile{
 	PlatformZhipu: {
 		Platform:    PlatformZhipu,
 		DefaultMode: AccountModePayG,
+		Routing:     ProviderRoutingByInbound,
 		// 智谱没有原生 Responses 端点，故不登记 responses 条目。
 		Modes: map[string]ProviderEndpoints{
 			AccountModePayG: {
@@ -95,6 +111,7 @@ var providerProfiles = map[string]*ProviderProfile{
 	PlatformDeepseek: {
 		Platform:    PlatformDeepseek,
 		DefaultMode: AccountModePayG,
+		Routing:     ProviderRoutingByInbound,
 		// DeepSeek 官方 Responses 端点为 /responses（无 /v1 前缀，适配 Codex）。
 		ResponsesPath: "/responses",
 		Modes: map[string]ProviderEndpoints{
@@ -110,6 +127,7 @@ var providerProfiles = map[string]*ProviderProfile{
 	PlatformMiniMax: {
 		Platform:    PlatformMiniMax,
 		DefaultMode: AccountModePayG,
+		Routing:     ProviderRoutingByInbound,
 		Modes: map[string]ProviderEndpoints{
 			// 按量付费与 Coding/Token Plan 共用推理域名，靠 API Key 区分套餐。
 			AccountModePayG: {
@@ -131,6 +149,7 @@ var providerProfiles = map[string]*ProviderProfile{
 	PlatformOpenCodeGo: {
 		Platform:    PlatformOpenCodeGo,
 		DefaultMode: AccountModeGo,
+		Routing:     ProviderRoutingByModel,
 		Modes: map[string]ProviderEndpoints{
 			AccountModeGo: {
 				BaseURLs: map[string]string{
@@ -178,4 +197,10 @@ func (a *Account) defaultProviderBaseURL(protocol string) string {
 func (a *Account) providerSupportsProtocol(protocol string) bool {
 	profile := a.providerProfile()
 	return profile != nil && profile.SupportsProtocol(a.GetCredential("account_mode"), protocol)
+}
+
+// routesByModel 报告账号所在供应商是否按模型名分流上游协议（多模型聚合平台）。
+func (a *Account) routesByModel() bool {
+	profile := a.providerProfile()
+	return profile != nil && profile.Routing == ProviderRoutingByModel
 }
