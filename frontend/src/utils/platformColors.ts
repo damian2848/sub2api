@@ -2,8 +2,11 @@
  * Centralized platform color definitions.
  *
  * All components that need platform-specific styling should import from here
- * instead of defining their own color mappings.
+ * instead of defining their own color mappings. Platforms registered only on
+ * the server (see constants/platformCatalog) use the neutral *_DEFAULT styles.
  */
+
+import { getPlatformSpec } from '@/constants/platformCatalog'
 
 export type Platform =
   | 'anthropic'
@@ -310,20 +313,8 @@ export function platformGradientSubtextClass(p: string): string {
   return isPlatform(p) ? GRADIENT_SUBTEXT[p] : GRADIENT_SUBTEXT_DEFAULT
 }
 
+/** 平台展示名：来自平台清单（后端 domain/platforms.go），新登记的平台同样适用。 */
 export function platformLabel(p: string): string {
-  switch (p) {
-    case 'anthropic': return 'Anthropic'
-    case 'openai': return 'OpenAI'
-    case 'antigravity': return 'Antigravity'
-    case 'gemini': return 'Gemini'
-    case 'grok': return 'Grok'
-    case 'kimi': return 'Kimi'
-    case 'zhipu': return 'Zhipu GLM'
-    case 'deepseek': return 'DeepSeek'
-    case 'minimax': return 'MiniMax'
-    case 'opencode_go': return 'OpenCode'
-    case 'typesafe': return 'TypeSafe / Jev'
-    case 'composite': return 'Composite'
-    default: return p || 'API'
-  }
+  if (p === 'composite') return 'Composite'
+  return getPlatformSpec(p)?.display_name ?? (p || 'API')
 }

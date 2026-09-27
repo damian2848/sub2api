@@ -29,14 +29,8 @@
           class="input w-44 shrink-0"
           :data-testid="`opencode-go-protocol-select-${index}`"
         >
-          <option value="chat_completions">
-            {{ t('admin.accounts.cnProviders.apiProtocol.chatCompletions') }}
-          </option>
-          <option value="responses">
-            {{ t('admin.accounts.cnProviders.apiProtocol.responses') }}
-          </option>
-          <option value="anthropic">
-            {{ t('admin.accounts.cnProviders.apiProtocol.anthropic') }}
+          <option v-for="option in protocolOptions" :key="option.value" :value="option.value">
+            {{ t(`admin.accounts.cnProviders.apiProtocol.${option.labelKey}`) }}
           </option>
         </select>
         <button
@@ -68,20 +62,26 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/icons/Icon.vue'
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
 import {
   cloneOpenCodeGoProtocolRules,
-  defaultOpenCodeProtocolRules,
-  type OpenCodeAccountMode,
+  defaultProviderProtocolRules,
+  providerNativeProtocols,
+  type CnNativeApiProtocol,
   type OpenCodeGoProtocolRule
 } from '@/components/account/credentialsBuilder'
 
+// 按模型分流的供应商（OpenCode 与后端新登记的聚合平台）的分流规则编辑器；
+// 默认规则与可选协议来自平台清单中该供应商 / 接入模式的 profile。
 const props = withDefaults(defineProps<{
   rows: OpenCodeGoProtocolRule[]
-  plan?: OpenCodeAccountMode
+  platform?: string
+  plan?: string
 }>(), {
+  platform: 'opencode_go',
   plan: 'go'
 })
 
@@ -100,7 +100,21 @@ const removeRow = (index: number) => {
   emit('update:rows', props.rows.filter((_, i) => i !== index))
 }
 
+const PROTOCOL_ORDER: Array<{ value: CnNativeApiProtocol; labelKey: string }> = [
+  { value: 'chat_completions', labelKey: 'chatCompletions' },
+  { value: 'responses', labelKey: 'responses' },
+  { value: 'anthropic', labelKey: 'anthropic' }
+]
+
+// 仅列出该接入模式提供原生端点的协议；已有规则使用的协议保留，避免编辑时丢值。
+const protocolOptions = computed(() => {
+  const supported = new Set<CnNativeApiProtocol>(providerNativeProtocols(props.platform, props.plan))
+  for (const row of props.rows) supported.add(row.protocol)
+  const options = PROTOCOL_ORDER.filter(option => supported.has(option.value))
+  return options.length > 0 ? options : PROTOCOL_ORDER
+})
+
 const restoreDefaults = () => {
-  emit('update:rows', cloneOpenCodeGoProtocolRules(defaultOpenCodeProtocolRules(props.plan)))
+  emit('update:rows', cloneOpenCodeGoProtocolRules(defaultProviderProtocolRules(props.platform, props.plan)))
 }
 </script>

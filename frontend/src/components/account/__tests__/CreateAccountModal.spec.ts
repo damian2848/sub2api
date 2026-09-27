@@ -6,6 +6,11 @@ vi.mock('@/api/admin/credentialEncryption', () => ({
 import { defineComponent } from 'vue'
 import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  BUILTIN_PLATFORM_CATALOG,
+  resetPlatformCatalog,
+  setPlatformCatalog,
+} from '@/constants/platformCatalog'
 
 enableAutoUnmount(afterEach)
 
@@ -935,6 +940,151 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
         { pattern: 'minimax-*', protocol: 'anthropic' },
         { pattern: 'qwen*', protocol: 'anthropic' }
       ]
+    })
+  })
+
+  describe('providers using the generic form', () => {
+    const serverOnlyProviders = {
+      platforms: [
+        ...BUILTIN_PLATFORM_CATALOG.platforms,
+        {
+          id: 'command_code',
+          display_name: 'Command Code',
+          gateway: 'openai',
+          cn_provider: false,
+          multi_protocol: {
+            default_mode: 'standard',
+            routing: 'by_model',
+            modes: [
+              {
+                mode: 'standard',
+                base_urls: {
+                  chat_completions: 'https://api.commandcode.ai/provider/v1',
+                  anthropic: 'https://api.commandcode.ai/provider',
+                },
+                protocol_rules: [{ pattern: 'claude-*', protocol: 'anthropic' }],
+              },
+              {
+                mode: 'team',
+                base_urls: {
+                  chat_completions: 'https://team.commandcode.ai/provider/v1',
+                  anthropic: 'https://team.commandcode.ai/provider',
+                },
+                protocol_rules: [{ pattern: 'sonnet-*', protocol: 'anthropic' }],
+              },
+            ],
+          },
+        },
+        {
+          id: 'cline_pass',
+          display_name: 'Cline Pass',
+          gateway: 'openai',
+          cn_provider: false,
+          multi_protocol: {
+            default_mode: 'pass',
+            routing: 'by_inbound',
+            modes: [{ mode: 'pass', base_urls: { chat_completions: 'https://api.cline.bot/api/v1' } }],
+          },
+        },
+      ],
+      composite_precedence: [...BUILTIN_PLATFORM_CATALOG.composite_precedence, 'command_code', 'cline_pass'],
+    }
+
+    beforeEach(() => {
+      setPlatformCatalog(serverOnlyProviders)
+    })
+
+    afterEach(() => {
+      resetPlatformCatalog()
+    })
+
+    it('creates a by-model provider account from its profile defaults', async () => {
+      const wrapper = mountModal()
+      await wrapper.get('[data-testid="platform-button-command_code"]').trigger('click')
+      await wrapper.get('form#create-account-form input[type="text"]').setValue('cc')
+      await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-cc')
+
+      await wrapper.get('form#create-account-form').trigger('submit.prevent')
+      await flushPromises()
+
+      expect(createAccountMock).toHaveBeenCalledTimes(1)
+      const payload = createAccountMock.mock.calls[0]?.[0]
+      expect(payload?.platform).toBe('command_code')
+      expect(payload?.type).toBe('apikey')
+      expect(payload?.credentials).toMatchObject({
+        api_key: 'sk-cc',
+        account_mode: 'standard',
+        api_protocol: 'adaptive',
+        base_url: 'https://api.commandcode.ai/provider/v1',
+        api_base_urls: {
+          chat_completions: 'https://api.commandcode.ai/provider/v1',
+          anthropic: 'https://api.commandcode.ai/provider',
+        },
+        protocol_rules: [{ pattern: 'claude-*', protocol: 'anthropic' }],
+      })
+      // 该供应商没有原生 Responses 端点，不下发 responses 基址。
+      expect(payload?.credentials?.api_base_urls).not.toHaveProperty('responses')
+      // 没有内置模型列表时不预填白名单，新账号不限制模型。
+      expect(payload?.credentials).not.toHaveProperty('model_mapping')
+    })
+
+    it('switches endpoints and default rules with the provider mode', async () => {
+      const wrapper = mountModal()
+      await wrapper.get('[data-testid="platform-button-command_code"]').trigger('click')
+      await wrapper.get('[data-testid="generic-account-mode"]').findAll('button')[1].trigger('click')
+      await wrapper.get('form#create-account-form input[type="text"]').setValue('cc-team')
+      await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-cc')
+
+      await wrapper.get('form#create-account-form').trigger('submit.prevent')
+      await flushPromises()
+
+      expect(createAccountMock.mock.calls[0]?.[0]?.credentials).toMatchObject({
+        account_mode: 'team',
+        base_url: 'https://team.commandcode.ai/provider/v1',
+        api_base_urls: {
+          chat_completions: 'https://team.commandcode.ai/provider/v1',
+          anthropic: 'https://team.commandcode.ai/provider',
+        },
+        protocol_rules: [{ pattern: 'sonnet-*', protocol: 'anthropic' }],
+      })
+    })
+
+    it('creates a by-inbound provider account without protocol rules', async () => {
+      const wrapper = mountModal()
+      await wrapper.get('[data-testid="platform-button-cline_pass"]').trigger('click')
+      // 单一接入模式时不显示模式选择。
+      expect(wrapper.find('[data-testid="generic-account-mode"]').exists()).toBe(false)
+      await wrapper.get('form#create-account-form input[type="text"]').setValue('cline')
+      await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-cline')
+
+      await wrapper.get('form#create-account-form').trigger('submit.prevent')
+      await flushPromises()
+
+      const credentials = createAccountMock.mock.calls[0]?.[0]?.credentials
+      expect(credentials).toMatchObject({
+        account_mode: 'pass',
+        api_protocol: 'adaptive',
+        base_url: 'https://api.cline.bot/api/v1',
+        api_base_urls: { chat_completions: 'https://api.cline.bot/api/v1' },
+      })
+      expect(credentials).not.toHaveProperty('protocol_rules')
+    })
+
+    it('falls back to the Kimi default mode after a server-only provider', async () => {
+      const wrapper = mountModal()
+      await wrapper.get('[data-testid="platform-button-command_code"]').trigger('click')
+      await selectButtonByText(wrapper, 'Kimi')
+      await wrapper.get('form#create-account-form input[type="text"]').setValue('kimi')
+      await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-kimi')
+
+      await wrapper.get('form#create-account-form').trigger('submit.prevent')
+      await flushPromises()
+
+      expect(createAccountMock.mock.calls[0]?.[0]?.credentials).toMatchObject({
+        account_mode: 'payg',
+        base_url: 'https://api.moonshot.cn/v1',
+      })
+      expect(createAccountMock.mock.calls[0]?.[0]?.credentials).not.toHaveProperty('protocol_rules')
     })
   })
 
