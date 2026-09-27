@@ -34,6 +34,12 @@ func legacyProviderDefaultBaseURL(platform, mode, protocol string) string {
 			return DefaultOpenCodeGoAnthropicBaseURL
 		}
 	case APIProtocolChatCompletions, APIProtocolResponses:
+		if platform == PlatformZhipu && protocol == APIProtocolResponses {
+			// 唯一的函数级差异：旧 switch 对智谱 Responses 也返回 CC 基址，profile
+			// 以"缺条目即不支持"建模后返回空串。所有运行时调用方都先经
+			// UsesNativeCNResponses / SupportsNativeCNResponses 守卫，智谱不会走到这里。
+			return ""
+		}
 		switch platform {
 		case PlatformKimi:
 			if coding {
@@ -127,11 +133,48 @@ func TestProviderProfile_NativeResponsesMatchesLegacy(t *testing.T) {
 		PlatformMiniMax:    true,
 		PlatformOpenCodeGo: true,
 	}
+	modes := []string{"", AccountModePayG, AccountModeCoding, AccountModeZen, AccountModeGo, "unknown"}
 	for _, platform := range []string{PlatformOpenAI, PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo} {
-		account := &Account{Platform: platform, Type: AccountTypeAPIKey}
-		require.Equal(t, legacy[platform], account.SupportsNativeCNResponses(), platform)
+		for _, mode := range modes {
+			account := &Account{Platform: platform, Type: AccountTypeAPIKey, Credentials: map[string]any{"account_mode": mode}}
+			require.Equal(t, legacy[platform], account.SupportsNativeCNResponses(), platform+"/"+mode)
+		}
 	}
 	require.False(t, (*Account)(nil).SupportsNativeCNResponses())
+}
+
+func TestProviderProfile_BaseURLKeysAreNativeProtocols(t *testing.T) {
+	t.Parallel()
+
+	for platform, profile := range providerProfiles {
+		for mode, endpoints := range profile.Modes {
+			require.NotEmpty(t, endpoints.BaseURLs[APIProtocolChatCompletions], "%s/%s must have a chat_completions base", platform, mode)
+			for protocol, baseURL := range endpoints.BaseURLs {
+				require.True(t, isNativeOpenCodeGoProtocol(protocol), "%s/%s has unknown protocol key %q", platform, mode, protocol)
+				require.NotEmpty(t, baseURL, "%s/%s/%s", platform, mode, protocol)
+			}
+		}
+	}
+}
+
+func TestProviderProfile_ResponsesPathMatchesLegacy(t *testing.T) {
+	t.Parallel()
+
+	legacy := func(platform, base string) string {
+		if platform == PlatformDeepseek {
+			return buildOpenAIEndpointURL(base, "/responses")
+		}
+		return buildOpenAIResponsesURL(base)
+	}
+	bases := []string{
+		"https://api.deepseek.com", "https://relay.example.com", "https://relay.example.com/v1",
+		"https://opencode.ai/zen/go/v1", "https://open.bigmodel.cn/api/paas/v4", "https://api.moonshot.cn/v1",
+	}
+	for _, platform := range []string{PlatformOpenAI, PlatformGrok, PlatformKimi, PlatformZhipu, PlatformDeepseek, PlatformMiniMax, PlatformOpenCodeGo} {
+		for _, base := range bases {
+			require.Equal(t, legacy(platform, base), buildOpenAIResponsesURLForPlatform(platform, base), platform+" "+base)
+		}
+	}
 }
 
 func TestProviderProfile_OpenCodeProtocolRulesByMode(t *testing.T) {

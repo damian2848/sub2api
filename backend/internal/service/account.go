@@ -1529,8 +1529,7 @@ func (a *Account) GetAPIProtocol() string {
 // DeepSeek 官方为 /responses（无 /v1）；Kimi 按量付费与 Coding Plan 均为
 // /v1/responses（moonshot.cn / kimi.com/coding）；MiniMax 为 /v1/responses。
 func (a *Account) SupportsNativeCNResponses() bool {
-	profile := a.providerProfile()
-	return profile != nil && profile.NativeResponses
+	return a.providerSupportsProtocol(APIProtocolResponses)
 }
 
 // UsesNativeCNResponses 报告当前账号是否应按原生 Responses 协议转发
