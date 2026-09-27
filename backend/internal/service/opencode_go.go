@@ -133,11 +133,9 @@ func DefaultOpenCodeZenProtocolRules() []OpenCodeGoProtocolRule {
 	}
 }
 
+// defaultOpenCodeProtocolRules 从 provider profile 取该接入模式的内置分流表。
 func defaultOpenCodeProtocolRules(mode string) []OpenCodeGoProtocolRule {
-	if mode == AccountModeZen {
-		return DefaultOpenCodeZenProtocolRules()
-	}
-	return DefaultOpenCodeGoProtocolRules()
+	return LookupProviderProfile(PlatformOpenCodeGo).Endpoints(mode).ProtocolRules
 }
 
 func isNativeOpenCodeGoProtocol(protocol string) bool {
@@ -306,20 +304,6 @@ func (a *Account) IsOpenCodeZen() bool {
 
 func (a *Account) IsOpenCodeGoPlan() bool {
 	return a.GetOpenCodeAccountMode() == AccountModeGo
-}
-
-func (a *Account) openCodeDefaultChatBaseURL() string {
-	if a.IsOpenCodeZen() {
-		return DefaultOpenCodeZenBaseURL
-	}
-	return DefaultOpenCodeGoBaseURL
-}
-
-func (a *Account) openCodeDefaultAnthropicBaseURL() string {
-	if a.IsOpenCodeZen() {
-		return DefaultOpenCodeZenAnthropicBaseURL
-	}
-	return DefaultOpenCodeGoAnthropicBaseURL
 }
 
 func (a *Account) IsMultiProtocolAPIKey() bool {
