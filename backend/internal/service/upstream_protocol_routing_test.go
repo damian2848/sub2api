@@ -3,10 +3,14 @@
 package service
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 func routingTestAccount(platform, accountType string, credentials, extra map[string]any) *Account {
@@ -116,4 +120,45 @@ func TestUpstreamRoutingModelOnlyForModelRoutedAccounts(t *testing.T) {
 	}, nil)
 	require.Equal(t, "glm-5.3", upstreamRoutingModel(openCode, body, ""))
 	require.Empty(t, upstreamRoutingModel(routingTestAccount(PlatformKimi, AccountTypeAPIKey, nil, nil), body, ""))
+}
+
+// /v1/responses 转 Anthropic 上游时，计费模型名与上游模型名都应是去除首尾空白的
+// 请求模型；按模型分流（OpenCode）与显式 anthropic 协议（Kimi）账号行为一致。
+func TestResponsesToNativeAnthropicTrimsBillingModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	openCode := &Account{
+		ID:          703,
+		Name:        "opencode-go",
+		Platform:    PlatformOpenCodeGo,
+		Type:        AccountTypeAPIKey,
+		Concurrency: 1,
+		Credentials: map[string]any{
+			"api_key":      "sk-test",
+			"account_mode": AccountModeGo,
+			"api_base_urls": map[string]any{
+				APIProtocolAnthropic: "http://anthropic.example",
+			},
+		},
+	}
+	for _, tc := range []struct {
+		name    string
+		account *Account
+		model   string
+	}{
+		{"opencode by model", openCode, "minimax-m3"},
+		{"kimi pinned anthropic", nativeAnthropicTestAccount(), "kimi-k2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"model":" ` + tc.model + ` ","input":"hello","stream":false}`)
+			upstream := &httpUpstreamRecorder{resp: nativeAnthropicStreamResponse()}
+			svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
+
+			result, err := svc.Forward(context.Background(), adaptiveProtocolTestContext("/v1/responses", body), tc.account, body)
+			require.NoError(t, err)
+			require.True(t, strings.HasSuffix(upstream.lastReq.URL.Path, "/v1/messages"), upstream.lastReq.URL.String())
+			require.Equal(t, tc.model, gjson.GetBytes(upstream.lastBody, "model").String())
+			require.Equal(t, tc.model, result.BillingModel)
+		})
+	}
 }

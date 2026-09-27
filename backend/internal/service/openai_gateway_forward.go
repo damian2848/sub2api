@@ -304,12 +304,8 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	case APIProtocolAnthropic:
 		// Responses 客户端 × Anthropic 上游：转成 Anthropic 请求走原生端点。不能落到
 		// raw-CC 分支——其 URL 构造会把 anthropic base 当 CC base 用。
-		// 按模型分流的账号不以请求模型兜底模型映射。
-		defaultMappedModel := reqModel
-		if account.routesByModel() {
-			defaultMappedModel = ""
-		}
-		return s.forwardResponsesViaNativeAnthropic(ctx, c, account, body, defaultMappedModel)
+		// 账号映射未命中时以去除首尾空白的请求模型兜底，计费名与上游模型名一致。
+		return s.forwardResponsesViaNativeAnthropic(ctx, c, account, body, reqModel)
 	case APIProtocolChatCompletions:
 		return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
 	}
