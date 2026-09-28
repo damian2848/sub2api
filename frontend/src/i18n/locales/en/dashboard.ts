@@ -188,8 +188,11 @@ export default {
       copy: 'Copy Script',
       copied: 'Copied',
       download: 'Download Script',
+      copySuccessMessage: 'The script was copied. Paste it into a file and run it to finish configuring Codex.',
+      downloadSuccessMessage: 'The script was downloaded. Run it, wait for the success message, then restart Codex.',
+      errorMessage: 'The operation did not complete. Try again or check the browser clipboard and download permissions.',
       runTitle: 'Run with',
-      windowsRun: 'Download the .cmd file and double-click it. The window closes after success.'
+      windowsRun: 'Download the .cmd file and double-click it. After the success message, press any key to close the window.'
     },
     useKeyModal: {
       title: 'Use API Key',

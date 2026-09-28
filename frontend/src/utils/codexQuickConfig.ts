@@ -132,7 +132,9 @@ fi
 
 ${catalogBlock}mv -f "${'${TMP_FILE}'}" "${'${CONFIG_FILE}'}"
 trap - EXIT
-printf 'Codex configuration written to %s\\n' "${'${CONFIG_FILE}'}"
+printf 'Codex configuration completed successfully.\\n'
+printf 'Configuration written to %s\\n' "${'${CONFIG_FILE}'}"
+printf 'Restart Codex to load the new configuration.\\n'
 `
 }
 
@@ -170,7 +172,12 @@ if errorlevel 1 goto :error
 move /Y "%TEMP_FILE%" "%CONFIG_FILE%" >nul
 if errorlevel 1 goto :error
 
-echo Codex configuration written to "%CONFIG_FILE%"
+echo.
+echo Codex configuration completed successfully.
+echo Configuration written to "%CONFIG_FILE%"
+echo Restart Codex to load the new configuration.
+echo.
+pause
 exit /b 0
 
 :error

@@ -55,9 +55,14 @@ describe('codexQuickConfig', () => {
 
     expect(unixScript).toContain('#!/usr/bin/env bash')
     expect(unixScript).toContain('mv -f')
+    expect(unixScript).toContain('Codex configuration completed successfully.')
+    expect(unixScript).toContain('Restart Codex to load the new configuration.')
     expect(windowsScript).toContain('@echo off')
     expect(windowsScript).toContain('powershell.exe -NoLogo -NoProfile -NonInteractive')
     expect(windowsScript).toContain('move /Y')
+    expect(windowsScript).toContain('Codex configuration completed successfully.')
+    expect(windowsScript).toContain('Restart Codex to load the new configuration.')
+    expect(windowsScript).toContain('pause')
     expect(unixScript).not.toContain('sk-secret-value')
     expect(windowsScript).not.toContain('sk-secret-value')
 

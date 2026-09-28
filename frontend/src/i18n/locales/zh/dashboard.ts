@@ -188,8 +188,11 @@ export default {
       copy: '复制脚本',
       copied: '已复制',
       download: '下载脚本',
+      copySuccessMessage: '脚本已复制到剪贴板，请粘贴保存后运行脚本完成 Codex 配置。',
+      downloadSuccessMessage: '脚本已下载，请运行脚本完成 Codex 配置；看到配置成功提示后重启 Codex。',
+      errorMessage: '操作未完成，请重试或检查浏览器的剪贴板和下载权限。',
       runTitle: '运行方式',
-      windowsRun: '下载 .cmd 文件后双击运行，成功后窗口会自动关闭。'
+      windowsRun: '下载 .cmd 文件后双击运行，看到成功提示后按任意键关闭窗口。'
     },
     useKeyModal: {
       title: '使用 API 密钥',

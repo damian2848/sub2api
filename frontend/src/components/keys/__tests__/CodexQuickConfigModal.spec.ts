@@ -52,6 +52,20 @@ describe('CodexQuickConfigModal', () => {
     expect(wrapper.get('[data-testid="quick-config-windows-tab"]').attributes('aria-selected')).toBe('true')
   })
 
+  it('shows a clear success message after copying or downloading', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockResolvedValue(undefined) }
+    })
+    const wrapper = mountModal()
+
+    await wrapper.get('[data-testid="quick-config-copy"]').trigger('click')
+    expect(wrapper.get('[data-testid="quick-config-action-status"]').text()).toContain('copySuccessMessage')
+
+    await wrapper.get('[data-testid="quick-config-download"]').trigger('click')
+    expect(wrapper.get('[data-testid="quick-config-action-status"]').text()).toContain('downloadSuccessMessage')
+  })
+
   it('waits for the model catalog before enabling copy and download', async () => {
     let resolveRequest!: (value: { content: string; modelCount: number }) => void
     fetchCodexModelsManifest.mockReturnValue(new Promise((resolve) => { resolveRequest = resolve }))

@@ -97,6 +97,20 @@
         <pre class="max-h-96 overflow-auto p-4 text-xs leading-5 text-gray-100"><code>{{ script }}</code></pre>
       </div>
 
+      <div
+        v-if="actionStatus"
+        role="status"
+        aria-live="polite"
+        data-testid="quick-config-action-status"
+        class="flex items-start gap-2 rounded-lg border p-3 text-sm"
+        :class="actionStatus === 'error'
+          ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300'
+          : 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300'"
+      >
+        <Icon :name="actionStatus === 'error' ? 'exclamationCircle' : 'checkCircle'" size="md" class="mt-0.5 flex-shrink-0" />
+        <p>{{ t(`keys.quickConfigureModal.${actionStatus}Message`) }}</p>
+      </div>
+
       <div class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-600 dark:border-dark-700 dark:bg-dark-800/50 dark:text-gray-300">
         <p class="font-medium text-gray-900 dark:text-white">{{ t('keys.quickConfigureModal.runTitle') }}</p>
         <code class="mt-1 block break-all text-xs">{{ runCommand }}</code>
@@ -142,6 +156,8 @@ type CatalogState = 'idle' | 'loading' | 'ready' | 'error'
 const detectPlatform = (): TargetPlatform => /windows/i.test(navigator.userAgent) ? 'windows' : 'unix'
 const activePlatform = ref<TargetPlatform>(detectPlatform())
 const copied = ref(false)
+type ActionStatus = 'copySuccess' | 'downloadSuccess' | 'error' | null
+const actionStatus = ref<ActionStatus>(null)
 const includeModelCatalog = ref(false)
 const catalogState = ref<CatalogState>('idle')
 const catalogContent = ref('')
@@ -186,6 +202,7 @@ watch(() => props.show, (show) => {
   if (show) {
     activePlatform.value = detectPlatform()
     copied.value = false
+    actionStatus.value = null
     includeModelCatalog.value = false
     resetCatalog()
   }
@@ -237,14 +254,21 @@ async function copyScript() {
   try {
     await navigator.clipboard.writeText(script.value)
     copied.value = true
+    actionStatus.value = 'copySuccess'
     window.setTimeout(() => { copied.value = false }, 1800)
   } catch {
     copied.value = false
+    actionStatus.value = 'error'
   }
 }
 
 function downloadScript() {
   if (!scriptReady.value) return
-  saveAs(new Blob([script.value], { type: 'text/plain;charset=utf-8' }), fileName.value)
+  try {
+    saveAs(new Blob([script.value], { type: 'text/plain;charset=utf-8' }), fileName.value)
+    actionStatus.value = 'downloadSuccess'
+  } catch {
+    actionStatus.value = 'error'
+  }
 }
 </script>
