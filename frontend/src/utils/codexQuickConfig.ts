@@ -132,9 +132,9 @@ fi
 
 ${catalogBlock}mv -f "${'${TMP_FILE}'}" "${'${CONFIG_FILE}'}"
 trap - EXIT
-printf 'Codex configuration completed successfully.\\n'
-printf 'Configuration written to %s\\n' "${'${CONFIG_FILE}'}"
-printf 'Restart Codex to load the new configuration.\\n'
+printf 'Codex 配置成功。\\n'
+printf '配置文件：%s\\n' "${'${CONFIG_FILE}'}"
+printf '请重启 Codex 以加载新配置。\\n'
 `
 }
 
@@ -156,6 +156,7 @@ if errorlevel 1 goto :error
 
   return `@echo off
 setlocal EnableExtensions DisableDelayedExpansion
+chcp 65001 >nul
 
 set "CONFIG_DIR=%USERPROFILE%\\.codex"
 set "CONFIG_FILE=%CONFIG_DIR%\\config.toml"
@@ -173,9 +174,9 @@ move /Y "%TEMP_FILE%" "%CONFIG_FILE%" >nul
 if errorlevel 1 goto :error
 
 echo.
-echo Codex configuration completed successfully.
-echo Configuration written to "%CONFIG_FILE%"
-echo Restart Codex to load the new configuration.
+echo Codex 配置成功。
+echo 配置文件："%CONFIG_FILE%"
+echo 请重启 Codex 以加载新配置。
 echo.
 pause
 exit /b 0
@@ -183,7 +184,7 @@ exit /b 0
 :error
 del /q "%TEMP_FILE%" >nul 2>&1
 if defined SUB2API_CODEX_CATALOG_TEMP del /q "%SUB2API_CODEX_CATALOG_TEMP%" >nul 2>&1
-echo Failed to write Codex configuration. 1>&2
+echo Codex 配置失败。 1>&2
 pause
 exit /b 1
 `
