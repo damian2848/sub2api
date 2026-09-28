@@ -5,8 +5,8 @@ package service
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"math"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
