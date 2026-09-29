@@ -1309,7 +1309,25 @@ export default {
 	    expiresAtFull: '重置次数到期时间：{time}',
 	    clears: '可清除窗口：{windows}',
 	    notUsableNow: '暂不可用',
-	    requiresLimit: '需达到限额后才能使用'
+	    requiresLimit: '需达到限额后才能使用',
+	    reset: '重置',
+	    resetTooltipNeedQuery: '请先点「次数」查询；查询到可用的重置后才能使用',
+	    resetTooltipNone: '当前没有可立即使用的重置',
+	    resetTooltipReady: '消耗 1 次重置，清除限额窗口（需确认）',
+	    confirmTitle: '使用 Claude 重置',
+	    confirmMessage: '将立即消耗 1 次重置，此操作不可撤销。将清除窗口：{windows}。当前持有 {count} 次。确定继续？',
+	    outcome: {
+	      reset: '重置成功，已清除：{windows}',
+	      alreadyUsed: '该重置已被使用，正在刷新确认',
+	      cooldown: '重置处于冷却中，请稍后再试',
+	      cooldownUntil: '重置处于冷却中，冷却至 {time}',
+	      notLimited: '当前未达到限额，无需重置，未消耗次数',
+	      ineligible: '此账号当前不可使用重置',
+	      unknown: '结果未确认，已阻止再次兑换，请稍后查询',
+	      busy: '另一个重置正在进行中，请稍后再试',
+	      notAvailable: '当前没有可立即使用的重置，未消耗次数',
+	      failed: '重置请求失败'
+	    }
 	  },
       autoResetCredit: {
 	    title: '自动使用重置卡',
