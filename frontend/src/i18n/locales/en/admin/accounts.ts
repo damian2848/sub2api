@@ -1203,8 +1203,13 @@ export default {
 	    resetTooltipNeedQuery: 'Check the count first; reset is available once a usable credit is found',
 	    resetTooltipNone: 'No reset can be used right now',
 	    resetTooltipReady: 'Consume 1 reset to clear limit windows (asks for confirmation)',
-	    confirmTitle: 'Use a Claude reset',
-	    confirmMessage: 'This immediately consumes 1 reset and cannot be undone. Windows cleared: {windows}. Resets held: {count}. Continue?',
+	    confirmTitle: 'Confirm Claude Reset',
+	    confirmMessage: 'This will consume 1 reset credit to immediately restore the {windows} window(s) ({count} remaining). This action cannot be undone. Continue?',
+	    windows: {
+	      fiveHour: '5h',
+	      sevenDay: '7d',
+	      sevenDayOverage: '7d overage'
+	    },
 	    outcome: {
 	      reset: 'Reset applied; cleared: {windows}',
 	      alreadyUsed: 'This reset was already used; refreshing to confirm',

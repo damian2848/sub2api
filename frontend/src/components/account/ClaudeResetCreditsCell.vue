@@ -191,10 +191,20 @@ const creditTitle = computed(() => {
   if (!credit) return ''
   const lines = [credit.label]
   if (credit.expires_at) lines.push(t('admin.accounts.claudeResetCredits.expiresAtFull', { time: formatTime(credit.expires_at, 'full') }))
-  if (credit.clears.length) lines.push(t('admin.accounts.claudeResetCredits.clears', { windows: credit.clears.join(', ') }))
+  if (credit.clears.length) lines.push(t('admin.accounts.claudeResetCredits.clears', { windows: windowLabels(credit.clears) }))
   if (credit.use_requires_limit) lines.push(t('admin.accounts.claudeResetCredits.requiresLimit'))
   return lines.join('\n')
 })
+
+// 已知窗口显示为可读名称，未知窗口原样显示
+const windowKeys: Record<string, string> = {
+  five_hour: 'fiveHour',
+  seven_day: 'sevenDay',
+  seven_day_overage_included: 'sevenDayOverage'
+}
+function windowLabels(windows?: string[]): string {
+  return (windows ?? []).map(w => windowKeys[w] ? t(`admin.accounts.claudeResetCredits.windows.${windowKeys[w]}`) : w).join(', ')
+}
 
 const countButtonTitle = computed(() => {
   if (!status.value) return t('admin.accounts.claudeResetCredits.countTooltipLoad')
@@ -215,8 +225,8 @@ const redeemButtonTitle = computed(() => {
 const confirmMessage = computed(() => {
   const next = status.value?.credits.find(c => c.redeemable)
   return t('admin.accounts.claudeResetCredits.confirmMessage', {
-    windows: next?.clears.join(', ') || '—',
-    count: totalResets.value
+    windows: windowLabels(next?.clears) || '—',
+    count: Math.max(totalResets.value - 1, 0)
   })
 })
 
@@ -242,7 +252,7 @@ function outcomeFeedback(result: ClaudeResetOutcome): { kind: 'success' | 'warni
   const key = 'admin.accounts.claudeResetCredits.outcome'
   switch (result.outcome) {
     case 'reset':
-      return { kind: 'success', text: t(`${key}.reset`, { windows: result.cleared?.join(', ') || '—' }) }
+      return { kind: 'success', text: t(`${key}.reset`, { windows: windowLabels(result.cleared) || '—' }) }
     case 'already_used':
       return { kind: 'warning', text: t(`${key}.alreadyUsed`) }
     case 'cooldown':

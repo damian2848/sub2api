@@ -5,7 +5,8 @@ import type { Account } from '@/types'
 const getCredits = vi.hoisted(() => vi.fn())
 const redeem = vi.hoisted(() => vi.fn())
 vi.mock('@/api/admin/claudeResetCredits', () => ({ getClaudeResetCredits: getCredits, redeemClaudeResetCredit: redeem }))
-vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
+const t = vi.hoisted(() => vi.fn((key: string, _params?: Record<string, unknown>) => key))
+vi.mock('vue-i18n', () => ({ useI18n: () => ({ t }) }))
 // Minimal stand-in exposing the dialog's show state and confirm/cancel events.
 vi.mock('@/components/common/ConfirmDialog.vue', () => ({
   default: {
@@ -104,6 +105,11 @@ describe('Claude reset credit status', () => {
     const dialog = wrapper.get('[data-testid="confirm-dialog"]')
     expect(dialog.attributes('data-danger')).toBe('true')
     expect(dialog.text()).toContain('admin.accounts.claudeResetCredits.confirmMessage')
+    // Known windows render as readable labels; count is what remains after this use.
+    expect(t).toHaveBeenCalledWith('admin.accounts.claudeResetCredits.confirmMessage', {
+      windows: 'admin.accounts.claudeResetCredits.windows.fiveHour, admin.accounts.claudeResetCredits.windows.sevenDay',
+      count: 0
+    })
     await wrapper.get('[data-testid="confirm-cancel"]').trigger('click')
     await flushPromises()
     expect(wrapper.find('[data-testid="confirm-dialog"]').exists()).toBe(false)
@@ -191,6 +197,15 @@ describe('Claude reset credit status', () => {
     redeem.mockResolvedValueOnce({ outcome: 'not_limited', replayed: false })
     await confirmReset(wrapper)
     expect(redeem.mock.calls[1][1]).toBe(redeem.mock.calls[0][1])
+  })
+
+  it('labels cleared windows and falls back to the raw key for unknown ones', async () => {
+    const wrapper = await queried()
+    redeem.mockResolvedValue({ outcome: 'reset', cleared: ['seven_day_overage_included', 'future_window'], replayed: false })
+    await confirmReset(wrapper)
+    expect(t).toHaveBeenCalledWith('admin.accounts.claudeResetCredits.outcome.reset', {
+      windows: 'admin.accounts.claudeResetCredits.windows.sevenDayOverage, future_window'
+    })
   })
 
   it('tells the operator to retry later after an explicit unavailable answer', async () => {
