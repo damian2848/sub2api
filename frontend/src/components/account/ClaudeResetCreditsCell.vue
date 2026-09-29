@@ -257,9 +257,13 @@ function outcomeFeedback(result: ClaudeResetOutcome): { kind: 'success' | 'warni
     case 'ineligible':
       return { kind: 'error', text: t(`${key}.ineligible`) }
     default:
+      if (result.reason === 'upstream_unavailable') return { kind: 'warning', text: t(`${key}.unavailable`) }
       return { kind: 'warning', text: t(`${key}.unknown`) }
   }
 }
+
+// Refusals issued before any claim was sent: the next attempt is a new confirmation.
+const preClaimRefusals = new Set(['CLAUDE_RESET_BUSY', 'CLAUDE_RESET_NOT_AVAILABLE', 'CLAUDE_RESET_UNRESOLVED', 'CLAUDE_RESET_UPSTREAM_UNAVAILABLE'])
 
 function errorText(e: unknown): string {
   const err = e as { reason?: string; message?: string }
@@ -267,6 +271,9 @@ function errorText(e: unknown): string {
     case 'CLAUDE_RESET_UNRESOLVED': return t('admin.accounts.claudeResetCredits.outcome.unknown')
     case 'CLAUDE_RESET_BUSY': return t('admin.accounts.claudeResetCredits.outcome.busy')
     case 'CLAUDE_RESET_NOT_AVAILABLE': return t('admin.accounts.claudeResetCredits.outcome.notAvailable')
+    case 'CLAUDE_RESET_UPSTREAM_UNAVAILABLE': return t('admin.accounts.claudeResetCredits.outcome.unavailable')
+    case 'IDEMPOTENCY_IN_PROGRESS': return t('admin.accounts.claudeResetCredits.outcome.inProgress')
+    case 'IDEMPOTENCY_RETRY_BACKOFF': return t('admin.accounts.claudeResetCredits.outcome.retryBackoff')
     default: return err?.message || t('admin.accounts.claudeResetCredits.outcome.failed')
   }
 }
@@ -290,6 +297,8 @@ async function confirmRedeem() {
     await refresh()
   } catch (e) {
     if (current !== generation) return
+    // Transport or unknown errors keep the key so a retry replays server-side.
+    if (preClaimRefusals.has((e as { reason?: string })?.reason ?? '')) pendingKey = null
     redeemFeedback.value = { kind: 'error', text: errorText(e) }
   } finally {
     if (current === generation) redeeming.value = false

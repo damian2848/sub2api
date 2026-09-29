@@ -1324,6 +1324,9 @@ export default {
 	      notLimited: '当前未达到限额，无需重置，未消耗次数',
 	      ineligible: '此账号当前不可使用重置',
 	      unknown: '结果未确认，已阻止再次兑换，请稍后查询',
+	      unavailable: '重置服务暂时不可用，未确认消耗，请稍后再试',
+	      inProgress: '该重置请求仍在处理中，请稍后查询结果',
+	      retryBackoff: '该重置请求刚刚失败，请稍后再试',
 	      busy: '另一个重置正在进行中，请稍后再试',
 	      notAvailable: '当前没有可立即使用的重置，未消耗次数',
 	      failed: '重置请求失败'

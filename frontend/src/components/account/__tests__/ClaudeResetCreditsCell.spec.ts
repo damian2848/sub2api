@@ -161,6 +161,45 @@ describe('Claude reset credit status', () => {
     expect(wrapper.get('[data-testid="claude-reset-feedback"]').text()).toBe('admin.accounts.claudeResetCredits.outcome.busy')
   })
 
+  it.each(['CLAUDE_RESET_BUSY', 'CLAUDE_RESET_NOT_AVAILABLE', 'CLAUDE_RESET_UNRESOLVED', 'CLAUDE_RESET_UPSTREAM_UNAVAILABLE'])(
+    'rotates the key after pre-claim refusal %s',
+    async reason => {
+      const wrapper = await queried()
+      redeem.mockRejectedValueOnce({ status: 409, reason, message: 'x' })
+      await confirmReset(wrapper)
+      redeem.mockResolvedValueOnce({ outcome: 'not_limited', replayed: false })
+      await confirmReset(wrapper)
+      expect(redeem.mock.calls[1][1]).not.toBe(redeem.mock.calls[0][1])
+    }
+  )
+
+  it.each([
+    ['IDEMPOTENCY_IN_PROGRESS', 'inProgress'],
+    ['IDEMPOTENCY_RETRY_BACKOFF', 'retryBackoff'],
+    ['CLAUDE_RESET_UPSTREAM_UNAVAILABLE', 'unavailable']
+  ])('maps %s to a clear message', async (reason, key) => {
+    const wrapper = await queried()
+    redeem.mockRejectedValueOnce({ status: 409, reason, message: 'x' })
+    await confirmReset(wrapper)
+    expect(wrapper.get('[data-testid="claude-reset-feedback"]').text()).toBe(`admin.accounts.claudeResetCredits.outcome.${key}`)
+  })
+
+  it('reuses the key after an idempotency conflict', async () => {
+    const wrapper = await queried()
+    redeem.mockRejectedValueOnce({ status: 409, reason: 'IDEMPOTENCY_IN_PROGRESS', message: 'x' })
+    await confirmReset(wrapper)
+    redeem.mockResolvedValueOnce({ outcome: 'not_limited', replayed: false })
+    await confirmReset(wrapper)
+    expect(redeem.mock.calls[1][1]).toBe(redeem.mock.calls[0][1])
+  })
+
+  it('tells the operator to retry later after an explicit unavailable answer', async () => {
+    const wrapper = await queried()
+    redeem.mockResolvedValue({ outcome: 'unknown', reason: 'upstream_unavailable', replayed: false })
+    await confirmReset(wrapper)
+    expect(wrapper.get('[data-testid="claude-reset-feedback"]').text()).toBe('admin.accounts.claudeResetCredits.outcome.unavailable')
+  })
+
   it('keeps slot content for setup tokens and discards responses after account changes', async () => {
     let resolve!: (value: typeof snapshot) => void
     getCredits.mockReturnValue(new Promise(r => { resolve = r }))
