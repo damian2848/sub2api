@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
+import { saveAs } from 'file-saver'
 import CodexQuickConfigModal from '../CodexQuickConfigModal.vue'
 
 const fetchCodexModelsManifest = vi.hoisted(() => vi.fn())
@@ -37,6 +38,7 @@ function decodeBase64Utf8(value: string): string {
 describe('CodexQuickConfigModal', () => {
   beforeEach(() => {
     fetchCodexModelsManifest.mockReset()
+    vi.mocked(saveAs).mockClear()
     Object.defineProperty(window.navigator, 'userAgent', { configurable: true, value: 'Mozilla/5.0' })
   })
 
@@ -64,6 +66,22 @@ describe('CodexQuickConfigModal', () => {
 
     await wrapper.get('[data-testid="quick-config-download"]').trigger('click')
     expect(wrapper.get('[data-testid="quick-config-action-status"]').text()).toContain('downloadSuccessMessage')
+  })
+
+  it('downloads an ASCII Windows CMD file with CRLF and system PowerShell bootstrap', async () => {
+    const wrapper = mountModal()
+    await wrapper.get('[data-testid="quick-config-windows-tab"]').trigger('click')
+    await wrapper.get('[data-testid="quick-config-download"]').trigger('click')
+    const [blob, fileName] = vi.mocked(saveAs).mock.calls[0]
+    expect(fileName).toBe('sub2api-codex-config.cmd')
+    const content = await new Promise<string>((resolve) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result))
+      reader.readAsText(blob as Blob)
+    })
+    expect(content.startsWith('@echo off\r\n')).toBe(true)
+    expect([...content].every((character) => character.charCodeAt(0) <= 0x7f)).toBe(true)
+    expect(content).toContain('%SystemRoot%\\System32\\WindowsPowerShell')
   })
 
   it('waits for the model catalog before enabling copy and download', async () => {

@@ -177,7 +177,7 @@ export default {
     quickConfigureModal: {
       title: 'Codex 一键配置',
       warning: '脚本内含当前 API 密钥，请仅在本人电脑上运行，不要分享或提交到代码仓库。',
-      description: '下载并运行脚本后，会自动生成 Codex 配置文件并覆盖同名旧配置。',
+      description: '下载并运行脚本后，会自动生成 Codex 配置文件并覆盖同名旧配置。Windows / macOS 使用系统组件弹窗反馈结果；弹窗不可用时请查看终端提示。',
       macLinux: 'macOS / Linux',
       windows: 'Windows',
       importCatalog: '同时导入当前 API Key 的模型目录',
@@ -192,7 +192,7 @@ export default {
       downloadSuccessMessage: '脚本已下载，请运行脚本完成 Codex 配置；看到配置成功提示后重启 Codex。',
       errorMessage: '操作未完成，请重试或检查浏览器的剪贴板和下载权限。',
       runTitle: '运行方式',
-      windowsRun: '下载 .cmd 文件后双击运行，看到成功提示后按任意键关闭窗口。'
+      windowsRun: '下载 .cmd 文件后双击运行，无需安装额外包。确认系统弹窗或终端结果后按任意键关闭窗口；配置成功后完全退出并重启 Codex。'
     },
     useKeyModal: {
       title: '使用 API 密钥',

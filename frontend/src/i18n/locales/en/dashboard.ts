@@ -177,7 +177,7 @@ export default {
     quickConfigureModal: {
       title: 'Configure Codex Automatically',
       warning: 'This script contains the current API key. Run it only on your own computer and never share or commit it.',
-      description: 'Download and run the script to generate the Codex configuration and replace the existing file.',
+      description: 'Download and run the script to generate the Codex configuration and replace the existing file. Windows / macOS show the result in a system dialog; if unavailable, check the terminal output.',
       macLinux: 'macOS / Linux',
       windows: 'Windows',
       importCatalog: 'Include the model catalog for this API key',
@@ -192,7 +192,7 @@ export default {
       downloadSuccessMessage: 'The script was downloaded. Run it, wait for the success message, then restart Codex.',
       errorMessage: 'The operation did not complete. Try again or check the browser clipboard and download permissions.',
       runTitle: 'Run with',
-      windowsRun: 'Download the .cmd file and double-click it. After the success message, press any key to close the window.'
+      windowsRun: 'Download the .cmd file and double-click it. No extra packages are needed. Check the system dialog or terminal result, then press any key to close the window. Fully quit and restart Codex after success.'
     },
     useKeyModal: {
       title: 'Use API Key',

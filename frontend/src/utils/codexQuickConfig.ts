@@ -51,8 +51,9 @@ function escapeTomlBasicString(value: string): string {
   return value
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"')
-    .replace(/\r/g, '\\r')
-    .replace(/\n/g, '\\n')
+    // TOML basic strings forbid unescaped control characters.
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x1f\x7f]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`)
 }
 
 export function normalizeCodexBaseUrl(baseUrl: string): string {
@@ -100,92 +101,192 @@ goals = true
 }
 
 export function buildMacLinuxCodexQuickConfigScript(input: CodexQuickConfigInput): string {
-  const configPayload = encodeUtf8Base64(buildCodexQuickConfigToml(input))
+  // The catalog path must be resolved on the target machine, not in the browser.
+  const configPayload = encodeUtf8Base64(buildCodexQuickConfigToml({ ...input, modelCatalogContent: undefined }))
   const catalogPayload = input.modelCatalogContent ? encodeUtf8Base64(input.modelCatalogContent) : ''
   const catalogBlock = catalogPayload
-    ? `CATALOG_PAYLOAD='${catalogPayload}'
-CATALOG_TMP_FILE="$(mktemp "${'${CONFIG_FILE}'}.catalog.tmp.XXXXXX")"
-if printf '%s' "${'${CATALOG_PAYLOAD}'}" | base64 --decode > "${'${CATALOG_TMP_FILE}'}" 2>/dev/null; then
-  :
-else
-  printf '%s' "${'${CATALOG_PAYLOAD}'}" | base64 -D > "${'${CATALOG_TMP_FILE}'}"
+    ? `if [ -d "${'${CONFIG_DIR}'}/codex-models.json" ]; then
+  printf '模型目录文件路径已被文件夹占用。\\n' >&2
+  exit 1
 fi
+CATALOG_PAYLOAD='${catalogPayload}'
+CATALOG_TMP_FILE="$(mktemp "${'${CONFIG_FILE}'}.catalog.tmp.XXXXXX")"
+decode_payload "${'${CATALOG_PAYLOAD}'}" > "${'${CATALOG_TMP_FILE}'}"
 mv -f "${'${CATALOG_TMP_FILE}'}" "${'${CONFIG_DIR}'}/codex-models.json"
+`
+    : ''
+  const catalogPathBlock = catalogPayload
+    ? `CATALOG_PATH="${'${CONFIG_DIR}'}/codex-models.json"
+CATALOG_PATH="${'${CATALOG_PATH//\\\\/\\\\\\\\}'}"
+CATALOG_PATH="${'${CATALOG_PATH//\\\"/\\\\\\\"}'}"
+CATALOG_PATH="${'${CATALOG_PATH//$\'\\n\'/\\\\n}'}"
+CATALOG_PATH="${'${CATALOG_PATH//$\'\\r\'/\\\\r}'}"
+CATALOG_PATH="${'${CATALOG_PATH//$\'\\t\'/\\\\t}'}"
+printf 'model_catalog_json = "%s"\\n' "${'${CATALOG_PATH}'}" > "${'${TMP_FILE}'}"
 `
     : ''
 
   return `#!/usr/bin/env bash
 set -euo pipefail
+# Keep feedback visible even when Bash 3 runs EXIT inside a redirected function.
+exec 3>&1
+umask 077
+export PATH="${'${PATH:-}'}:/usr/bin:/bin"
 
-CONFIG_DIR="${'${HOME}'}/.codex"
+CONFIG_DIR="${'${CODEX_HOME:-${HOME}/.codex}'}"
 CONFIG_FILE="${'${CONFIG_DIR}'}/config.toml"
+TMP_FILE=''
+CATALOG_TMP_FILE=''
+
+finish() {
+  status=$?
+  trap - EXIT
+  [ -z "$TMP_FILE" ] || rm -f "$TMP_FILE" || :
+  [ -z "$CATALOG_TMP_FILE" ] || rm -f "$CATALOG_TMP_FILE" || :
+  if [ "$status" -eq 0 ]; then
+    message="Codex 配置成功。
+配置文件：$CONFIG_FILE
+请完全退出并重启 Codex 以加载新配置。"
+    dialog_kind='success'
+  else
+    message="Codex 配置失败。
+配置文件：$CONFIG_FILE
+请检查终端错误信息、目录权限和磁盘空间后重试。"
+    dialog_kind='error'
+  fi
+  printf '%s\\n' "$message" >&3
+  if [ "$(uname -s)" = 'Darwin' ] && command -v osascript >/dev/null 2>&1; then
+    osascript - "$message" "$dialog_kind" >/dev/null 2>&1 <<'APPLESCRIPT' || :
+on run argv
+  if item 2 of argv is "success" then
+    display dialog (item 1 of argv) with title "Sub2API - Codex" buttons {"好"} default button 1 with icon note
+  else
+    display dialog (item 1 of argv) with title "Sub2API - Codex" buttons {"好"} default button 1 with icon stop
+  end if
+end run
+APPLESCRIPT
+  fi
+  exit "$status"
+}
+trap finish EXIT
+
+if printf '' | base64 --decode >/dev/null 2>&1; then
+  BASE64_DECODE_FLAG='--decode'
+elif printf '' | base64 -D >/dev/null 2>&1; then
+  BASE64_DECODE_FLAG='-D'
+else
+  printf '系统 base64 组件不可用。\\n' >&2
+  exit 1
+fi
+decode_payload() {
+  printf '%s' "$1" | base64 "$BASE64_DECODE_FLAG"
+}
+
 mkdir -p "${'${CONFIG_DIR}'}"
+CONFIG_DIR="$(cd "${'${CONFIG_DIR}'}" && pwd -P)"
+CONFIG_FILE="${'${CONFIG_DIR}'}/config.toml"
+if [ -d "${'${CONFIG_FILE}'}" ]; then
+  printf '配置文件路径已被文件夹占用。\\n' >&2
+  exit 1
+fi
 TMP_FILE="$(mktemp "${'${CONFIG_FILE}'}.tmp.XXXXXX")"
-trap 'rm -f "${'${TMP_FILE}'}" "${'${CATALOG_TMP_FILE:-}'}"' EXIT
 
 PAYLOAD='${configPayload}'
-if printf '%s' "${'${PAYLOAD}'}" | base64 --decode > "${'${TMP_FILE}'}" 2>/dev/null; then
-  :
-else
-  printf '%s' "${'${PAYLOAD}'}" | base64 -D > "${'${TMP_FILE}'}"
-fi
+${catalogPathBlock}decode_payload "${'${PAYLOAD}'}" >> "${'${TMP_FILE}'}"
 
 ${catalogBlock}mv -f "${'${TMP_FILE}'}" "${'${CONFIG_FILE}'}"
-trap - EXIT
-printf 'Codex 配置成功。\\n'
-printf '配置文件：%s\\n' "${'${CONFIG_FILE}'}"
-printf '请重启 Codex 以加载新配置。\\n'
 `
 }
 
 export function buildWindowsCmdCodexQuickConfigScript(input: CodexQuickConfigInput): string {
-  const configPayload = encodeUtf8Base64(buildCodexQuickConfigToml(input))
+  const configPayload = encodeUtf8Base64(buildCodexQuickConfigToml({ ...input, modelCatalogContent: undefined }))
   const catalogPayload = input.modelCatalogContent ? encodeUtf8Base64(input.modelCatalogContent) : ''
-  const chunks = catalogPayload.match(/.{1,2000}/g) || []
+  const psPayload = (payload: string) => (payload.match(/.{1,2000}/g) || [])
+    .map((chunk) => `  '${chunk}'`).join(',\n')
   const catalogBlock = catalogPayload
-    ? `set "SUB2API_CODEX_CATALOG_TEMP=%CONFIG_FILE%.catalog.tmp.%RANDOM%%RANDOM%"
-> "%SUB2API_CODEX_CATALOG_TEMP%" echo ${chunks[0]}
-${chunks.slice(1).map((chunk) => `>> "%SUB2API_CODEX_CATALOG_TEMP%" echo ${chunk}`).join('\n')}
-if errorlevel 1 goto :error
-powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$value = [IO.File]::ReadAllText($env:SUB2API_CODEX_CATALOG_TEMP); [IO.File]::WriteAllBytes($env:SUB2API_CODEX_CATALOG_TEMP, [Convert]::FromBase64String($value))"
-if errorlevel 1 goto :error
-move /Y "%SUB2API_CODEX_CATALOG_TEMP%" "%CONFIG_DIR%\\codex-models.json" >nul
-if errorlevel 1 goto :error
+    ? `  $catalogPayload = @(
+${psPayload(catalogPayload)}
+  ) -join ''
+  $catalogFile = [IO.Path]::Combine($configDir, 'codex-models.json')
+  $catalogTemp = $catalogFile + '.tmp.' + [Guid]::NewGuid().ToString('N')
+  $tempFiles += $catalogTemp
+  [IO.File]::WriteAllBytes($catalogTemp, [Convert]::FromBase64String($catalogPayload))
+  $catalogPath = $catalogFile.Replace('\\', '\\\\').Replace('"', '\\"')
+  $config = 'model_catalog_json = "' + $catalogPath + '"' + [Environment]::NewLine + $config
 `
     : ''
 
+  // Only the short bootstrap is interpreted by CMD. Payloads stay out of its
+  // 8191-character command/environment limit, and the entire file is ASCII.
   return `@echo off
 setlocal EnableExtensions DisableDelayedExpansion
-chcp 65001 >nul
-
-set "CONFIG_DIR=%USERPROFILE%\\.codex"
-set "CONFIG_FILE=%CONFIG_DIR%\\config.toml"
-set "TEMP_FILE=%CONFIG_FILE%.tmp.%RANDOM%%RANDOM%"
-set "SUB2API_CODEX_PAYLOAD=${configPayload}"
-set "SUB2API_CODEX_TEMP=%TEMP_FILE%"
-set "SUB2API_CODEX_CATALOG_TEMP="
-
-if not exist "%CONFIG_DIR%\\" mkdir "%CONFIG_DIR%" >nul 2>&1
-if errorlevel 1 goto :error
-
-${catalogBlock}powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$bytes = [Convert]::FromBase64String($env:SUB2API_CODEX_PAYLOAD); [IO.File]::WriteAllBytes($env:SUB2API_CODEX_TEMP, $bytes)"
-if errorlevel 1 goto :error
-move /Y "%TEMP_FILE%" "%CONFIG_FILE%" >nul
-if errorlevel 1 goto :error
-
-echo.
-echo Codex 配置成功。
-echo 配置文件："%CONFIG_FILE%"
-echo 请重启 Codex 以加载新配置。
-echo.
+set "SUB2API_CODEX_SCRIPT=%~f0"
+set "SUB2API_POWERSHELL=%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+if exist "%SystemRoot%\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe" set "SUB2API_POWERSHELL=%SystemRoot%\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe"
+if not exist "%SUB2API_POWERSHELL%" goto :missing_powershell
+"%SUB2API_POWERSHELL%" -NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -Command "try { $source = [IO.File]::ReadAllText($env:SUB2API_CODEX_SCRIPT); $marker = '# SUB2API_POWERSHELL'; & ([ScriptBlock]::Create($source.Substring($source.LastIndexOf($marker) + $marker.Length))) } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
+set "SUB2API_CODEX_EXIT=%ERRORLEVEL%"
 pause
-exit /b 0
+endlocal & exit /b %SUB2API_CODEX_EXIT%
 
-:error
-del /q "%TEMP_FILE%" >nul 2>&1
-if defined SUB2API_CODEX_CATALOG_TEMP del /q "%SUB2API_CODEX_CATALOG_TEMP%" >nul 2>&1
-echo Codex 配置失败。 1>&2
+:missing_powershell
+echo Codex configuration failed: Windows PowerShell is unavailable. 1>&2
+echo Enable the built-in Windows PowerShell component and run this file again. 1>&2
 pause
+endlocal
 exit /b 1
+
+# SUB2API_POWERSHELL
+$ErrorActionPreference = 'Stop'
+$tempFiles = @()
+$status = 1
+$configFile = ''
+try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+function Decode-Text([string]$value) {
+  return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($value))
+}
+function Publish-File([string]$source, [string]$destination) {
+  if ([IO.File]::Exists($destination)) {
+    [IO.File]::Replace($source, $destination, $null)
+  } else {
+    [IO.File]::Move($source, $destination)
+  }
+}
+try {
+  $configDir = $env:CODEX_HOME
+  if ([string]::IsNullOrWhiteSpace($configDir)) {
+    $configDir = [IO.Path]::Combine([Environment]::GetFolderPath('UserProfile'), '.codex')
+  }
+  $configDir = [IO.Path]::GetFullPath($configDir)
+  $configFile = [IO.Path]::Combine($configDir, 'config.toml')
+  [void][IO.Directory]::CreateDirectory($configDir)
+  $configPayload = @(
+${psPayload(configPayload)}
+  ) -join ''
+  $config = Decode-Text $configPayload
+${catalogBlock}  $configTemp = $configFile + '.tmp.' + [Guid]::NewGuid().ToString('N')
+  $tempFiles += $configTemp
+  [IO.File]::WriteAllBytes($configTemp, [Text.Encoding]::UTF8.GetBytes($config))
+${catalogPayload ? '  Publish-File $catalogTemp $catalogFile\n' : ''}  Publish-File $configTemp $configFile
+  $status = 0
+  $message = (Decode-Text '${encodeUtf8Base64('Codex 配置成功。')}') + [Environment]::NewLine + $configFile + [Environment]::NewLine + (Decode-Text '${encodeUtf8Base64('请完全退出并重启 Codex 以加载新配置。')}')
+} catch {
+  $message = (Decode-Text '${encodeUtf8Base64('Codex 配置失败。请检查目录权限、磁盘空间和终端错误信息后重试。')}') + [Environment]::NewLine + $configFile + [Environment]::NewLine + $_.Exception.Message
+} finally {
+  foreach ($file in $tempFiles) {
+    try { if ([IO.File]::Exists($file)) { [IO.File]::Delete($file) } } catch { }
+  }
+}
+[Console]::WriteLine($message)
+try {
+  $shell = New-Object -ComObject WScript.Shell
+  $icon = 16
+  if ($status -eq 0) { $icon = 64 }
+  [void]$shell.Popup($message, 0, 'Sub2API - Codex', $icon)
+} catch {
+  [Console]::WriteLine('System dialog unavailable. See the result above.')
+}
+exit $status
 `
+    .replace(/\n/g, '\r\n')
 }

@@ -165,16 +165,11 @@ const catalogModelCount = ref(0)
 let catalogController: AbortController | null = null
 let catalogRequestID = 0
 
-const catalogPath = computed(() => activePlatform.value === 'windows'
-  ? '%USERPROFILE%\\.codex\\codex-models.json'
-  : '~/.codex/codex-models.json')
-
 const input = computed(() => ({
   apiKey: props.apiKey,
   baseUrl: props.baseUrl || window.location.origin,
   platform: props.platform,
-  modelCatalogContent: includeModelCatalog.value && catalogState.value === 'ready' ? catalogContent.value : undefined,
-  modelCatalogPath: includeModelCatalog.value && catalogState.value === 'ready' ? catalogPath.value : undefined
+  modelCatalogContent: includeModelCatalog.value && catalogState.value === 'ready' ? catalogContent.value : undefined
 }))
 
 const script = computed(() => activePlatform.value === 'windows'
