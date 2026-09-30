@@ -17,5 +17,5 @@ command -v curl >/dev/null
 umask 077
 tmp=$(mktemp -d)
 trap 'rm -rf -- "$tmp"' EXIT
-curl -fsSL --retry 2 --connect-timeout 15 --max-time 60 "https://raw.githubusercontent.com/ranxi2001/sub2api/$version/deploy/upgrade-k3s.py" -o "$tmp/upgrade.py"
+curl -fsSL --retry 2 --connect-timeout 15 --max-time 60 "https://raw.githubusercontent.com/damian2848/sub2api/$version/deploy/upgrade-k3s.py" -o "$tmp/upgrade.py"
 python3 "$tmp/upgrade.py" --version "$version" "${args[@]}"

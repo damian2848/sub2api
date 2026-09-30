@@ -2,7 +2,7 @@
 #
 # Sub2API Installation Script
 # Sub2API 安装脚本
-# Usage: curl -sSL https://raw.githubusercontent.com/ranxi2001/sub2api/production/deploy/install.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/damian2848/sub2api/production/deploy/install.sh | bash
 #
 
 set -e
@@ -31,7 +31,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Configuration
-GITHUB_REPO="${SUB2API_GITHUB_REPO:-ranxi2001/sub2api}"
+GITHUB_REPO="${SUB2API_GITHUB_REPO:-damian2848/sub2api}"
 INSTALL_DIR="/opt/sub2api"
 SERVICE_NAME="sub2api"
 SERVICE_USER="sub2api"

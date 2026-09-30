@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-REPO = 'ranxi2001/sub2api'
+REPO = 'damian2848/sub2api'
 IMAGE = 'ghcr.io/' + REPO
 VERSION = re.compile(r'^v[0-9]+[.][0-9]+[.][0-9]+$')
 SHA = re.compile(r'^[0-9a-f]{40}$')
