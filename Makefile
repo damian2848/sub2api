@@ -1,6 +1,12 @@
 .PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical
 
 FRONTEND_CRITICAL_VITEST := \
+	src/components/account/__tests__/ClaudeResetCreditsCell.spec.ts \
+	src/components/keys/__tests__/UseKeyModal.spec.ts \
+	src/components/account/__tests__/ModelWhitelistSelector.spec.ts \
+	src/components/common/__tests__/PlatformTypeBadge.openaiPlans.spec.ts \
+	src/views/admin/__tests__/DashboardView.spec.ts \
+	src/api/__tests__/codex.spec.ts \
 	src/views/admin/ops/__tests__/TokenGuardV2View.spec.ts \
 	src/features/channel-monitor-v2/__tests__/MonitorCandySettings.spec.ts \
 	src/features/channel-monitor-v2/__tests__/MonitorStatusCards.spec.ts \
