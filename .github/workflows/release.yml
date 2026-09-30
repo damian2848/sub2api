@@ -15,6 +15,11 @@ on:
         required: false
         type: boolean
         default: false
+      publish_images:
+        description: 'Publish container images (binary releases work without registry permissions)'
+        required: false
+        type: boolean
+        default: true
       notify_release:
         description: 'Send the release announcement to Telegram (explicit opt-in)'
         required: false
@@ -36,6 +41,7 @@ permissions:
 env:
   SIMPLE_RELEASE: ${{ inputs.simple_release == true || vars.SIMPLE_RELEASE == 'true' }}
   DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
+  PUBLISH_IMAGES: ${{ vars.PUBLISH_CONTAINER_IMAGES != 'false' && (github.event_name != 'workflow_dispatch' || inputs.publish_images == true) }}
 
 jobs:
   prepare:
@@ -72,6 +78,10 @@ jobs:
           REQUESTED_REF: ${{ inputs.tag || github.ref_name }}
         run: |
           args=(--ref "$REQUESTED_REF")
+          if [[ "$SIMPLE_RELEASE" == true && "$PUBLISH_IMAGES" != true ]]; then
+            echo 'Simple releases require container publishing; use a full binary release instead.' >&2
+            exit 1
+          fi
           if [[ "$SIMPLE_RELEASE" == true ]]; then args+=(--simple); fi
           if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
           python "$RUNNER_TEMP/release-tools/release_matrix.py" plan "${args[@]}"
@@ -267,7 +277,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to DockerHub
-        if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && env.DOCKERHUB_USERNAME != '' }}
+        if: ${{ env.PUBLISH_IMAGES == 'true' && env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && env.DOCKERHUB_USERNAME != '' }}
         uses: docker/login-action@v3
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -275,13 +285,14 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Login to GitHub Container Registry
-        if: ${{ env.DRY_RUN != 'true' }}
+        if: ${{ env.PUBLISH_IMAGES == 'true' && env.DRY_RUN != 'true' }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build images and publish manifests
+        if: ${{ env.PUBLISH_IMAGES == 'true' }}
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || 'skip' }}
         run: bash "$RUNNER_TEMP/release-tools/release-images.sh"
@@ -337,7 +348,7 @@ jobs:
 
       # Update DockerHub description
       - name: Update DockerHub description
-        if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && env.DOCKERHUB_USERNAME != '' && needs.prepare.outputs.prerelease != 'true' }}
+        if: ${{ env.PUBLISH_IMAGES == 'true' && env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && env.DOCKERHUB_USERNAME != '' && needs.prepare.outputs.prerelease != 'true' }}
         uses: peter-evans/dockerhub-description@v5
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
