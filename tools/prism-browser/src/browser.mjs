@@ -10,6 +10,23 @@ export function catalogCollapsed(collected, previous = []) {
   return collected.length === 1 && collected[0] === FALLBACK_MODEL && previous.length > 1;
 }
 
+// Prism builds its model menu from the `prism_codex_models` Statsig dynamic config. The menu can sit
+// on its one-model loading fallback although the client is Ready and already holds the full list,
+// so the config itself is the catalog; the menu is only a fallback for a client that exposes none.
+const MODEL_ID = /^gpt-[0-9]+(?:\.[0-9]+)?(?:-[a-z0-9]+)+$/;
+export function catalogFromConfig(models) {
+  const labels = new Map();
+  if (!Array.isArray(models)) return labels;
+  for (const item of models.slice(0, 32)) {
+    if (!item || typeof item.id !== 'string' || !MODEL_ID.test(item.id)) continue;
+    labels.set(item.id, typeof item.label === 'string' && item.label.trim() ? item.label.trim() : item.id);
+  }
+  return labels;
+}
+
+// The model a readiness probe uses: the known-good fallback when offered, else the first model.
+export const probeModel = models => models.includes(FALLBACK_MODEL) ? FALLBACK_MODEL : models[0];
+
 export function modelFromLabel(label) {
   const value = label.trim().replace(/\s+/g, ' ');
   const match = /^(\d+(?:\.\d+)?) (Sol|Terra|Luna|Astra)\b/.exec(value);
@@ -17,10 +34,11 @@ export function modelFromLabel(label) {
 }
 
 export class BrowserSession {
-  constructor(browser, onHeartbeat, source) {
+  constructor(browser, onHeartbeat, source, worker = 0) {
     this.browser = browser;
     this.onHeartbeat = onHeartbeat;
     this.context = null;
+    this.contextEpoch = 0;
     this.page = null;
     this.projectId = null;
     this.creating = false;
@@ -31,38 +49,64 @@ export class BrowserSession {
     this.labels = new Map();
     this.reserveProject = null;
     this.source = source;
+    this.worker = worker;
   }
 
   audit(event, details) {
-    if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event, source: this.source, ...details }));
+    if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event, source: this.source,
+      worker: this.worker, ...details }));
   }
 
   async authenticate({ access_token, expected_email, expected_user_id }, signal) {
-    this.context = await this.browser.newContext({ locale: 'en-US' });
-    await this.context.addCookies([{ name: 'prism_oai_access_token', value: access_token,
-      domain: 'prism.openai.com', path: '/', secure: true, httpOnly: true, sameSite: 'Lax' }]);
-    this.page = await this.context.newPage();
-    await this.page.route(`${origin}/**`, route => this.route(route).catch(() => route.abort().catch(() => {})));
-    this.page.on('response', response => this.observe(response).catch(() => {}));
-    this.page.on('close', () => this.turn?.reject(new PrismError('browser_session_closed', 503)));
-    this.page.on('crash', () => this.close().catch(() => {}));
+    const epoch = this.contextEpoch;
+    let context;
+    let installed = false;
+    const checkCurrent = () => {
+      aborted(signal);
+      if (this.contextEpoch !== epoch) throw new PrismError('browser_session_closed', 503);
+    };
     return interruptible(async () => {
-      await this.page.goto(origin + '/', { waitUntil: 'domcontentloaded', timeout: 25000 });
-      const auth = await this.page.evaluate(async expected => {
-        const response = await fetch('/auth/session', { signal: AbortSignal.timeout(15000) });
-        const data = await response.json();
-        const user = data.user || {};
-        const policy = data.policy?.user || {};
-        const ids = [user.id, user.app_metadata?.user_id, policy.id, policy.openai_user_id, policy.prism_user_id];
-        const emails = [user.email, policy.email].filter(value => typeof value === 'string').map(value => value.toLowerCase());
-        return { signedIn: response.ok && Boolean(user.id) && !user.is_anonymous, actualUserId: user.id,
-          emailMatches: !expected.email || emails.includes(expected.email.toLowerCase()),
-          idMatches: !expected.id || ids.includes(expected.id) };
-      }, { email: expected_email, id: expected_user_id });
-      if (!auth.signedIn) throw new PrismError('oauth_session_rejected', 401);
-      if (!auth.emailMatches || !auth.idMatches) throw new PrismError('oauth_identity_mismatch', 403);
-      return auth.actualUserId;
-    }, signal, () => this.close());
+      try {
+        context = await this.browser.newContext({ locale: 'en-US' });
+        checkCurrent();
+        this.context = context;
+        installed = true;
+        await context.addCookies([{ name: 'prism_oai_access_token', value: access_token,
+          domain: 'prism.openai.com', path: '/', secure: true, httpOnly: true, sameSite: 'Lax' }]);
+        checkCurrent();
+        const page = await context.newPage();
+        checkCurrent();
+        this.page = page;
+        const currentPage = () => this.contextEpoch === epoch && this.page === page;
+        await page.route(`${origin}/**`, route => currentPage()
+          ? this.route(route).catch(() => route.abort().catch(() => {})) : route.abort().catch(() => {}));
+        checkCurrent();
+        page.on('response', response => { if (currentPage()) this.observe(response).catch(() => {}); });
+        page.on('close', () => { if (currentPage()) this.turn?.reject(new PrismError('browser_session_closed', 503)); });
+        page.on('crash', () => { if (currentPage()) this.close().catch(() => {}); });
+        await page.goto(origin + '/', { waitUntil: 'domcontentloaded', timeout: 25000 });
+        checkCurrent();
+        const auth = await page.evaluate(async expected => {
+          const response = await fetch('/auth/session', { signal: AbortSignal.timeout(15000) });
+          const data = await response.json();
+          const user = data.user || {};
+          const policy = data.policy?.user || {};
+          const ids = [user.id, user.app_metadata?.user_id, policy.id, policy.openai_user_id, policy.prism_user_id];
+          const emails = [user.email, policy.email].filter(value => typeof value === 'string').map(value => value.toLowerCase());
+          return { signedIn: response.ok && Boolean(user.id) && !user.is_anonymous, actualUserId: user.id,
+            emailMatches: !expected.email || emails.includes(expected.email.toLowerCase()),
+            idMatches: !expected.id || ids.includes(expected.id) };
+        }, { email: expected_email, id: expected_user_id });
+        checkCurrent();
+        if (!auth.signedIn) throw new PrismError('oauth_session_rejected', 401);
+        if (!auth.emailMatches || !auth.idMatches) throw new PrismError('oauth_identity_mismatch', 403);
+        return auth.actualUserId;
+      } catch (error) {
+        if (context && !installed) await context.close().catch(() => {});
+        else if (context && this.context === context) await this.terminateContext();
+        throw error;
+      }
+    }, signal, () => this.contextEpoch === epoch ? this.close() : undefined);
   }
 
   async route(route) {
@@ -86,10 +130,12 @@ export class BrowserSession {
     if (path === '/api/llm/response_with_tools_start') {
       const turn = this.turn;
       if (!turn || turn.started || turn.signal?.aborted) return route.abort();
+      if (!turn.submitAllowed) {
+        this.audit('upstream_start_blocked', { code: 'browser_start_before_submit' });
+        return route.abort();
+      }
       const body = request.postDataJSON();
       const mismatch = body?.metadata?.projectId !== this.projectId ? 'browser_project_mismatch' :
-        body.metadata.model !== turn.request.model ? 'browser_model_selection_mismatch' :
-        body.metadata.reasoning_effort !== turn.request.effort ? 'browser_effort_selection_mismatch' :
         body.previousResponseId ? 'browser_previous_context_present' : null;
       if (mismatch) {
         this.audit('upstream_start_blocked', { code: mismatch, model: body?.metadata?.model,
@@ -100,17 +146,21 @@ export class BrowserSession {
       turn.started = true;
       turn.startRequest = request;
       turn.conversationId = body.conversationId;
-      this.audit('upstream_start', { model: body.metadata.model, effort: body.metadata.reasoning_effort,
+      this.audit('upstream_start', { model: turn.request.model, effort: turn.request.effort, ui_model: body.metadata.model,
         sentinel_present: Boolean(request.headers?.()['openai-sentinel-token']), input_roles: turn.request.input.map(item => item.role) });
       // The official UI still generates Sentinel proof, identity, and sandbox metadata.
-      // Replace only validated text so no unrelated native UI history is sent.
-      return route.continue({ postData: JSON.stringify({ ...body, input: turn.request.input }) });
+      // Replace only validated text so no unrelated native UI history is sent. The UI's own model
+      // and effort controls can sit on their loading defaults, so the exact requested values
+      // replace them; select() has already confirmed the model is in Prism's catalog.
+      return route.continue({ postData: JSON.stringify({ ...body, input: turn.request.input,
+        metadata: { ...body.metadata, model: turn.request.model, reasoning_effort: turn.request.effort } }) });
     }
     if (path.startsWith('/api/llm/') && !this.turn && !path.endsWith('_stop')) return route.abort();
     return route.continue();
   }
 
   async observe(response) {
+    const epoch = this.contextEpoch;
     const path = new URL(response.url()).pathname;
     if (path.endsWith('/heartbeat')) {
       if (response.ok()) {
@@ -121,7 +171,7 @@ export class BrowserSession {
     }
     if (path.endsWith('/wait-for-sync') && response.ok()) {
       const data = await response.json();
-      this.syncSeen = data.status === 'synced';
+      if (epoch === this.contextEpoch) this.syncSeen = data.status === 'synced';
       return;
     }
     if (!['/api/llm/response_with_tools_start', '/api/llm/response_with_tools_status'].includes(path)) return;
@@ -131,7 +181,7 @@ export class BrowserSession {
     const sent = request.postDataJSON();
     const isStart = path === '/api/llm/response_with_tools_start';
     // Old tabs can finish polling after a new chat has started, including HTTP errors.
-    const matchesTurn = () => this.turn === turn && !turn.completed && (isStart
+    const matchesTurn = () => this.turn === turn && !turn.completed && !turn.signal?.aborted && (isStart
       ? request === turn.startRequest && sent?.conversationId === turn.conversationId
       : Boolean(turn.requestId && sent?.request_id === turn.requestId &&
         (!sent.conversation_id || sent.conversation_id === turn.conversationId)));
@@ -153,18 +203,21 @@ export class BrowserSession {
     if (data.conversation_id) turn.conversationId = data.conversation_id;
     if (!['completed', 'error', 'failed'].includes(data.status)) return;
     turn.completed = true;
+    const payload = data.response?.payload || {};
+    const resubmissionRequested = data.status === 'completed' && data.response?.status === 'error' &&
+      payload.httpStatus === 403 && payload.reason === 'unknown' && payload.message ===
+      'Error while processing conversation (403 Forbidden). Please submit prompt again.';
     this.audit('upstream_result', { status: data.response?.status,
-      reported_model: data.response?.payload?.model || null,
-      failure_code: /^[a-z_]{1,100}$/.test(data.response?.payload?.reason || '') ? data.response.payload.reason : undefined });
+      reported_model: payload.model || null,
+      failure_code: /^[a-z_]{1,100}$/.test(payload.reason || '') ? payload.reason : undefined,
+      payload_http_status: Number.isInteger(payload.httpStatus) && payload.httpStatus >= 100 && payload.httpStatus <= 599
+        ? payload.httpStatus : undefined,
+      resubmission_requested: resubmissionRequested });
     if (data.response?.status !== 'success') {
-      const payload = data.response?.payload;
       const error = new PrismError('prism_generation_failed');
-      error.retryConversation = data.status === 'completed' && data.response?.status === 'error' &&
-        payload?.httpStatus === 403 && payload?.reason === 'unknown' && payload?.message ===
-        'Error while processing conversation (403 Forbidden). Please submit prompt again.';
+      error.retryConversation = resubmissionRequested;
       return turn.reject(error);
     }
-    const payload = data.response.payload || {};
     if (payload.model && payload.model !== turn.request.model) return turn.reject(new PrismError('upstream_model_mismatch'));
     const output = payload.output;
     if (!Array.isArray(output)) return turn.reject(new PrismError('prism_invalid_output'));
@@ -176,6 +229,15 @@ export class BrowserSession {
   }
 
   async initialize(projectId, onProjectCreated, signal, previousModels = []) {
+    const page = this.page;
+    const epoch = this.contextEpoch;
+    const checkCurrent = () => {
+      aborted(signal);
+      if (this.contextEpoch !== epoch || this.page !== page || !page || page.isClosed?.()) {
+        throw new PrismError('browser_session_closed', 503);
+      }
+    };
+    checkCurrent();
     this.bootstrapping = true;
     this.syncSeen = false;
     this.lastHeartbeat = 0;
@@ -185,126 +247,182 @@ export class BrowserSession {
         if (projectId) {
           if (!uuidPattern.test(projectId)) throw new PrismError('invalid_managed_project');
           this.projectId = projectId;
-          await this.page.goto(`${origin}/?u=${encodeURIComponent(projectId)}&pg=1`,
+          await page.goto(`${origin}/?u=${encodeURIComponent(projectId)}&pg=1`,
             { waitUntil: 'domcontentloaded', timeout: 45000 });
+          checkCurrent();
         } else {
           this.creating = true;
-          const creation = this.page.waitForResponse(response => new URL(response.url()).pathname === '/api/projects' &&
+          const creation = page.waitForResponse(response => new URL(response.url()).pathname === '/api/projects' &&
             response.request().method() === 'POST', { timeout: 90000 });
           creation.catch(() => {});
-          await this.page.goto(`${origin}/?n=1`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+          await page.goto(`${origin}/?n=1`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+          checkCurrent();
           const response = await creation;
+          checkCurrent();
           const data = await response.json();
+          checkCurrent();
           if (!response.ok() || data.uuid !== this.projectId) throw new PrismError('project_creation_failed');
         }
-        await this.composer();
+        await this.composer(checkCurrent);
+        checkCurrent();
         const deadline = Date.now() + 120000;
         while ((!this.syncSeen || !this.lastHeartbeat) && Date.now() < deadline) {
-          aborted(signal);
-          await this.page.waitForTimeout(250);
+          checkCurrent();
+          await page.waitForTimeout(250);
+          checkCurrent();
         }
         if (!this.syncSeen || !this.lastHeartbeat) throw new PrismError('sandbox_initialization_timeout', 504);
-        this.labels = await this.catalog(previousModels, signal);
+        const labels = await this.catalog(previousModels, signal, checkCurrent);
+        checkCurrent();
+        this.labels = labels;
         if (!this.labels.size) throw new PrismError('model_catalog_unavailable');
-      }, signal, () => this.close());
+      }, signal, () => this.contextEpoch === epoch ? this.close() : undefined);
       return [...this.labels.keys()];
     } finally {
-      this.creating = false;
-      this.bootstrapping = false;
-      this.reserveProject = null;
+      if (this.contextEpoch === epoch) {
+        this.creating = false;
+        this.bootstrapping = false;
+        this.reserveProject = null;
+      }
     }
   }
 
   // Waits (read-only) until the Statsig client reports Ready; its absence is tolerated.
-  async waitForStatsig(signal, timeoutMs = 20000, pollMs = 250) {
+  async waitForStatsig(signal, timeoutMs = 20000, pollMs = 250, checkCurrent = () => {}) {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       aborted(signal);
+      checkCurrent();
       const status = await this.page.evaluate(() => window.__STATSIG__?.firstInstance?.loadingStatus ?? null)
         .catch(() => null);
+      checkCurrent();
       if (status === 'Ready') return true;
       if (Date.now() >= deadline) {
         this.audit('statsig_wait_timeout', { status });
         return false;
       }
       await this.page.waitForTimeout(pollMs);
+      checkCurrent();
     }
   }
 
-  async readModelMenu() {
-    await this.thinking().click();
-    await this.page.getByRole('menuitem', { name: /^(Model|模型)/ }).hover();
-    await this.page.getByRole('menuitem').filter({ hasText: /^\d+(?:\.\d+)? (?:Sol|Terra|Luna|Astra)\b/ }).first()
+  // Read-only: the models of the Statsig `prism_codex_models` config, or null when unavailable.
+  async readConfigModels(checkCurrent = () => {}) {
+    const page = this.page;
+    checkCurrent();
+    const models = await page.evaluate(() => {
+      const config = window.__STATSIG__?.firstInstance?.getDynamicConfig?.('prism_codex_models');
+      const value = config?.get?.('models', null) ?? config?.value?.models;
+      return Array.isArray(value) ? value.map(item => ({ id: item?.id, label: item?.label })) : null;
+    }).catch(() => null);
+    checkCurrent();
+    return models;
+  }
+
+  async readModelMenu(checkCurrent = () => {}) {
+    const page = this.page;
+    checkCurrent();
+    await this.thinking(page).click();
+    checkCurrent();
+    await page.getByRole('menuitem', { name: /^(Model|模型)/ }).hover();
+    checkCurrent();
+    await page.getByRole('menuitem').filter({ hasText: /^\d+(?:\.\d+)? (?:Sol|Terra|Luna|Astra)\b/ }).first()
       .waitFor({ state: 'visible', timeout: 15000 });
+    checkCurrent();
     const observed = new Map();
     const collect = async () => {
-      const items = await this.page.getByRole('menuitem').evaluateAll(elements => elements.map(element => ({
+      const items = await page.getByRole('menuitem').evaluateAll(elements => elements.map(element => ({
         label: element.textContent.trim(), disabled: element.hasAttribute('data-disabled') ||
           element.getAttribute('aria-disabled') === 'true', visible: Boolean(element.getClientRects().length) })));
+      checkCurrent();
       for (const item of items) observed.set(item.label, { ...item,
         visible: item.visible || observed.get(item.label)?.visible === true });
     };
     await collect();
-    const menu = this.page.getByRole('menu').last();
+    checkCurrent();
+    const menu = page.getByRole('menu').last();
     for (const fraction of [0.5, 1]) {
       await menu.evaluate((element, offset) => { element.scrollTop = element.scrollHeight * offset; }, fraction);
-      await this.page.waitForTimeout(200);
+      checkCurrent();
+      await page.waitForTimeout(200);
+      checkCurrent();
       await collect();
+      checkCurrent();
     }
     await menu.evaluate(element => { element.scrollTop = 0; });
+    checkCurrent();
     this.audit('model_menu', { items: [...observed.values()] });
     const labels = new Map();
     for (const item of observed.values()) {
       const id = modelFromLabel(item.label);
       if (id && !item.disabled && item.visible) labels.set(id, item.label);
     }
-    await this.page.keyboard.press('Escape');
-    await this.page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
+    checkCurrent();
+    await page.keyboard.press('Escape');
+    checkCurrent();
     return labels;
   }
 
   // The menu is only trusted once Statsig is Ready. If it still collapses to the fallback
   // list although the persisted catalog was larger, read it once more and accept that result.
-  async catalog(previousModels, signal) {
-    await this.waitForStatsig(signal);
-    let labels = await this.readModelMenu();
+  async catalog(previousModels, signal, checkCurrent = () => {}) {
+    await this.waitForStatsig(signal, 20000, 250, checkCurrent);
+    checkCurrent();
+    const configured = catalogFromConfig(await this.readConfigModels(checkCurrent));
+    if (configured.size) {
+      this.audit('model_catalog_config', { models: [...configured.keys()] });
+      return configured;
+    }
+    let labels = await this.readModelMenu(checkCurrent);
+    checkCurrent();
     if (catalogCollapsed([...labels.keys()], previousModels)) {
       this.audit('model_catalog_collapsed', { previous_count: previousModels.length });
       await this.page.waitForTimeout(3000);
       aborted(signal);
-      labels = await this.readModelMenu();
+      checkCurrent();
+      labels = await this.readModelMenu(checkCurrent);
+      checkCurrent();
     }
     return labels;
   }
 
-  thinking() { return this.page.getByRole('button', { name: /^(Thinking|思考中):/ }); }
+  thinking(page = this.page) { return page.getByRole('button', { name: /^(Thinking|思考中):/ }); }
 
-  async composer() {
-    const composer = this.page.locator('textarea:visible').last();
+  async composer(checkCurrent = () => {}) {
+    const page = this.page;
+    checkCurrent();
+    const composer = page.locator('textarea:visible').last();
     await composer.waitFor({ state: 'visible', timeout: 30000 });
-    await this.page.waitForFunction(() => {
+    checkCurrent();
+    await page.waitForFunction(() => {
       const item = Array.from(document.querySelectorAll('textarea')).filter(element => element.getClientRects().length).at(-1);
       return item && !item.disabled;
     }, null, { timeout: 120000 });
+    checkCurrent();
     return composer;
   }
 
-  async select(request) {
-    const label = this.labels.get(request.model);
-    if (!label) throw new PrismError('model_not_available', 400, 'model');
-    await this.thinking().click();
-    await this.page.getByRole('menuitem', { name: /^(Model|模型)/ }).hover();
-    await this.page.getByRole('menuitem', { name: label, exact: true }).click();
-    await this.thinking().click();
-    await this.page.getByRole('menuitem', { name: /^(Effort|Reasoning effort|推理强度)/ }).hover();
-    const effortLabel = request.effort[0].toUpperCase() + request.effort.slice(1);
-    await this.page.getByRole('menuitem', { name: effortLabel, exact: true }).click();
+  // The model and effort are applied by route() on the native start. This only checks that Prism
+  // offers the model; nothing is clicked in the (possibly still loading) menu.
+  async select(request, checkCurrent = () => {}) {
+    checkCurrent();
+    if (!this.labels.has(request.model)) throw new PrismError('model_not_available', 400, 'model');
+    if (!['low', 'medium', 'high'].includes(request.effort)) throw new PrismError('unsupported_reasoning_effort', 400, 'reasoning_effort');
   }
 
-  async generate(request, signal) {
+  async generate(request, signal, onText) {
     aborted(signal);
     if (this.turn) throw new PrismError('account_busy', 409);
-    const turn = { request, signal, started: false };
+    const page = this.page;
+    // onText is reserved for verified cumulative assistant text; pending progress is not that text.
+    const turn = { request, signal, onText, started: false, submitAllowed: false };
+    const checkCurrent = () => {
+      aborted(signal);
+      if (this.turn !== turn || this.page !== page || !page || page.isClosed?.()) {
+        throw new PrismError('browser_session_closed', 503);
+      }
+    };
     const result = new Promise((resolve, reject) => { turn.resolve = resolve; turn.reject = reject; });
     // A native response can finish before press('Enter') returns.
     result.catch(() => {});
@@ -312,30 +430,40 @@ export class BrowserSession {
     let stage = 'new_chat';
     try {
       return await interruptible(async () => {
-        await this.page.getByRole('button', { name: 'New chat tab', exact: true }).click({ timeout: 15000 });
+        checkCurrent();
+        await page.getByRole('button', { name: 'New chat tab', exact: true }).click({ timeout: 15000 });
+        checkCurrent();
         stage = 'composer';
-        const composer = await this.composer();
+        const composer = await this.composer(checkCurrent);
+        checkCurrent();
         stage = 'model_selection';
-        await this.select(request);
+        await this.select(request, checkCurrent);
+        checkCurrent();
         stage = 'submit';
         await composer.fill('Process the submitted text.');
+        checkCurrent();
+        turn.submitAllowed = true;
         await composer.press('Enter');
+        checkCurrent();
         stage = 'generation';
         return result;
-      }, signal, () => this.stop());
+      }, signal, () => this.page === page ? this.close() : undefined);
     } catch (error) {
       this.audit('browser_ui_failure', { stage, error_type: error.constructor.name,
         code: error instanceof PrismError ? error.code : undefined });
-      if (process.env.PRISM_AUDIT_REQUESTS === 'true' && this.page && !this.page.isClosed()) {
+      if (process.env.PRISM_AUDIT_REQUESTS === 'true' && this.page === page && page && !page.isClosed()) {
         const composers = await this.page.locator('textarea').evaluateAll(elements => elements.map(element => ({
           visible: Boolean(element.getClientRects().length), disabled: element.disabled }))).catch(() => []);
         const thinking = await this.thinking().allTextContents().catch(() => []);
         this.audit('browser_ui_state', { composers, thinking });
       }
-      await this.stop();
+      if (this.turn === turn) {
+        if (signal?.aborted) await this.close();
+        else await this.stop();
+      }
       throw error instanceof PrismError ? error : new PrismError(`browser_ui_${stage}_failed`);
     } finally {
-      this.turn = null;
+      if (this.turn === turn) this.turn = null;
     }
   }
 
@@ -379,9 +507,13 @@ export class BrowserSession {
   }
 
   async terminateContext() {
+    this.contextEpoch += 1;
     const context = this.context;
     this.context = null;
     this.page = null;
+    this.creating = false;
+    this.bootstrapping = false;
+    this.reserveProject = null;
     this.turn?.reject(new PrismError('session_closed', 503));
     this.turn = null;
     if (context) await context.close().catch(() => {});

@@ -122,6 +122,81 @@ test('nonstream output and SSE contain actual completed output and estimated usa
   assert.match(text, /Only the actual browser result/);
 });
 
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+const responseEvents = text => text.split('\n\n').filter(frame => frame.startsWith('event: '))
+  .map(frame => JSON.parse(frame.split('\n')[1].slice(6)));
+
+test('HTTP lifecycle reaches the client before generation completes and tool output appears only once afterward', async t => {
+  const started = deferred();
+  const completion = deferred();
+  const { post } = await fixture(t, { generate() { started.resolve(); return completion.promise; } }, { keepaliveMs: 2 });
+  const response = await post('/accounts/32/v1/responses', { ...body, tools: [execTool], stream: true });
+  const reader = response.body.getReader();
+  let wire = '';
+  while (responseEvents(wire).length < 2) wire += new TextDecoder().decode((await reader.read()).value);
+  await started.promise;
+  const early = responseEvents(wire);
+  assert.deepEqual(early.map(event => event.type), ['response.created', 'response.in_progress']);
+  assert.ok(!wire.includes('tool_call') && !wire.includes('output_text.delta'));
+  completion.resolve(toolReply);
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    wire += new TextDecoder().decode(value);
+  }
+  const events = responseEvents(wire);
+  assert.deepEqual(events.map(event => event.sequence_number), events.map((_, index) => index));
+  assert.equal(events.filter(event => event.type === 'response.created').length, 1);
+  assert.equal(events.filter(event => event.type === 'response.function_call_arguments.done').length, 1);
+  assert.equal(events[0].response.id, events.at(-1).response.id);
+  assert.equal(events[0].response.created_at, events.at(-1).response.created_at);
+  assert.equal(events.at(-1).response.output[0].arguments, '{"cmd":"ls"}');
+});
+
+test('stream timeout returns one safe top-level Responses error following the lifecycle', async t => {
+  let calls = 0;
+  const { post } = await fixture(t, { generate(_, __, signal) {
+    calls++;
+    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  } }, { requestTimeout: 20, keepaliveMs: 2 });
+  const response = await post('/accounts/32/v1/responses', { ...body, stream: true });
+  const events = responseEvents(await response.text());
+  assert.deepEqual(events.map(event => event.type), ['response.created', 'response.in_progress', 'error']);
+  assert.deepEqual(events.at(-1), { type: 'error', sequence_number: 2,
+    code: 'request_timeout', message: 'request_timeout', param: null });
+  assert.equal(calls, 1);
+});
+
+test('streaming unexpected errors never expose the browser message or nested error envelopes', async t => {
+  const { post } = await fixture(t, { async generate() { throw new Error('secret-access-token'); } });
+  const events = responseEvents(await (await post('/accounts/32/v1/responses', { ...body, stream: true })).text());
+  assert.deepEqual(events.at(-1), { type: 'error', sequence_number: 2,
+    code: 'browser_operation_failed', message: 'browser_operation_failed', param: null });
+  assert.ok(!JSON.stringify(events).includes('secret-access-token'));
+});
+
+test('disconnect after early lifecycle cancels the sole streaming generation', async t => {
+  const started = deferred();
+  const cancelled = deferred();
+  let calls = 0;
+  const { post } = await fixture(t, { generate(_, __, signal) {
+    calls++;
+    started.resolve();
+    return new Promise((_, reject) => signal.addEventListener('abort', () => {
+      cancelled.resolve(); reject(signal.reason);
+    }, { once: true }));
+  } });
+  const response = await post('/accounts/32/v1/responses', { ...body, stream: true });
+  await started.promise;
+  await response.body.cancel();
+  await cancelled.promise;
+  assert.equal(calls, 1);
+});
+
 test('request timeout aborts a single running generation without retry', async t => {
   let calls = 0;
   let aborts = 0;

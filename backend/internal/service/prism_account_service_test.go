@@ -27,6 +27,7 @@ type prismTestRepository struct {
 	created          []*Account
 	nextID           int64
 	bulkCalls        int
+	bulkUpdates      []AccountBulkUpdate
 	extraCalls       int
 	schedulableCalls int
 }
@@ -154,6 +155,7 @@ func (r *prismTestRepository) BulkUpdate(_ context.Context, ids []int64, updates
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.bulkCalls++
+	r.bulkUpdates = append(r.bulkUpdates, updates)
 	var updated int64
 	for _, id := range ids {
 		a := r.items[id]
@@ -168,6 +170,9 @@ func (r *prismTestRepository) BulkUpdate(_ context.Context, ids []int64, updates
 		}
 		if updates.Schedulable != nil {
 			a.Schedulable = *updates.Schedulable
+		}
+		if updates.Concurrency != nil {
+			a.Concurrency = *updates.Concurrency
 		}
 		r.items[id] = prismTestClone(a)
 		updated++
@@ -418,6 +423,142 @@ func TestPrismStatusQueryCannotEnableAccount(t *testing.T) {
 	require.EqualValues(t, 1, requests.Load())
 }
 
+func TestPrismSyncRuntimeConcurrencyAndCatalogTogether(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		fields      string
+		initial     int
+		expected    int
+		sameMapping bool
+	}{
+		{name: "legacy_missing", initial: 3, expected: 1},
+		{name: "legacy_null", fields: `,"concurrency":null`, initial: 3, expected: 1},
+		{name: "two_workers", fields: `,"concurrency":2,"ready_workers":2,"busy_workers":1,"queued":3`, initial: 1, expected: 2},
+		{name: "four_workers", fields: `,"concurrency":4`, initial: 1, expected: 4},
+		{name: "capacity_only", fields: `,"concurrency":2`, initial: 1, expected: 2, sameMapping: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPut {
+					_, _ = w.Write([]byte(`{}`))
+					return
+				}
+				_, _ = fmt.Fprintf(w, `{"phase":"ready","ready":true,"models":["gpt-6.1-sol"]%s}`, test.fields)
+			}))
+			defer server.Close()
+			managed := prismTestManaged(server.URL)
+			managed.Concurrency = test.initial
+			if test.sameMapping {
+				managed.Credentials["model_mapping"] = map[string]any{"gpt-6.1-sol": "gpt-6.1-sol"}
+			}
+			source := prismTestSource()
+			repo := newPrismTestRepository(source, managed)
+			svc := prismTestService(t, server.URL, repo, &prismTestTokens{token: prismTestJWT("latest")})
+			svc.syncAccount(context.Background(), managed.ID, false)
+			fresh, err := repo.GetByID(context.Background(), managed.ID)
+			require.NoError(t, err)
+			require.Equal(t, test.expected, fresh.Concurrency)
+			require.EqualValues(t, test.expected, fresh.Extra["prism_concurrency"])
+			require.True(t, fresh.Schedulable)
+			require.Equal(t, "ready", fresh.Extra["prism_phase"])
+			require.Equal(t, map[string]any{"gpt-6.1-sol": "gpt-6.1-sol"}, fresh.Credentials["model_mapping"])
+			require.Equal(t, managed.GroupIDs, fresh.GroupIDs)
+			require.Equal(t, managed.ProxyID, fresh.ProxyID)
+			require.Equal(t, test.expected, svc.storedStatus(fresh).Concurrency)
+			require.Equal(t, 1, repo.bulkCalls)
+			require.Equal(t, test.expected, *repo.bulkUpdates[0].Concurrency)
+			require.Equal(t, fresh.Credentials["model_mapping"], repo.bulkUpdates[0].Credentials["model_mapping"],
+				"scheduler capacity and the catalog must be in the same repository update")
+			if test.name == "two_workers" {
+				status := svc.storedStatus(fresh)
+				require.Equal(t, 2, *status.ReadyWorkers)
+				require.Equal(t, 1, *status.BusyWorkers)
+				require.Equal(t, 3, *status.Queued)
+			}
+			svc.syncAccount(context.Background(), managed.ID, false)
+			require.Equal(t, 1, repo.bulkCalls, "unchanged capacity and models need no further bulk write")
+			sourceAfter, err := repo.GetByID(context.Background(), source.ID)
+			require.NoError(t, err)
+			require.Equal(t, prismTestClone(source), sourceAfter)
+		})
+	}
+}
+
+func TestPrismInvalidRuntimeCapacityCannotEnableOrIncreaseConcurrency(t *testing.T) {
+	for _, fields := range []string{
+		`"concurrency":0`, `"concurrency":-1`, `"concurrency":5`, `"concurrency":1000`,
+		`"concurrency":1.5`, `"concurrency":"4"`, `"concurrency":true`,
+		`"concurrency":2,"ready_workers":1`, `"concurrency":2,"ready_workers":-1`,
+		`"concurrency":2,"busy_workers":3`, `"concurrency":2,"busy_workers":-1`,
+		`"concurrency":2,"queued":-1`,
+	} {
+		t.Run(fields, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPut {
+					_, _ = w.Write([]byte(`{}`))
+					return
+				}
+				_, _ = fmt.Fprintf(w, `{"phase":"ready","ready":true,"models":["gpt-6.1-sol"],%s}`, fields)
+			}))
+			defer server.Close()
+			managed := prismTestManaged(server.URL)
+			managed.Credentials["model_mapping"] = map[string]any{"original-model": "original-model"}
+			repo := newPrismTestRepository(prismTestSource(), managed)
+			svc := prismTestService(t, server.URL, repo, &prismTestTokens{token: prismTestJWT("latest")})
+			svc.syncAccount(context.Background(), managed.ID, false)
+			fresh, err := repo.GetByID(context.Background(), managed.ID)
+			require.NoError(t, err)
+			require.Equal(t, managed.Concurrency, fresh.Concurrency)
+			require.Equal(t, managed.Credentials["model_mapping"], fresh.Credentials["model_mapping"])
+			require.False(t, fresh.Schedulable)
+			require.Equal(t, "error", fresh.Extra["prism_phase"])
+			require.NotNil(t, fresh.TempUnschedulableUntil)
+			require.Zero(t, repo.bulkCalls)
+			require.Zero(t, repo.schedulableCalls)
+			status, err := svc.Status(context.Background(), managed.ID)
+			require.NoError(t, err)
+			require.False(t, status.Ready)
+		})
+	}
+}
+
+func TestPrismZeroRuntimeCapacityIsOnlyValidWhenNotReady(t *testing.T) {
+	svc := &PrismAccountService{}
+	var runtime prismRuntimeStatus
+	require.NoError(t, json.Unmarshal([]byte(`{"phase":"initializing","ready":false,"concurrency":0,"ready_workers":0,"busy_workers":0,"queued":0}`), &runtime))
+	status := &PrismStatus{}
+	svc.applyRuntimeStatus(status, runtime)
+	require.False(t, status.Ready)
+	require.Equal(t, "sandbox_syncing", status.Phase)
+	require.Equal(t, 0, status.Concurrency)
+	require.Empty(t, status.ErrorCode)
+	runtime.Ready = true
+	svc.applyRuntimeStatus(status, runtime)
+	require.False(t, status.Ready)
+	require.Equal(t, "prism_invalid_capacity", status.ErrorCode)
+}
+
+func TestPrismEnsureSessionRejectsInvalidRuntimeCapacity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"phase":"ready","ready":true,"models":["gpt-6.1-sol"],"concurrency":5}`))
+	}))
+	defer server.Close()
+	managed := prismTestManaged(server.URL)
+	managed.Schedulable = true
+	repo := newPrismTestRepository(prismTestSource(), managed)
+	svc := prismTestService(t, server.URL, repo, &prismTestTokens{token: prismTestJWT("latest")})
+	require.Error(t, svc.EnsureSession(context.Background(), managed))
+	prismTestWaitJobs(svc)
+	fresh, err := repo.GetByID(context.Background(), managed.ID)
+	require.NoError(t, err)
+	require.NotNil(t, fresh.TempUnschedulableUntil)
+	require.Equal(t, 1, fresh.Concurrency)
+}
+
 func TestPrismManagementClientRejectsRedirectAndSanitizesPrivateError(t *testing.T) {
 	var targetRequests atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -596,6 +737,24 @@ func TestPrismManagedConnectionCannotBeForgedOrRebound(t *testing.T) {
 	}
 	require.NoError(t, validatePrismAccountUpdate(managed, &UpdateAccountInput{Name: "rename"}))
 	require.Equal(t, int64(32), managed.PrismSourceAccountID())
+}
+
+func TestPrismManagedConcurrencyOnlyAcceptsTheCurrentValue(t *testing.T) {
+	managed := prismTestManaged("http://127.0.0.1:8319")
+	managed.Concurrency = 2
+	for _, value := range []int{-1, 0, 1, 2, 3, 4, 1000} {
+		err := validatePrismAccountUpdate(managed, &UpdateAccountInput{Concurrency: &value})
+		if value == managed.Concurrency {
+			require.NoError(t, err, "an unchanged edit roundtrip must remain valid")
+		} else {
+			require.Error(t, err, "only the runtime may change managed concurrency")
+		}
+	}
+	for _, proxyID := range []int64{1, 99} {
+		require.Error(t, validatePrismAccountUpdate(managed, &UpdateAccountInput{ProxyID: &proxyID}))
+	}
+	require.NoError(t, validatePrismAccountUpdate(&Account{}, &UpdateAccountInput{Concurrency: &managed.Concurrency}),
+		"ordinary account updates keep their existing behavior")
 }
 
 func TestPrismStatusWorkerFailureCannotReportStoredReady(t *testing.T) {

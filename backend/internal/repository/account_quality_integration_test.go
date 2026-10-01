@@ -44,7 +44,9 @@ func TestQualityActionsRestoreOwnershipAndStaleRuns(t *testing.T) {
 			require.NoError(t, plans.TriggerQuality(ctx, plan.ID))
 			plan, err = plans.GetByID(ctx, plan.ID)
 			require.NoError(t, err)
-			now := time.Now().Truncate(time.Microsecond)
+			require.NotNil(t, plan.NextRunAt)
+			// Use the database timestamp so VM clock skew cannot affect the due claim.
+			now := *plan.NextRunAt
 			until := now.Add(15 * time.Minute)
 			ok, err := plans.ClaimPelican(ctx, plan, now, until, now.Add(30*time.Minute))
 			require.NoError(t, err)

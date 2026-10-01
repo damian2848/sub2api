@@ -164,6 +164,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	usage := &OpenAIUsage{}
 	imageCounter := newOpenAIImageOutputCounter()
 	responseID := ""
+	lastSequenceNumber := int64(-1)
+	lastCommittedSequenceNumber := int64(-1)
 	var firstOutputScanGuard atomic.Bool
 	firstOutputScanGuard.Store(stageFirstOutput)
 	scanner := bufio.NewScanner(resp.Body)
@@ -269,6 +271,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	pendingSSEEventType := ""
 	eventInProgress := false
 	eventStartsClientOutput := false
+	eventStartsPrismLifecycle := false
 	eventStartsTTFTOutput := false
 	eventShouldFlush := false
 	handlePendingWriteError := func(err error) {
@@ -279,7 +282,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			}
 			logger.LegacyPrintf("service.openai_gateway", "%s: account=%d model=%s error=%v", message, account.ID, originalModel, err)
 			failoverErr := s.newOpenAIStreamFailoverError(c, account, false, upstreamRequestID, nil, message)
-			failoverErr.SafeToFailoverAfterWrite = true
+			failoverErr.SafeToFailoverAfterWrite = !IsPrismStreamCommitted(c)
 			streamEarlyErr = failoverErr
 			_ = resp.Body.Close()
 			return
@@ -289,20 +292,31 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	}
 	completeGuardedEvent := func(queueDrained bool) {
 		completedProgressEvent := eventStartsClientOutput
+		completedLifecycleEvent := eventStartsPrismLifecycle
 		completedTTFTEvent := eventStartsTTFTOutput
 		shouldFlush := eventShouldFlush || (queueDrained && clientOutputStarted)
 		eventInProgress = false
 		if !clientDisconnected {
-			if completedProgressEvent {
+			if completedProgressEvent || completedLifecycleEvent {
 				applyAttemptResponseHeaders()
 			}
 			if shouldFlush {
+				if completedLifecycleEvent {
+					MarkPrismStreamCommitted(c)
+				}
 				if err := flushBuffered(); err != nil {
 					clientDisconnected = true
 					logger.LegacyPrintf("service.openai_gateway", "Client disconnected during streaming flush, continuing to drain upstream for billing")
 				} else {
 					clientOutputStarted = true
+					lastCommittedSequenceNumber = lastSequenceNumber
 					lastDownstreamWriteAt = time.Now()
+					if account.IsManagedPrismAccount() && !completedProgressEvent && !firstOutputProgressObserved {
+						if err := firstOutputStage.Close(); err != nil {
+							logger.LegacyPrintf("service.openai_gateway", "Prism lifecycle staging cleanup failed: account=%d error=%v", account.ID, err)
+						}
+						firstOutputStage = newDefaultOpenAIFirstOutputStage()
+					}
 				}
 			}
 		}
@@ -316,6 +330,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			firstTokenMs = &ms
 		}
 		eventStartsClientOutput = false
+		eventStartsPrismLifecycle = false
 		eventStartsTTFTOutput = false
 		eventShouldFlush = false
 	}
@@ -324,9 +339,19 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			return
 		}
 		errorEventSent = true
+		if IsPrismStreamCommitted(c) && eventInProgress {
+			// An incomplete next event must not precede the terminal error frame.
+			_ = firstOutputStage.Close()
+			bufferedWriter.Reset(w)
+			eventInProgress = false
+		}
 		// Responses error events use top-level code/message/param fields. A nested
 		// Chat Completions error envelope loses the classification in strict clients.
-		payload := `{"type":"error","sequence_number":0,"code":` + strconv.Quote(code) + `,"message":` + strconv.Quote(message) + `,"param":null}`
+		sequenceNumber := int64(0)
+		if account.IsManagedPrismAccount() {
+			sequenceNumber = lastCommittedSequenceNumber + 1
+		}
+		payload := `{"type":"error","sequence_number":` + strconv.FormatInt(sequenceNumber, 10) + `,"code":` + strconv.Quote(code) + `,"message":` + strconv.Quote(message) + `,"param":null}`
 		if err := flushBuffered(); err != nil {
 			clientDisconnected = true
 			return
@@ -379,6 +404,11 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 	finalizeStream := func() (*openaiStreamingResult, error) {
 		if stageFirstOutput && eventInProgress {
 			// EOF dispatches the final SSE event even without a trailing blank line.
+			if account.IsManagedPrismAccount() && !sawTerminalEvent && !clientDisconnected {
+				if _, err := writePendingString("\n"); err != nil {
+					handlePendingWriteError(err)
+				}
+			}
 			completeGuardedEvent(true)
 		}
 		if codexFailureTerminal && sawBareError && !sawResponseFailed && bareErrorAccountSideEffectsPending {
@@ -411,6 +441,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			if openAIStreamClientOutputStarted(c, clientOutputStarted) && !clientDisconnected {
 				s.recordOpenAIProxyStreamDisconnect(account, errors.New("stream ended before terminal event"), upstreamRequestID, resp)
 			}
+			if IsPrismStreamCommitted(c) {
+				sendErrorEvent("upstream_error", "Upstream stream ended before completion")
+			}
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete: missing terminal event")
 		}
 		if sawFailedEvent {
@@ -426,7 +459,13 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if scanErr == nil {
 			return nil, nil, false
 		}
-		if errors.Is(scanErr, errOpenAIFirstOutputScannerLimit) && !firstOutputProgressObserved {
+		if account.IsManagedPrismAccount() && eventInProgress && sawTerminalEvent {
+			sawTerminalEvent = false
+			terminalSuccessful = false
+			sendErrorEvent("upstream_error", "Upstream stream ended before completion")
+			return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", scanErr), true
+		}
+		if errors.Is(scanErr, errOpenAIFirstOutputScannerLimit) && !firstOutputProgressObserved && !IsPrismStreamCommitted(c) {
 			logger.LegacyPrintf("service.openai_gateway", "SSE token exceeded guarded first-output limit: account=%d limit=%d error=%v", account.ID, openAIFirstOutputStageMaxBytes+openAIFirstOutputScannerFramingAllowance, scanErr)
 			failoverErr := s.newOpenAIStreamFailoverError(
 				c, account, false, upstreamRequestID, nil,
@@ -435,7 +474,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			failoverErr.SafeToFailoverAfterWrite = true
 			return resultWithUsage(), failoverErr, true
 		}
-		if errors.Is(scanErr, bufio.ErrTooLong) && stageFirstOutput && !firstOutputProgressObserved {
+		if errors.Is(scanErr, bufio.ErrTooLong) && stageFirstOutput && !firstOutputProgressObserved && !IsPrismStreamCommitted(c) {
 			logger.LegacyPrintf("service.openai_gateway", "SSE line too long before first output: account=%d max_size=%d error=%v", account.ID, maxLineSize, scanErr)
 			failoverErr := s.newOpenAIStreamFailoverError(
 				c, account, false, upstreamRequestID, nil,
@@ -493,6 +532,9 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		// Extract data from SSE line (supports both "data: " and "data:" formats)
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
+			if sequence := gjson.GetBytes(dataBytes, "sequence_number"); sequence.Type == gjson.Number && sequence.Int() > lastSequenceNumber {
+				lastSequenceNumber = sequence.Int()
+			}
 			eventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
 			if codexFailureTerminal && sawBareError && !sawResponseFailed &&
 				(eventType == "response.completed" || eventType == "response.done") {
@@ -681,10 +723,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
 			}
 			startsClientOutput := forceFlushFailedEvent || openAIStreamDataStartsClientOutput(data, eventType)
+			startsPrismLifecycle := prismStreamLifecycleStartsOutput(account, eventType)
 			startsVisibleOutput := openAIStreamDataStartsVisibleOutput(data, eventType)
 			startsTTFTOutput := openAIStreamDataStartsTTFT(data, eventType, forceFlushFailedEvent, ttftMode)
 			if stageFirstOutput {
 				eventStartsClientOutput = eventStartsClientOutput || startsClientOutput
+				eventStartsPrismLifecycle = eventStartsPrismLifecycle || startsPrismLifecycle
 				eventStartsTTFTOutput = eventStartsTTFTOutput || startsTTFTOutput
 				if startsClientOutput {
 					firstOutputScanGuard.Store(false)
@@ -709,7 +753,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			requesttiming.Output(ctx, openAIStreamDataStartsSemanticTTFT(data, eventType), startsVisibleOutput, timingTerminal(eventType))
 			// 写入客户端（客户端断开后继续 drain 上游）
 			if !clientDisconnected && !failureDelivered && !suppressCurrentEvent {
-				shouldFlush := queueDrained && (clientOutputStarted || startsClientOutput)
+				shouldFlush := startsPrismLifecycle || (queueDrained && (clientOutputStarted || startsClientOutput))
 				if firstTokenMs == nil && startsVisibleOutput {
 					// 保证首个 token 事件尽快出站，避免影响 TTFT。
 					shouldFlush = true
@@ -742,6 +786,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				terminalFailurePending = false
 				eventInProgress = false
 				eventStartsClientOutput = false
+				eventStartsPrismLifecycle = false
 				eventStartsTTFTOutput = false
 				eventShouldFlush = false
 				return
@@ -750,6 +795,7 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				terminalFailurePending = false
 				eventInProgress = false
 				eventStartsClientOutput = false
+				eventStartsPrismLifecycle = false
 				eventStartsTTFTOutput = false
 				eventShouldFlush = false
 				return
@@ -887,11 +933,6 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				if stageFirstOutput && eventInProgress {
-					// EOF dispatches the final SSE event even without a trailing blank
-					// line. Do not synthesize extra bytes on the downstream wire.
-					completeGuardedEvent(true)
-				}
 				return finalizeStream()
 			}
 			if result, err, done := handleScanErr(ev.err); done {
@@ -959,11 +1000,15 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			for ev := range events {
 				markEventProcessed(ev)
 			}
-			return resultWithUsage(), s.newOpenAIFirstOutputTimeoutError(
+			timeoutErr := s.newOpenAIFirstOutputTimeoutError(
 				ctx, c, account, opsUpstreamProxyID(account), opsUpstreamProxyName(account),
 				startTime, originalModel, reasoningEffort,
 				firstOutputTimeout, "semantic_output", resp.Header,
 			)
+			if IsPrismStreamCommitted(c) {
+				sendErrorEvent("first_output_timeout", "Upstream produced no output before the deadline")
+			}
+			return resultWithUsage(), timeoutErr
 
 		case <-keepaliveCh:
 			if clientDisconnected || failureDelivered {
@@ -1834,7 +1879,7 @@ func extractOpenAISSEErrorMessage(payload []byte) string {
 	return sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(payload)))
 }
 
-func buildOpenAIResponseFailedSSE(responseID, model string, source []byte, fallbackMessage string) string {
+func buildOpenAIResponseFailedSSE(responseID, model string, source []byte, fallbackMessage string, sequenceNumbers ...int64) string {
 	responseID = strings.TrimSpace(responseID)
 	if responseID == "" {
 		responseID = "resp_" + strings.ReplaceAll(uuid.NewString(), "-", "")
@@ -1871,10 +1916,14 @@ func buildOpenAIResponseFailedSSE(responseID, model string, source []byte, fallb
 	if model = strings.TrimSpace(model); model != "" {
 		response["model"] = model
 	}
-	payload, err := marshalOpenAIUpstreamJSON(gin.H{
+	event := gin.H{
 		"type":     "response.failed",
 		"response": response,
-	})
+	}
+	if len(sequenceNumbers) > 0 {
+		event["sequence_number"] = sequenceNumbers[0]
+	}
+	payload, err := marshalOpenAIUpstreamJSON(event)
 	if err != nil {
 		// All values above are JSON primitives, so this is only a defensive fallback.
 		payload = []byte(`{"type":"response.failed","response":{"status":"failed","output":[],"error":{"code":"upstream_error","message":"Upstream response failed"}}}`)

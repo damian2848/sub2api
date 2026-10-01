@@ -130,7 +130,22 @@
           :hint="t('admin.accounts.pelicanTest.promptHint')"
         />
         <div class="space-y-3">
-          <Input
+          <div v-if="isPrism" data-testid="prism-model-control">
+            <div class="mb-1.5 flex items-center justify-between gap-2">
+              <label for="iq-prism-model" class="input-label">{{ t('admin.accounts.pelicanTest.model') }}</label>
+              <button type="button" class="rounded-md p-1 text-gray-500 hover:text-primary-600 disabled:opacity-50"
+                :disabled="running || prismModelsLoading" :title="t('common.refresh')" :aria-label="t('common.refresh')"
+                data-testid="prism-model-refresh" @click="refreshPrismModels">
+                <Icon name="refresh" size="sm" :class="{ 'animate-spin': prismModelsLoading }" />
+              </button>
+            </div>
+            <Select id="iq-prism-model" v-model="modelId" :options="prismModelOptions"
+              :disabled="running || prismModelsLoading || !prismModels.length" :loading="prismModelsLoading"
+              :aria-label="t('admin.accounts.pelicanTest.model')" data-testid="prism-model-select" />
+            <p v-if="prismModelsLoading" class="mt-1.5 text-xs text-gray-500" role="status">{{ t('common.loading') }}</p>
+            <p v-else-if="prismModelMessage" class="mt-1.5 text-xs text-red-600 dark:text-red-400" role="alert" data-testid="prism-model-error">{{ prismModelMessage }}</p>
+          </div>
+          <Input v-else
             v-model="modelId"
             :label="t('admin.accounts.pelicanTest.model')"
             :disabled="running"
@@ -186,9 +201,9 @@
       </div>
 
       <ScheduledTestsPanel v-if="show && account && activeTab === 'schedule'" :key="account.id" :show="true" embedded
-        :account-id="account.id" :default-model="modelId" :model-options="[{ value: modelId, label: modelId }]"
+        :account-id="account.id" :default-model="modelId" :model-options="scheduleModelOptions" :restrict-models="isPrism"
         :pelican-config="{ question_kind: questionKind, prompt, reasoning_effort: reasoningEffort, parallel_count: Number(parallelCount) }"
-        :disabled="running" @preview="previewScheduled" @history="scheduledRecords = $event" />
+        :disabled="running || (isPrism && (prismModelsLoading || !prismModels.length))" @preview="previewScheduled" @history="scheduledRecords = $event" />
       <div v-else-if="activeTab === 'history'" class="space-y-2">
         <button v-for="result in scheduledRecords" :key="`scheduled-${result.id}`" type="button"
           class="flex w-full items-center justify-between rounded-lg border border-gray-200 px-3 py-2 text-left transition-colors hover:border-primary-300 hover:bg-primary-50/50 dark:border-dark-600 dark:hover:border-primary-700 dark:hover:bg-primary-900/10"
@@ -287,7 +302,9 @@ import Select from '@/components/common/Select.vue'
 import { Icon } from '@/components/icons'
 import { buildApiUrl } from '@/api/client'
 import { ADMIN_UI_REQUEST_HEADER } from '@/api/adminUIRequest'
+import { adminAPI } from '@/api/admin'
 import { probeOpenAICodexState, type OpenAICodexStateProbeResult, type OpenAICodexStateVerdict } from '@/api/admin/accounts'
+import { isManagedPrismAccount } from '@/utils/prism'
 import type { Account, AccountListItem, PelicanTestConfig, ScheduledTestResult } from '@/types'
 import ScheduledTestsPanel from './ScheduledTestsPanel.vue'
 import PelicanRecordsDashboard from './PelicanRecordsDashboard.vue'
@@ -296,6 +313,7 @@ const { t } = useI18n()
 
 const STORAGE_PREFIX = 'sub2api-pelican-test:'
 const PROBE_CONTROLLER_KEY = 'state-probe'
+const MODEL_CONTROLLER_KEY = 'prism-models'
 const PROBE_RESULT_LIMIT = 5
 const PROBE_FAILURE_KINDS = new Set(['unsupported', 'account_error', 'rate_limited', 'model_unsupported', 'upstream_error', 'network_error', 'stream_error', 'no_ticket', 'cancelled'])
 
@@ -348,6 +366,70 @@ const controllers = new Map<string, AbortController>()
 const testMode = ref<TestMode>('question')
 const probeResults = ref<OpenAICodexStateProbeResult[]>([])
 const probeError = ref('')
+const prismModels = ref<string[]>([])
+const prismModelsLoading = ref(false)
+const prismModelsError = ref('')
+let modelGeneration = 0
+let modelPollTimer: ReturnType<typeof setTimeout> | undefined
+let modelUnavailable = false
+
+const isPrism = computed(() => isManagedPrismAccount(props.account))
+const prismModelOptions = computed(() => prismModels.value.map(value => ({ value, label: value })))
+const scheduleModelOptions = computed(() => isPrism.value ? prismModelOptions.value : [{ value: modelId.value, label: modelId.value }])
+const validModel = computed(() => !isPrism.value || (!prismModelsLoading.value && prismModels.value.includes(modelId.value.trim())))
+const prismModelMessage = computed(() => prismModelsError.value || (!prismModels.value.length
+  ? t('admin.accounts.prism.modelsUnavailable')
+  : !validModel.value ? t('admin.accounts.prism.modelUnavailable') : ''))
+
+function stopModelRequests() {
+  modelGeneration++
+  if (modelPollTimer) clearTimeout(modelPollTimer)
+  modelPollTimer = undefined
+  controllers.get(MODEL_CONTROLLER_KEY)?.abort()
+  controllers.delete(MODEL_CONTROLLER_KEY)
+  prismModelsLoading.value = false
+}
+
+function scheduleModelRefresh() {
+  if (!props.show || !isPrism.value) return
+  modelPollTimer = setTimeout(() => {
+    modelPollTimer = undefined
+    if (running.value) scheduleModelRefresh()
+    else void refreshPrismModels()
+  }, 15000)
+}
+
+async function refreshPrismModels() {
+  if (!props.show || !props.account || !isPrism.value || running.value) return
+  stopModelRequests()
+  const current = modelGeneration
+  const accountId = props.account.id
+  const controller = new AbortController()
+  controllers.set(MODEL_CONTROLLER_KEY, controller)
+  prismModelsLoading.value = true
+  prismModelsError.value = ''
+  try {
+    const status = await adminAPI.accounts.getPrismStatus(accountId, controller.signal)
+    if (current !== modelGeneration || controller.signal.aborted || !props.show || props.account?.id !== accountId) return
+    prismModels.value = status.ready ? [...new Set(status.models.filter(value => typeof value === 'string' && value.trim()))] : []
+    if (!prismModels.value.includes(modelId.value)) modelId.value = prismModels.value[0] || ''
+  } catch {
+    if (current !== modelGeneration || controller.signal.aborted) return
+    prismModels.value = []
+    modelId.value = ''
+    prismModelsError.value = t('admin.accounts.prism.modelsLoadFailed')
+  } finally {
+    if (current === modelGeneration) {
+      controllers.delete(MODEL_CONTROLLER_KEY)
+      prismModelsLoading.value = false
+      scheduleModelRefresh()
+    }
+  }
+}
+
+function restoreModel(value: string) {
+  modelId.value = isPrism.value && !prismModels.value.includes(value) ? prismModels.value[0] || '' : value
+}
 
 const deliveryContract = computed(() => questionContract(questionKind.value))
 const questionOptions = computed(() => ['candy', 'pelican'].map(value => ({ value, label: t(`admin.accounts.pelicanTest.${value}Question`) })))
@@ -361,7 +443,7 @@ const reasoningOptions = computed(() => [
   { value: 'medium', label: t('admin.accounts.pelicanTest.reasoningMedium') },
   { value: 'high', label: t('admin.accounts.pelicanTest.reasoningHigh') }
 ])
-const canStart = computed(() => Boolean(props.account && prompt.value.trim() && modelId.value.trim() && normalizeCount() > 0))
+const canStart = computed(() => Boolean(props.account && prompt.value.trim() && modelId.value.trim() && validModel.value && normalizeCount() > 0))
 const hasDownloadable = computed(() => runs.value.some((run) => Boolean(run.output)))
 const probeSupported = computed(() => props.account?.platform === 'openai' && (props.account.type === 'oauth' || props.account.type === 'setup-token'))
 const canStartProbe = computed(() => Boolean(props.account && probeSupported.value))
@@ -443,12 +525,12 @@ function formatDate(value: string) {
 
 function editSchedule(config: PelicanTestConfig, model: string) {
   if (running.value) return
-  modelId.value = model
+  restoreModel(model)
   // 探针计划没有题目，手动测试的题目保持不变。
   if (config.question_kind === STATE_PROBE_QUESTION) return
   questionKind.value = config.question_kind || 'pelican'
   prompt.value = config.prompt
-  modelId.value = model
+  restoreModel(model)
   reasoningEffort.value = config.reasoning_effort
   parallelCount.value = config.parallel_count
 }
@@ -477,7 +559,7 @@ function loadRecord(record: TestRecord) {
   if (running.value) return
   questionKind.value = record.questionKind || 'pelican'
   prompt.value = record.prompt
-  modelId.value = record.modelId
+  restoreModel(record.modelId)
   reasoningEffort.value = record.reasoningEffort || 'medium'
   runs.value = record.runs.map((run) => ({ ...run, questionKind: run.questionKind || record.questionKind || 'pelican', modelId: run.modelId || record.modelId, reasoningEffort: run.reasoningEffort || record.reasoningEffort }))
   viewingScheduled.value = false
@@ -485,6 +567,7 @@ function loadRecord(record: TestRecord) {
 }
 
 function handleClose() {
+  stopModelRequests()
   for (const controller of controllers.values()) controller.abort()
   controllers.clear()
   running.value = false
@@ -555,7 +638,11 @@ async function startOne(run: TestRun) {
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') return
     run.status = 'error'
-    run.error = error instanceof Error ? error.message : t('admin.accounts.pelicanTest.failed')
+    const message = error instanceof Error ? error.message : t('admin.accounts.pelicanTest.failed')
+    if (isPrism.value && message.includes('model_not_available')) {
+      modelUnavailable = true
+      run.error = t('admin.accounts.prism.modelUnavailable')
+    } else run.error = message
   } finally {
     run.durationMs = Math.max(0, Math.round(performance.now() - started))
     run.finishedAt = new Date().toISOString()
@@ -581,6 +668,7 @@ async function startTest() {
   }))
   activeTab.value = 'results'
   running.value = true
+  modelUnavailable = false
   await Promise.all(runs.value.map((run) => startOne(run)))
   running.value = false
   const record: TestRecord = {
@@ -594,6 +682,7 @@ async function startTest() {
   }
   records.value = [record, ...records.value.filter((item) => item.id !== record.id)]
   saveRecords()
+  if (modelUnavailable) void refreshPrismModels()
 }
 
 async function startProbe() {
@@ -633,9 +722,15 @@ function downloadAll() {
   runs.value.filter((run) => run.output).forEach((run) => downloadHtml(run))
 }
 
-onBeforeUnmount(() => { for (const controller of controllers.values()) controller.abort() })
+onBeforeUnmount(() => {
+  stopModelRequests()
+  for (const controller of controllers.values()) controller.abort()
+})
 
-watch(() => [props.show, props.account?.id] as const, ([show]) => {
+watch([() => props.show, () => props.account?.id, () => isPrism.value], ([show]) => {
+  stopModelRequests()
+  prismModels.value = []
+  prismModelsError.value = ''
   if (show) {
     readRecords()
     activeTab.value = 'results'
@@ -643,7 +738,7 @@ watch(() => [props.show, props.account?.id] as const, ([show]) => {
     scheduledRecords.value = []
     questionKind.value = 'candy'
     prompt.value = questionPrompt('candy')
-    modelId.value = 'gpt-6-astra'
+    modelId.value = isPrism.value ? '' : 'gpt-6-astra'
     reasoningEffort.value = 'medium'
     parallelCount.value = 1
     runs.value = []
@@ -651,9 +746,16 @@ watch(() => [props.show, props.account?.id] as const, ([show]) => {
     testMode.value = 'question'
     probeResults.value = []
     probeError.value = ''
+    if (isPrism.value) void refreshPrismModels()
   } else {
     for (const controller of controllers.values()) controller.abort()
     controllers.clear()
   }
 }, { immediate: true })
+
+watch([() => props.account?.id, () => isPrism.value,
+  () => JSON.stringify([props.account?.extra?.prism_models, props.account?.credentials?.model_mapping])],
+([id, prism], [previousId, previousPrism]) => {
+  if (id === previousId && prism === previousPrism && props.show && isPrism.value && !running.value) void refreshPrismModels()
+})
 </script>

@@ -37,6 +37,17 @@ func TestOpenAIFirstOutputFailoverStopsAfterOneAccountSwitch(t *testing.T) {
 	require.Equal(t, 1, count)
 }
 
+func TestOpenAIForwardMayFailoverRejectsPublicPrismLifecycle(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	before := service.OpenAICompactKeepaliveAdjustedWrittenSize(c)
+	service.MarkPrismStreamCommitted(c)
+	require.False(t, openAIForwardMayFailover(c, before, &service.UpstreamFailoverError{SafeToFailoverAfterWrite: true}))
+	_, err := fmt.Fprint(c.Writer, "data: {\"type\":\"response.created\"}\n\n")
+	require.NoError(t, err)
+	require.False(t, openAIForwardMayFailover(c, before, &service.UpstreamFailoverError{SafeToFailoverAfterWrite: true}))
+	require.False(t, service.IsResponseCommitted(c), "blocking replay must still allow a terminal error")
+}
+
 func TestOpenAIRequestAllowsFailoverReplayStopsCanceledClient(t *testing.T) {
 	require.False(t, openAIRequestAllowsFailoverReplay(nil))
 

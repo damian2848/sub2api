@@ -31,6 +31,24 @@ var prismNonTextPartTypes = map[string]struct{}{
 // input/messages, so anything deeper is not worth following.
 const prismMaxPartDepth = 16
 
+const prismStreamCommittedKey = "prism_stream_committed"
+
+// MarkPrismStreamCommitted prevents replay once a Prism response ID is public.
+// It is separate from the terminal-response marker so failures can still be sent.
+func MarkPrismStreamCommitted(c *gin.Context) {
+	if c != nil {
+		c.Set(prismStreamCommittedKey, true)
+	}
+}
+
+func IsPrismStreamCommitted(c *gin.Context) bool {
+	return c != nil && c.GetBool(prismStreamCommittedKey)
+}
+
+func prismStreamLifecycleStartsOutput(account *Account, eventType string) bool {
+	return account.IsManagedPrismAccount() && (eventType == "response.created" || eventType == "response.in_progress")
+}
+
 func openaiAccountUpstreamContext(ctx context.Context, account *Account) (context.Context, context.CancelFunc) {
 	if account.IsManagedPrismAccount() {
 		if ctx == nil {

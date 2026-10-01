@@ -1,9 +1,10 @@
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
-import { AccountManager, keyMatches } from './accounts.mjs';
+import { keyMatches } from './accounts.mjs';
+import { AccountPoolManager } from './pool.mjs';
 import { createHash } from 'node:crypto';
-import { PrismError, publicError } from './errors.mjs';
-import { parseRequest, resultBody, writeCompletedStream } from './protocol.mjs';
+import { PrismError, aborted, publicError } from './errors.mjs';
+import { createStreamWriter, parseRequest, resultBody } from './protocol.mjs';
 
 function bearer(req) {
   const value = req.headers.authorization;
@@ -57,9 +58,11 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
     const controller = new AbortController();
     let timer;
     let keepalive;
+    let streamWriter;
     const disconnect = () => { if (!res.writableEnded) controller.abort(new PrismError('request_cancelled', 499)); };
     req.on('aborted', disconnect);
     res.on('close', disconnect);
+    res.on('error', disconnect);
     try {
       const url = new URL(req.url, 'http://localhost');
       if (url.search || url.hash) throw new PrismError('query_parameters_not_supported', 400);
@@ -107,26 +110,30 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-store',
           Connection: 'keep-alive', 'X-Accel-Buffering': 'no', 'X-Prism-Usage': 'estimated' });
         res.flushHeaders();
-        res.write(': waiting for Prism\n\n');
-        keepalive = setInterval(() => { if (!res.destroyed) res.write(': waiting for Prism\n\n'); }, keepaliveMs);
+        streamWriter = createStreamWriter(res, request, { signal: controller.signal, onDisconnect: disconnect });
+        await streamWriter.begin();
+        keepalive = setInterval(() => {
+          streamWriter.heartbeat().catch(disconnect);
+        }, keepaliveMs);
       }
+      aborted(controller.signal);
       const text = await manager.generate(source, request, controller.signal);
-      const result = resultBody(request, text);
+      aborted(controller.signal);
+      const result = resultBody(request, text, streamWriter?.identity);
       if (res.destroyed) return;
-      if (request.stream) writeCompletedStream(res, request, result);
+      if (request.stream) await streamWriter.finish(result);
       else { res.setHeader('X-Prism-Usage', 'estimated'); send(res, 200, result); }
     } catch (error) {
       if (res.destroyed || res.writableEnded) return;
       const output = publicError(error);
-      if (res.headersSent) {
-        res.write(`event: error\ndata: ${JSON.stringify({ type: 'error', ...output })}\n\n`);
-        res.end();
-      } else send(res, error instanceof PrismError ? error.status : 502, output);
+      if (streamWriter) await streamWriter.error(error).catch(disconnect);
+      else send(res, error instanceof PrismError ? error.status : 502, output);
     } finally {
       clearTimeout(timer);
       clearInterval(keepalive);
       req.off('aborted', disconnect);
       res.off('close', disconnect);
+      res.off('error', disconnect);
     }
   });
   server.requestTimeout = requestTimeout + 10000;
@@ -140,8 +147,11 @@ export async function main() {
     if (!Number.isInteger(value) || value < min || value > max) throw new Error(`invalid ${name}`);
     return value;
   };
-  const manager = new AccountManager({ dataDir: process.env.PRISM_DATA_DIR || '/data',
-    queueLimit: integer('PRISM_QUEUE_LIMIT', 8, 1, 64), maxAccounts: integer('PRISM_MAX_ACCOUNTS', 16, 1, 256) });
+  const manager = new AccountPoolManager({ dataDir: process.env.PRISM_DATA_DIR || '/data',
+    queueLimit: integer('PRISM_QUEUE_LIMIT', 8, 1, 64), maxAccounts: integer('PRISM_MAX_ACCOUNTS', 16, 1, 256),
+    concurrency: integer('PRISM_ACCOUNT_CONCURRENCY', 2, 1, 4), maxWorkers: integer('PRISM_MAX_WORKERS', 32, 1, 1024),
+    startLimit: integer('PRISM_ACCOUNT_START_LIMIT', 0, 0, 120),
+    startWindowMs: integer('PRISM_START_WINDOW_SECONDS', 65, 1, 3600) * 1000 });
   await manager.init();
   const server = createPrismServer({ manager, managementKey: process.env.PRISM_MANAGEMENT_KEY,
     bodyLimit: integer('PRISM_BODY_LIMIT', 8 * 1024 * 1024, 4096, 32 * 1024 * 1024),

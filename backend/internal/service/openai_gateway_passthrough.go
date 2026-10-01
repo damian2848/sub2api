@@ -1978,6 +1978,8 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	imageCounter := newOpenAIImageOutputCounter()
 	var firstTokenMs *int
 	responseID := ""
+	lastSequenceNumber := int64(-1)
+	lastCommittedSequenceNumber := int64(-1)
 	ctx = requesttiming.ResponseContext(ctx, resp)
 	ttftMode := s.openAITTFTMode(ctx)
 	requesttiming.Mode(ctx, ttftMode)
@@ -2002,6 +2004,10 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	upstreamRequestID := strings.TrimSpace(resp.Header.Get("x-request-id"))
 	// pendingLines 在首个可见输出前保留前导事件，确保无输出失败仍可安全 failover。
 	pendingLines := make([]string, 0, 8)
+	prismLifecyclePending := false
+	prismSemanticPending := false
+	prismTTFTPending := false
+	prismTerminalDelivered := false
 
 	// ── 首个可见输出之前的下游 keepalive ──────────────────────────────────
 	//
@@ -2056,6 +2062,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 		}
 		flusher.Flush()
 		requesttiming.OutputFlushed(ctx)
+		lastCommittedSequenceNumber = lastSequenceNumber
 		flushPending = false
 	}
 	defer flushPendingOutput()
@@ -2070,6 +2077,32 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 		pendingLines = pendingLines[:0]
 		return true
 	}
+	buildFailedSSE := func(source []byte, message string) string {
+		if account.IsManagedPrismAccount() {
+			return buildOpenAIResponseFailedSSE(responseID, originalModel, source, message, lastCommittedSequenceNumber+1)
+		}
+		return buildOpenAIResponseFailedSSE(responseID, originalModel, source, message)
+	}
+	sendPrismFailedTerminal := func(message string) {
+		if !IsPrismStreamCommitted(c) || clientDisconnected || failureDelivered {
+			return
+		}
+		pendingLines = pendingLines[:0]
+		if flushPending {
+			if _, err := fmt.Fprintln(w); err != nil {
+				clientDisconnected = true
+				return
+			}
+		}
+		if _, err := fmt.Fprint(w, buildFailedSSE(nil, message)); err != nil {
+			clientDisconnected = true
+			return
+		}
+		failureDelivered = true
+		flushPending = true
+		flushPendingOutput()
+		MarkResponseCommitted(c)
+	}
 	ensureResponseFailedTerminal := func() {
 		if !sawBareError || sawResponseFailed || failureDelivered {
 			return
@@ -2081,7 +2114,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 		if clientDisconnected || !writePendingLines() {
 			return
 		}
-		if _, err := fmt.Fprint(w, buildOpenAIResponseFailedSSE(responseID, originalModel, bareErrorPayload, failedMessage)); err != nil {
+		if _, err := fmt.Fprint(w, buildFailedSSE(bareErrorPayload, failedMessage)); err != nil {
 			clientDisconnected = true
 			return
 		}
@@ -2108,7 +2141,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	}
 	streamInterval := s.openAIPassthroughStreamDataInterval(imageBillingModel)
 	heartbeat := func() {
-		if clientDisconnected || clientOutputStarted || failureDelivered {
+		if clientDisconnected || semanticOutputSeen || failureDelivered || flushPending {
 			return
 		}
 		n, err := w.Write([]byte(": keepalive\n\n"))
@@ -2138,6 +2171,29 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	// read before usage/terminal events can be collected and settled.
 	upstreamReadCtx, releaseUpstreamReadCtx := openAIPassthroughContext(ctx, account)
 	defer releaseUpstreamReadCtx()
+	commitPrismPending := func() {
+		MarkPrismStreamCommitted(c)
+		if writePendingLines() {
+			clientOutputStarted = true
+			flushPending = true
+			flushPendingOutput()
+			if sawDone || sawTerminalEvent {
+				prismTerminalDelivered = true
+			}
+		}
+		if prismSemanticPending {
+			semanticOutputSeen = true
+			documentScanner.firstOutputDeadline = time.Time{}
+			stopKeepalive()
+			if prismTTFTPending && firstTokenMs == nil {
+				ms := int(time.Since(startTime).Milliseconds())
+				firstTokenMs = &ms
+			}
+		}
+		prismLifecyclePending = false
+		prismSemanticPending = false
+		prismTTFTPending = false
+	}
 	for documentScanner.Next(upstreamReadCtx, streamInterval, keepaliveCh, heartbeat) {
 		line := documentScanner.Text()
 		if eventType, ok := extractOpenAISSEEventLine(line); ok {
@@ -2149,6 +2205,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 		forceFlushFailedEvent := false
 		if data, ok := extractOpenAISSEDataLine(line); ok {
 			dataBytes := []byte(data)
+			if sequence := gjson.GetBytes(dataBytes, "sequence_number"); sequence.Type == gjson.Number && sequence.Int() > lastSequenceNumber {
+				lastSequenceNumber = sequence.Int()
+			}
 			trimmedData := strings.TrimSpace(data)
 			rawEventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
 			observer.ObserveOpenAI(dataBytes, rawEventType)
@@ -2300,10 +2359,18 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 				line = "data: " + string(sanitizedData)
 			}
 			lineStartsClientOutput = forceFlushFailedEvent || openAIStreamDataStartsClientOutput(trimmedData, eventType)
-			if lineStartsClientOutput {
-				documentScanner.firstOutputDeadline = time.Time{}
+			if !clientOutputStarted && prismStreamLifecycleStartsOutput(account, eventType) {
+				prismLifecyclePending = true
 			}
-			if lineStartsClientOutput && trimmedData != "[DONE]" && !openAIStreamEventTypeIsTerminal(eventType) {
+			if lineStartsClientOutput {
+				if account.IsManagedPrismAccount() && !semanticOutputSeen {
+					prismSemanticPending = true
+				} else {
+					documentScanner.firstOutputDeadline = time.Time{}
+					stopKeepalive()
+				}
+			}
+			if lineStartsClientOutput && trimmedData != "[DONE]" && !openAIStreamEventTypeIsTerminal(eventType) && !account.IsManagedPrismAccount() {
 				semanticOutputSeen = true
 			}
 			// OpenAI Responses streams that terminate with an empty
@@ -2317,8 +2384,12 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			}
 			requesttiming.Output(ctx, openAIStreamDataStartsSemanticTTFT(trimmedData, eventType), openAIStreamDataStartsVisibleOutput(trimmedData, eventType), timingTerminal(eventType))
 			if firstTokenMs == nil && openAIStreamDataStartsTTFT(trimmedData, eventType, forceFlushFailedEvent, ttftMode) {
-				ms := int(time.Since(startTime).Milliseconds())
-				firstTokenMs = &ms
+				if account.IsManagedPrismAccount() && !semanticOutputSeen {
+					prismTTFTPending = true
+				} else {
+					ms := int(time.Since(startTime).Milliseconds())
+					firstTokenMs = &ms
+				}
 			}
 			s.parseSSEUsageBytesWithType(dataBytes, eventType, usage)
 		}
@@ -2332,8 +2403,18 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 		}
 
 		if !clientDisconnected && !failureDelivered && !suppressCurrentEvent {
-			if !clientOutputStarted && !lineStartsClientOutput {
+			if (account.IsManagedPrismAccount() && !semanticOutputSeen) || (!clientOutputStarted && !lineStartsClientOutput) {
 				pendingLines = append(pendingLines, line)
+				if (prismLifecyclePending || prismSemanticPending || clientOutputStarted) && line == "" {
+					commitPrismPending()
+				}
+				if line == "" && responseFailedPending {
+					responseFailedPending = false
+					failureDelivered = true
+				}
+				if (sawDone || sawTerminalEvent) && line == "" && (!codexFailureTerminal || !sawBareError) {
+					break
+				}
 				continue
 			}
 			// 真实输出开始，心跳的使命结束。停拍是幂等的，且会与心跳 goroutine
@@ -2354,6 +2435,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 				flushPending = true
 				if line == "" {
 					flushPendingOutput()
+					if sawDone || sawTerminalEvent {
+						prismTerminalDelivered = true
+					}
 				}
 			}
 		}
@@ -2370,21 +2454,35 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			break
 		}
 	}
+	if documentScanner.Err() == nil && account.IsManagedPrismAccount() && !clientDisconnected && !suppressCurrentEvent &&
+		len(pendingLines) > 0 && (prismLifecyclePending || prismSemanticPending || clientOutputStarted) {
+		if !sawDone && !sawTerminalEvent {
+			pendingLines = append(pendingLines, "")
+		}
+		commitPrismPending()
+		if responseFailedPending {
+			failureDelivered = true
+		}
+	}
 	ensureResponseFailedTerminal()
 	if err := documentScanner.Err(); err != nil {
-		if (sawDone || sawTerminalEvent) && !sawFailedEvent {
+		if (sawDone || sawTerminalEvent) && !sawFailedEvent && (!account.IsManagedPrismAccount() || prismTerminalDelivered) {
 			s.clearOpenAIProxyStreamDisconnect(account, resp)
 			return resultWithUsage(), nil
 		}
-		if sawFailedEvent {
+		if sawFailedEvent && (!account.IsManagedPrismAccount() || failureDelivered) {
 			return resultWithUsage(), fmt.Errorf("upstream response failed: %s", failedMessage)
 		}
 		if errors.Is(err, errOpenAISSEIdle) || errors.Is(err, errOpenAISSEFirstOutput) {
 			// The request was already sent. Silence, even before visible output,
 			// does not authorize replay, account cooldown or a fabricated success.
 			stopKeepalive()
+			if IsPrismStreamCommitted(c) {
+				sendPrismFailedTerminal("Upstream stream timed out")
+				return resultWithUsage(), fmt.Errorf("stream usage incomplete: %w", err)
+			}
 			if !clientDisconnected {
-				_, writeErr := fmt.Fprint(w, buildOpenAIResponseFailedSSE(responseID, originalModel, nil, "Upstream stream timed out"))
+				_, writeErr := fmt.Fprint(w, buildFailedSSE(nil, "Upstream stream timed out"))
 				if writeErr == nil {
 					flusher.Flush()
 					// The timeout event is the terminal response. Tell the
@@ -2399,6 +2497,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 		}
 		if errors.Is(err, bufio.ErrTooLong) {
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI passthrough] SSE line too long: account=%d max_size=%d error=%v", account.ID, maxLineSize, err)
+			sendPrismFailedTerminal("Upstream response exceeded the size limit")
 			return resultWithUsage(), err
 		}
 		if !openAIStreamClientOutputStarted(c, clientOutputStarted) {
@@ -2413,6 +2512,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 			return resultWithUsage(), fmt.Errorf("stream usage incomplete after disconnect: %w", err)
 		}
 		s.recordOpenAIProxyStreamDisconnect(account, err, upstreamRequestID, resp)
+		sendPrismFailedTerminal("Upstream stream ended before completion")
 		logger.LegacyPrintf("service.openai_gateway",
 			"[OpenAI passthrough] 流读取异常中断: account=%d request_id=%s err=%v",
 			account.ID,
@@ -2435,6 +2535,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 				s.newOpenAIStreamFailoverError(c, account, true, upstreamRequestID, nil, "OpenAI stream ended before a terminal event")
 		}
 		s.recordOpenAIProxyStreamDisconnect(account, errors.New("stream ended before terminal event"), upstreamRequestID, resp)
+		sendPrismFailedTerminal("Upstream stream ended before completion")
 		return resultWithUsage(), errors.New("stream usage incomplete: missing terminal event")
 	}
 	if (sawDone || sawTerminalEvent) && !sawFailedEvent {

@@ -3,7 +3,7 @@ import { mkdir, readdir, readFile, rename, writeFile, chmod } from 'node:fs/prom
 import { join } from 'node:path';
 import { AccountQueue } from './queue.mjs';
 import { PrismError, aborted } from './errors.mjs';
-import { BrowserSession, launchBrowser } from './browser.mjs';
+import { BrowserSession, launchBrowser, probeModel } from './browser.mjs';
 
 const sourcePattern = /^[1-9][0-9]{0,18}$/;
 // Failures that mean the browser session itself is unusable, as opposed to one bad request.
@@ -19,12 +19,13 @@ export function keyMatches(value, expectedHash) {
 }
 
 export class AccountManager {
-  constructor({ dataDir, queueLimit = 8, maxAccounts = 16, browserFactory = launchBrowser,
+  constructor({ dataDir, queueLimit = 8, maxAccounts = 16, browserFactory = launchBrowser, ownsBrowser = true,
     sessionFactory = (browser, callback, source) => new BrowserSession(browser, callback, source) }) {
     this.dataDir = dataDir;
     this.queueLimit = queueLimit;
     this.maxAccounts = maxAccounts;
     this.browserFactory = browserFactory;
+    this.ownsBrowser = ownsBrowser;
     this.sessionFactory = sessionFactory;
     this.accounts = new Map();
     this.browser = null;
@@ -65,10 +66,15 @@ export class AccountManager {
   }
 
   async persist(account) {
-    const path = join(this.dataDir, `${account.metadata.source}.json`);
-    const temporary = `${path}.${randomUUID()}.tmp`;
-    await writeFile(temporary, JSON.stringify(account.metadata) + '\n', { mode: 0o600, flag: 'wx' });
-    await rename(temporary, path);
+    const previous = account.persistence || Promise.resolve();
+    const writing = previous.catch(() => {}).then(async () => {
+      const path = join(this.dataDir, `${account.metadata.source}.json`);
+      const temporary = `${path}.${randomUUID()}.tmp`;
+      await writeFile(temporary, JSON.stringify(account.metadata) + '\n', { mode: 0o600, flag: 'wx' });
+      await rename(temporary, path);
+    });
+    account.persistence = writing;
+    await writing;
   }
 
   async getBrowser() {
@@ -162,15 +168,21 @@ export class AccountManager {
       await account.driver?.close();
       account.driver = null;
       account.accessHash = null;
-      const driver = this.sessionFactory(await this.getBrowser(), (timestamp, error) => {
+      const browser = await this.getBrowser();
+      aborted(signal);
+      if (this.stopping || version !== account.version) throw new PrismError('session_revoked', 409);
+      const driver = this.sessionFactory(browser, (timestamp, error) => {
         if (account.driver !== driver) return;
         if (timestamp) account.lastHeartbeat = timestamp;
         if (error) { account.ready = false; account.phase = 'authentication_required'; account.errorCode = error; }
       }, source);
+      account.driver = driver;
       try {
         const actualUserId = await driver.authenticate(body, signal);
         aborted(signal);
-        if (version !== account.version) throw new PrismError('session_revoked', 409);
+        if (this.stopping || version !== account.version || account.driver !== driver) {
+          throw new PrismError('session_revoked', 409);
+        }
         if (typeof actualUserId !== 'string' || !actualUserId.length) throw new PrismError('oauth_identity_unavailable', 403);
         const identityHash = hash(actualUserId);
         if (account.metadata.identity_hash && account.metadata.identity_hash !== identityHash) {
@@ -186,9 +198,13 @@ export class AccountManager {
         account.phase = 'authenticated';
         return this.status(source);
       } catch (error) {
-        await driver.close();
-        account.phase = 'authentication_required';
-        account.errorCode = error instanceof PrismError ? error.code : 'browser_authentication_failed';
+        if (account.driver === driver) {
+          await driver.close();
+          account.driver = null;
+          account.accessHash = null;
+          account.phase = 'authentication_required';
+          account.errorCode = error instanceof PrismError ? error.code : 'browser_authentication_failed';
+        }
         throw error;
       }
     }, signal);
@@ -205,28 +221,38 @@ export class AccountManager {
       }
       account.phase = 'initializing';
       account.errorCode = undefined;
+      const driver = account.driver;
+      const assertCurrent = () => {
+        aborted(signal);
+        if (this.stopping || version !== account.version || account.driver !== driver) {
+          throw new PrismError('session_revoked', 409);
+        }
+      };
       try {
-        const driver = account.driver;
         const models = await driver.initialize(account.metadata.project_id, async id => {
-          if (version !== account.version) throw new PrismError('session_revoked', 409);
+          assertCurrent();
           account.metadata.project_id = id;
           await this.persist(account);
+          assertCurrent();
         }, signal, [...account.metadata.models]);
-        aborted(signal);
-        if (version !== account.version) throw new PrismError('session_revoked', 409);
+        assertCurrent();
         account.metadata.models = models;
         await this.persist(account);
+        assertCurrent();
         if (account.metadata.verified_project !== account.metadata.project_id) {
           if (account.metadata.probe_attempted && !retry_probe) throw new PrismError('readiness_probe_requires_reauthorization', 409);
           account.metadata.probe_attempted = true;
           account.metadata.readiness_probe_count = (account.metadata.readiness_probe_count || 0) + 1;
           await this.persist(account);
+          assertCurrent();
           account.phase = 'verifying_model';
-          const text = await driver.generate({ model: models[0], effort: 'low', input: [{ type: 'message', role: 'user',
+          const text = await driver.generate({ model: probeModel(models), effort: 'low', input: [{ type: 'message', role: 'user',
             content: [{ type: 'input_text', text: 'Reply with only the uppercase spelling of ready. Do not edit files or use tools.' }] }] }, signal);
+          assertCurrent();
           if (text.trim() !== 'READY') throw new PrismError('readiness_probe_failed');
           account.metadata.verified_project = account.metadata.project_id;
           await this.persist(account);
+          assertCurrent();
         }
         account.lastHeartbeat = driver.lastHeartbeat;
         if (!account.lastHeartbeat || Date.now() / 1000 - account.lastHeartbeat > 60) throw new PrismError('heartbeat_stale', 503);
@@ -260,7 +286,7 @@ export class AccountManager {
     return account;
   }
 
-  async generate(source, request, signal) {
+  async generate(source, request, signal, onText) {
     const account = this.get(source);
     const version = account.version;
     return account.queue.run(async () => {
@@ -279,11 +305,13 @@ export class AccountManager {
       };
       try {
         let text;
+        let published = false;
+        const progress = onText ? value => { assertCurrent(); onText(value); published = true; } : undefined;
         try {
-          text = await driver.generate(request, signal);
+          text = await driver.generate(request, signal, progress);
         } catch (error) {
           assertCurrent();
-          if (!(error instanceof PrismError) || error.code !== 'prism_generation_failed' || error.retryConversation !== true ||
+          if (published || !(error instanceof PrismError) || error.code !== 'prism_generation_failed' || error.retryConversation !== true ||
             driver.isAlive?.() === false || !account.metadata.project_id) throw error;
           // The native terminal response explicitly asks for resubmission. Refresh
           // its project state once; readiness probes never enter this user path.
@@ -311,7 +339,7 @@ export class AccountManager {
           }
           if (!account.metadata.models.includes(request.model)) throw new PrismError('model_not_available', 400, 'model');
           assertCurrent();
-          text = await driver.generate(request, signal);
+          text = await driver.generate(request, signal, progress);
         }
         assertCurrent();
         return text;
@@ -332,12 +360,14 @@ export class AccountManager {
   async revoke(source, signal) {
     const account = this.get(source);
     account.version += 1;
+    account.metadata.key_hash = null;
+    account.queue.cancelPending(new PrismError('session_revoked', 409));
     // Closing immediately also stops an active user turn before revocation queues.
     const closing = account.driver?.close();
     account.driver = null;
     account.accessHash = null;
     account.ready = false;
-    return account.queue.run(async () => {
+    return account.queue.exclusive(async () => {
       await closing;
       await account.driver?.close();
       account.driver = null;
@@ -350,13 +380,20 @@ export class AccountManager {
       account.metadata.probe_attempted = false;
       await this.persist(account);
       return this.status(source);
-    }, signal);
+    }, signal, { priority: true });
   }
 
   async close() {
     this.stopping = true;
     for (const account of this.accounts.values()) account.queue.close();
-    await Promise.allSettled([...this.accounts.values()].map(account => account.driver?.close()));
-    await this.browser?.close();
+    await Promise.allSettled([...this.accounts.values()].map(account => {
+      const driver = account.driver;
+      account.driver = null;
+      account.accessHash = null;
+      account.ready = false;
+      return driver?.close();
+    }));
+    await Promise.allSettled([...this.accounts.values()].map(account => account.persistence));
+    if (this.ownsBrowser) await this.browser?.close();
   }
 }

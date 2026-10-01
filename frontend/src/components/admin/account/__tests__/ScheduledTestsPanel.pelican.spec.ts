@@ -2,13 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import ScheduledTestsPanel from '../ScheduledTestsPanel.vue'
 import { adminAPI } from '@/api/admin'
+const { showError } = vi.hoisted(() => ({ showError: vi.fn() }))
 vi.mock('vue-i18n', async () => ({ ...await vi.importActual<typeof import('vue-i18n')>('vue-i18n'), useI18n: () => ({ t: (key: string) => key }) }))
-vi.mock('@/stores/app', () => ({ useAppStore: () => ({ showError: vi.fn(), showSuccess: vi.fn() }) }))
+vi.mock('@/stores/app', () => ({ useAppStore: () => ({ showError, showSuccess: vi.fn() }) }))
 vi.mock('@/api/admin', () => ({ adminAPI: { scheduledTests: { listByAccount: vi.fn(), listResults: vi.fn(), getResult: vi.fn(), create: vi.fn(), update: vi.fn(), delete: vi.fn() } } }))
 const config = { prompt: 'draw a pelican', reasoning_effort: 'medium', parallel_count: 2 }
 const plan = { id: 4, account_id: 42, model_id: 'gpt-6-astra', cron_expression: '*/30 * * * *', enabled: true, max_results: 100, auto_recover: true, pelican_config: config }
-function mountPanel(pelican = true) {
-  return mount(ScheduledTestsPanel, { props: { show: true, embedded: pelican, accountId: 42, modelOptions: [], defaultModel: 'gpt-6-astra', ...(pelican ? { pelicanConfig: config } : {}) }, global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, ConfirmDialog: true, Select: true, Input: true, Toggle: true, Icon: true, HelpTooltip: true, PelicanTestFields: true } } })
+function mountPanel(pelican = true, overrides: Record<string, unknown> = {}) {
+  return mount(ScheduledTestsPanel, { props: { show: true, embedded: pelican, accountId: 42, modelOptions: [], defaultModel: 'gpt-6-astra', ...(pelican ? { pelicanConfig: config } : {}), ...overrides }, global: { stubs: { BaseDialog: { template: '<div><slot /></div>' }, ConfirmDialog: true, Select: true, Input: true, Toggle: true, Icon: true, HelpTooltip: true, PelicanTestFields: true } } })
 }
 describe('shared scheduled test plans for Pelican', () => {
   beforeEach(() => { vi.useFakeTimers(); vi.mocked(adminAPI.scheduledTests.listByAccount).mockResolvedValue([]); vi.mocked(adminAPI.scheduledTests.listResults).mockResolvedValue([]) })
@@ -85,6 +86,68 @@ describe('shared scheduled test plans for Pelican', () => {
     await vm.handleCreate()
     expect(adminAPI.scheduledTests.create).toHaveBeenCalledWith(expect.not.objectContaining({ pelican_config: expect.anything() }))
     expect(vm.newPlan.max_results).toBe('100')
+    wrapper.unmount()
+  })
+
+  it('uses a restricted catalog selector for Prism Pelican plans', async () => {
+    const options = [{ value: 'gpt-5.6-sol', label: 'gpt-5.6-sol' }]
+    const wrapper = mountPanel(true, { restrictModels: true, modelOptions: options, defaultModel: 'gpt-5.6-sol' })
+    await flushPromises()
+    ;(wrapper.vm as any).showAddForm = true
+    await flushPromises()
+    const selector = wrapper.findComponent({ name: 'Select' })
+    expect(selector.exists()).toBe(true)
+    expect(selector.props('options')).toEqual(options)
+    expect((wrapper.vm as any).newPlan.model_id).toBe('gpt-5.6-sol')
+    wrapper.unmount()
+  })
+
+  it('refuses to create or save a model outside the restricted catalog', async () => {
+    const wrapper = mountPanel(true, { restrictModels: true, modelOptions: [{ value: 'gpt-5.6-sol', label: 'Sol' }] })
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.newPlan.model_id = 'gpt-6-astra'
+    await vm.handleCreate()
+    vm.startEdit(plan)
+    await vm.handleEdit()
+    expect(adminAPI.scheduledTests.create).not.toHaveBeenCalled()
+    expect(adminAPI.scheduledTests.update).not.toHaveBeenCalled()
+    expect(showError).toHaveBeenCalledWith('admin.accounts.prism.modelUnavailable')
+    wrapper.unmount()
+  })
+
+  it('uses updated catalog options for new plans and requires an explicit replacement for stale edits', async () => {
+    const wrapper = mountPanel(true, { restrictModels: true, modelOptions: [{ value: 'gpt-5.6-sol', label: 'Sol' }], defaultModel: 'gpt-5.6-sol' })
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.startEdit({ ...plan, model_id: 'gpt-5.6-sol' })
+    await wrapper.setProps({ modelOptions: [{ value: 'gpt-6-luna', label: 'Luna' }], defaultModel: 'gpt-6-luna' })
+    expect(vm.newPlan.model_id).toBe('gpt-6-luna')
+    await vm.handleEdit()
+    expect(adminAPI.scheduledTests.update).not.toHaveBeenCalled()
+    vm.editForm.model_id = 'gpt-6-luna'
+    vi.mocked(adminAPI.scheduledTests.update).mockResolvedValue({ ...plan, model_id: 'gpt-6-luna' } as any)
+    await vm.handleEdit()
+    expect(adminAPI.scheduledTests.update).toHaveBeenCalledWith(4, expect.objectContaining({ model_id: 'gpt-6-luna' }))
+    wrapper.unmount()
+  })
+
+  it('allows pausing an unsupported plan but requires a catalog model before enabling it', async () => {
+    const wrapper = mountPanel(true, { restrictModels: true, modelOptions: [{ value: 'gpt-5.6-sol', label: 'Sol' }] })
+    await flushPromises()
+    await (wrapper.vm as any).handleToggleEnabled(plan, true)
+    expect(adminAPI.scheduledTests.update).not.toHaveBeenCalled()
+    await (wrapper.vm as any).handleToggleEnabled(plan, false)
+    expect(adminAPI.scheduledTests.update).toHaveBeenCalledWith(4, { enabled: false })
+    wrapper.unmount()
+  })
+
+  it('continues to permit a custom model when restriction is omitted', async () => {
+    const wrapper = mountPanel()
+    await flushPromises()
+    ;(wrapper.vm as any).newPlan.model_id = 'custom-model'
+    await (wrapper.vm as any).handleCreate()
+    expect(adminAPI.scheduledTests.create).toHaveBeenCalledWith(expect.objectContaining({ model_id: 'custom-model' }))
     wrapper.unmount()
   })
 })

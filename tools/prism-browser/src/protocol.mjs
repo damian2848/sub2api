@@ -5,7 +5,7 @@
 // MIT License, Copyright (c) 2026 free-astra contributors.
 // See ../THIRD_PARTY_NOTICES.md for the full license text.
 import { randomBytes, randomUUID } from 'node:crypto';
-import { PrismError } from './errors.mjs';
+import { PrismError, publicError } from './errors.mjs';
 import { NOISE, buildPrompt, collectTools, elide, parseDone, parseToolCall } from './emulation.mjs';
 
 const DEFAULT_MAX_TEXT_BYTES = 256 * 1024;
@@ -153,7 +153,12 @@ export function estimatedUsage(input, text) {
     estimation: 'character_based_estimate' };
 }
 
-export function resultBody(request, text) {
+export function resultIdentity(request) {
+  return { id: request.family === 'chat' ? `chatcmpl-${randomUUID()}` : `resp_${randomUUID()}`,
+    created: Math.floor(Date.now() / 1000) };
+}
+
+export function resultBody(request, text, identity = resultIdentity(request)) {
   let call = null;
   if (request.tools) {
     call = parseToolCall(text, request.tools);
@@ -163,11 +168,11 @@ export function resultBody(request, text) {
     }
   }
   const usage = estimatedUsage(request.input, call ? `${call.name} ${call.arguments}` : text);
-  const created = Math.floor(Date.now() / 1000);
+  const { id, created } = identity;
   if (request.family === 'chat') {
     const message = call ? { role: 'assistant', content: null, tool_calls: [{ id: call.id, type: 'function',
       function: { name: call.name, arguments: call.arguments } }] } : { role: 'assistant', content: text };
-    return { id: `chatcmpl-${randomUUID()}`, object: 'chat.completion', created, model: request.model,
+    return { id, object: 'chat.completion', created, model: request.model,
       choices: [{ index: 0, message, finish_reason: call ? 'tool_calls' : 'stop' }],
       usage: { prompt_tokens: usage.input_tokens, completion_tokens: usage.output_tokens,
         total_tokens: usage.total_tokens, estimation: usage.estimation } };
@@ -176,7 +181,7 @@ export function resultBody(request, text) {
     arguments: call.arguments, status: 'completed', ...(call.namespace && call.namespace !== 'functions' ? { namespace: call.namespace } : {}) }
     : { id: `msg_${randomUUID()}`, type: 'message', role: 'assistant', status: 'completed',
       content: [{ type: 'output_text', text, annotations: [] }] };
-  return { id: `resp_${randomUUID()}`, object: 'response', created_at: created, status: 'completed', model: request.model,
+  return { id, object: 'response', created_at: created, status: 'completed', model: request.model,
     output: [item], output_text: call ? '' : text, usage };
 }
 
@@ -191,48 +196,142 @@ function* slices(text, size = 600) {
   }
 }
 
+function streamFrames(request, identity) {
+  let sequence = 0;
+  // Allocate sequences at write time so cancelled frames cannot leave gaps.
+  const event = (type, data) => () => `event: ${type}\ndata: ${JSON.stringify({ type,
+    sequence_number: sequence++, ...data })}\n\n`;
+  const chunk = (delta, finishReason = null) => `data: ${JSON.stringify({
+    id: identity.id, object: 'chat.completion.chunk', created: identity.created, model: request.model,
+    choices: [{ index: 0, delta, finish_reason: finishReason }] })}\n\n`;
+  return {
+    *begin() {
+      if (request.family === 'chat') {
+        yield chunk({ role: 'assistant', content: '' });
+        return;
+      }
+      const shell = { id: identity.id, object: 'response', created_at: identity.created,
+        status: 'in_progress', model: request.model, output: [], output_text: '', usage: null };
+      yield event('response.created', { response: shell });
+      yield event('response.in_progress', { response: shell });
+    },
+    *finish(result) {
+      if (request.family === 'chat') {
+        const choice = result.choices[0];
+        if (choice.message.tool_calls) yield chunk({ tool_calls: choice.message.tool_calls.map((call, index) => ({ index, ...call })) });
+        else for (const piece of slices(choice.message.content)) yield chunk({ content: piece });
+        yield chunk({}, choice.finish_reason);
+        if (request.includeUsage) yield `data: ${JSON.stringify({ id: result.id, object: 'chat.completion.chunk',
+          created: result.created, model: result.model, choices: [], usage: result.usage })}\n\n`;
+        yield 'data: [DONE]\n\n';
+        return;
+      }
+      const item = result.output[0];
+      if (item.type === 'function_call') {
+        yield event('response.output_item.added', { output_index: 0, item: { ...item, status: 'in_progress', arguments: '' } });
+        for (const delta of slices(item.arguments)) {
+          yield event('response.function_call_arguments.delta', { item_id: item.id, output_index: 0, delta });
+        }
+        yield event('response.function_call_arguments.done', { item_id: item.id, output_index: 0, name: item.name,
+          arguments: item.arguments });
+        yield event('response.output_item.done', { output_index: 0, item });
+      } else {
+        const part = item.content[0];
+        yield event('response.output_item.added', { output_index: 0, item: { ...item, status: 'in_progress', content: [] } });
+        yield event('response.content_part.added', { item_id: item.id, output_index: 0, content_index: 0,
+          part: { ...part, text: '' } });
+        for (const delta of slices(part.text)) {
+          yield event('response.output_text.delta', { item_id: item.id, output_index: 0, content_index: 0, delta });
+        }
+        yield event('response.output_text.done', { item_id: item.id, output_index: 0, content_index: 0, text: part.text });
+        yield event('response.content_part.done', { item_id: item.id, output_index: 0, content_index: 0, part });
+        yield event('response.output_item.done', { output_index: 0, item });
+      }
+      yield event('response.completed', { response: result });
+    },
+    *error(error) {
+      const output = publicError(error);
+      if (request.family === 'chat') yield `data: ${JSON.stringify(output)}\n\n`;
+      else yield event('error', { code: output.error.code, message: output.error.message, param: output.error.param ?? null });
+    },
+  };
+}
+
 export function writeCompletedStream(res, request, result) {
-  if (request.family === 'chat') {
-    const choice = result.choices[0];
-    const chunk = (delta, finishReason = null) => res.write(`data: ${JSON.stringify({
-      id: result.id, object: 'chat.completion.chunk', created: result.created, model: result.model,
-      choices: [{ index: 0, delta, finish_reason: finishReason }] })}\n\n`);
-    chunk({ role: 'assistant', content: '' });
-    if (choice.message.tool_calls) chunk({ tool_calls: choice.message.tool_calls.map((call, index) => ({ index, ...call })) });
-    else for (const piece of slices(choice.message.content)) chunk({ content: piece });
-    chunk({}, choice.finish_reason);
-    if (request.includeUsage) res.write(`data: ${JSON.stringify({ id: result.id, object: 'chat.completion.chunk',
-      created: result.created, model: result.model, choices: [], usage: result.usage })}\n\n`);
-    res.write('data: [DONE]\n\n');
-  } else {
-    let sequence = 0;
-    const event = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type,
-      sequence_number: sequence++, ...data })}\n\n`);
-    const item = result.output[0];
-    const shell = { ...result, status: 'in_progress', output: [], output_text: '', usage: null };
-    event('response.created', { response: shell });
-    event('response.in_progress', { response: shell });
-    if (item.type === 'function_call') {
-      event('response.output_item.added', { output_index: 0, item: { ...item, status: 'in_progress', arguments: '' } });
-      for (const delta of slices(item.arguments)) {
-        event('response.function_call_arguments.delta', { item_id: item.id, output_index: 0, delta });
-      }
-      event('response.function_call_arguments.done', { item_id: item.id, output_index: 0, name: item.name,
-        arguments: item.arguments });
-      event('response.output_item.done', { output_index: 0, item });
-    } else {
-      const part = item.content[0];
-      event('response.output_item.added', { output_index: 0, item: { ...item, status: 'in_progress', content: [] } });
-      event('response.content_part.added', { item_id: item.id, output_index: 0, content_index: 0,
-        part: { ...part, text: '' } });
-      for (const delta of slices(part.text)) {
-        event('response.output_text.delta', { item_id: item.id, output_index: 0, content_index: 0, delta });
-      }
-      event('response.output_text.done', { item_id: item.id, output_index: 0, content_index: 0, text: part.text });
-      event('response.content_part.done', { item_id: item.id, output_index: 0, content_index: 0, part });
-      event('response.output_item.done', { output_index: 0, item });
-    }
-    event('response.completed', { response: result });
-  }
+  const frames = streamFrames(request, { id: result.id, created: result.created ?? result.created_at });
+  for (const frame of frames.begin()) res.write(typeof frame === 'function' ? frame() : frame);
+  for (const frame of frames.finish(result)) res.write(typeof frame === 'function' ? frame() : frame);
   res.end();
+}
+
+export function createStreamWriter(res, request, { signal, onDisconnect } = {}) {
+  const identity = resultIdentity(request);
+  const frames = streamFrames(request, identity);
+  let pending;
+  let started = false;
+  let terminalRequested = false;
+  let errorRequested = false;
+  let ended = false;
+  const write = (frame, allowAborted) => new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      res.off('drain', drained); res.off('close', disconnected); res.off('error', disconnected);
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const drained = () => { if (settled) return; settled = true; cleanup(); resolve(); };
+    const cancelled = () => {
+      if (settled) return;
+      settled = true; cleanup();
+      reject(signal.reason instanceof PrismError ? signal.reason : new PrismError('request_cancelled', 499));
+    };
+    const disconnected = () => {
+      if (settled) return;
+      settled = true; cleanup(); onDisconnect?.(); reject(new PrismError('request_cancelled', 499));
+    };
+    const onAbort = allowAborted ? drained : cancelled;
+    if (res.destroyed || res.writableEnded) return disconnected();
+    if (!allowAborted && signal?.aborted) return cancelled();
+    res.once('close', disconnected); res.once('error', disconnected);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      const writable = res.write(typeof frame === 'function' ? frame() : frame);
+      // A deadline may still enqueue its one bounded error frame, then end the response.
+      if (!settled && writable === false && !(allowAborted && signal?.aborted)) res.once('drain', drained);
+      else drained();
+    } catch { disconnected(); }
+  });
+  const run = (source, terminal = false, allowAborted = false) => {
+    const previous = pending;
+    const task = (async () => {
+      if (previous) await previous.catch(() => {});
+      for (const frame of source) await write(frame, allowAborted);
+      if (terminal && !res.destroyed && !res.writableEnded) { ended = true; res.end(); }
+    })();
+    pending = task;
+    task.catch(() => {}).finally(() => { if (pending === task) pending = null; });
+    return task;
+  };
+  return {
+    identity,
+    begin() {
+      if (started || terminalRequested || ended) return pending || Promise.resolve();
+      started = true;
+      return run((function* () { yield ': waiting for Prism\n\n'; yield* frames.begin(); })());
+    },
+    heartbeat() {
+      if (pending || terminalRequested || ended) return Promise.resolve();
+      return run([': waiting for Prism\n\n']);
+    },
+    finish(result) {
+      if (terminalRequested || ended) return pending || Promise.resolve();
+      terminalRequested = true;
+      return run(frames.finish(result), true);
+    },
+    error(error) {
+      if (errorRequested || ended || res.destroyed || res.writableEnded) return pending || Promise.resolve();
+      errorRequested = true;
+      terminalRequested = true;
+      return run(frames.error(error), true, true);
+    },
+  };
 }

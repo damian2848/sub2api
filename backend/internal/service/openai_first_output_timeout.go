@@ -281,7 +281,7 @@ func (s *OpenAIGatewayService) newOpenAIFirstOutputTimeoutError(
 	return &UpstreamFailoverError{
 		StatusCode:      http.StatusGatewayTimeout,
 		ResponseBody:    []byte(`{"error":{"type":"first_output_timeout","message":"Upstream produced no output before the deadline"}}`),
-		ResponseHeaders: responseHeaders.Clone(), SafeToFailoverAfterWrite: true,
+		ResponseHeaders: responseHeaders.Clone(), SafeToFailoverAfterWrite: !IsPrismStreamCommitted(c),
 	}
 }
 

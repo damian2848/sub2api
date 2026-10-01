@@ -332,11 +332,57 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	clientDisconnected := false
 	clientOutputStarted := false
 	pendingLines := make([]string, 0, 8)
+	isPrism := account.IsManagedPrismAccount()
+	prismEventHasData := false
+	prismEventStartsTTFT := false
+	prismEventPayloads := make([]string, 0, 1)
+	prismErrorDelivered := false
+	prismErrorMessage := ""
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
 	var terminal openAIRawStreamTerminalState
 
 	writeLine := func(line string) {
 		if clientDisconnected {
+			return
+		}
+		if isPrism {
+			pendingLines = append(pendingLines, line)
+			if line != "" {
+				return
+			}
+			writeStreamHeaders()
+			if prismEventHasData {
+				MarkPrismStreamCommitted(c)
+			}
+			for _, pending := range pendingLines {
+				n, err := c.Writer.WriteString(pending + "\n")
+				if !prismEventHasData {
+					recordOpenAIStreamKeepaliveBytes(c, n)
+				}
+				if err != nil {
+					clientDisconnected = true
+					return
+				}
+			}
+			if prismEventHasData {
+				clientOutputStarted = true
+			}
+			for _, payload := range prismEventPayloads {
+				terminal.ObserveDataLine(payload)
+				if gjson.Get(payload, "error").IsObject() {
+					prismErrorDelivered = true
+					prismErrorMessage = extractUpstreamErrorMessage([]byte(payload))
+					MarkResponseCommitted(c)
+				}
+			}
+			if prismEventStartsTTFT && firstTokenMs == nil {
+				elapsed := int(time.Since(startTime).Milliseconds())
+				firstTokenMs = &elapsed
+			}
+			pendingLines = pendingLines[:0]
+			prismEventHasData = false
+			prismEventStartsTTFT = false
+			prismEventPayloads = prismEventPayloads[:0]
 			return
 		}
 		if !clientOutputStarted && !refusalDetector.ShouldReleaseClientOutput() {
@@ -372,7 +418,12 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		refusalDetector.ObserveSSELine(line)
 		if payload, ok := extractOpenAISSEDataLine(line); ok {
 			trimmedPayload := strings.TrimSpace(payload)
-			terminal.ObserveDataLine(trimmedPayload)
+			if isPrism && trimmedPayload != "" {
+				prismEventHasData = true
+				prismEventPayloads = append(prismEventPayloads, trimmedPayload)
+			} else if !isPrism {
+				terminal.ObserveDataLine(trimmedPayload)
+			}
 			if trimmedPayload != "[DONE]" {
 				observer.ObserveOpenAI([]byte(payload), strings.TrimSpace(gjson.Get(payload, "type").String()))
 				usageOnlyChunk := isOpenAIChatUsageOnlyStreamChunk(payload)
@@ -380,8 +431,25 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 					usage = *u
 				}
 				if firstTokenMs == nil && !usageOnlyChunk {
-					elapsed := int(time.Since(startTime).Milliseconds())
-					firstTokenMs = &elapsed
+					if isPrism {
+						for _, choice := range gjson.Get(payload, "choices").Array() {
+							delta := choice.Get("delta")
+							if delta.Get("content").String() != "" || delta.Get("refusal").String() != "" ||
+								delta.Get("function_call.name").String() != "" || delta.Get("function_call.arguments").String() != "" {
+								prismEventStartsTTFT = true
+								break
+							}
+							for _, toolCall := range delta.Get("tool_calls").Array() {
+								if toolCall.Get("id").String() != "" || toolCall.Get("function.name").String() != "" || toolCall.Get("function.arguments").String() != "" {
+									prismEventStartsTTFT = true
+									break
+								}
+							}
+						}
+					} else {
+						elapsed := int(time.Since(startTime).Milliseconds())
+						firstTokenMs = &elapsed
+					}
 				}
 			}
 		}
@@ -391,12 +459,12 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		line = s.replaceModelInSSELine(line, upstreamModel, originalModel)
 		writeLine(line)
 		if line == "" {
-			if !clientDisconnected && clientOutputStarted {
+			if !clientDisconnected && (clientOutputStarted || isPrism) {
 				c.Writer.Flush()
 			}
 			continue
 		}
-		if !clientDisconnected && clientOutputStarted {
+		if !clientDisconnected && clientOutputStarted && !isPrism {
 			c.Writer.Flush()
 		}
 	}
@@ -421,6 +489,15 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	}
 
 	scanErr := scanner.Err()
+	if scanErr == nil && isPrism && len(pendingLines) > 0 && !clientDisconnected {
+		writeLine("")
+		if !clientDisconnected {
+			c.Writer.Flush()
+		}
+	}
+	if prismErrorDelivered {
+		return resultWithUsage(), fmt.Errorf("upstream response failed: %s", prismErrorMessage)
+	}
 	if scanErr != nil && !errors.Is(scanErr, context.Canceled) && !errors.Is(scanErr, context.DeadlineExceeded) {
 		logger.L().Warn("openai chat_completions raw: stream read error",
 			zap.Error(scanErr),

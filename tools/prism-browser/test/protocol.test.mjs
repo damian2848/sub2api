@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { estimatedUsage, mapEffort, parseRequest, resultBody, writeCompletedStream } from '../src/protocol.mjs';
+import { EventEmitter } from 'node:events';
+import { createStreamWriter, estimatedUsage, mapEffort, parseRequest, resultBody, writeCompletedStream } from '../src/protocol.mjs';
+import { PrismError } from '../src/errors.mjs';
 import { TOOL_INSTRUCTIONS_LIMIT } from '../src/emulation.mjs';
 
 const models = ['gpt-6.1-sol'];
@@ -363,6 +365,123 @@ test('Responses text SSE has the full event order and chunked deltas', () => {
   assert.equal(events[0].response.status, 'in_progress');
   assert.equal(events.at(-1).response.usage.estimation, 'character_based_estimate');
   assert.ok(wire().endsWith('<end>'));
+});
+
+function writableResponse() {
+  const res = new EventEmitter();
+  res.frames = [];
+  res.write = frame => { res.frames.push(frame); return !res.blocked; };
+  res.end = () => { res.writableEnded = true; };
+  return res;
+}
+const asyncEvents = res => res.frames.filter(frame => frame.startsWith('event: '))
+  .map(frame => JSON.parse(frame.split('\n')[1].slice(6)));
+
+test('async Responses lifecycle is early and keeps one identity and continuous sequences through final tools', async () => {
+  const request = parse({ input: 'run', tools: [execTool], stream: true });
+  const res = writableResponse();
+  const writer = createStreamWriter(res, request);
+  await writer.begin();
+  await writer.begin();
+  const early = asyncEvents(res);
+  assert.deepEqual(early.map(event => event.type), ['response.created', 'response.in_progress']);
+  assert.equal(res.writableEnded, undefined);
+  assert.ok(early.every(event => event.response.output.length === 0 && event.response.usage === null));
+  const result = resultBody(request, '{"tool_call":{"name":"exec_command","arguments":{"cmd":"ls"}}}', writer.identity);
+  await writer.finish(result);
+  await writer.finish(result);
+  await writer.heartbeat();
+  const events = asyncEvents(res);
+  assert.deepEqual(events.map(event => event.sequence_number), events.map((_, index) => index));
+  assert.equal(events.filter(event => event.type === 'response.output_item.added').length, 1);
+  assert.equal(events.filter(event => event.type === 'response.completed').length, 1);
+  assert.equal(events[0].response.id, events.at(-1).response.id);
+  assert.equal(events[0].response.created_at, events.at(-1).response.created_at);
+  assert.equal(events.at(-1).response.output[0].arguments, '{"cmd":"ls"}');
+  assert.equal(res.writableEnded, true);
+});
+
+test('async writes wait for drain and skip heartbeats while backpressured', async () => {
+  const res = writableResponse();
+  const writer = createStreamWriter(res, parse({ input: 'x', stream: true }));
+  res.blocked = true;
+  const beginning = writer.begin();
+  await writer.heartbeat();
+  assert.equal(res.frames.length, 1);
+  assert.equal(asyncEvents(res).length, 0);
+  assert.equal(res.listenerCount('drain'), 1);
+  res.blocked = false;
+  res.emit('drain');
+  await beginning;
+  assert.equal(asyncEvents(res).length, 2);
+  assert.equal(res.listenerCount('drain'), 0);
+  await writer.finish(resultBody(parse({ input: 'x' }), 'x', writer.identity));
+});
+
+test('backpressured close aborts writes, removes listeners and never emits remaining content', async () => {
+  const res = writableResponse();
+  const controller = new AbortController();
+  const writer = createStreamWriter(res, parse({ input: 'x', stream: true }), {
+    signal: controller.signal, onDisconnect: () => controller.abort(),
+  });
+  res.blocked = true;
+  const beginning = writer.begin();
+  res.destroyed = true;
+  res.emit('close');
+  await assert.rejects(beginning, error => error.code === 'request_cancelled');
+  assert.equal(controller.signal.aborted, true);
+  assert.equal(res.frames.length, 1);
+  assert.equal(res.listenerCount('drain'), 0);
+  assert.equal(res.listenerCount('close'), 0);
+});
+
+test('Responses errors use safe top-level fields and the next sequence even after timeout', async () => {
+  const res = writableResponse();
+  const controller = new AbortController();
+  const writer = createStreamWriter(res, parse({ input: 'x', stream: true }), { signal: controller.signal });
+  await writer.begin();
+  controller.abort(new PrismError('request_timeout', 504));
+  res.blocked = true;
+  await writer.error(controller.signal.reason);
+  await writer.error(new Error('do-not-expose-access-token'));
+  const events = asyncEvents(res);
+  assert.deepEqual(events.at(-1), { type: 'error', sequence_number: 2,
+    code: 'request_timeout', message: 'request_timeout', param: null });
+  assert.equal(events.filter(event => event.type === 'error').length, 1);
+  assert.equal(res.writableEnded, true);
+  assert.equal(res.listenerCount('drain'), 0);
+});
+
+test('an error frame stalled on drain ends when the request deadline arrives', async () => {
+  const res = writableResponse();
+  const controller = new AbortController();
+  const writer = createStreamWriter(res, parse({ input: 'x', stream: true }), { signal: controller.signal });
+  await writer.begin();
+  res.blocked = true;
+  const ending = writer.error(new Error('secret-access-token'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(res.listenerCount('drain'), 1);
+  controller.abort(new PrismError('request_timeout', 504));
+  await ending;
+  assert.equal(res.writableEnded, true);
+  assert.equal(res.listenerCount('drain'), 0);
+  assert.deepEqual(asyncEvents(res).at(-1), { type: 'error', sequence_number: 2,
+    code: 'browser_operation_failed', message: 'browser_operation_failed', param: null });
+});
+
+test('async Chat emits the role once before content and preserves its initial identity', async () => {
+  const request = parse({ messages: [{ role: 'user', content: 'Hello' }], stream: true }, 'chat');
+  const res = writableResponse();
+  const writer = createStreamWriter(res, request);
+  await writer.begin();
+  const initial = JSON.parse(res.frames[1].slice(6));
+  assert.deepEqual(initial.choices[0].delta, { role: 'assistant', content: '' });
+  await writer.finish(resultBody(request, 'answer', writer.identity));
+  const chunks = res.frames.filter(frame => frame.startsWith('data: {')).map(frame => JSON.parse(frame.slice(6)));
+  assert.equal(chunks.filter(chunk => chunk.choices[0]?.delta.role === 'assistant').length, 1);
+  assert.ok(chunks.every(chunk => chunk.id === initial.id && chunk.created === initial.created));
+  assert.equal(chunks.filter(chunk => chunk.choices[0]?.delta.content).map(chunk => chunk.choices[0].delta.content).join(''), 'answer');
+  assert.equal(res.frames.at(-1), 'data: [DONE]\n\n');
 });
 
 test('Responses function call SSE streams the arguments and ends with the completed response', () => {

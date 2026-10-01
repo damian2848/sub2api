@@ -50,6 +50,10 @@ type PrismStatus struct {
 	Phase           string   `json:"phase"`
 	Ready           bool     `json:"ready"`
 	Models          []string `json:"models"`
+	Concurrency     int      `json:"concurrency"`
+	ReadyWorkers    *int     `json:"ready_workers,omitempty"`
+	BusyWorkers     *int     `json:"busy_workers,omitempty"`
+	Queued          *int     `json:"queued,omitempty"`
 	ErrorCode       string   `json:"error_code,omitempty"`
 	LastHeartbeatAt string   `json:"last_heartbeat_at,omitempty"`
 	SourceAccountID int64    `json:"source_account_id"`
@@ -61,6 +65,10 @@ type prismRuntimeStatus struct {
 	Phase           string          `json:"phase"`
 	Ready           bool            `json:"ready"`
 	Models          []string        `json:"models"`
+	Concurrency     *int            `json:"concurrency"`
+	ReadyWorkers    *int            `json:"ready_workers,omitempty"`
+	BusyWorkers     *int            `json:"busy_workers,omitempty"`
+	Queued          *int            `json:"queued,omitempty"`
 	ErrorCode       string          `json:"error_code"`
 	LastHeartbeatAt json.RawMessage `json:"last_heartbeat_at"`
 }
@@ -238,7 +246,25 @@ func (s *PrismAccountService) Create(ctx context.Context, sourceID int64, name s
 
 func (s *PrismAccountService) storedStatus(a *Account) *PrismStatus {
 	status := &PrismStatus{Phase: "provisioning", Models: []string{}, AccountID: a.ID,
-		SourceAccountID: a.PrismSourceAccountID(), Enabled: s.enabled()}
+		SourceAccountID: a.PrismSourceAccountID(), Enabled: s.enabled(), Concurrency: 1}
+	if a.Concurrency >= 1 && a.Concurrency <= 4 {
+		status.Concurrency = a.Concurrency
+	}
+	for _, metric := range []struct {
+		key    string
+		target **int
+	}{
+		{"prism_ready_workers", &status.ReadyWorkers},
+		{"prism_busy_workers", &status.BusyWorkers},
+		{"prism_queued", &status.Queued},
+	} {
+		if raw, err := json.Marshal(a.Extra[metric.key]); err == nil {
+			_ = json.Unmarshal(raw, metric.target)
+		}
+		if *metric.target != nil && (**metric.target < 0 || metric.key != "prism_queued" && **metric.target > status.Concurrency) {
+			*metric.target = nil
+		}
+	}
 	if v, ok := a.Extra["prism_phase"].(string); ok && v != "" {
 		status.Phase = v
 	}
@@ -325,7 +351,7 @@ func (s *PrismAccountService) Reconnect(ctx context.Context, id int64) (*PrismSt
 	}
 	s.schedule(id, true)
 	return &PrismStatus{Phase: "provisioning", Models: []string{}, Enabled: true, AccountID: id,
-		SourceAccountID: a.PrismSourceAccountID()}, nil
+		SourceAccountID: a.PrismSourceAccountID(), Concurrency: s.storedStatus(a).Concurrency}, nil
 }
 
 func (s *PrismAccountService) request(ctx context.Context, sourceID int64, method, action string, body any, result any) error {
@@ -481,7 +507,8 @@ func (s *PrismAccountService) EnsureSession(ctx context.Context, a *Account) err
 		statusCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		err = s.request(statusCtx, source.ID, http.MethodGet, "status", nil, &status)
 		cancel()
-		if err == nil && !status.Ready {
+		_, capacityValid := prismRuntimeCapacity(status)
+		if err == nil && (!status.Ready || !capacityValid) {
 			s.schedule(a.ID, false)
 			err = infraerrors.New(http.StatusServiceUnavailable, "PRISM_ACCOUNT_NOT_READY", "The Prism account is reconnecting")
 		}
@@ -502,8 +529,33 @@ func (s *PrismAccountService) EnsureSession(ctx context.Context, a *Account) err
 var prismModelID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
 var prismErrorCode = regexp.MustCompile(`^[a-z][a-z0-9_]{1,80}$`)
 
+func prismRuntimeCapacity(runtime prismRuntimeStatus) (int, bool) {
+	// Missing capacity is the legacy single-worker protocol. Invalid reports
+	// cannot increase scheduler concurrency or mark the account ready.
+	capacity := 1
+	if runtime.Concurrency != nil {
+		capacity = *runtime.Concurrency
+	}
+	if capacity < 0 || capacity > 4 || capacity == 0 && runtime.Ready {
+		return 1, false
+	}
+	if runtime.ReadyWorkers != nil && *runtime.ReadyWorkers != capacity {
+		return 1, false
+	}
+	if runtime.BusyWorkers != nil && (*runtime.BusyWorkers < 0 || *runtime.BusyWorkers > capacity) {
+		return 1, false
+	}
+	if runtime.Queued != nil && *runtime.Queued < 0 {
+		return 1, false
+	}
+	return capacity, true
+}
+
 func (s *PrismAccountService) applyRuntimeStatus(status *PrismStatus, runtime prismRuntimeStatus) {
 	status.Phase, status.Ready, status.ErrorCode = runtime.Phase, runtime.Ready, runtime.ErrorCode
+	capacity, capacityValid := prismRuntimeCapacity(runtime)
+	status.Concurrency = capacity
+	status.ReadyWorkers, status.BusyWorkers, status.Queued = runtime.ReadyWorkers, runtime.BusyWorkers, runtime.Queued
 	switch status.Phase {
 	case "authenticating":
 		status.Phase = "provisioning"
@@ -524,6 +576,10 @@ func (s *PrismAccountService) applyRuntimeStatus(status *PrismStatus, runtime pr
 	}
 	if len(status.Models) == 0 && status.Ready {
 		status.Ready, status.Phase, status.ErrorCode = false, "error", "prism_models_unavailable"
+	}
+	if !capacityValid {
+		status.Ready, status.Phase, status.ErrorCode = false, "error", "prism_invalid_capacity"
+		status.ReadyWorkers, status.BusyWorkers, status.Queued = nil, nil, nil
 	}
 	var seconds float64
 	if json.Unmarshal(runtime.LastHeartbeatAt, &seconds) == nil && seconds > 0 {
@@ -578,7 +634,9 @@ func (s *PrismAccountService) syncAccount(ctx context.Context, id int64, retryPr
 		}
 	}
 	updates := map[string]any{"prism_phase": status.Phase, "prism_error_code": status.ErrorCode,
-		"prism_models": status.Models, "prism_last_heartbeat_at": status.LastHeartbeatAt}
+		"prism_models": status.Models, "prism_last_heartbeat_at": status.LastHeartbeatAt,
+		"prism_concurrency": status.Concurrency, "prism_ready_workers": status.ReadyWorkers,
+		"prism_busy_workers": status.BusyWorkers, "prism_queued": status.Queued}
 	if status.Ready {
 		fresh, loadErr := s.repo.GetByID(ctx, id)
 		if loadErr != nil || !fresh.IsManagedPrismAccount() || !fresh.IsActive() {
@@ -596,8 +654,9 @@ func (s *PrismAccountService) syncAccount(ctx context.Context, id int64, retryPr
 		current, _ := json.Marshal(fresh.Credentials["model_mapping"])
 		desired, _ := json.Marshal(mapping)
 		var updateErr error
-		if !bytes.Equal(current, desired) {
-			_, updateErr = s.repo.BulkUpdate(ctx, []int64{id}, AccountBulkUpdate{Credentials: map[string]any{"model_mapping": mapping}})
+		if !bytes.Equal(current, desired) || fresh.Concurrency != status.Concurrency {
+			_, updateErr = s.repo.BulkUpdate(ctx, []int64{id}, AccountBulkUpdate{
+				Credentials: map[string]any{"model_mapping": mapping}, Concurrency: &status.Concurrency})
 		}
 		if updateErr != nil {
 			status.Ready = false
@@ -787,7 +846,7 @@ func validatePrismAccountUpdate(account *Account, input *UpdateAccountInput) err
 		}
 		return nil
 	}
-	if input.Type != "" && input.Type != AccountTypeAPIKey || input.ProxyID != nil && *input.ProxyID != 0 || input.Concurrency != nil && *input.Concurrency != 1 || input.ProbeEnabled != nil && *input.ProbeEnabled || input.RateSyncEnabled != nil && *input.RateSyncEnabled {
+	if input.Type != "" && input.Type != AccountTypeAPIKey || input.ProxyID != nil && *input.ProxyID != 0 || input.Concurrency != nil && *input.Concurrency != account.Concurrency || input.ProbeEnabled != nil && *input.ProbeEnabled || input.RateSyncEnabled != nil && *input.RateSyncEnabled {
 		return infraerrors.BadRequest("PRISM_MANAGED_FIELDS_IMMUTABLE", "Managed Prism connection settings cannot be changed")
 	}
 	if value, ok := input.Extra[PrismSourceAccountKey]; ok {

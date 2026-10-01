@@ -130,6 +130,99 @@ func prismWSFrame(text, previousResponseID string) string {
 		`"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"` + text + `"}]}]}`
 }
 
+func TestPrismWebSocketBridgeLifecycleArrivesBeforeNativeBody(t *testing.T) {
+	h := newPrismGatewayHarness(t, nil, nil)
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pr.Close(); _ = pw.Close() })
+	bridge := newPrismWSBridge(t, h, true, &http.Response{StatusCode: http.StatusOK,
+		Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: pr})
+	finish := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-finish:
+		default:
+			close(finish)
+		}
+	})
+	go func() {
+		_, _ = io.WriteString(pw, prismStreamCreated+prismStreamInProgress)
+		<-finish
+		_, _ = io.WriteString(pw, `data: {"type":"response.output_text.delta","sequence_number":2,"delta":"answer"}`+"\n\n"+
+			`data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_prism_stream","model":"gpt-6.1-sol","usage":{"input_tokens":1,"output_tokens":1}}}`+"\n\n")
+		_ = pw.Close()
+	}()
+	bridge.send(prismWSFrame("hello", ""))
+	for sequence, eventType := range []string{"response.created", "response.in_progress"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, event, err := bridge.client.Read(ctx)
+		cancel()
+		require.NoError(t, err, "lifecycle must arrive while native body is blocked")
+		require.Equal(t, eventType, gjson.GetBytes(event, "type").String())
+		require.Equal(t, int64(sequence), gjson.GetBytes(event, "sequence_number").Int())
+		require.Equal(t, "resp_prism_stream", gjson.GetBytes(event, "response.id").String())
+	}
+	close(finish)
+	events := bridge.completed()
+	require.Equal(t, "response.output_text.delta", gjson.GetBytes(events[0], "type").String())
+	require.Equal(t, "resp_prism_stream", gjson.GetBytes(events[len(events)-1], "response.id").String())
+	require.NoError(t, bridge.client.Close(coderws.StatusNormalClosure, "done"))
+	require.NoError(t, bridge.finish())
+	require.Len(t, h.upstream.requests, 1)
+}
+
+func TestPrismWebSocketBridgeSemanticTimeoutKeepsPublicResponse(t *testing.T) {
+	h := newPrismGatewayHarness(t, nil, nil)
+	h.svc.cfg.Gateway.OpenAIFirstOutputTimeoutSeconds = 1
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pr.Close(); _ = pw.Close() })
+	bridge := newPrismWSBridge(t, h, true, &http.Response{StatusCode: http.StatusOK,
+		Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: pr})
+	go func() { _, _ = io.WriteString(pw, prismStreamCreated+prismStreamInProgress) }()
+	bridge.send(prismWSFrame("hello", ""))
+	for sequence, eventType := range []string{"response.created", "response.in_progress", "response.failed"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		_, event, err := bridge.client.Read(ctx)
+		cancel()
+		require.NoError(t, err)
+		require.Equal(t, eventType, gjson.GetBytes(event, "type").String())
+		require.Equal(t, int64(sequence), gjson.GetBytes(event, "sequence_number").Int())
+		require.Equal(t, "resp_prism_stream", gjson.GetBytes(event, "response.id").String())
+	}
+	err := bridge.finish()
+	require.Error(t, err)
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(err, &failoverErr), "a public response cannot be replayed")
+	require.Len(t, h.upstream.requests, 1)
+}
+
+func TestPrismWebSocketBridgeFailureAfterLifecycleKeepsPublicResponse(t *testing.T) {
+	for _, failure := range []string{
+		`data: {"type":"response.failed","sequence_number":2,"response":{"id":"resp_prism_stream","status":"failed","error":{"code":"server_error","message":"native failure"}}}` + "\n\n",
+		`data: {"type":"error","sequence_number":2,"code":"server_error","message":"native failure","param":null}` + "\n\n",
+		"",
+	} {
+		h := newPrismGatewayHarness(t, nil, nil)
+		response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}},
+			Body: io.NopCloser(strings.NewReader(prismStreamCreated + prismStreamInProgress + failure))}
+		bridge := newPrismWSBridge(t, h, true, response)
+		bridge.send(prismWSFrame("hello", ""))
+		for sequence, eventType := range []string{"response.created", "response.in_progress", "response.failed"} {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_, event, err := bridge.client.Read(ctx)
+			cancel()
+			require.NoError(t, err, "failure=%q", failure)
+			require.Equal(t, eventType, gjson.GetBytes(event, "type").String())
+			require.Equal(t, int64(sequence), gjson.GetBytes(event, "sequence_number").Int())
+			require.Equal(t, "resp_prism_stream", gjson.GetBytes(event, "response.id").String())
+		}
+		_ = bridge.client.CloseNow()
+		err := bridge.finish()
+		var failoverErr *UpstreamFailoverError
+		require.False(t, errors.As(err, &failoverErr), "failure=%q", failure)
+		require.Len(t, h.upstream.requests, 1)
+	}
+}
+
 // Serving a WebSocket client from Prism means bridging every turn to the
 // sidecar's HTTP /responses endpoint: Prism rejects previous_response_id, so the
 // bridge has to send the whole conversation, including what the model said.

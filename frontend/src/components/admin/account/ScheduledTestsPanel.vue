@@ -36,13 +36,15 @@
             <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
               {{ t('admin.scheduledTests.model') }}
             </label>
-            <Input v-if="pelicanConfig" v-model="newPlan.model_id" />
+            <Input v-if="pelicanConfig && !restrictModels" v-model="newPlan.model_id" />
             <Select v-else
               v-model="newPlan.model_id"
               :options="modelOptions"
               :placeholder="t('admin.scheduledTests.model')"
               :searchable="modelOptions.length > 5"
+              :disabled="disabled"
             />
+            <p v-if="restrictModels && newPlan.model_id && !isAllowedModel(newPlan.model_id)" class="mt-1 text-xs text-red-600">{{ t('admin.accounts.prism.modelUnavailable') }}</p>
           </div>
           <div>
             <label class="mb-1 flex items-center gap-1 text-xs font-medium text-gray-600 dark:text-gray-400">
@@ -122,7 +124,7 @@
           </button>
           <button
             @click="handleCreate"
-            :disabled="disabled || !newPlan.model_id || !newPlan.cron_expression || creating"
+            :disabled="disabled || !newPlan.model_id || !isAllowedModel(newPlan.model_id) || !newPlan.cron_expression || creating"
             class="flex items-center gap-1.5 rounded-lg bg-primary-500 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Icon v-if="creating" name="refresh" size="sm" class="animate-spin" :stroke-width="2" />
@@ -255,13 +257,15 @@
                 <label class="mb-1 block text-xs font-medium text-gray-600 dark:text-gray-400">
                   {{ t('admin.scheduledTests.model') }}
                 </label>
-                <Input v-if="pelicanConfig" v-model="editForm.model_id" />
+                <Input v-if="pelicanConfig && !restrictModels" v-model="editForm.model_id" />
                 <Select v-else
                   v-model="editForm.model_id"
                   :options="modelOptions"
                   :placeholder="t('admin.scheduledTests.model')"
                   :searchable="modelOptions.length > 5"
+                  :disabled="disabled"
                 />
+                <p v-if="restrictModels && editForm.model_id && !isAllowedModel(editForm.model_id)" class="mt-1 text-xs text-red-600">{{ t('admin.accounts.prism.modelUnavailable') }}</p>
               </div>
               <div>
                 <label class="mb-1 flex items-center gap-1 text-xs font-medium text-gray-600 dark:text-gray-400">
@@ -341,7 +345,7 @@
               </button>
               <button
                 @click="handleEdit"
-                :disabled="disabled || !editForm.model_id || !editForm.cron_expression || updating"
+                :disabled="disabled || !editForm.model_id || !isAllowedModel(editForm.model_id) || !editForm.cron_expression || updating"
                 class="flex items-center gap-1.5 rounded-lg bg-primary-500 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-primary-600 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <Icon v-if="updating" name="refresh" size="sm" class="animate-spin" :stroke-width="2" />
@@ -519,7 +523,10 @@ const props = defineProps<{
   pelicanConfig?: PelicanTestConfig
   defaultModel?: string
   disabled?: boolean
+  restrictModels?: boolean
 }>()
+
+const isAllowedModel = (model: string) => !props.restrictModels || props.modelOptions.some(option => option.value === model && !option.disabled)
 
 const emit = defineEmits<{
   (e: 'close'): void
@@ -572,6 +579,12 @@ const resetNewPlan = () => {
   newPlan.auto_recover = false
 }
 
+watch(() => [props.restrictModels, props.modelOptions, props.defaultModel], () => {
+  if (!props.restrictModels || isAllowedModel(newPlan.model_id)) return
+  newPlan.model_id = props.defaultModel && isAllowedModel(props.defaultModel)
+    ? props.defaultModel : String(props.modelOptions.find(option => !option.disabled)?.value ?? '')
+}, { deep: true, immediate: true })
+
 const loadPlans = async () => {
   if (!props.accountId) return
   const accountId = props.accountId
@@ -595,6 +608,10 @@ const loadPlans = async () => {
 const handleCreate = async () => {
   if (!props.accountId || !newPlan.model_id || !newPlan.cron_expression) return
   if (props.disabled || creating.value) return
+  if (!isAllowedModel(newPlan.model_id)) {
+    appStore.showError(t('admin.accounts.prism.modelUnavailable'))
+    return
+  }
   revision++
   creating.value = true
   try {
@@ -621,6 +638,10 @@ const handleCreate = async () => {
 
 const handleToggleEnabled = async (plan: ScheduledTestPlan, enabled: boolean) => {
   if (props.disabled) return
+  if (enabled && !isAllowedModel(plan.model_id)) {
+    appStore.showError(t('admin.accounts.prism.modelUnavailable'))
+    return
+  }
   revision++
   try {
     const updated = await adminAPI.scheduledTests.update(plan.id, { enabled })
@@ -651,6 +672,10 @@ const cancelEdit = () => {
 const handleEdit = async () => {
   if (!editingPlanId.value || !editForm.model_id || !editForm.cron_expression) return
   if (props.disabled || updating.value) return
+  if (!isAllowedModel(editForm.model_id)) {
+    appStore.showError(t('admin.accounts.prism.modelUnavailable'))
+    return
+  }
   revision++
   updating.value = true
   try {

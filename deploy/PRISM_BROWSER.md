@@ -6,8 +6,12 @@ Sentinel SDK. It does not hold or refresh OAuth refresh tokens. Sub2API remains
 the only owner of refresh-token rotation and supplies current access tokens.
 
 The old Free-Astra adapter remains available for manual sessions. The browser
-adapter discovers the current account's actual model menu; it does not promise
-Astra availability and never falls back to another model.
+adapter reads the model list Prism itself serves to the current account (the
+Statsig `prism_codex_models` config the model menu is built from); it does not
+promise Astra availability and never falls back to another model. A model that
+Prism does not list for the account (for source 32 on 2026-10-02: `gpt-5.5`,
+`gpt-5.6-luna`, `gpt-6-sol`, `gpt-6-astra`) cannot be relayed through Prism; the
+same model may still work through the OAuth account itself.
 
 ## Deployment
 
@@ -44,13 +48,38 @@ compose file and listed in `.env.prism-browser.example`):
 | `PRISM_MAX_TRANSCRIPT_CHARS` | `32000` | 1000-1000000 | Characters of earlier conversation kept per request; older entries are replaced by a note. The final user message is never cut. |
 | `PRISM_QUEUE_LIMIT` | `8` | 1-64 | Waiting requests per account. |
 | `PRISM_MAX_ACCOUNTS` | `16` | 1-256 | Provisioned source accounts. |
+| `PRISM_ACCOUNT_CONCURRENCY` | `2` | 1-4 | Independent workers per source account. Each worker has its own browser context, page and project. |
+| `PRISM_MAX_WORKERS` | `32` | 1-1024 | Global browser-context limit, including contexts initializing or closing. |
+| `PRISM_ACCOUNT_START_LIMIT` | `0` | 0-120 | Native starts per source across every worker, probe and retry. Zero disables admission pacing. |
+| `PRISM_START_WINDOW_SECONDS` | `65` | 1-3600 | Sliding admission window when a start limit is enabled. |
 
 Invalid values stop the adapter at startup.
 
-The image pins Playwright and Chromium to `1.56.1`. Each active source account
-uses a separate browser context and page, so size memory for the number of
-active accounts. `PRISM_MAX_ACCOUNTS` bounds provisioned source metadata and
-`PRISM_QUEUE_LIMIT` bounds waiting work per account.
+The image pins Playwright and Chromium to `1.56.1`. Workers share one Chromium
+process, while their contexts, pages and projects remain independent. Size
+memory for active workers. The primary worker keeps the existing metadata path;
+additional workers store metadata under `workers/<slot>/<source>.json`.
+`PRISM_MAX_ACCOUNTS` bounds provisioned source metadata and `PRISM_QUEUE_LIMIT`
+bounds waiting work per account. Sub2API synchronizes the managed account's
+concurrency to the actual ready worker count. A partially available pool can
+continue using its healthy workers.
+
+Concurrency is separate from the upstream's rate allowance. Two controlled
+production runs on source 32 accepted four native calls, then immediately
+refused subsequent calls until a later window. That deployment therefore uses
+`PRISM_ACCOUNT_START_LIMIT=4` and `PRISM_START_WINDOW_SECONDS=65`. This is an
+observed allowance for that source, not a promise about other Prism accounts.
+Admission happens before UI submission and Sentinel generation. A shared FIFO
+window includes readiness probes and the existing single resubmission attempt;
+it does not add retries. Waiting keeps the ordinary request timeout, SSE
+keepalives and disconnect cancellation. Revocation cancels pending admissions
+while preserving consumed allowance. No pacing applies by default. Queued calls
+can take longer than the upstream generation itself when this limit is enabled.
+The window records admission before UI work, with the deployment's five-second
+margin covering its measured submission overhead. It does not guarantee the
+upstream's timing under an unusually slow UI. Window state is in memory; after
+a restart, allow one configured window since the last native call before
+starting a load test or admitting another burst.
 
 ## Management API
 
@@ -61,16 +90,21 @@ Source IDs are positive decimal Sub2API account IDs.
   `expires_at` (Unix seconds), and at least one of `expected_email` or
   `expected_user_id`. Each supplied identity field must match the authenticated
   `/auth/session` identity. `expected_user_id` is a user ID, never a workspace
-  ID. Provisioning is idempotent and never calls a model. Subsequent credentials
-  for that source must resolve to the same actual Prism user ID.
+  ID. Provisioning is idempotent. Unchanged credentials refresh expiry without
+  waiting for active generations. Credential changes wait for active work, then
+  authenticate each worker and reopen previously verified projects without a
+  new model probe. Subsequent credentials for that source must resolve to the
+  same actual Prism user ID.
 - `POST /internal/accounts/:source/bootstrap` accepts `{}`. It creates a
   dedicated blank project through Prism's normal UI, or reopens the saved one,
   waits for sandbox sync and a successful native HTTP heartbeat, and discovers
-  models. Before opening the model menu it waits up to 20 seconds for Prism's
-  feature-flag client (Statsig) to finish loading, because the menu shows a
-  fallback list with a single model until then. If the menu still collapses to
-  exactly `gpt-5.6-sol` while the saved catalog was larger, it is read once more
-  after 3 seconds and that second result is accepted. Its first readiness check sends one minimal low-effort request and
+  models. It waits up to 20 seconds for Prism's feature-flag client (Statsig) to
+  finish loading and then takes the catalog from the `prism_codex_models`
+  config itself. The model menu is not used for this: its React state can stay
+  on a one-model loading fallback (`gpt-5.6-sol`) although the client already
+  holds the full list. Only if the client exposes no config is the menu read as
+  a fallback, and a menu that collapses to exactly `gpt-5.6-sol` while the saved
+  catalog was larger is read once more after 3 seconds. Its first readiness check sends one minimal low-effort request and
   requires the result `READY`. A successful project is not probed again after
   token refresh, restart, or normal background restoration.
 - A failed first probe is never replayed in the background. An explicit manual
@@ -79,9 +113,12 @@ Source IDs are positive decimal Sub2API account IDs.
   (default 240, at most 600).
 - `GET /internal/accounts/:source/status` returns `phase`, `ready`, `models`
   and optional `error_code`, `last_heartbeat_at` (Unix seconds), `project_id`.
+  It also returns `concurrency`, `pool_size`, `ready_workers` (including busy
+  workers), `busy_workers` and `queued`.
   It never returns credentials or identifying email addresses.
-- `DELETE /internal/accounts/:source/session` stops its browser context and
-  revokes the account API key. Managed project and stable identity remain, so
+- `DELETE /internal/accounts/:source/session` immediately blocks the account key,
+  cancels waiting requests and closes all its browser contexts. Managed projects
+  and stable identity remain, so
   reauthorization can recover them. It does not delete any Prism project. Sub2API
   calls it when the source OAuth account is temporarily unusable, so the user
   routes then answer `503 account_not_ready` (see below), not 401.
@@ -92,7 +129,7 @@ OAuth token, a verified project and a recent successful native heartbeat.
 There is no periodic model ping. One specific native terminal error can recover
 inside the same user-request timeout: HTTP 403, reason `unknown`, and the exact
 Prism message asking to submit the prompt again. The bridge reopens the same
-managed project, waits for native readiness, refreshes the actual model menu,
+managed project, waits for native readiness, refreshes the model catalog,
 then resubmits the unchanged request once if its model is still available.
 The first attempt emits no client tool call. Cancellation, revocation, other
 errors and readiness probes are never retried this way. A failed second attempt
@@ -133,9 +170,12 @@ the whole request into the text of one user message and emulates the rest. The
 approach follows the free-astra project (MIT; see
 `tools/prism-browser/THIRD_PARTY_NOTICES.md`).
 A normal UI send produces the SDK's authenticated request; only its input is
-replaced with that single message. Official identity, sandbox metadata, model
-selection and Sentinel proof are preserved. Each call uses a new chat tab, the
-requested catalog model and a low/medium/high reasoning effort. Each native
+replaced with that single message. Official identity, sandbox metadata and
+Sentinel proof are preserved. Each call uses a new chat tab; the native start's
+`metadata.model` and `reasoning_effort` are set to the requested catalog model
+and a low/medium/high effort, because the UI's own controls can still be on
+their loading defaults. The readiness probe uses `gpt-5.6-sol` when the catalog
+offers it. Each native
 attempt initiates one upstream start. A user call can make a second attempt only
 for the narrowly defined terminal resubmission error described above.
 
@@ -215,8 +255,12 @@ text still exceeds 256 KiB, for example one gigantic final user message or a
 very large system prompt without tools. `PRISM_BODY_LIMIT` bounds the HTTP body
 (default 8 MiB, at most 32 MiB; management requests stay at 128 KiB).
 
-Streaming keeps the connection alive with SSE comments, then sends the events
-for the completed output:
+Streaming sends Responses `response.created` / `response.in_progress` or the
+Chat role chunk as soon as the request is accepted, using one stable response
+identity. SSE comments keep the connection alive during generation. Output
+events follow when Prism completes; text and tool JSON are validated before
+publication. Writes respect client backpressure, and terminal errors use the
+appropriate streaming protocol:
 
 - Responses text: `response.created`, `response.in_progress`,
   `response.output_item.added`, `response.content_part.added`, chunked
@@ -232,15 +276,18 @@ for the completed output:
 Limitations that remain:
 
 - **No token streaming.** The answer arrives all at once when Prism finishes;
-  SSE comments only keep the connection open. Disconnects and timeouts cancel
-  queued work or invoke the native stop control; cancelled or timed-out requests
+  lifecycle events and SSE comments do not represent generated text.
+  Disconnects and timeouts cancel waiting work or invoke the native stop control
+  and destroy the active context. A closed worker needs session provisioning
+  and bootstrap before reuse; cancelled or timed-out requests
   are never replayed. The specific terminal resubmission error may trigger one
   retry within the original timeout budget.
 - **Usage is estimated.** It is a character-based estimate over the flattened
   prompt and the emitted output, marked in `usage.estimation` and
   `X-Prism-Usage: estimated`; it is unsuitable for exact billing.
-- **One request at a time per account.** Requests queue (`PRISM_QUEUE_LIMIT`)
-  and a full queue is rejected. Several clients on one account serialise.
+- **One request at a time per worker.** Requests queue (`PRISM_QUEUE_LIMIT`)
+  and a full queue is rejected. Clients on one account can overlap up to its
+  ready worker count, while any configured native start allowance is shared.
 - **Tool calls are prompt-emulated**, at most one call per turn. Parallel tool
   calls, `tool_choice` and strict schemas are not enforced, and weaker adherence
   to the JSON protocol shows up as plain text instead of a call.

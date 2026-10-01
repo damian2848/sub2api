@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import IQTestModal from '../IQTestModal.vue'
 
-const { probeOpenAICodexState } = vi.hoisted(() => ({ probeOpenAICodexState: vi.fn() }))
+const { probeOpenAICodexState, getPrismStatus } = vi.hoisted(() => ({ probeOpenAICodexState: vi.fn(), getPrismStatus: vi.fn() }))
+
+vi.mock('@/api/admin', () => ({ adminAPI: { accounts: { getPrismStatus } } }))
 
 vi.mock('@/api/admin/accounts', async () => {
   const actual = await vi.importActual<typeof import('@/api/admin/accounts')>('@/api/admin/accounts')
@@ -54,7 +56,8 @@ function mountModal(account: Record<string, unknown> = {}) {
         Input: true,
         TextArea: true,
         Select: true,
-        Icon: true
+        Icon: true,
+        ScheduledTestsPanel: true
       }
     }
   })
@@ -148,6 +151,174 @@ describe('IQTestModal', () => {
     wrapper.unmount()
   })
 
+})
+
+describe('IQTestModal Prism model catalog', () => {
+  const sol = 'gpt-5.6-sol'
+  const luna = 'gpt-6-luna'
+  const prismAccount = {
+    type: 'apikey',
+    extra: { provider_preset: 'prism_browser', prism_source_account_id: 32, prism_models: ['gpt-6-astra', sol] },
+    credentials: { model_mapping: { 'gpt-6-astra': 'gpt-6-astra' } }
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    getPrismStatus.mockReset()
+    getPrismStatus.mockResolvedValue({ ready: true, models: [sol] })
+    global.fetch = vi.fn(() => Promise.resolve(streamResponse([
+      { type: 'content', text: '21' }, { type: 'test_complete', success: true }
+    ]))) as any
+  })
+
+  afterEach(() => { vi.useRealTimers() })
+
+  it('defaults to the live Prism catalog instead of the cached account mapping or Astra', async () => {
+    const wrapper = mountModal(prismAccount)
+    expect((wrapper.vm as any).canStart).toBe(false)
+    await flushPromises()
+    expect(getPrismStatus).toHaveBeenCalledWith(42, expect.any(AbortSignal))
+    expect((wrapper.vm as any).modelId).toBe(sol)
+    expect(wrapper.getComponent('[data-testid="prism-model-select"]').props('options')).toEqual([{ value: sol, label: sol }])
+    await (wrapper.vm as any).startTest()
+    expect(JSON.parse((global.fetch as any).mock.calls[0][1].body).model_id).toBe(sol)
+    wrapper.unmount()
+  })
+
+  it('allows other catalog models and prevents a request using an unsupported selection', async () => {
+    getPrismStatus.mockResolvedValue({ ready: true, models: [sol, luna] })
+    const wrapper = mountModal(prismAccount)
+    await flushPromises()
+    ;(wrapper.vm as any).modelId = 'gpt-6-astra'
+    await (wrapper.vm as any).startTest()
+    expect(global.fetch).not.toHaveBeenCalled()
+    expect((wrapper.vm as any).canStart).toBe(false)
+    wrapper.getComponent('[data-testid="prism-model-select"]').vm.$emit('update:modelValue', luna)
+    await flushPromises()
+    await (wrapper.vm as any).startTest()
+    expect(JSON.parse((global.fetch as any).mock.calls[0][1].body).model_id).toBe(luna)
+    wrapper.unmount()
+  })
+
+  it('refreshes a changed directory and replaces a selection that is no longer offered', async () => {
+    const wrapper = mountModal(prismAccount)
+    await flushPromises()
+    getPrismStatus.mockResolvedValue({ ready: true, models: [luna] })
+    await wrapper.setProps({ account: { ...wrapper.props('account')!, extra: { ...prismAccount.extra, prism_models: [luna] } } as any })
+    await flushPromises()
+    expect(getPrismStatus).toHaveBeenCalledTimes(2)
+    expect((wrapper.vm as any).modelId).toBe(luna)
+    expect((wrapper.vm as any).prismModels).toEqual([luna])
+    wrapper.unmount()
+  })
+
+  it('refreshes while open, retains a valid choice, and pauses polling during a test', async () => {
+    getPrismStatus.mockResolvedValue({ ready: true, models: [sol, luna] })
+    const wrapper = mountModal(prismAccount)
+    await flushPromises()
+    ;(wrapper.vm as any).modelId = luna
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(getPrismStatus).toHaveBeenCalledTimes(2)
+    expect((wrapper.vm as any).modelId).toBe(luna)
+    ;(wrapper.vm as any).running = true
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(getPrismStatus).toHaveBeenCalledTimes(2)
+    ;(wrapper.vm as any).running = false
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(getPrismStatus).toHaveBeenCalledTimes(3)
+    wrapper.unmount()
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(getPrismStatus).toHaveBeenCalledTimes(3)
+  })
+
+  it('blocks generation when the live catalog fails to load', async () => {
+    getPrismStatus.mockRejectedValue(new Error('unavailable'))
+    const wrapper = mountModal(prismAccount)
+    await flushPromises()
+    expect((wrapper.vm as any).modelId).toBe('')
+    expect((wrapper.vm as any).canStart).toBe(false)
+    expect(wrapper.get('[data-testid="prism-model-error"]').text()).toContain('admin.accounts.prism.modelsLoadFailed')
+    await (wrapper.vm as any).startTest()
+    expect(global.fetch).not.toHaveBeenCalled()
+    getPrismStatus.mockResolvedValue({ ready: true, models: [sol] })
+    await wrapper.get('[data-testid="prism-model-refresh"]').trigger('click')
+    await flushPromises()
+    expect((wrapper.vm as any).modelId).toBe(sol)
+    expect((wrapper.vm as any).canStart).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('does not use cached models before the Prism connection is ready', async () => {
+    getPrismStatus.mockResolvedValue({ ready: false, models: [sol] })
+    const wrapper = mountModal(prismAccount)
+    await flushPromises()
+    expect((wrapper.vm as any).prismModels).toEqual([])
+    expect((wrapper.vm as any).canStart).toBe(false)
+    expect(wrapper.get('[data-testid="prism-model-error"]').text()).toContain('admin.accounts.prism.modelsUnavailable')
+    wrapper.unmount()
+  })
+
+  it('rejects a catalog result arriving after the account changed', async () => {
+    let resolve!: (value: unknown) => void
+    getPrismStatus.mockReturnValue(new Promise(done => { resolve = done }))
+    const wrapper = mountModal(prismAccount)
+    const signal = getPrismStatus.mock.calls[0][1] as AbortSignal
+    await wrapper.setProps({ account: { id: 43, platform: 'openai', type: 'oauth', name: 'OAuth', status: 'active' } as any })
+    expect(signal.aborted).toBe(true)
+    resolve({ ready: true, models: [luna] })
+    await flushPromises()
+    expect((wrapper.vm as any).modelId).toBe('gpt-6-astra')
+    expect((wrapper.vm as any).prismModels).toEqual([])
+    wrapper.unmount()
+  })
+
+  it('explains a native model_not_available result and reloads the catalog', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(streamResponse([{ type: 'error', error: 'model_not_available' }]))) as any
+    const wrapper = mountModal(prismAccount)
+    await flushPromises()
+    getPrismStatus.mockResolvedValue({ ready: true, models: [luna] })
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+    expect((wrapper.vm as any).runs[0].error).toBe('admin.accounts.prism.modelUnavailable')
+    expect((wrapper.vm as any).modelId).toBe(luna)
+    expect(getPrismStatus).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('passes the live catalog and restriction through to scheduled tests', async () => {
+    getPrismStatus.mockResolvedValue({ ready: true, models: [sol, luna] })
+    const wrapper = mountModal(prismAccount)
+    await flushPromises()
+    ;(wrapper.vm as any).activeTab = 'schedule'
+    await flushPromises()
+    const panel = wrapper.findComponent({ name: 'ScheduledTestsPanel' })
+    expect(panel.props('restrictModels')).toBe(true)
+    expect(panel.props('defaultModel')).toBe(sol)
+    expect(panel.props('modelOptions')).toEqual([{ value: sol, label: sol }, { value: luna, label: luna }])
+    wrapper.unmount()
+  })
+
+  it('keeps the historical model snapshot while using a current model for another test', async () => {
+    const wrapper = mountModal(prismAccount)
+    await flushPromises()
+    ;(wrapper.vm as any).loadRecord({ id: 'old', createdAt: new Date().toISOString(), questionKind: 'candy',
+      prompt: 'candy question', modelId: 'gpt-6-astra', reasoningEffort: 'medium',
+      runs: [{ id: 'old-output', status: 'success', output: '21', error: '', html: '' }] })
+    expect((wrapper.vm as any).modelId).toBe(sol)
+    expect((wrapper.vm as any).runs[0].modelId).toBe('gpt-6-astra')
+    await (wrapper.vm as any).startTest()
+    expect(JSON.parse((global.fetch as any).mock.calls[0][1].body).model_id).toBe(sol)
+    wrapper.unmount()
+  })
+
+  it('keeps the original free model input and Astra default for an OAuth account', async () => {
+    const wrapper = mountModal()
+    await flushPromises()
+    expect(getPrismStatus).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="prism-model-select"]').exists()).toBe(false)
+    expect((wrapper.vm as any).modelId).toBe('gpt-6-astra')
+    wrapper.unmount()
+  })
 })
 
 
