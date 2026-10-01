@@ -19,8 +19,8 @@ vi.mock('vue-i18n', async () => ({
   useI18n: () => ({ t: (key: string, named?: Record<string, unknown>) => (named ? `${key} ${JSON.stringify(named)}` : key) }),
 }))
 
-const item = (id: number, groupId: number): PelicanShowcaseItem => ({
-  id, group_id: groupId, model_id: 'gpt-6-astra', reasoning_effort: 'high', latency_ms: 42300,
+const item = (id: number, groupId: number, modelId = 'gpt-6-astra'): PelicanShowcaseItem => ({
+  id, group_id: groupId, model_id: modelId, reasoning_effort: 'high', latency_ms: 42300,
   generated_at: '2026-09-24T08:30:00Z',
 })
 const showcase = (overrides: Partial<ShowcaseData> = {}): ShowcaseData => ({
@@ -28,12 +28,21 @@ const showcase = (overrides: Partial<ShowcaseData> = {}): ShowcaseData => ({
   max_items: 20,
   retention_days: 7,
   groups: [
-    { id: 1, name: 'Claude Max', platform: 'anthropic', items: Array.from({ length: 10 }, (_, i) => item(100 + i, 1)) },
+    { id: 1, name: 'Claude Max', platform: 'anthropic', items: Array.from({ length: 10 }, (_, i) => item(100 + i, 1, i === 9 ? 'gpt-6-sol' : 'gpt-6-astra')) },
     { id: 2, name: 'GPT Plus', platform: 'openai', items: [item(200, 2)] },
     { id: 3, name: 'Empty', platform: 'gemini', items: [] },
   ],
   ...overrides,
 })
+const modelShowcase = (ids: number[]) => showcase({
+  groups: [{ id: 1, name: 'GPT Plus', platform: 'openai', items: ids.map((id) => item(id, 1)) }],
+})
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((accept) => { resolve = accept })
+  return { promise, resolve }
+}
 
 const mountView = () => mount(PelicanShowcaseView, {
   global: {
@@ -75,6 +84,7 @@ let wrapper: ReturnType<typeof mountView>
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   vi.stubGlobal('IntersectionObserver', OnScreenObserver)
+  vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
   getShowcase.mockReset()
   getShowcaseItem.mockReset().mockImplementation(async (id: number) => ({
     ...item(id, 0),
@@ -87,6 +97,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   wrapper?.unmount()
+  vi.restoreAllMocks()
   vi.unstubAllGlobals()
   vi.useRealTimers()
 })
@@ -113,26 +124,34 @@ describe('PelicanShowcaseView', () => {
     ])
     expect(wrapper.get('[data-testid="showcase-group-3"]').text()).toContain('pelicanShowcase.groupEmpty')
 
-    // Every item of a group sits in its row, in the order received (newest first); no paging.
+    // Each model gets one card; its newest result is shown first.
     const firstRow = wrapper.get('[data-testid="showcase-group-1"] [data-testid="pelican-showcase-row"]')
     expect(firstRow.findAll('iframe').map((frame) => frame.attributes('srcdoc').match(/data-item="(\d+)"/)?.[1]))
-      .toEqual(Array.from({ length: 10 }, (_, i) => String(100 + i)))
+      .toEqual(['108', '109'])
     expect(wrapper.find('[data-testid="showcase-group-3"] [data-testid="pelican-showcase-row"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="showcase-group-1"] [role="scrollbar"]').attributes('aria-label'))
       .toBe('pelicanShowcase.scrollLabel {"group":"Claude Max"}')
 
     const cards = wrapper.findAll('[data-testid="pelican-showcase-card"]')
-    expect(cards).toHaveLength(11)
+    expect(cards).toHaveLength(3)
     expect(cards[0].classes()).toContain('shrink-0')
-    expect(getShowcaseItem).toHaveBeenCalledTimes(11)
+    expect(getShowcaseItem).toHaveBeenCalledTimes(3)
     const frame = cards[0].get('iframe')
     expect(frame.attributes('sandbox')).toBe('allow-scripts')
     expect(frame.attributes('referrerpolicy')).toBe('no-referrer')
     expect(frame.attributes('srcdoc')).toContain('Content-Security-Policy')
-    expect(frame.attributes('srcdoc')).toContain('data-item="100"')
+    expect(frame.attributes('srcdoc')).toContain('data-item="108"')
     expect(cards[0].text()).toContain('gpt-6-astra')
     expect(cards[0].text()).toContain('"seconds":"42.3"')
     expect(cards[0].text()).toContain('pelicanShowcase.efforts.high')
+    expect(cards[0].get('[data-testid="pelican-showcase-history-prev"]').attributes('disabled')).toBeUndefined()
+    expect(cards[0].get('[data-testid="pelican-showcase-history-next"]').attributes('disabled')).toBeDefined()
+    await cards[0].get('[data-testid="pelican-showcase-history-prev"]').trigger('click')
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(250)
+    await flushPromises()
+    expect(cards[0].text()).toContain('pelicanShowcase.historyPosition {"current":2,"total":9}')
+    expect(cards[0].get('iframe').attributes('srcdoc')).toContain('data-item="107"')
 
     await wrapper.get('[data-testid="showcase-tab-2"]').trigger('click')
     expect(wrapper.find('[data-testid="showcase-group-1"]').exists()).toBe(false)
@@ -144,13 +163,13 @@ describe('PelicanShowcaseView', () => {
     getShowcase.mockResolvedValue(showcase())
     wrapper = mountView()
     await settle()
-    expect(wrapper.findAll('[data-testid="pelican-showcase-card"]')).toHaveLength(11)
+    expect(wrapper.findAll('[data-testid="pelican-showcase-card"]')).toHaveLength(3)
     expect(getShowcaseItem).not.toHaveBeenCalled()
   })
 
   it('shows a readable state for output without HTML and for failed loads', async () => {
     getShowcase.mockResolvedValue(showcase({
-      groups: [{ id: 2, name: 'GPT Plus', platform: 'openai', items: [item(201, 2), item(202, 2)] }],
+      groups: [{ id: 2, name: 'GPT Plus', platform: 'openai', items: [item(201, 2, 'gpt-6-astra'), item(202, 2, 'gpt-6-sol')] }],
     }))
     getShowcaseItem.mockImplementation(async (id: number) => {
       if (id === 202) throw new Error('boom')
@@ -176,7 +195,7 @@ describe('PelicanShowcaseView', () => {
     wrapper = mountView()
     await settle()
 
-    await wrapper.get('[data-testid="showcase-group-2"] [data-testid="pelican-showcase-card"] button').trigger('click')
+    await wrapper.get('[data-testid="showcase-group-2"] [data-testid="pelican-showcase-open"]').trigger('click')
     await flushPromises()
     const dialog = wrapper.get('[data-testid="showcase-preview"]')
     expect(dialog.get('iframe').attributes('srcdoc')).toContain('data-item="200"')
@@ -185,12 +204,14 @@ describe('PelicanShowcaseView', () => {
     await dialog.get('[data-testid="showcase-preview-actual"]').trigger('click')
     expect(dialog.get('[data-testid="showcase-preview-actual"]').attributes('aria-pressed')).toBe('true')
     expect(wrapper.find('[data-testid="showcase-remove"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid="pelican-showcase-card"] iframe')).toHaveLength(0)
+    expect(getShowcaseItem).toHaveBeenCalledTimes(3)
     wrapper.unmount()
 
     auth.isAdmin = true
     wrapper = mountView()
     await settle()
-    await wrapper.get('[data-testid="showcase-group-2"] [data-testid="pelican-showcase-card"] button').trigger('click')
+    await wrapper.get('[data-testid="showcase-group-2"] [data-testid="pelican-showcase-open"]').trigger('click')
     await wrapper.get('[data-testid="showcase-remove"]').trigger('click')
     await wrapper.get('.confirm-yes').trigger('click')
     await flushPromises()
@@ -198,5 +219,215 @@ describe('PelicanShowcaseView', () => {
     expect(showSuccess).toHaveBeenCalledWith('pelicanShowcase.removed')
     expect(wrapper.find('[data-testid="showcase-preview"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="showcase-group-2"]').text()).toContain('pelicanShowcase.groupEmpty')
+  })
+
+  it('keeps history navigation within its boundaries and reuses a revisited result', async () => {
+    getShowcase.mockResolvedValue(modelShowcase([3, 2, 1]))
+    wrapper = mountView()
+    await settle()
+    const card = wrapper.get('[data-testid="pelican-showcase-card"]')
+    const previous = () => card.get('[data-testid="pelican-showcase-history-prev"]')
+    const next = () => card.get('[data-testid="pelican-showcase-history-next"]')
+    expect(card.attributes('data-result-id')).toBe('3')
+    expect(next().attributes('disabled')).toBeDefined()
+
+    await previous().trigger('click')
+    await flushPromises()
+    expect(card.attributes('data-result-id')).toBe('2')
+    await next().trigger('click')
+    await flushPromises()
+    expect(card.get('iframe').attributes('srcdoc')).toContain('data-item="3"')
+    expect(getShowcaseItem).toHaveBeenCalledTimes(2)
+    await previous().trigger('click')
+    await flushPromises()
+    expect(getShowcaseItem).toHaveBeenCalledTimes(2)
+
+    await previous().trigger('click')
+    await flushPromises()
+    expect(card.attributes('data-result-id')).toBe('1')
+    expect(previous().attributes('disabled')).toBeDefined()
+    await previous().trigger('click')
+    expect(card.attributes('data-result-id')).toBe('1')
+    expect(wrapper.findAll('iframe')).toHaveLength(1)
+  })
+
+  it('selects the newest result after refresh, even when browsing an older result', async () => {
+    getShowcase.mockResolvedValueOnce(modelShowcase([3, 2, 1])).mockResolvedValue(modelShowcase([4, 3, 2, 1]))
+    wrapper = mountView()
+    await settle()
+    const card = wrapper.get('[data-testid="pelican-showcase-card"]')
+    await card.get('[data-testid="pelican-showcase-history-prev"]').trigger('click')
+    await flushPromises()
+    expect(card.attributes('data-result-id')).toBe('2')
+
+    await wrapper.get('button[aria-label="common.refresh"]').trigger('click')
+    await flushPromises()
+    expect(card.attributes('data-result-id')).toBe('4')
+    expect(card.get('iframe').attributes('srcdoc')).toContain('data-item="4"')
+    expect(card.get('[data-testid="pelican-showcase-history-next"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('moves to a newer result on the first click after deleting the oldest result', async () => {
+    auth.isAdmin = true
+    getShowcase.mockResolvedValue(modelShowcase([3, 2, 1]))
+    wrapper = mountView()
+    await settle()
+    const card = wrapper.get('[data-testid="pelican-showcase-card"]')
+    await card.get('[data-testid="pelican-showcase-history-prev"]').trigger('click')
+    await flushPromises()
+    await card.get('[data-testid="pelican-showcase-history-prev"]').trigger('click')
+    await flushPromises()
+    expect(card.attributes('data-result-id')).toBe('1')
+    await card.get('[data-testid="pelican-showcase-open"]').trigger('click')
+    await wrapper.get('[data-testid="showcase-remove"]').trigger('click')
+    await wrapper.get('.confirm-yes').trigger('click')
+    await flushPromises()
+    expect(removeShowcaseItem).toHaveBeenCalledWith(1)
+    expect(card.attributes('data-result-id')).toBe('2')
+
+    await card.get('[data-testid="pelican-showcase-history-next"]').trigger('click')
+    await flushPromises()
+    expect(card.attributes('data-result-id')).toBe('3')
+    expect(card.get('iframe').attributes('srcdoc')).toContain('data-item="3"')
+  })
+
+  it('removes a previewed result from the current gallery when refresh finishes while the preview is open', async () => {
+    auth.isAdmin = true
+    const refreshed = deferred<ShowcaseData>()
+    getShowcase.mockResolvedValueOnce(modelShowcase([3, 2, 1])).mockReturnValueOnce(refreshed.promise)
+    wrapper = mountView()
+    await settle()
+    await wrapper.get('button[aria-label="common.refresh"]').trigger('click')
+    await wrapper.get('[data-testid="pelican-showcase-open"]').trigger('click')
+    refreshed.resolve(modelShowcase([4, 3, 2, 1]))
+    await flushPromises()
+    expect(wrapper.get('[data-testid="showcase-preview"] iframe').attributes('srcdoc')).toContain('data-item="3"')
+    await wrapper.get('[data-testid="showcase-remove"]').trigger('click')
+    await wrapper.get('.confirm-yes').trigger('click')
+    await flushPromises()
+    expect(removeShowcaseItem).toHaveBeenCalledWith(3)
+    const card = wrapper.get('[data-testid="pelican-showcase-card"]')
+    expect(card.attributes('data-result-id')).toBe('4')
+    await card.get('[data-testid="pelican-showcase-history-prev"]').trigger('click')
+    await flushPromises()
+    expect(card.attributes('data-result-id')).toBe('2')
+    expect(card.text()).toContain('pelicanShowcase.historyPosition {"current":2,"total":3}')
+  })
+
+  it('does not restore a deleted result when an earlier refresh responds after removal', async () => {
+    auth.isAdmin = true
+    const refreshed = deferred<ShowcaseData>()
+    getShowcase.mockResolvedValueOnce(modelShowcase([3, 2, 1])).mockReturnValueOnce(refreshed.promise)
+    wrapper = mountView()
+    await settle()
+    await wrapper.get('button[aria-label="common.refresh"]').trigger('click')
+    const refreshSignal = getShowcase.mock.calls[1][0].signal as AbortSignal
+    await wrapper.get('[data-testid="pelican-showcase-open"]').trigger('click')
+    await wrapper.get('[data-testid="showcase-remove"]').trigger('click')
+    await wrapper.get('.confirm-yes').trigger('click')
+    await flushPromises()
+    expect(removeShowcaseItem).toHaveBeenCalledWith(3)
+    expect(refreshSignal.aborted).toBe(true)
+    expect(wrapper.get('[data-testid="pelican-showcase-card"]').attributes('data-result-id')).toBe('2')
+
+    refreshed.resolve(modelShowcase([3, 2, 1]))
+    await flushPromises()
+    const card = wrapper.get('[data-testid="pelican-showcase-card"]')
+    expect(card.attributes('data-result-id')).toBe('2')
+    expect(card.get('iframe').attributes('srcdoc')).toContain('data-item="2"')
+    expect(card.text()).toContain('pelicanShowcase.historyPosition {"current":1,"total":2}')
+    await card.get('[data-testid="pelican-showcase-history-prev"]').trigger('click')
+    await flushPromises()
+    expect(card.attributes('data-result-id')).toBe('1')
+    expect(getShowcaseItem.mock.calls.map(([id]) => id)).toEqual([3, 2, 1])
+  })
+
+  it('aborts in-flight body requests when the view unmounts', async () => {
+    const pending = deferred<PelicanShowcaseItem>()
+    getShowcase.mockResolvedValue(modelShowcase([1]))
+    getShowcaseItem.mockReturnValue(pending.promise)
+    wrapper = mountView()
+    await settle()
+    const signal = getShowcaseItem.mock.calls[0][1].signal as AbortSignal
+    expect(signal.aborted).toBe(false)
+    wrapper.unmount()
+    expect(signal.aborted).toBe(true)
+    pending.resolve({ ...item(1, 1), response_text: '<svg></svg>' })
+    await flushPromises()
+    expect(showError).not.toHaveBeenCalled()
+  })
+
+  it('aborts an obsolete result when refresh replaces it and ignores its late response', async () => {
+    const obsolete = deferred<PelicanShowcaseItem>()
+    getShowcase.mockResolvedValueOnce(modelShowcase([1])).mockResolvedValue(modelShowcase([2]))
+    getShowcaseItem.mockImplementation((id: number) => id === 1
+      ? obsolete.promise
+      : Promise.resolve({ ...item(id, 1), response_text: `<svg data-item="${id}"></svg>` }))
+    wrapper = mountView()
+    await settle()
+    const signal = getShowcaseItem.mock.calls[0][1].signal as AbortSignal
+    await wrapper.get('button[aria-label="common.refresh"]').trigger('click')
+    await flushPromises()
+    expect(signal.aborted).toBe(true)
+    const card = wrapper.get('[data-testid="pelican-showcase-card"]')
+    expect(card.get('iframe').attributes('srcdoc')).toContain('data-item="2"')
+    obsolete.resolve({ ...item(1, 1), response_text: '<svg data-item="1"></svg>' })
+    await flushPromises()
+    expect(card.attributes('data-result-id')).toBe('2')
+    expect(card.get('iframe').attributes('srcdoc')).toContain('data-item="2"')
+    expect(getShowcaseItem).toHaveBeenCalledTimes(2)
+  })
+
+  it('reloads a rapidly revisited result after its canceled request settles without displaying the stale response', async () => {
+    const canceled = deferred<PelicanShowcaseItem>()
+    const replacement = deferred<PelicanShowcaseItem>()
+    let olderRequests = 0
+    getShowcase.mockResolvedValue(modelShowcase([3, 2]))
+    getShowcaseItem.mockImplementation((id: number) => {
+      if (id === 2) return olderRequests++ === 0 ? canceled.promise : replacement.promise
+      return Promise.resolve({ ...item(id, 1), response_text: `<svg data-item="${id}"></svg>` })
+    })
+    wrapper = mountView()
+    await settle()
+    const card = wrapper.get('[data-testid="pelican-showcase-card"]')
+    await card.get('[data-testid="pelican-showcase-history-prev"]').trigger('click')
+    await flushPromises()
+    const canceledSignal = getShowcaseItem.mock.calls[1][1].signal as AbortSignal
+    expect(canceledSignal.aborted).toBe(false)
+
+    await card.get('[data-testid="pelican-showcase-history-next"]').trigger('click')
+    await flushPromises()
+    expect(canceledSignal.aborted).toBe(true)
+    expect(card.get('iframe').attributes('srcdoc')).toContain('data-item="3"')
+    await card.get('[data-testid="pelican-showcase-history-prev"]').trigger('click')
+    await flushPromises()
+    expect(card.attributes('data-result-id')).toBe('2')
+    expect(getShowcaseItem.mock.calls.map(([id]) => id)).toEqual([3, 2])
+
+    canceled.resolve({ ...item(2, 1), response_text: '<svg data-item="2" data-response="stale"></svg>' })
+    await flushPromises()
+    expect(getShowcaseItem.mock.calls.map(([id]) => id)).toEqual([3, 2, 2])
+    expect(card.find('iframe').exists()).toBe(false)
+    expect((getShowcaseItem.mock.calls[2][1].signal as AbortSignal).aborted).toBe(false)
+    replacement.resolve({ ...item(2, 1), response_text: '<svg data-item="2" data-response="fresh"></svg>' })
+    await flushPromises()
+    const document = card.get('iframe').attributes('srcdoc')
+    expect(document).toContain('data-response="fresh"')
+    expect(document).not.toContain('data-response="stale"')
+  })
+
+  it('renders and fetches one result per model when many historical results exist', async () => {
+    getShowcase.mockResolvedValue(showcase({
+      groups: [{
+        id: 1, name: 'GPT Plus', platform: 'openai',
+        items: Array.from({ length: 100 }, (_, index) => item(index + 1, 1, index % 2 ? 'gpt-6-astra' : 'gpt-6-sol')),
+      }],
+    }))
+    wrapper = mountView()
+    await settle()
+    expect(wrapper.findAll('[data-testid="pelican-showcase-card"]')).toHaveLength(2)
+    expect(wrapper.findAll('iframe')).toHaveLength(2)
+    expect(getShowcaseItem).toHaveBeenCalledTimes(2)
+    expect(getShowcaseItem.mock.calls.map(([id]) => id)).toEqual([99, 100])
   })
 })

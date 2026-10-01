@@ -86,47 +86,53 @@
 
       <!-- One section per showcased group -->
       <section
-        v-for="group in shownGroups"
-        :key="group.id"
+        v-for="groupView in shownModelGroups"
+        :key="groupView.group.id"
         class="space-y-4"
-        :data-testid="`showcase-group-${group.id}`"
+        :data-testid="`showcase-group-${groupView.group.id}`"
       >
         <header class="flex min-w-0 items-center gap-3">
           <span
             class="grid h-9 w-9 flex-shrink-0 place-items-center rounded-xl ring-1 ring-black/5 dark:ring-white/10"
-            :class="platformBadgeLightClass(group.platform)"
+            :class="platformBadgeLightClass(groupView.group.platform)"
           >
-            <PlatformIcon :platform="group.platform as GroupPlatform" size="sm" />
+            <PlatformIcon :platform="groupView.group.platform as GroupPlatform" size="sm" />
           </span>
           <div class="min-w-0">
-            <h2 class="truncate text-base font-semibold text-gray-900 dark:text-white">{{ group.name }}</h2>
+            <h2 class="truncate text-base font-semibold text-gray-900 dark:text-white">{{ groupView.group.name }}</h2>
             <p class="text-xs text-gray-500 dark:text-gray-400">
-              {{ platformLabel(group.platform) }}
-              · {{ t('pelicanShowcase.itemCount', { count: group.items.length }) }}
-              <template v-if="group.items.length">
-                · {{ t('pelicanShowcase.latestAt', { time: formatRelativeTime(group.items[0].generated_at) }) }}
+              {{ platformLabel(groupView.group.platform) }}
+              · {{ t('pelicanShowcase.modelCount', { count: groupView.models.length }) }}
+              · {{ t('pelicanShowcase.itemCount', { count: groupView.group.items.length }) }}
+              <template v-if="groupView.group.items.length">
+                · {{ t('pelicanShowcase.latestAt', { time: formatRelativeTime(groupView.group.items[0].generated_at) }) }}
               </template>
             </p>
           </div>
         </header>
 
         <div
-          v-if="!group.items.length"
+          v-if="!groupView.group.items.length"
           class="rounded-2xl border border-dashed border-gray-300 px-4 py-10 text-center text-sm text-gray-500 dark:border-dark-600 dark:text-gray-400"
         >
           {{ t('pelicanShowcase.groupEmpty') }}
         </div>
-        <!-- Items arrive newest first, so the newest card is on the left and older ones continue to the right. -->
-        <PelicanShowcaseRow v-else :label="t('pelicanShowcase.scrollLabel', { group: group.name })">
+        <!-- One card per model keeps the group compact; each card switches its own history. -->
+        <PelicanShowcaseRow v-else :label="t('pelicanShowcase.scrollLabel', { group: groupView.group.name })">
           <PelicanShowcaseCard
-            v-for="item in group.items"
-            :key="item.id"
+            v-for="model in groupView.models"
+            :key="model.key"
             :class="CARD_WIDTH"
-            :item="item"
-            :group-name="group.name"
-            :body="bodies[item.id]"
-            @visible="requestBody(item.id)"
-            @open="openPreview(group, item)"
+            :item="model.item"
+            :history="model.items"
+            :history-index="model.index"
+            :group-name="groupView.group.name"
+            :body="bodies[model.item.id]"
+            :suspended="preview !== null"
+            @visibility="setCardVisibility(model.key, model.item.id, $event)"
+            @previous="changeHistory(model, 1)"
+            @next="changeHistory(model, -1)"
+            @open="openPreview(groupView.group, model.item)"
           />
         </PelicanShowcaseRow>
       </section>
@@ -169,7 +175,7 @@
         </div>
         <div class="min-h-0 flex-1 overflow-hidden rounded-xl border border-gray-200 bg-gray-100 dark:border-dark-700 dark:bg-dark-900" data-testid="showcase-preview-stage">
           <PelicanArtworkPreview
-            v-if="previewBody?.status === 'ready'"
+            v-if="pageVisible && previewBody?.status === 'ready'"
             :html="previewBody.html"
             :mode="previewMode"
             :title="previewTitle"
@@ -229,6 +235,7 @@ import {
   pelicanEffortLabel,
   type PelicanBody,
 } from '@/components/user/pelican/pelicanShowcaseFormat'
+import { groupPelicanItemsByModel, type PelicanModelHistory } from '@/components/user/pelican/pelicanShowcaseHistory'
 import {
   getShowcase,
   getShowcaseItem,
@@ -246,6 +253,8 @@ import { extractPelicanHtml } from '@/utils/pelicanHtml'
 import { platformBadgeLightClass, platformLabel } from '@/utils/platformColors'
 
 const MAX_CONCURRENT_BODIES = 4
+const MAX_CACHED_BODIES = 24
+const MAX_CACHE_CHARACTERS = 4_000_000
 // Use 70% of the former width at every breakpoint; artwork keeps its 4:3 ratio.
 const CARD_WIDTH = 'w-[59.5%] shrink-0 sm:w-[calc((100%-1.25rem)/2*0.7)] lg:w-[calc((100%-2.5rem)/3*0.7)] 2xl:w-[calc((100%-3.75rem)/4*0.7)]'
 
@@ -260,24 +269,40 @@ const view = ref<PelicanShowcaseView | null>(null)
 const loading = ref(false)
 const activeGroup = ref<TabKey>('all')
 const bodies = reactive<Record<number, PelicanBody>>({})
+const historyIndexes = reactive<Record<string, number>>({})
 const preview = ref<{ group: PelicanShowcaseGroup; item: PelicanShowcaseItem } | null>(null)
 const previewMode = ref<'fit' | 'actual'>('fit')
 const confirmingRemove = ref(false)
 const removing = ref(false)
+const pageVisible = ref(!document.hidden)
 
 let alive = true
 let loadController: AbortController | null = null
 const bodyQueue: number[] = []
-let bodiesInFlight = 0
+const bodyControllers = new Map<number, AbortController>()
+const visibleCards = new Map<string, number>()
+const bodyCache = new Map<number, number>()
+let currentItemIds = new Set<number>()
 
 const groups = computed(() => (view.value?.enabled ? view.value.groups : []))
 const tabs = computed(() => [
   { key: 'all' as TabKey, label: t('pelicanShowcase.allGroups'), count: undefined as number | undefined },
   ...groups.value.map((group) => ({ key: group.id as TabKey, label: group.name, count: group.items.length })),
 ])
-const shownGroups = computed(() =>
-  activeGroup.value === 'all' ? groups.value : groups.value.filter((group) => group.id === activeGroup.value)
-)
+const modelHistoryGroups = computed(() => groups.value.map((group) => ({
+  group,
+  models: groupPelicanItemsByModel(group),
+})))
+const shownModelHistoryGroups = computed(() => activeGroup.value === 'all'
+  ? modelHistoryGroups.value
+  : modelHistoryGroups.value.filter(({ group }) => group.id === activeGroup.value))
+const shownModelGroups = computed(() => shownModelHistoryGroups.value.map(({ group, models }) => ({
+  group,
+  models: models.map((history) => {
+    const index = Math.min(historyIndexes[history.key] ?? 0, Math.max(0, history.items.length - 1))
+    return { ...history, index, item: history.items[index] }
+  }),
+})))
 const previewBody = computed(() => (preview.value ? bodies[preview.value.item.id] : undefined))
 const previewTitle = computed(() =>
   preview.value
@@ -291,30 +316,105 @@ watch(groups, (list) => {
   if (activeGroup.value !== 'all' && !list.some((group) => group.id === activeGroup.value)) activeGroup.value = 'all'
 })
 
+watch(modelHistoryGroups, (list) => {
+  const keys = new Set(list.flatMap((group) => group.models.map((model) => model.key)))
+  for (const key of Object.keys(historyIndexes)) {
+    if (!keys.has(key)) delete historyIndexes[key]
+  }
+}, { flush: 'post' })
+
 function requestBody(id: number) {
-  if (bodies[id]) return
+  if (!alive || !pageVisible.value || !currentItemIds.has(id)) return
+  if (bodies[id]) {
+    if (bodyCache.has(id)) {
+      const size = bodyCache.get(id)!
+      bodyCache.delete(id)
+      bodyCache.set(id, size)
+    }
+    return
+  }
+  // A cancelled request may still be settling. Its finalizer will restart it
+  // if this result becomes visible again before cancellation completes.
+  if (bodyControllers.has(id)) return
   bodies[id] = { status: 'loading', html: '' }
-  bodyQueue.push(id)
+  bodyQueue.unshift(id)
   pumpBodies()
 }
 
 function pumpBodies() {
-  while (alive && bodiesInFlight < MAX_CONCURRENT_BODIES && bodyQueue.length) {
+  while (alive && bodyControllers.size < MAX_CONCURRENT_BODIES && bodyQueue.length) {
     const id = bodyQueue.shift()!
-    bodiesInFlight++
-    getShowcaseItem(id)
+    const controller = new AbortController()
+    bodyControllers.set(id, controller)
+    getShowcaseItem(id, { signal: controller.signal })
       .then((item) => {
+        if (!alive || controller.signal.aborted || !currentItemIds.has(id)) return
         const html = extractPelicanHtml(item.response_text || '')
-        if (alive) bodies[id] = html ? { status: 'ready', html } : { status: 'invalid', html: '' }
+        bodies[id] = html ? { status: 'ready', html } : { status: 'invalid', html: '' }
+        bodyCache.set(id, html.length)
+        pruneBodyCache()
       })
       .catch(() => {
-        if (alive) bodies[id] = { status: 'error', html: '' }
+        if (alive && !controller.signal.aborted && currentItemIds.has(id)) {
+          bodies[id] = { status: 'error', html: '' }
+          bodyCache.set(id, 0)
+          pruneBodyCache()
+        }
       })
       .finally(() => {
-        bodiesInFlight--
+        bodyControllers.delete(id)
+        if (alive && controller.signal.aborted && wantedBodyIds().has(id)) requestBody(id)
         pumpBodies()
       })
   }
+}
+
+function wantedBodyIds() {
+  const ids = new Set(pageVisible.value ? visibleCards.values() : [])
+  if (pageVisible.value && preview.value) ids.add(preview.value.item.id)
+  return ids
+}
+
+function pruneBodyWork() {
+  const wanted = wantedBodyIds()
+  for (let i = bodyQueue.length - 1; i >= 0; i--) {
+    const id = bodyQueue[i]
+    if (wanted.has(id) && currentItemIds.has(id)) continue
+    bodyQueue.splice(i, 1)
+    delete bodies[id]
+  }
+  for (const [id, controller] of bodyControllers) {
+    if (wanted.has(id) && currentItemIds.has(id)) continue
+    controller.abort()
+    if (bodies[id]?.status === 'loading') delete bodies[id]
+  }
+}
+
+function pruneBodyCache() {
+  const wanted = wantedBodyIds()
+  let characters = Array.from(bodyCache.values()).reduce((sum, size) => sum + size, 0)
+  for (const [id, size] of bodyCache) {
+    if (bodyCache.size <= MAX_CACHED_BODIES && characters <= MAX_CACHE_CHARACTERS) break
+    if (wanted.has(id)) continue
+    delete bodies[id]
+    bodyCache.delete(id)
+    characters -= size
+  }
+}
+
+function setCardVisibility(key: string, id: number, visible: boolean) {
+  if (visible) visibleCards.set(key, id)
+  else visibleCards.delete(key)
+  pruneBodyWork()
+  if (visible) requestBody(id)
+  pruneBodyCache()
+}
+
+function changeHistory(model: PelicanModelHistory & { index: number }, delta: number) {
+  const current = model.index
+  const next = Math.min(model.items.length - 1, Math.max(0, current + delta))
+  if (next === current) return
+  historyIndexes[model.key] = next
 }
 
 async function load() {
@@ -325,17 +425,28 @@ async function load() {
   try {
     const next = await getShowcase({ signal: controller.signal })
     if (!alive || controller.signal.aborted) return
-    // Keep loaded HTML of items still shown. Failed ones are fetched again right away:
-    // their cards were on screen already and will not report visibility a second time.
     const kept = new Set(next.groups.flatMap((group) => group.items.map((item) => item.id)))
+    currentItemIds = kept
     const retry: number[] = []
     for (const key of Object.keys(bodies)) {
       const id = Number(key)
       if (kept.has(id) && bodies[id].status === 'error') retry.push(id)
-      if (!kept.has(id) || bodies[id].status === 'error') delete bodies[id]
+      if (!kept.has(id) || bodies[id].status === 'error') {
+        delete bodies[id]
+        bodyCache.delete(id)
+      }
     }
+    for (const key of Object.keys(historyIndexes)) delete historyIndexes[key]
     view.value = next
-    retry.forEach(requestBody)
+    if (preview.value) {
+      const group = next.groups.find((group) => group.id === preview.value?.group.id)
+      const item = group?.items.find((item) => item.id === preview.value?.item.id)
+      if (next.enabled && group && item) preview.value = { group, item }
+      else closePreview()
+    }
+    pruneBodyWork()
+    const wanted = wantedBodyIds()
+    retry.filter((id) => wanted.has(id)).forEach(requestBody)
   } catch (err: unknown) {
     const e = err as { name?: string; code?: string }
     if (e?.name === 'AbortError' || e?.code === 'ERR_CANCELED') return
@@ -366,8 +477,14 @@ async function removeItem() {
   removing.value = true
   try {
     await removeShowcaseItem(target.item.id)
-    target.group.items = target.group.items.filter((item) => item.id !== target.item.id)
+    // A refresh started before the deletion may still contain this result.
+    loadController?.abort()
+    const group = view.value?.groups.find((group) => group.id === target.group.id)
+    if (group) group.items = group.items.filter((item) => item.id !== target.item.id)
+    currentItemIds.delete(target.item.id)
     delete bodies[target.item.id]
+    bodyCache.delete(target.item.id)
+    pruneBodyWork()
     closePreview()
     appStore.showSuccess(t('pelicanShowcase.removed'))
   } catch (err: unknown) {
@@ -377,9 +494,22 @@ async function removeItem() {
   }
 }
 
-onMounted(load)
+function updatePageVisibility() {
+  pageVisible.value = !document.hidden
+  pruneBodyWork()
+  if (pageVisible.value && preview.value) requestBody(preview.value.item.id)
+}
+
+onMounted(() => {
+  document.addEventListener('visibilitychange', updatePageVisibility)
+  load()
+})
 onBeforeUnmount(() => {
   alive = false
   loadController?.abort()
+  bodyControllers.forEach((controller) => controller.abort())
+  bodyQueue.length = 0
+  document.removeEventListener('visibilitychange', updatePageVisibility)
+  currentItemIds = new Set()
 })
 </script>
