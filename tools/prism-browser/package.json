@@ -1,0 +1,9 @@
+{
+  "name": "sub2api-prism-browser",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": { "start": "node src/server.mjs", "test": "node --test test/*.test.mjs" },
+  "dependencies": { "playwright": "1.56.1" }
+}

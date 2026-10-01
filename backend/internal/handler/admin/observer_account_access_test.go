@@ -34,6 +34,9 @@ func TestObserverGuardRejectsWholeUnauthorizedBatch(t *testing.T) {
 		2: {ID: 2, GroupIDs: []int64{20}},
 		3: {ID: 3, GroupIDs: []int64{10, 20}},
 		4: {ID: 4},
+		5: {ID: 5, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, GroupIDs: []int64{10}, Extra: map[string]any{"provider_preset": service.PrismProviderPreset, service.PrismSourceAccountKey: int64(2)}},
+		6: {ID: 6, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, GroupIDs: []int64{10}, Extra: map[string]any{"provider_preset": service.PrismProviderPreset, service.PrismSourceAccountKey: int64(1)}},
+		7: {ID: 7, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey, GroupIDs: []int64{10}, Extra: map[string]any{"provider_preset": service.PrismProviderPreset, service.PrismSourceAccountKey: int64(99)}},
 	}}
 	for _, tc := range []struct {
 		name, method, route, path, body string
@@ -57,6 +60,18 @@ func TestObserverGuardRejectsWholeUnauthorizedBatch(t *testing.T) {
 		{"mixed_create", "POST", "/accounts/batch", "/accounts/batch", `{"accounts":[{"group_ids":[10]},{"group_ids":[20]}]}`, []int64{10}, 403},
 		{"credential_body_untouched", "PUT", "/accounts/:id", "/accounts/1", `{"credentials":{"api_key":"test-secret","account_ids":[2]},"group_ids":[10]}`, []int64{10}, 204},
 		{"system_update", "POST", "/system/update", "/system/update", "{}", []int64{10}, 403},
+		{"prism_create_allowed", "POST", "/accounts/:id/prism", "/accounts/1/prism", `{"name":"Prism","group_ids":[10]}`, []int64{10}, 204},
+		{"prism_create_hidden_source", "POST", "/accounts/:id/prism", "/accounts/2/prism", `{"group_ids":[10]}`, []int64{10}, 403},
+		{"prism_create_inherit_groups", "POST", "/accounts/:id/prism", "/accounts/1/prism", `{}`, []int64{10}, 204},
+		{"prism_create_group_escape", "POST", "/accounts/:id/prism", "/accounts/1/prism", `{"group_ids":[20]}`, []int64{10}, 403},
+		{"prism_create_ungrouped", "POST", "/accounts/:id/prism", "/accounts/1/prism", `{"group_ids":[]}`, []int64{10}, 403},
+		{"prism_source_reference", "POST", "/accounts/:id/prism", "/accounts/1/prism", `{"source_account_id":2,"group_ids":[10]}`, []int64{10}, 403},
+		{"prism_source_reference_case", "POST", "/accounts/:id/prism", "/accounts/1/prism", `{"SOURCE_ACCOUNT_ID":2,"group_ids":[10]}`, []int64{10}, 403},
+		{"prism_status_hidden_source", "GET", "/accounts/:id/prism/status", "/accounts/5/prism/status", "", []int64{10}, 403},
+		{"prism_status_visible_source", "GET", "/accounts/:id/prism/status", "/accounts/6/prism/status", "", []int64{10}, 204},
+		{"prism_status_missing_source", "GET", "/accounts/:id/prism/status", "/accounts/7/prism/status", "", []int64{10}, 403},
+		{"prism_reconnect_hidden_source", "POST", "/accounts/:id/prism/reconnect", "/accounts/5/prism/reconnect", "", []int64{10}, 403},
+		{"prism_reconnect_visible_source", "POST", "/accounts/:id/prism/reconnect", "/accounts/6/prism/reconnect", "", []int64{10}, 204},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := &AccountHandler{adminService: svc}

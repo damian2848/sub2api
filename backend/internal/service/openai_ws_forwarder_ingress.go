@@ -144,7 +144,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	}
 
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
-	forceHTTPBridge := account.Platform == PlatformGrok ||
+	forceHTTPBridge := account.Platform == PlatformGrok || account.isPrismWSHTTPBridge() ||
 		(s.pluginManager != nil && s.pluginManager.ShouldRouteOpenAIOAuth(account))
 	modeRouterV2Enabled := s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.ModeRouterV2Enabled
 	ingressMode := OpenAIWSIngressModeCtxPool
@@ -200,7 +200,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	wsHost := "-"
 	wsPath := "-"
 	if forceHTTPBridge {
-		wsHost = "xai-http-bridge"
+		wsHost = "http-bridge"
+		if account.Platform == PlatformGrok {
+			wsHost = "xai-http-bridge"
+		}
 		wsPath = "/v1/responses"
 	} else {
 		var err error
@@ -478,7 +481,15 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		// follow-up response.create frames may omit it and then reuse
 		// ingressSessionOriginalModel. We always write a concrete upstream model
 		// before evaluating policy, so whitelist / filter behavior remains stable.
-		policyApplied, blocked, policyErr := s.applyOpenAIFastPolicyToWSResponseCreate(ctx, account, upstreamModel, normalized)
+		var policyApplied []byte
+		var blocked *OpenAIFastBlockedError
+		var policyErr error
+		if account.IsManagedPrismAccount() {
+			// Prism has no Fast tier: neither force nor honor one on any frame.
+			policyApplied = stripPrismServiceTier(normalized)
+		} else {
+			policyApplied, blocked, policyErr = s.applyOpenAIFastPolicyToWSResponseCreate(ctx, account, upstreamModel, normalized)
+		}
 		if policyErr != nil {
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", policyErr)
 		}
@@ -718,6 +729,15 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					openAIWSRawPayloadHasToolCallOutput(currentBridgePayload.payloadRaw),
 				)
 			}
+			if account.IsManagedPrismAccount() && currentBridgePayload.previousResponseID != "" && bridgeReplayInputExists {
+				// The full history is replayed, so the continuation id has done its
+				// job. One that arrives without history (a resumed session) stays in
+				// the payload and makes the bridge decline the turn instead.
+				if stripped, deleteErr := sjson.DeleteBytes(bridgePayloadRaw, "previous_response_id"); deleteErr == nil {
+					bridgePayloadRaw = stripped
+					bridgePayloadBytes = len(stripped)
+				}
+			}
 			grokCacheIdentity := ""
 			if account.Platform == PlatformGrok {
 				grokCacheIdentity, err = resolveGrokWSCacheIdentity(
@@ -778,8 +798,14 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			// bridgeCurrentItems），保存历史必须经 combine 新建头，禁止就地 append。
 			bridgeReplayInput = turnReplayInput
 			bridgeReplayInputExists = turnReplayInputExists
-			if result.wsReplayInputExists {
-				bridgeReplayInput = combineOpenAIWSReplayItems(bridgeReplayInput, result.wsReplayInput)
+			replayItems, replayItemsExist := result.wsReplayInput, result.wsReplayInputExists
+			if account.IsManagedPrismAccount() && len(result.wsAccountFailoverReplayInput) > 0 {
+				// Prism cannot continue from previous_response_id: the next turn has
+				// to replay everything the model said, not only its tool calls.
+				replayItems, replayItemsExist = result.wsAccountFailoverReplayInput, true
+			}
+			if replayItemsExist {
+				bridgeReplayInput = combineOpenAIWSReplayItems(bridgeReplayInput, replayItems)
 				bridgeReplayInputExists = true
 			}
 			bridgeAccountFailoverInput = turnAccountFailoverInput

@@ -1033,6 +1033,47 @@ export async function getUpstreamBillingProbeSettings(): Promise<UpstreamBilling
   return data
 }
 
+export interface PrismStatus {
+  phase: string
+  ready: boolean
+  models: string[]
+  error_code?: string
+  last_heartbeat_at?: string
+  source_account_id: number
+  account_id: number
+  enabled: boolean
+}
+
+export interface PrismCreatePayload {
+  name?: string
+  group_ids?: number[]
+}
+
+export async function createPrism(
+  sourceId: number,
+  payload: PrismCreatePayload,
+  signal?: AbortSignal
+): Promise<{ account: Account; status: PrismStatus }> {
+  const { data } = await apiClient.post<{ account: Account; status: PrismStatus }>(
+    `/admin/accounts/${sourceId}/prism`, payload, { signal, timeout: 15000 }
+  )
+  return data
+}
+
+export async function getPrismStatus(accountId: number, signal?: AbortSignal): Promise<PrismStatus> {
+  const { data } = await apiClient.get<PrismStatus>(`/admin/accounts/${accountId}/prism/status`, {
+    signal, timeout: 15000
+  })
+  return data
+}
+
+export async function reconnectPrism(accountId: number, signal?: AbortSignal): Promise<PrismStatus> {
+  const { data } = await apiClient.post<PrismStatus>(`/admin/accounts/${accountId}/prism/reconnect`, undefined, {
+    signal, timeout: 15000
+  })
+  return data
+}
+
 export async function updateUpstreamBillingProbeSettings(
   settings: UpstreamBillingProbeSettings
 ): Promise<UpstreamBillingProbeSettings> {
@@ -1447,6 +1488,9 @@ export const accountsAPI = {
   refreshOpenAIQuota,
   resetOpenAIQuota,
   createSparkShadow,
+  createPrism,
+  getPrismStatus,
+  reconnectPrism,
   getUpstreamBillingProbeSettings,
   updateUpstreamBillingProbeSettings,
   setUpstreamBillingProbeEnabled,

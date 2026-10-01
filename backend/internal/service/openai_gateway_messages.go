@@ -156,7 +156,9 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	// ChatGPT/Codex credentials rely on session_id + x-codex-turn-state; trimming to a
 	// sliding 12-message window makes the cached prefix stall at system/tools.
 	// Keep full replay there so upstream prompt caching can grow turn by turn.
-	if compatReplayGuardEnabled && !account.UsesOpenAICodexProtocol() && previousResponseID == "" && !compatContinuationDisabled {
+	// Prism cannot continue from previous_response_id, so trimming the replay would
+	// drop history the sidecar never sees again.
+	if compatReplayGuardEnabled && !account.UsesOpenAICodexProtocol() && !account.IsManagedPrismAccount() && previousResponseID == "" && !compatContinuationDisabled {
 		compatReplayTrimmed = applyAnthropicCompatFullReplayGuard(&anthropicReq)
 	}
 
@@ -173,7 +175,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	isStream := true
 
 	// 3b. Handle BetaFastMode → service_tier: "priority"
-	if containsBetaToken(c.GetHeader("anthropic-beta"), claude.BetaFastMode) {
+	if containsBetaToken(c.GetHeader("anthropic-beta"), claude.BetaFastMode) && !account.IsManagedPrismAccount() {
 		responsesReq.ServiceTier = "priority"
 	}
 
@@ -326,16 +328,20 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	// 4c. Apply OpenAI fast policy (may filter service_tier or block the request).
 	// Mirrors the Claude anthropic-beta "fast-mode-2026-02-01" filter, but keyed
 	// on the body-level service_tier field (priority/flex).
-	updatedBody, policyErr := s.applyOpenAIFastPolicyToBody(ctx, account, upstreamModel, responsesBody)
-	if policyErr != nil {
-		var blocked *OpenAIFastBlockedError
-		if errors.As(policyErr, &blocked) {
-			MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
-			writeAnthropicError(c, http.StatusForbidden, "forbidden_error", blocked.Message)
+	if account.IsManagedPrismAccount() {
+		responsesBody = stripPrismServiceTier(responsesBody)
+	} else {
+		updatedBody, policyErr := s.applyOpenAIFastPolicyToBody(ctx, account, upstreamModel, responsesBody)
+		if policyErr != nil {
+			var blocked *OpenAIFastBlockedError
+			if errors.As(policyErr, &blocked) {
+				MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
+				writeAnthropicError(c, http.StatusForbidden, "forbidden_error", blocked.Message)
+			}
+			return nil, policyErr
 		}
-		return nil, policyErr
+		responsesBody = updatedBody
 	}
-	responsesBody = updatedBody
 	responsesReq.ServiceTier = normalizedOpenAIServiceTierValue(gjson.GetBytes(responsesBody, "service_tier").String())
 	grokCacheIdentity := ""
 	if account.Platform == PlatformGrok {
@@ -355,6 +361,14 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		}
 	}
 
+	// Decide before any credential or sidecar session work: image blocks only
+	// exist as input_image parts once the Anthropic body has been converted.
+	if account.IsManagedPrismAccount() {
+		if failoverErr := prismUnsupportedRequest(c, responsesBody, false); failoverErr != nil {
+			return nil, failoverErr
+		}
+	}
+
 	// 5. Get access token
 	token, _, err := s.getRequestCredential(ctx, c, account)
 	if err != nil {
@@ -368,7 +382,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		// 既有 body/session/conversation 行为。身份头在 post-build 阶段统一恢复。
 		setOpenAICompatMessagesBridgeContext(c, true)
 	}
-	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+	upstreamCtx, releaseUpstreamCtx := openaiAccountUpstreamContext(ctx, account)
 	var upstreamReq *http.Request
 	if account.Platform == PlatformGrok {
 		upstreamReq, err = buildGrokResponsesRequest(upstreamCtx, c, account, responsesBody, token, grokCacheIdentity, s.cfg, s.settingService)

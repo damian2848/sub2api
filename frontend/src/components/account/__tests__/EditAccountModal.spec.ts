@@ -2391,6 +2391,31 @@ describe('EditAccountModal Free-Astra / Prism provider preset', () => {
     checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
   })
 
+  it('preserves managed Prism metadata and never resubmits adapter credentials on a normal edit', async () => {
+    const extra = {
+      provider_preset: 'prism_browser',
+      prism_source_account_id: 32,
+      prism_phase: 'ready',
+      prism_models: ['gpt-6.1-sol'],
+      prism_last_heartbeat_at: '2026-10-01T12:00:00Z',
+      prism_auto_enable_pending: false,
+      openai_responses_mode: 'force_responses'
+    }
+    const wrapper = mountModal({
+      ...buildAccount(),
+      credentials: { base_url: 'http://prism-browser:8320/accounts/45/v1', api_key: 'adapter-secret', model_mapping: { 'gpt-6.1-sol': 'gpt-6.1-sol' } },
+      extra
+    })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="edit-openai-provider-preset-official"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="copilot-sdk-toggle"]').exists()).toBe(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    const payload = updateAccountMock.mock.calls[0]?.[1]
+    expect(payload).not.toHaveProperty('credentials')
+    expect(payload.extra).toMatchObject(extra)
+  })
+
   it('converts an existing OpenAI API key account to compatible Prism settings', async () => {
     const account = {
       ...buildAccount(),
@@ -2424,6 +2449,8 @@ describe('EditAccountModal Free-Astra / Prism provider preset', () => {
         base_url: 'http://prism2api:8319/v1',
         openai_capabilities: ['chat_completions'],
         model_mapping: {
+          'gpt-6.1-sol': 'gpt-6.1-sol',
+          'gpt-6-luna': 'gpt-6-luna',
           'gpt-6-astra': 'gpt-6-astra',
           'gpt-5.6-sol': 'gpt-5.6-sol',
           'gpt-5.6-terra': 'gpt-5.6-terra'

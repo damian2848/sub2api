@@ -375,6 +375,13 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 						h.handleFailoverExhausted(c, failoverErr, true)
 						return
 					}
+					if skipPrismUnsupportedAccount(failoverErr, account.ID, failedAccountIDs, &lastFailoverErr) {
+						reqLog.Info("openai_chat_completions.prism_account_skipped_unsupported_request",
+							zap.Int64("account_id", account.ID),
+							zap.String("reason", string(failoverErr.Reason)),
+						)
+						continue
+					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, reqModel, false, nil), false, nil, err)
 					}

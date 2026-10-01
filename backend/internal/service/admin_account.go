@@ -262,6 +262,9 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 			"linked credential shadow accounts cannot be duplicated; duplicate the parent account instead",
 		)
 	}
+	if source.IsManagedPrismAccount() {
+		return nil, infraerrors.BadRequest("PRISM_MANAGED_FIELDS_IMMUTABLE", "Managed Prism accounts cannot be duplicated")
+	}
 	if !canDuplicateAccountType(source.Type) {
 		return nil, infraerrors.BadRequest(
 			"ACCOUNT_DUPLICATE_CREDENTIAL_TYPE_UNSUPPORTED",
@@ -450,6 +453,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 		Status:      StatusActive,
 		Schedulable: true,
 	}
+	if input.Schedulable != nil {
+		account.Schedulable = *input.Schedulable
+	}
 	if input.ProbeEnabled != nil && *input.ProbeEnabled {
 		if !isUpstreamBillingProbeAccount(account) {
 			return nil, ErrUpstreamBillingProbeAccountInvalid
@@ -498,6 +504,9 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 }
 
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
+	if !input.prismManaged && hasPrismManagedExtra(input.Extra) {
+		return nil, infraerrors.BadRequest("PRISM_MANAGED_FIELDS_IMMUTABLE", "Use the Prism account creation action")
+	}
 	if err := ValidateAccountCostMultiplierExtra(input.Extra); err != nil {
 		return nil, err
 	}
@@ -619,6 +628,9 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	}
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := validatePrismAccountUpdate(account, input); err != nil {
 		return nil, err
 	}
 	var normalizedExtra map[string]any
@@ -751,7 +763,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 		normalizedExtra = MergeOpenAICodexTicketExtra(normalizedExtra, account.Extra)
 		normalizedExtra = prepareCodexFingerprintExtraForUpdate(account, normalizedExtra)
-		account.Extra = normalizedExtra
+		account.Extra = preservePrismExtra(account, normalizedExtra)
 		if account.Platform == PlatformAntigravity && wasOveragesEnabled && !account.IsOveragesEnabled() {
 			delete(account.Extra, "antigravity_credits_overages") // 清理旧版 overages 运行态
 			// 清除 AICredits 限流 key
@@ -1101,7 +1113,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 
 	// 预取所有目标账号，供凭据守卫/代理守卫/混合渠道检查共用，避免多次 DB 查询。
 	var cachedTargets []*Account
-	if len(input.Credentials) > 0 || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil {
+	if len(input.Credentials) > 0 || len(input.Extra) > 0 || input.Concurrency != nil || input.Schedulable != nil || input.ProxyID != nil || needMixedChannelCheck || openAISettings.any() || input.ProbeEnabled != nil || input.RateMultiplier != nil {
 		loaded, err := s.accountRepo.GetByIDs(ctx, input.AccountIDs)
 		if err != nil {
 			return nil, err
@@ -1112,6 +1124,15 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	for _, account := range cachedTargets {
 		if account != nil {
 			targetsByID[account.ID] = account
+			if err := validatePrismAccountUpdate(account, &UpdateAccountInput{Credentials: input.Credentials, Extra: input.Extra, ProxyID: input.ProxyID, Concurrency: input.Concurrency}); err != nil {
+				return nil, err
+			}
+			if account.IsManagedPrismAccount() && (hasPrismManagedExtra(input.Extra) || prismConnectionExtraChanged(account, input.Extra)) {
+				return nil, infraerrors.BadRequest("PRISM_MANAGED_FIELDS_IMMUTABLE", "Managed Prism fields cannot be changed in bulk")
+			}
+			if account.IsManagedPrismAccount() && input.Schedulable != nil && *input.Schedulable && account.Extra["prism_phase"] != "ready" {
+				return nil, infraerrors.BadRequest("PRISM_ACCOUNT_NOT_READY", "Reconnect the Prism account before enabling it")
+			}
 		}
 	}
 	if openAISettings.any() {
@@ -1304,6 +1325,13 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	}
 	if input.Schedulable != nil {
 		repoUpdates.Schedulable = input.Schedulable
+		for _, account := range cachedTargets {
+			if account.IsManagedPrismAccount() {
+				if err := s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{"prism_auto_enable_pending": false}); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 
 	// Run bulk update for column/jsonb fields first.
@@ -1423,6 +1451,14 @@ func (s *adminServiceImpl) resolveBulkUpdateTargetIDs(ctx context.Context, filte
 }
 
 func (s *adminServiceImpl) DeleteAccount(ctx context.Context, id int64) error {
+	var prismAccount *Account
+	if s.prismAccounts != nil {
+		var err error
+		prismAccount, err = s.accountRepo.GetByID(ctx, id)
+		if err != nil {
+			return err
+		}
+	}
 	// 级联删除 spark 影子账号（先删影子，再删母账号）
 	shadows, err := s.accountRepo.ListShadowsByParent(ctx, id)
 	if err != nil {
@@ -1435,6 +1471,9 @@ func (s *adminServiceImpl) DeleteAccount(ctx context.Context, id int64) error {
 	}
 	if err := s.accountRepo.Delete(ctx, id); err != nil {
 		return err
+	}
+	if s.prismAccounts != nil {
+		s.prismAccounts.RevokeDeleted(ctx, prismAccount)
 	}
 	return nil
 }
@@ -1482,6 +1521,18 @@ func (s *adminServiceImpl) SetAccountError(ctx context.Context, id int64, errorM
 }
 
 func (s *adminServiceImpl) SetAccountSchedulable(ctx context.Context, id int64, schedulable bool) (*Account, error) {
+	account, err := s.accountRepo.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if account.IsManagedPrismAccount() {
+		if schedulable && account.Extra["prism_phase"] != "ready" {
+			return nil, infraerrors.BadRequest("PRISM_ACCOUNT_NOT_READY", "Reconnect the Prism account before enabling it")
+		}
+		if err := s.accountRepo.UpdateExtra(ctx, id, map[string]any{"prism_auto_enable_pending": false}); err != nil {
+			return nil, err
+		}
+	}
 	if err := s.accountRepo.SetSchedulable(ctx, id, schedulable); err != nil {
 		return nil, err
 	}

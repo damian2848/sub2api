@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
@@ -492,6 +493,7 @@ type OpenAIGatewayService struct {
 	pluginManager          *PluginManager
 	deferredService        *DeferredService
 	openAITokenProvider    *OpenAITokenProvider
+	prismAccounts          *PrismAccountService
 	grokTokenProvider      *GrokTokenProvider
 	toolCorrector          *CodexToolCorrector
 	openaiWSResolver       OpenAIWSProtocolResolver
@@ -678,6 +680,9 @@ func (s *OpenAIGatewayService) ResolveChannelMappingAndRestrict(ctx context.Cont
 }
 
 func (s *OpenAIGatewayService) isCodexImageGenerationBridgeEnabled(ctx context.Context, account *Account, apiKey *APIKey) bool {
+	if account.IsManagedPrismAccount() {
+		return false
+	}
 	if override := account.CodexImageGenerationBridgeOverride(); override != nil {
 		return *override
 	}
@@ -1318,6 +1323,9 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 		}
 		return accessToken, "oauth", nil
 	case AccountTypeAPIKey:
+		if err := s.ensurePrismSession(ctx, account); err != nil {
+			return "", "", err
+		}
 		if account.Platform == PlatformGrok {
 			apiKey := strings.TrimSpace(account.GetCredential("api_key"))
 			if apiKey == "" {
@@ -1333,4 +1341,25 @@ func (s *OpenAIGatewayService) GetAccessToken(ctx context.Context, account *Acco
 	default:
 		return "", "", fmt.Errorf("unsupported account type: %s", account.Type)
 	}
+}
+
+// ensurePrismSession makes sure the sidecar holds a ready browser session before
+// a request is sent. A session that is down is an unavailable account, not a
+// client error, so it surfaces as a failover error and the handler moves on to
+// the next account. A canceled request is passed through untouched: nothing
+// says the session is unhealthy.
+func (s *OpenAIGatewayService) ensurePrismSession(ctx context.Context, account *Account) error {
+	if !account.IsManagedPrismAccount() {
+		return nil
+	}
+	var err error
+	if s.prismAccounts == nil {
+		err = infraerrors.New(http.StatusServiceUnavailable, "PRISM_NOT_CONFIGURED", "The Prism browser service is not configured")
+	} else {
+		err = s.prismAccounts.EnsureSession(ctx, account)
+	}
+	if err == nil || ctx != nil && ctx.Err() != nil {
+		return err
+	}
+	return newPrismSessionUnavailableError(err)
 }

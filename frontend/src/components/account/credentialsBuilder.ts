@@ -5,6 +5,8 @@ export const ACCOUNT_PROVIDER_PRESET_KEY = 'provider_preset'
 export const FREE_ASTRA_PRISM_PROVIDER_PRESET = 'free_astra_prism' as const
 export const FREE_ASTRA_PRISM_BASE_URL = 'http://prism2api:8319/v1'
 export const FREE_ASTRA_PRISM_MODEL_MAPPINGS = [
+  { from: 'gpt-6.1-sol', to: 'gpt-6.1-sol' },
+  { from: 'gpt-6-luna', to: 'gpt-6-luna' },
   { from: 'gpt-6-astra', to: 'gpt-6-astra' },
   { from: 'gpt-5.6-sol', to: 'gpt-5.6-sol' },
   { from: 'gpt-5.6-terra', to: 'gpt-5.6-terra' }

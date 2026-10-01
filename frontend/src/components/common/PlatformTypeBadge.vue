@@ -90,6 +90,9 @@ interface Props {
 const props = defineProps<Props>()
 
 const platformLabel = computed(() =>
+  props.platform === 'openai' && props.type === 'apikey' && props.providerPreset === 'prism_browser'
+    ? 'Prism'
+    :
   props.platform === 'openai' && props.type === 'apikey' && isFreeAstraPrismProviderPreset(props.providerPreset)
     ? 'Free-Astra / Prism'
     : sharedPlatformLabel(props.platform)

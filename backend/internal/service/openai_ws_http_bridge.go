@@ -433,6 +433,17 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	if writeClientMessage == nil {
 		return nil, errors.New("client websocket writer is nil")
 	}
+	if account.IsManagedPrismAccount() {
+		// Declined before any sidecar work and before anything reaches the client,
+		// so the handler (turn 1) or the current-turn retry (later turns) can move
+		// the turn to another account.
+		if failoverErr := prismUnsupportedRequest(c, payload, false); failoverErr != nil {
+			return nil, failoverErr
+		}
+		if err := s.ensurePrismSession(ctx, account); err != nil {
+			return nil, err
+		}
+	}
 	responseModelObserver := &upstreamResponseModelObserver{}
 
 	body, err := prepareOpenAIWSHTTPBridgeBody(account, payload)
@@ -490,7 +501,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	}
 
 	buildUpstreamRequest := func(requestBody []byte) (*http.Request, error) {
-		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+		upstreamCtx, releaseUpstreamCtx := openaiAccountUpstreamContext(ctx, account)
 		defer releaseUpstreamCtx()
 		var upstreamReq *http.Request
 		var buildErr error

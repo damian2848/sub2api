@@ -32,7 +32,7 @@
       </div>
 
       <!-- API Key fields (only for apikey type) -->
-      <div v-if="account.type === 'apikey'" class="space-y-4">
+      <div v-if="account.type === 'apikey' && !isManagedPrism" class="space-y-4">
         <div
           v-if="account.platform === 'openai'"
           class="rounded-lg border border-gray-200 p-4 dark:border-dark-600"
@@ -1843,7 +1843,7 @@
         </p>
       </div>
 
-      <div v-if="account?.platform === 'openai' && account?.type === 'apikey'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="account?.platform === 'openai' && account?.type === 'apikey' && !isManagedPrism" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <label class="flex items-center gap-2">
           <input v-model="copilotSDKEnabled" type="checkbox" data-testid="copilot-sdk-toggle" />
           <span>Copilot SDK</span>
@@ -1977,7 +1977,7 @@
 
       <!-- OpenAI 自动透传开关（OAuth/API Key） -->
       <div
-        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
+        v-if="account?.platform === 'openai' && !isManagedPrism && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -2038,7 +2038,7 @@
 
       <!-- OpenAI Codex hosted image_generation bridge policy -->
       <div
-        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
+        v-if="account?.platform === 'openai' && !isManagedPrism && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="overflow-hidden rounded-lg border border-sky-100 bg-sky-50/60 shadow-sm dark:border-sky-900/50 dark:bg-sky-950/20">
@@ -2098,7 +2098,7 @@
 
       <!-- OpenAI WS Mode 三态（off/ctx_pool/passthrough） -->
       <div
-        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
+        v-if="account?.platform === 'openai' && !isManagedPrism && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -2136,7 +2136,7 @@
 
       <!-- OpenAI APIKey Responses API support mode -->
       <div
-        v-if="account?.platform === 'openai' && account?.type === 'apikey'"
+        v-if="account?.platform === 'openai' && account?.type === 'apikey' && !isManagedPrism"
         class="space-y-4 border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between gap-4">
@@ -3348,6 +3348,7 @@ import Toggle from '@/components/common/Toggle.vue'
 import AccountRpmSettings from '@/components/account/AccountRpmSettings.vue'
 import { applyAccountRPMSettings } from '@/components/account/accountRpm'
 import Icon from '@/components/icons/Icon.vue'
+import { isManagedPrismAccount } from '@/utils/prism'
 import ProxySelector from '@/components/common/ProxySelector.vue'
 import ProxyAdBanner from '@/components/common/ProxyAdBanner.vue'
 import GroupSelector from '@/components/common/GroupSelector.vue'
@@ -3617,6 +3618,7 @@ const submitting = ref(false)
 const editBaseUrl = ref('https://api.anthropic.com')
 const editApiKey = ref('')
 const openAIProviderPreset = ref<OpenAIProviderPreset>('openai')
+const isManagedPrism = computed(() => isManagedPrismAccount(props.account))
 const isFreeAstraPrismPreset = computed(
   () => props.account?.platform === 'openai' && props.account?.type === 'apikey' && openAIProviderPreset.value === 'free_astra_prism'
 )
@@ -5508,6 +5510,7 @@ const saveAutoBPSRule = async (accountID: number) => {
 }
 
 const submitUpdateAccount = async (accountID: number, updatePayload: Record<string, unknown>) => {
+  if (isManagedPrism.value) delete updatePayload.credentials
   submitting.value = true
   try {
     let updatedAccount = await adminAPI.accounts.update(accountID, withAntigravityConfirmFlag(updatePayload))
@@ -6211,7 +6214,9 @@ const handleSubmit = async () => {
         } else {
           delete newExtra.images_url_to_b64_json
         }
-			if (isFreeAstraPrismPreset.value) {
+			if (isManagedPrism.value) {
+				newExtra[ACCOUNT_PROVIDER_PRESET_KEY] = 'prism_browser'
+			} else if (isFreeAstraPrismPreset.value) {
 				newExtra[ACCOUNT_PROVIDER_PRESET_KEY] = FREE_ASTRA_PRISM_PROVIDER_PRESET
 			} else {
 				delete newExtra[ACCOUNT_PROVIDER_PRESET_KEY]

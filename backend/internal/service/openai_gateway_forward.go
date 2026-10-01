@@ -38,6 +38,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return nil, markOpenAIInitialAdmissionError(admissionErr)
 	}
 	account = latest
+	if account.IsManagedPrismAccount() {
+		if err := validatePrismGatewayRequest(c, body, false); err != nil {
+			return nil, err
+		}
+	}
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	// A failed account attempt must not leave a bypass reason on a later BPS response.
@@ -717,7 +722,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 
 	rawTier := requestView.ServiceTier
-	if openAIGroupForcesFast(ctx, account) {
+	if account.IsManagedPrismAccount() && rawTier != "" {
+		markPatchDelete("service_tier")
+		rawTier = ""
+	}
+	if !account.IsManagedPrismAccount() && openAIGroupForcesFast(ctx, account) {
 		rawTier = OpenAIFastTierPriority
 		if requestView.ServiceTier != OpenAIFastTierPriority {
 			markPatchSet("service_tier", OpenAIFastTierPriority)
@@ -747,7 +756,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				}
 			}
 		}
-	} else if s.shouldForceOpenAIFastPriorityForMissingTier(ctx, account, upstreamModel) {
+	} else if !account.IsManagedPrismAccount() && s.shouldForceOpenAIFastPriorityForMissingTier(ctx, account, upstreamModel) {
 		markPatchSet("service_tier", OpenAIFastTierPriority)
 	}
 
@@ -1130,7 +1139,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 
 		// Build upstream request
-		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
+		upstreamCtx, releaseUpstreamCtx := openaiAccountUpstreamContext(ctx, account)
 		var headerGuard *openAIFirstOutputHeaderGuard
 		if firstOutputTimeout > 0 {
 			upstreamCtx, headerGuard = newOpenAIFirstOutputHeaderGuard(

@@ -18,6 +18,7 @@ import (
 // uses the same case-insensitive field matching as the endpoint request types.
 type observerAccountReferences struct {
 	AccountID          *int64                      `json:"account_id"`
+	SourceAccountID    *int64                      `json:"source_account_id"`
 	AccountIDs         []int64                     `json:"account_ids"`
 	ProxyID            *int64                      `json:"proxy_id"`
 	GroupIDs           *[]int64                    `json:"group_ids"`
@@ -80,6 +81,9 @@ func (h *AccountHandler) AuthorizeObserver(c *gin.Context) {
 				if r.AccountID != nil && *r.AccountID != 0 {
 					ids = append(ids, *r.AccountID)
 				}
+				if r.SourceAccountID != nil && *r.SourceAccountID != 0 {
+					ids = append(ids, *r.SourceAccountID)
+				}
 				if r.GroupIDs != nil && service.ValidateObserverGroupBindings(ctx, *r.GroupIDs) != nil {
 					return false
 				}
@@ -116,6 +120,37 @@ func (h *AccountHandler) AuthorizeObserver(c *gin.Context) {
 		for _, account := range accounts {
 			if account != nil && service.ObserverCanManageAccount(ctx, account) {
 				allowed[account.ID] = true
+			}
+		}
+		for _, id := range ids {
+			if !allowed[id] {
+				response.ErrorFrom(c, service.ErrObserverScope)
+				c.Abort()
+				return
+			}
+		}
+		// A linked Prism account cannot grant access to an OAuth source outside
+		// the observer's groups, even when that source is absent from the body.
+		if strings.HasSuffix(c.FullPath(), "/prism/status") || strings.HasSuffix(c.FullPath(), "/prism/reconnect") {
+			var sourceIDs []int64
+			for _, account := range accounts {
+				if account != nil && account.IsManagedPrismAccount() {
+					sourceIDs = append(sourceIDs, account.PrismSourceAccountID())
+				}
+			}
+			if len(sourceIDs) > 0 {
+				sources, sourceErr := h.adminService.GetAccountsByIDs(ctx, sourceIDs)
+				if sourceErr != nil {
+					response.ErrorFrom(c, sourceErr)
+					c.Abort()
+					return
+				}
+				for _, source := range sources {
+					if source != nil && service.ObserverCanManageAccount(ctx, source) {
+						allowed[source.ID] = true
+					}
+				}
+				ids = append(ids, sourceIDs...)
 			}
 		}
 		for _, id := range ids {

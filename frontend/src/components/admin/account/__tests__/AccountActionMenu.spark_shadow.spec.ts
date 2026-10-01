@@ -49,6 +49,39 @@ const getBodyText = () => document.body.textContent ?? ''
 const getBodyButtons = () => Array.from(document.body.querySelectorAll('button'))
 
 describe('AccountActionMenu — spark shadow 按钮可见性', () => {
+  it('shows Prism creation only for a real OpenAI OAuth source', () => {
+    const wrapper = mount(AccountActionMenu, { props: { show: true, account: makeAccount({}), anchorRect }, attachTo: document.body })
+    expect(getBodyText()).toContain('admin.accounts.prism.create')
+    wrapper.unmount()
+  })
+
+  it.each([
+    { parent_account_id: 32 },
+    { type: 'apikey' as const },
+    { platform: 'anthropic' as const }
+  ])('hides Prism creation for ineligible accounts %j', overrides => {
+    const wrapper = mount(AccountActionMenu, { props: { show: true, account: makeAccount(overrides), anchorRect }, attachTo: document.body })
+    expect(getBodyText()).not.toContain('admin.accounts.prism.create')
+    wrapper.unmount()
+  })
+
+  it('shows status and reconnect, and hides duplication for managed Prism', () => {
+    const account = makeAccount({ type: 'apikey', status: 'error', extra: { provider_preset: 'prism_browser', prism_source_account_id: 32 } })
+    const wrapper = mount(AccountActionMenu, { props: { show: true, account, anchorRect }, attachTo: document.body })
+    expect(getBodyText()).toContain('admin.accounts.prism.connectionStatus')
+    expect(getBodyText()).toContain('admin.accounts.prism.reconnect')
+    expect(getBodyText()).not.toContain('admin.accounts.duplicateAccount')
+    expect(getBodyText()).not.toContain('admin.accounts.recoverState')
+    wrapper.unmount()
+  })
+
+  it('keeps a manual Prism preset separate from OAuth-managed accounts', () => {
+    const account = makeAccount({ type: 'apikey', extra: { provider_preset: 'free_astra_prism' } })
+    const wrapper = mount(AccountActionMenu, { props: { show: true, account, anchorRect }, attachTo: document.body })
+    expect(getBodyText()).not.toContain('admin.accounts.prism.connectionStatus')
+    expect(getBodyText()).toContain('admin.accounts.duplicateAccount')
+    wrapper.unmount()
+  })
   it('普通账号显示「复制账号」按钮', () => {
     const account = makeAccount({ platform: 'anthropic', type: 'apikey', parent_account_id: null })
     const wrapper = mount(AccountActionMenu, {

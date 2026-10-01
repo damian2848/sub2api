@@ -50,6 +50,20 @@
               <Icon name="shield" size="sm" />
               {{ t('admin.accounts.setPrivacy') }}
             </button>
+            <button v-if="isOpenAIOAuthParent" @click="$emit('create-prism', account); $emit('close')" class="flex w-full items-center gap-2 px-4 py-2 text-sm text-teal-600 hover:bg-gray-100 dark:hover:bg-dark-700">
+              <Icon name="sparkles" size="sm" />
+              {{ t('admin.accounts.prism.create') }}
+            </button>
+            <template v-if="isManagedPrism">
+              <button @click="$emit('prism-status', account); $emit('close')" class="flex w-full items-center gap-2 px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-dark-700">
+                <Icon name="link" size="sm" class="text-teal-500" />
+                {{ t('admin.accounts.prism.connectionStatus') }}
+              </button>
+              <button @click="$emit('prism-reconnect', account); $emit('close')" class="flex w-full items-center gap-2 px-4 py-2 text-sm hover:bg-gray-100 dark:hover:bg-dark-700">
+                <Icon name="refresh" size="sm" class="text-teal-500" />
+                {{ t('admin.accounts.prism.reconnect') }}
+              </button>
+            </template>
             <div v-if="hasRecoverableState" class="my-1 border-t border-gray-100 dark:border-dark-700"></div>
             <button v-if="hasRecoverableState" @click="$emit('recover-state', account); $emit('close')" class="flex w-full items-center gap-2 px-4 py-2 text-sm text-emerald-600 hover:bg-gray-100 dark:hover:bg-dark-700">
               <Icon name="sync" size="sm" />
@@ -72,9 +86,10 @@ import { useResizeObserver, useWindowSize } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import { Icon } from '@/components/icons'
 import type { Account } from '@/types'
+import { isManagedPrismAccount } from '@/utils/prism'
 
 const props = defineProps<{ show: boolean; account: Account | null; anchorRect: DOMRect | null }>()
-const emit = defineEmits(['close', 'test', 'stats', 'schedule', 'iq-test', 'duplicate', 'reauth', 'refresh-token', 'recover-state', 'reset-quota', 'set-privacy', 'create-spark-shadow'])
+const emit = defineEmits(['close', 'test', 'stats', 'schedule', 'iq-test', 'duplicate', 'reauth', 'refresh-token', 'recover-state', 'reset-quota', 'set-privacy', 'create-spark-shadow', 'create-prism', 'prism-status', 'prism-reconnect'])
 const { t } = useI18n()
 const menuRef = ref<HTMLElement | null>(null)
 const { width: viewportWidth, height: viewportHeight } = useWindowSize()
@@ -110,7 +125,7 @@ watch([menuRef, () => props.anchorRect, viewportWidth, viewportHeight], updatePo
 useResizeObserver(menuRef, updatePosition)
 
 const canDuplicate = computed(() => {
-  if (!props.account || props.account.parent_account_id != null) return false
+  if (!props.account || props.account.parent_account_id != null || isManagedPrismAccount(props.account)) return false
   return ['apikey', 'upstream', 'bedrock', 'service_account'].includes(props.account.type)
 })
 const isRateLimited = computed(() => {
@@ -129,6 +144,7 @@ const isRateLimited = computed(() => {
 const isOverloaded = computed(() => props.account?.overload_until && new Date(props.account.overload_until) > new Date())
 const isTempUnschedulable = computed(() => props.account?.temp_unschedulable_until && new Date(props.account.temp_unschedulable_until) > new Date())
 const hasRecoverableState = computed(() => {
+  if (isManagedPrismAccount(props.account)) return false
   return props.account?.status === 'error' || Boolean(isRateLimited.value) || Boolean(isOverloaded.value) || Boolean(isTempUnschedulable.value)
 })
 const isAntigravityOAuth = computed(() => props.account?.platform === 'antigravity' && props.account?.type === 'oauth')
@@ -137,6 +153,7 @@ const isOpenAIOAuth = computed(() => props.account?.platform === 'openai' && pro
 const isShadow = computed(() => props.account?.parent_account_id != null)
 // A "parent" OpenAI OAuth account is one that is NOT itself a shadow (parent_account_id == null)
 const isOpenAIOAuthParent = computed(() => isOpenAIOAuth.value && !isShadow.value)
+const isManagedPrism = computed(() => isManagedPrismAccount(props.account))
 const supportsPrivacy = computed(() => (isAntigravityOAuth.value || isOpenAIOAuth.value) && !isShadow.value)
 const hasQuotaLimit = computed(() => {
   return (props.account?.type === 'apikey' || props.account?.type === 'bedrock') && (

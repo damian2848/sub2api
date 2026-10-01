@@ -21,7 +21,8 @@ type openAICompatSessionResponseBinding struct {
 }
 
 func openAICompatContinuationEnabled(account *Account, model string) bool {
-	if account == nil || account.Type != AccountTypeAPIKey {
+	// Prism rejects previous_response_id, so every turn must carry its full history.
+	if account == nil || account.Type != AccountTypeAPIKey || account.IsManagedPrismAccount() {
 		return false
 	}
 	return shouldAutoInjectPromptCacheKeyForCompat(model)

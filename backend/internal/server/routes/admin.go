@@ -410,6 +410,11 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/:id/claude/reset-credits/redeem", h.Admin.Account.RedeemClaudeResetCredit)
 		accounts.POST("", h.Admin.Account.Create)
 		accounts.POST("/:id/duplicate", h.Admin.Account.Duplicate)
+		if h.Admin.Prism != nil {
+			accounts.POST("/:id/prism", h.Admin.Prism.Create)
+			accounts.GET("/:id/prism/status", h.Admin.Prism.Status)
+			accounts.POST("/:id/prism/reconnect", h.Admin.Prism.Reconnect)
+		}
 		accounts.POST("/check-mixed-channel", h.Admin.Account.CheckMixedChannel)
 		accounts.POST("/import/codex-session", h.Admin.Account.ImportCodexSession)
 		accounts.POST("/sync/crs", h.Admin.Account.SyncFromCRS)

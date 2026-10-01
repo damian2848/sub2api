@@ -1036,6 +1036,13 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					if c.Writer.Written() {
 						streamStarted = true
 					}
+					if skipPrismUnsupportedAccount(failoverErr, account.ID, failedAccountIDs, &lastFailoverErr) {
+						reqLog.Info("openai.prism_account_skipped_unsupported_request",
+							zap.Int64("account_id", account.ID),
+							zap.String("reason", string(failoverErr.Reason)),
+						)
+						continue
+					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, nil), false, nil, err)
 					}
@@ -1634,6 +1641,13 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						h.handleAnthropicFailoverExhausted(c, failoverErr, true)
 						return
 					}
+					if skipPrismUnsupportedAccount(failoverErr, account.ID, failedAccountIDs, &lastFailoverErr) {
+						reqLog.Info("openai_messages.prism_account_skipped_unsupported_request",
+							zap.Int64("account_id", account.ID),
+							zap.String("reason", string(failoverErr.Reason)),
+						)
+						continue
+					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, nil), false, nil, err)
 					}
@@ -1779,6 +1793,10 @@ func (h *OpenAIGatewayHandler) anthropicStreamingAwareError(c *gin.Context, stat
 func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, streamStarted bool) {
 	if failoverErr != nil {
 		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
+	}
+	if failoverErr.IsPrismRequestUnsupported() {
+		h.anthropicStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", failoverErr.ClientMessage, streamStarted)
+		return
 	}
 	if failoverErr != nil && failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
@@ -2835,6 +2853,13 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, wsForwardModel, false, nil), false, nil, failoverErr)
 		}
 		releaseAccountSlot()
+		if skipPrismUnsupportedAccount(failoverErr, account.ID, failedAccountIDs, &lastFailoverErr) {
+			reqLog.Info("openai.websocket_prism_account_skipped_unsupported_request",
+				zap.Int64("account_id", account.ID),
+				zap.String("reason", string(failoverErr.Reason)),
+			)
+			return ctx.Err() == nil && ensureUserSlotHeld()
+		}
 		if !failoverErr.ShouldRetryNextAccount() {
 			closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
 			return false
@@ -3731,6 +3756,10 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		)
 		return
 	}
+	if failoverErr.IsPrismRequestUnsupported() {
+		h.handleStreamingAwareErrorWithCode(c, http.StatusBadRequest, "invalid_request_error", string(failoverErr.Reason), failoverErr.ClientMessage, streamStarted, false)
+		return
+	}
 	if failoverErr.Reason == service.OpenAIHTTPContinuationUnsupportedReason {
 		message := strings.TrimSpace(failoverErr.ClientMessage)
 		if message == "" {
@@ -3817,6 +3846,22 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	// 使用默认的错误映射
 	status, errType, errMsg := h.mapUpstreamError(statusCode)
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
+}
+
+// skipPrismUnsupportedAccount excludes a managed Prism account that declined the
+// request itself (image input, previous_response_id, compact) from the rest of
+// this request. Unlike an upstream fault it spends no account-switch budget, and
+// it never reaches the scheduler health or cooldown paths. A fault already
+// remembered from another account stays the final answer if nothing can serve.
+func skipPrismUnsupportedAccount(failoverErr *service.UpstreamFailoverError, accountID int64, failedAccountIDs map[int64]struct{}, lastFailoverErr **service.UpstreamFailoverError) bool {
+	if !failoverErr.IsPrismRequestUnsupported() {
+		return false
+	}
+	failedAccountIDs[accountID] = struct{}{}
+	if *lastFailoverErr == nil {
+		*lastFailoverErr = failoverErr
+	}
+	return true
 }
 
 func credentialFailoverClientResponse(failoverErr *service.UpstreamFailoverError) (int, string) {
@@ -4190,6 +4235,12 @@ func closeOpenAIWSFailoverExhausted(c *gin.Context, conn *coderws.Conn, failover
 	if failoverErr != nil {
 		if reason := strings.TrimSpace(string(failoverErr.Reason)); reason != "" {
 			errorCode = reason
+		}
+		if failoverErr.IsPrismRequestUnsupported() {
+			// The client's request is at fault, not the upstream: say so plainly.
+			service.MarkOpsStreamFailure(c, "invalid_request_error", errorCode, failoverErr.ClientMessage, http.StatusBadRequest)
+			closeOpenAIClientWS(conn, coderws.StatusPolicyViolation, failoverErr.ClientMessage)
+			return
 		}
 		if failoverErr.Stage == service.GatewayFailureStageAccountAuth {
 			intendedStatus = http.StatusServiceUnavailable

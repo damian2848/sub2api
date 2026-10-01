@@ -459,7 +459,8 @@
     <AccountStatsModal :show="showStats" :account="statsAcc" @close="closeStatsModal" />
     <IQTestModal :show="showIQTest" :account="iqTestingAcc" :accounts="accounts" @close="closeIQTestModal" />
     <ScheduledTestsPanel :show="showSchedulePanel" :account-id="scheduleAcc?.id ?? null" :model-options="scheduleModelOptions" @close="closeSchedulePanel" />
-    <AccountActionMenu :show="menu.show" :account="menu.acc" :anchor-rect="menu.anchorRect" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @iq-test="handleIQTest" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" />
+    <AccountActionMenu :show="menu.show" :account="menu.acc" :anchor-rect="menu.anchorRect" @close="menu.show = false" @test="handleTest" @stats="handleViewStats" @schedule="handleSchedule" @iq-test="handleIQTest" @duplicate="handleDuplicateAccount" @reauth="handleReAuth" @refresh-token="handleRefresh" @recover-state="handleRecoverState" @reset-quota="handleResetQuota" @set-privacy="handleSetPrivacy" @create-spark-shadow="handleCreateSparkShadow" @create-prism="openPrismModal($event, 'create')" @prism-status="openPrismModal($event, 'status')" @prism-reconnect="openPrismModal($event, 'reconnect')" />
+    <PrismAccountModal :show="showPrism" :account="prismAcc" :mode="prismMode" @close="showPrism = false" @updated="reload" />
     <SyncFromCrsModal v-if="authStore.isAdmin" :show="showSync" @close="showSync = false" @synced="reload" />
     <ImportDataModal :show="showImportData" @close="showImportData = false" @imported="handleDataImported" />
     <BulkEditAccountModal
@@ -512,6 +513,7 @@ import AccountTableActions from '@/components/admin/account/AccountTableActions.
 import AccountTableFilters from '@/components/admin/account/AccountTableFilters.vue'
 import AccountBulkActionsBar from '@/components/admin/account/AccountBulkActionsBar.vue'
 import AccountActionMenu from '@/components/admin/account/AccountActionMenu.vue'
+import PrismAccountModal from '@/components/admin/account/PrismAccountModal.vue'
 import ImportDataModal from '@/components/admin/account/ImportDataModal.vue'
 import ReAuthAccountModal from '@/components/admin/account/ReAuthAccountModal.vue'
 import AccountTestModal from '@/components/admin/account/AccountTestModal.vue'
@@ -618,6 +620,9 @@ const bulkEditTarget = ref<AccountBulkEditTarget | null>(null)
 const showTempUnsched = ref(false)
 const showDeleteDialog = ref(false)
 const showCreateShadowDialog = ref(false)
+const showPrism = ref(false)
+const prismAcc = ref<Account | null>(null)
+const prismMode = ref<'create' | 'status' | 'reconnect'>('status')
 const showReAuth = ref(false)
 const showTest = ref(false)
 const showStats = ref(false)
@@ -1398,6 +1403,7 @@ const isAnyModalOpen = computed(() => {
     showBulkEdit.value ||
     showTempUnsched.value ||
     showDeleteDialog.value ||
+    showPrism.value ||
     showReAuth.value ||
     showTest.value ||
     showStats.value ||
@@ -2481,6 +2487,11 @@ const onRevertFallback = async (a: Account) => {
 const handleCreateSparkShadow = (a: Account) => {
   creatingShadowAcc.value = a
   showCreateShadowDialog.value = true
+}
+const openPrismModal = (account: Account, mode: 'create' | 'status' | 'reconnect') => {
+  prismAcc.value = account
+  prismMode.value = mode
+  showPrism.value = true
 }
 const confirmCreateSparkShadow = async () => {
   const a = creatingShadowAcc.value

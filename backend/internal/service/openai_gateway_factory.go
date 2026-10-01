@@ -30,6 +30,7 @@ type OpenAIGatewayDependencies struct {
 	Quotas        UserPlatformQuotaRepository
 	RPMCache      RPMCache
 	Harvest       *CodexHarvestService
+	PrismAccounts *PrismAccountService
 }
 
 func ProvideOpenAIGatewayService(d OpenAIGatewayDependencies) *OpenAIGatewayService {
@@ -38,5 +39,5 @@ func ProvideOpenAIGatewayService(d OpenAIGatewayDependencies) *OpenAIGatewayServ
 		d.BillingCache, d.Upstream, d.Deferred, d.OpenAITokens, d.GrokTokens, d.Pricing,
 		d.Channels, d.BalanceNotify, d.Settings, d.Quotas,
 		WithOpenAIRPMCache(d.RPMCache),
-		func(s *OpenAIGatewayService) { s.codexHarvest = d.Harvest })
+		func(s *OpenAIGatewayService) { s.codexHarvest = d.Harvest; s.prismAccounts = d.PrismAccounts })
 }

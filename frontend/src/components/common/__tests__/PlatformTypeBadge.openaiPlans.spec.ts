@@ -110,6 +110,14 @@ describe('new Codex subscription labels', () => {
 })
 
 describe('PlatformTypeBadge provider presets', () => {
+  it('labels managed OpenAI API key accounts as Prism', () => {
+    const wrapper = mount(PlatformTypeBadge, {
+      props: { platform: 'openai', type: 'apikey', providerPreset: 'prism_browser' }
+    })
+    expect(wrapper.text()).toContain('Prism')
+    expect(wrapper.text()).not.toContain('Astra')
+  })
+
   it('labels marked OpenAI API key accounts as Free-Astra / Prism', () => {
     const wrapper = mount(PlatformTypeBadge, {
       props: { platform: 'openai', type: 'apikey', providerPreset: 'free_astra_prism' }

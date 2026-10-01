@@ -531,6 +531,7 @@ func (r *accountRepository) updateLockedAccount(
 	explicitRateSyncEnabled *bool,
 	explicitRateMultiplier *float64,
 ) (*dbent.Account, error) {
+	managedPrism := account.IsManagedPrismAccount()
 	extra, err := lockAndMergeAccountProbeExtra(ctx, client, account, explicitProbeEnabled, explicitRateSyncEnabled)
 	if err != nil {
 		return nil, err
@@ -547,14 +548,15 @@ func (r *accountRepository) updateLockedAccount(
 		SetNillableNotes(account.Notes).
 		SetPlatform(account.Platform).
 		SetType(account.Type).
-		SetCredentials(normalizeJSONMap(account.Credentials)).
 		SetExtra(extra).
 		SetConcurrency(account.Concurrency).
 		SetPriority(account.Priority).
 		SetStatus(account.Status).
 		SetErrorMessage(account.ErrorMessage).
-		SetSchedulable(schedulable).
 		SetAutoPauseOnExpired(account.AutoPauseOnExpired)
+	if !managedPrism {
+		builder.SetCredentials(normalizeJSONMap(account.Credentials)).SetSchedulable(schedulable)
+	}
 
 	if explicitRateMultiplier != nil {
 		builder.SetRateMultiplier(*explicitRateMultiplier)
@@ -618,7 +620,12 @@ func (r *accountRepository) updateLockedAccount(
 	builder.SetQuotaDimension(dbaccount.QuotaDimension(account.QuotaDimensionOrDefault()))
 	builder.SetNillableParentAccountID(account.ParentAccountID)
 
-	return builder.Save(ctx)
+	updated, err := builder.Save(ctx)
+	if err == nil && managedPrism {
+		account.Credentials = copyJSONMap(updated.Credentials)
+		account.Schedulable = updated.Schedulable
+	}
+	return updated, err
 }
 
 func lockAndMergeAccountProbeExtra(
@@ -748,6 +755,19 @@ func lockAndMergeAccountProbeExtra(
 	}
 	extra := service.MergeOpenAICodexTicketExtra(copyJSONMap(normalizeJSONMap(account.Extra)), currentExtra)
 	extra = service.MergeExcelBPS403Marker(extra, currentExtra)
+	if account.IsManagedPrismAccount() {
+		// The worker owns these fields; an admin snapshot may predate its last sync.
+		for key := range extra {
+			if strings.HasPrefix(key, "prism_") || key == "provider_preset" || key == "openai_responses_mode" || key == "openai_passthrough" || strings.Contains(key, "websockets") {
+				delete(extra, key)
+			}
+		}
+		for key, value := range currentExtra {
+			if strings.HasPrefix(key, "prism_") || key == "provider_preset" || key == "openai_responses_mode" || key == "openai_passthrough" || strings.Contains(key, "websockets") {
+				extra[key] = value
+			}
+		}
+	}
 	// Omitted cost means an unrelated edit. Keep the value under the row lock,
 	// including a probe update committed after the edit form was loaded.
 	for _, key := range []string{service.AccountCostMultiplierExtraKey, service.AccountCostAutoSyncExtraKey} {
