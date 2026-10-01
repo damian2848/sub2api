@@ -244,7 +244,8 @@ test('all other parameters are ignored, never rejected', () => {
 });
 
 test('reasoning effort maps to Prism levels and never rejects', () => {
-  const table = { none: 'low', minimal: 'low', low: 'low', medium: 'medium', high: 'high', xhigh: 'high', HIGH: 'high' };
+  const table = { none: 'low', minimal: 'low', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', HIGH: 'high', XHIGH: 'xhigh',
+    max: 'xhigh', extrahigh: 'xhigh', 'extra-high': 'xhigh', extra_high: 'xhigh', 'Extra-High': 'xhigh' };
   for (const [given, expected] of Object.entries(table)) {
     assert.equal(mapEffort(given), expected, given);
     assert.equal(parse({ input: 'x', reasoning: { effort: given } }).effort, expected);

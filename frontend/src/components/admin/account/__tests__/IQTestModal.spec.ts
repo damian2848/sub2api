@@ -121,6 +121,20 @@ describe('IQTestModal', () => {
     expect(wrapper.text()).toContain('I cannot provide HTML.')
     expect(wrapper.text()).toContain('admin.accounts.pelicanTest.failed')
   })
+  it('offers extra high reasoning and sends it unchanged', async () => {
+    global.fetch = vi.fn(() => Promise.resolve(streamResponse([
+      { type: 'content', text: '29' },
+      { type: 'test_complete', success: true }
+    ]))) as any
+    const wrapper = mountModal()
+    expect((wrapper.vm as any).reasoningOptions.map((o: { value: string }) => o.value)).toEqual(['low', 'medium', 'high', 'xhigh'])
+    ;(wrapper.vm as any).selectQuestion('candy')
+    ;(wrapper.vm as any).reasoningEffort = 'xhigh'
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+    expect(JSON.parse((global.fetch as any).mock.calls[0][1].body)).toMatchObject({ reasoning_effort: 'xhigh' })
+    wrapper.unmount()
+  })
   it('persists manual timing and model snapshots independently of later form edits', async () => {
     const wrapper = mountModal()
     ;(wrapper.vm as any).selectQuestion('pelican')

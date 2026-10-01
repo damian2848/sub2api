@@ -444,7 +444,8 @@ test('select() only checks the catalog and the effort, and never touches the men
   driver.page = { getByRole() { assert.fail('the model menu must not be used'); } };
   await driver.select({ model: 'gpt-6-luna', effort: 'high' });
   await assert.rejects(driver.select({ model: 'gpt-6-astra', effort: 'low' }), error => error.code === 'model_not_available');
-  await assert.rejects(driver.select({ model: 'gpt-6-luna', effort: 'xhigh' }), error => error.code === 'unsupported_reasoning_effort');
+  for (const effort of ['low', 'medium', 'high', 'xhigh']) await driver.select({ model: 'gpt-6-luna', effort });
+  await assert.rejects(driver.select({ model: 'gpt-6-luna', effort: 'ultra' }), error => error.code === 'unsupported_reasoning_effort');
 });
 
 test('the catalog is Prism\'s own model config, validated, and the probe prefers the known-good model', () => {

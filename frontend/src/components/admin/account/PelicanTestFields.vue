@@ -27,7 +27,7 @@ const props = defineProps<{ modelValue: PelicanTestConfig }>()
 const emit = defineEmits<{ 'update:modelValue': [value: PelicanTestConfig] }>()
 const { t } = useI18n()
 const isProbe = computed(() => props.modelValue.question_kind === STATE_PROBE_QUESTION)
-const reasoningOptions = computed(() => ['low', 'medium', 'high'].map(value => ({ value, label: t(`admin.accounts.pelicanTest.reasoning${value[0].toUpperCase()}${value.slice(1)}`) })))
+const reasoningOptions = computed(() => ['low', 'medium', 'high', 'xhigh'].map(value => ({ value, label: t(`admin.accounts.pelicanTest.reasoning${value[0].toUpperCase()}${value.slice(1)}`) })))
 const questionOptions = computed(() => [
   ...['candy', 'pelican'].map(value => ({ value, label: t(`admin.accounts.pelicanTest.${value}Question`) })),
   { value: STATE_PROBE_QUESTION, label: t('admin.accounts.pelicanTest.stateProbeQuestion') }

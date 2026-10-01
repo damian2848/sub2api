@@ -18,6 +18,14 @@ describe('PelicanTestFields question kinds', () => {
     expect(wrapper.emitted('update:modelValue')?.[0]).toEqual([{ ...config, question_kind: 'state_probe', prompt: '', parallel_count: 1, reasoning_effort: 'high' }])
     wrapper.unmount()
   })
+  it('offers every Prism reasoning effort, including extra high', () => {
+    const wrapper = render()
+    const reasoning = wrapper.findAllComponents(SelectStub)[1]
+    expect(reasoning.props('options').map((o: { value: string }) => o.value)).toEqual(['low', 'medium', 'high', 'xhigh'])
+    reasoning.vm.$emit('update:modelValue', 'xhigh')
+    expect(wrapper.emitted('update:modelValue')?.[0]).toEqual([{ ...config, reasoning_effort: 'xhigh' }])
+    wrapper.unmount()
+  })
   it('hides the question and parallel fields for probe plans and restores them for candy', async () => {
     const wrapper = render({ ...config, question_kind: 'state_probe', prompt: '', parallel_count: 1 })
     expect(wrapper.find('[data-testid="state-probe-hint"]').exists()).toBe(true)

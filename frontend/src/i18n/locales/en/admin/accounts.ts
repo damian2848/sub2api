@@ -1746,6 +1746,7 @@ export default {
         reasoningLow: 'Low',
         reasoningMedium: 'Medium',
         reasoningHigh: 'High',
+        reasoningXhigh: 'Extra High',
         parallel: 'Parallel runs',
         parallelHint: 'Up to 8 outputs can be generated for the same account at once.',
         results: 'New Test',

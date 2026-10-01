@@ -441,7 +441,8 @@ function selectQuestion(value: string | number | boolean | null) {
 const reasoningOptions = computed(() => [
   { value: 'low', label: t('admin.accounts.pelicanTest.reasoningLow') },
   { value: 'medium', label: t('admin.accounts.pelicanTest.reasoningMedium') },
-  { value: 'high', label: t('admin.accounts.pelicanTest.reasoningHigh') }
+  { value: 'high', label: t('admin.accounts.pelicanTest.reasoningHigh') },
+  { value: 'xhigh', label: t('admin.accounts.pelicanTest.reasoningXhigh') }
 ])
 const canStart = computed(() => Boolean(props.account && prompt.value.trim() && modelId.value.trim() && validModel.value && normalizeCount() > 0))
 const hasDownloadable = computed(() => runs.value.some((run) => Boolean(run.output)))

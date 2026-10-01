@@ -408,7 +408,7 @@ export class BrowserSession {
   async select(request, checkCurrent = () => {}) {
     checkCurrent();
     if (!this.labels.has(request.model)) throw new PrismError('model_not_available', 400, 'model');
-    if (!['low', 'medium', 'high'].includes(request.effort)) throw new PrismError('unsupported_reasoning_effort', 400, 'reasoning_effort');
+    if (!['low', 'medium', 'high', 'xhigh'].includes(request.effort)) throw new PrismError('unsupported_reasoning_effort', 400, 'reasoning_effort');
   }
 
   async generate(request, signal, onText) {

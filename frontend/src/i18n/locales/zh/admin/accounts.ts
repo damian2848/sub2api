@@ -1833,6 +1833,7 @@ export default {
         reasoningLow: '低',
         reasoningMedium: '中',
         reasoningHigh: '高',
+        reasoningXhigh: '超高',
         parallel: '并行数',
         parallelHint: '同一账号最多同时生成 8 份结果。',
         results: '新建测试',

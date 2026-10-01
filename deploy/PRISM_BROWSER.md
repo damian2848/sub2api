@@ -173,7 +173,7 @@ A normal UI send produces the SDK's authenticated request; only its input is
 replaced with that single message. Official identity, sandbox metadata and
 Sentinel proof are preserved. Each call uses a new chat tab; the native start's
 `metadata.model` and `reasoning_effort` are set to the requested catalog model
-and a low/medium/high effort, because the UI's own controls can still be on
+and one of Prism's four efforts (low, medium, high, xhigh), because the UI's own controls can still be on
 their loading defaults. The readiness probe uses `gpt-5.6-sol` when the catalog
 offers it. Each native
 attempt initiates one upstream start. A user call can make a second attempt only
@@ -238,9 +238,12 @@ Accepted input:
 - Content parts `text`, `input_text`, `output_text` or plain strings. Codex
   scaffolding user messages (plugin and skill lists) are dropped.
 - `model` must be in the account catalog (`model_not_available`). Reasoning effort
-  comes from Chat `reasoning_effort` or Responses `reasoning.effort`:
-  `none`/`minimal`/`low` run as `low`, `medium` as `medium`, `high`/`xhigh` as
-  `high`; a missing or unknown value runs as `medium` and is never an error.
+  comes from Chat `reasoning_effort` or Responses `reasoning.effort`. Prism's
+  UI offers four levels for every model and all four are passed through:
+  `low`, `medium`, `high` and `xhigh` ("Extra High"). `none`/`minimal` run as
+  `low` (the lowest Prism has) and the gateway's `max` and the spellings
+  `extrahigh`, `extra-high` and `extra_high` run as `xhigh`; a missing or
+  unknown value runs as `medium` and is never an error.
 - All other parameters (`temperature`, `top_p`, `tool_choice`,
   `parallel_tool_calls`, `include`, `prompt_cache_key`, `text`, `store`,
   `metadata`, `user`, `service_tier`, `max_output_tokens`, `truncation`, ...) are
