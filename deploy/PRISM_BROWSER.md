@@ -132,6 +132,17 @@ selection and Sentinel proof are preserved. Each call uses a new chat tab, the
 requested catalog model and a low/medium/high reasoning effort. One user call can
 initiate exactly one upstream start.
 
+For Codex's standard code-mode tools, Sub2API lowers Responses custom tools
+(including `exec` in `additional_tools`) to a function with one string argument,
+`input`, then restores the reply to `custom_tool_call` and the corresponding
+`response.custom_tool_call_input.delta`/`.done` events. HTTP and WebSocket HTTP
+bridge requests share this normalization; bridge continuations retain their
+tool declarations. Custom tools in the default `functions` namespace use
+their public unqualified name (`exec`) in restored replies. The `exec` runtime
+description is kept in full so Prism can emit JavaScript using the caller's
+documented APIs. The JavaScript runs only in the client executor. No private
+model catalog or JavaScript interpreter in the sidecar is required.
+
 How a request is turned into the single user message:
 
 - **Plain prompt.** A lone user text message without instructions or tools is

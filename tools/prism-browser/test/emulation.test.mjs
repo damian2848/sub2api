@@ -42,6 +42,24 @@ test('envContext extracts only the executor environment', () => {
   assert.ok(envContext(['<cwd>' + 'x'.repeat(5000) + '</cwd>']).length <= 1500);
 });
 
+test('lowered Codex exec retains its complete executor API description', () => {
+  const description = 'Run JavaScript in the executor.\n\n' + 'Runtime details. '.repeat(80) +
+    '\nconst result = await tools.exec_command({cmd: "pwd"});\ntext(result);';
+  const exec = { type: 'function', name: 'exec', description,
+    parameters: { type: 'object', properties: { input: { type: 'string' } }, required: ['input'] } };
+  for (const specs of [collectTools([exec]), collectTools([{ ...exec, name: 'functions__exec' }]), collectTools([], [{ type: 'additional_tools', tools: [
+    { type: 'namespace', name: 'functions', tools: [exec] }] }])]) {
+    assert.equal(specs[0].desc, description);
+    const prompt = buildPrompt({ convo: [{ kind: 'user', text: 'Print the current directory.' }], tools: specs, budget: 1000 });
+    assert.ok(prompt.includes(description));
+    assert.ok(prompt.includes('"input":{"type":"string"}'));
+    assert.match(prompt, /tools\.exec_command\(\{cmd: "pwd"\}\)/);
+  }
+  // An ordinary exec function with command arguments keeps the concise treatment.
+  assert.equal(collectTools([{ ...exec, parameters: { properties: { cmd: { type: 'string' } } } }])[0].desc,
+    'Run JavaScript in the executor.');
+});
+
 test('envContext stays linear on unclosed tags', () => {
   const hostile = '<cwd>'.repeat(40000) + '<env>'.repeat(40000);
   const started = Date.now();

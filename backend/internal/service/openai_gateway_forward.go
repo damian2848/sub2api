@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/requesttiming"
@@ -12,11 +13,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // Forward forwards request to OpenAI API
@@ -199,7 +202,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// adaptation 把顶层 custom 改写成 function，再进 fallback 时回程查不到 custom
 	// 映射，会把 custom_tool_call 降级成 function_call（Codex 判 unsupported call）。
 	// 因此进入 fallback 的请求必须跳过 adaptation。
-	if shouldAdaptDeepSeekResponsesClientTools(account, body, compactPath) {
+	if account.IsManagedPrismAccount() {
+		adaptedBody, mapping, adaptErr := adaptPrismResponsesClientTools(body)
+		if adaptErr != nil {
+			return nil, fmt.Errorf("adapt Prism Responses client tools: %w", adaptErr)
+		}
+		body = adaptedBody
+		setOpenAIResponsesClientToolMapping(c, mapping)
+	} else if shouldAdaptDeepSeekResponsesClientTools(account, body, compactPath) {
 		adaptedBody, mapping, adaptErr := adaptOpenAIResponsesClientTools(body)
 		if adaptErr != nil {
 			return nil, fmt.Errorf("adapt DeepSeek Responses client tools: %w", adaptErr)
@@ -1630,6 +1640,72 @@ func isDeepSeekSemanticsAccount(account *Account) bool {
 		return true
 	}
 	return accountMapsToDeepSeekModel(account)
+}
+
+func adaptPrismResponsesClientTools(body []byte) ([]byte, apicompat.ResponsesClientToolMapping, error) {
+	promoted, err := promotePrismResponsesClientTools(body)
+	if err != nil {
+		return body, apicompat.ResponsesClientToolMapping{}, err
+	}
+	return adaptOpenAIResponsesClientTools(promoted)
+}
+
+func promotePrismResponsesClientTools(body []byte) ([]byte, error) {
+	if !needsOpenAIResponsesClientToolAdaptation(body) {
+		return body, nil
+	}
+	// Codex declares its custom exec in input[].additional_tools. Promote it
+	// before using the same reversible custom-to-function adapter as other relays.
+	var declarations struct {
+		Tools []apicompat.ResponsesTool `json:"tools"`
+		Input json.RawMessage           `json:"input"`
+	}
+	if err := json.Unmarshal(body, &declarations); err != nil {
+		return body, err
+	}
+	tools, err := apicompat.EffectiveResponsesTools(&apicompat.ResponsesRequest{
+		Tools: declarations.Tools, Input: declarations.Input,
+	})
+	if err != nil {
+		return body, err
+	}
+	if len(tools) == 0 {
+		return body, nil
+	}
+	var promotedTools []apicompat.ResponsesTool
+	// Public custom tools use their unqualified name for Codex's default
+	// functions namespace; the shared native adapter only flattens functions.
+	for _, tool := range tools {
+		if tool.Type != "namespace" || tool.Name != "functions" {
+			promotedTools = append(promotedTools, tool)
+			continue
+		}
+		children := tool.Tools
+		if len(children) == 0 {
+			children = tool.Children
+		}
+		var remaining []apicompat.ResponsesTool
+		for _, child := range children {
+			if child.Type == "custom" && child.Name != "" {
+				promotedTools = append(promotedTools, child)
+			} else {
+				remaining = append(remaining, child)
+			}
+		}
+		if len(remaining) > 0 {
+			tool.Tools, tool.Children = remaining, nil
+			promotedTools = append(promotedTools, tool)
+		}
+	}
+	toolsJSON, err := json.Marshal(promotedTools)
+	if err != nil {
+		return body, err
+	}
+	promoted, err := sjson.SetRawBytes(body, "tools", toolsJSON)
+	if err != nil {
+		return body, err
+	}
+	return promoted, nil
 }
 
 // shouldAdaptDeepSeekResponsesClientTools 决定是否在进入原生 DeepSeek Responses 前

@@ -107,7 +107,12 @@ function walkTools(list, namespace, out, seen, describe, depth = 0) {
     if (namespace?.startsWith('mcp__')) continue; // the MCP surface is too big to inline
     if (seen.has(fn.name)) continue;
     seen.add(fn.name);
-    out.push({ ns: namespace, name: fn.name, params: fn.parameters || fn.input_schema || {}, desc: describe(fn.description) });
+    const params = fn.parameters || fn.input_schema || {};
+    // The gateway lowers Codex's custom exec to {input:string}. Its description
+    // defines the executor APIs, so shortening it makes otherwise valid JS unusable.
+    const codeInput = /^(?:functions__)?exec$/.test(fn.name) && params.properties?.input?.type === 'string';
+    out.push({ ns: namespace, name: fn.name, params,
+      desc: codeInput ? String(fn.description || '').trim() : describe(fn.description) });
   }
 }
 
