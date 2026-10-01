@@ -89,8 +89,14 @@ Source IDs are positive decimal Sub2API account IDs.
 `GET /health` checks service availability only. Use account status to decide
 whether a specific account can serve requests. Readiness requires an unexpired
 OAuth token, a verified project and a recent successful native heartbeat.
-There is no periodic model ping. A failed model request is returned once and
-never replayed. It does not take the account offline when it is a per-request
+There is no periodic model ping. One specific native terminal error can recover
+inside the same user-request timeout: HTTP 403, reason `unknown`, and the exact
+Prism message asking to submit the prompt again. The bridge reopens the same
+managed project, waits for native readiness, refreshes the actual model menu,
+then resubmits the unchanged request once if its model is still available.
+The first attempt emits no client tool call. Cancellation, revocation, other
+errors and readiness probes are never retried this way. A failed second attempt
+is returned to the client. It does not take the account offline when it is a per-request
 failure (`prism_generation_failed`, `prism_empty_output`, `prism_invalid_output`,
 `upstream_model_mismatch`, `model_not_available`, `request_cancelled`, timeouts,
 validation errors) and the browser session is still alive. Only a dead browser
@@ -129,8 +135,9 @@ approach follows the free-astra project (MIT; see
 A normal UI send produces the SDK's authenticated request; only its input is
 replaced with that single message. Official identity, sandbox metadata, model
 selection and Sentinel proof are preserved. Each call uses a new chat tab, the
-requested catalog model and a low/medium/high reasoning effort. One user call can
-initiate exactly one upstream start.
+requested catalog model and a low/medium/high reasoning effort. Each native
+attempt initiates one upstream start. A user call can make a second attempt only
+for the narrowly defined terminal resubmission error described above.
 
 For Codex's standard code-mode tools, Sub2API lowers Responses custom tools
 (including `exec` in `additional_tools`) to a function with one string argument,
@@ -226,7 +233,9 @@ Limitations that remain:
 
 - **No token streaming.** The answer arrives all at once when Prism finishes;
   SSE comments only keep the connection open. Disconnects and timeouts cancel
-  queued work or invoke the native stop control, and requests are never replayed.
+  queued work or invoke the native stop control; cancelled or timed-out requests
+  are never replayed. The specific terminal resubmission error may trigger one
+  retry within the original timeout budget.
 - **Usage is estimated.** It is a character-based estimate over the flattened
   prompt and the emitted output, marked in `usage.estimation` and
   `X-Prism-Usage: estimated`; it is unsuitable for exact billing.
@@ -283,7 +292,8 @@ The tests use simulated browser sessions and cover request flattening for
 Codex, Claude Code style and plain chat requests, tool-call parsing and output
 shapes, ignored and rejected parameters, size clamping, every SSE variant, model
 catalog recovery, account health after failed requests, credential isolation,
-single-start behavior, persistent recovery, explicit probe retries, queue limits,
+single-start behavior per native attempt, bounded conversation resubmission,
+persistent recovery, explicit probe retries, queue limits,
 cancellation, HTTP authentication, timeouts and error redaction. They do not
 access production credentials or call Prism. Real browser verification remains
 necessary after changes to Prism's UI or authentication behavior.

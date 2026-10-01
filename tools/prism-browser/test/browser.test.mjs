@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BrowserSession, FALLBACK_MODEL, catalogCollapsed, modelFromLabel } from '../src/browser.mjs';
+import { publicError } from '../src/errors.mjs';
 
 function route(body, path = '/api/llm/response_with_tools_start') {
   const state = { aborted: false, body: null };
@@ -107,6 +108,34 @@ test('HTTP errors from the accepted current start and current status still fail 
     '/api/llm/response_with_tools_status');
   await statusFailure.driver.observe(response(status.request(), null, 502));
   assert.deepEqual(statusFailure.outcomes, [{ error: 'prism_upstream_http_error' }]);
+});
+
+test('only the current native resubmission terminal error is internally retryable', async () => {
+  const payload = { httpStatus: 403, reason: 'unknown',
+    message: 'Error while processing conversation (403 Forbidden). Please submit prompt again.' };
+  const failure = { ...running, status: 'completed', response: { status: 'error', payload } };
+  const cases = [
+    [failure, true],
+    [{ ...failure, status: 'failed' }, false],
+    [{ ...failure, response: { ...failure.response, status: 'failed' } }, false],
+    [{ ...failure, response: { status: 'error', payload: { ...payload, httpStatus: 401 } } }, false],
+    [{ ...failure, response: { status: 'error', payload: { ...payload, httpStatus: '403' } } }, false],
+    [{ ...failure, response: { status: 'error', payload: { ...payload, reason: 'model_not_available' } } }, false],
+    [{ ...failure, response: { status: 'error', payload: { ...payload, message: 'Forbidden: secret-session-token' } } }, false],
+  ];
+  for (const [data, retryable] of cases) {
+    const { driver, turn, start } = await activeTurn();
+    let error;
+    turn.reject = value => { error = value; };
+    const stale = route({ conversationId: 'previous-conversation' });
+    await driver.observe(response(stale.request(), failure));
+    assert.equal(error, undefined);
+    await driver.observe(response(start.request(), data));
+    assert.equal(error.code, 'prism_generation_failed');
+    assert.equal(error.retryConversation, retryable);
+    assert.deepEqual(publicError(error), { error: {
+      message: 'prism_generation_failed', type: 'prism_error', code: 'prism_generation_failed' } });
+  }
 });
 
 test('one UI start replaces the UI text, preserves official metadata and blocks an automatic replay', async () => {

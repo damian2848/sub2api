@@ -267,8 +267,54 @@ export class AccountManager {
       if (version !== account.version) throw new PrismError('session_revoked', 409);
       if (!this.status(source).ready || !account.driver) throw new PrismError('account_not_ready', 503);
       if (!account.metadata.models.includes(request.model)) throw new PrismError('model_not_available', 400, 'model');
+      const driver = account.driver;
+      const assertCurrent = () => {
+        aborted(signal);
+        if (this.stopping || version !== account.version || account.driver !== driver) {
+          throw new PrismError('session_revoked', 409);
+        }
+        if (!account.expiresAt || account.expiresAt <= Date.now() / 1000) {
+          throw new PrismError('account_not_ready', 503);
+        }
+      };
       try {
-        return await account.driver.generate(request, signal);
+        let text;
+        try {
+          text = await driver.generate(request, signal);
+        } catch (error) {
+          assertCurrent();
+          if (!(error instanceof PrismError) || error.code !== 'prism_generation_failed' || error.retryConversation !== true ||
+            driver.isAlive?.() === false || !account.metadata.project_id) throw error;
+          // The native terminal response explicitly asks for resubmission. Refresh
+          // its project state once; readiness probes never enter this user path.
+          account.ready = false;
+          account.phase = 'initializing';
+          account.errorCode = undefined;
+          try {
+            const models = await driver.initialize(account.metadata.project_id,
+              () => { throw new PrismError('browser_project_mismatch'); }, signal, [...account.metadata.models]);
+            assertCurrent();
+            account.metadata.models = models;
+            await this.persist(account);
+            assertCurrent();
+            account.lastHeartbeat = driver.lastHeartbeat;
+            if (!account.lastHeartbeat || Date.now() / 1000 - account.lastHeartbeat > 60) {
+              throw new PrismError('heartbeat_stale', 503);
+            }
+            account.ready = true;
+            account.phase = 'ready';
+          } catch (refreshError) {
+            account.ready = false;
+            account.phase = 'request_failed';
+            account.errorCode = refreshError instanceof PrismError ? refreshError.code : 'browser_bootstrap_failed';
+            throw refreshError;
+          }
+          if (!account.metadata.models.includes(request.model)) throw new PrismError('model_not_available', 400, 'model');
+          assertCurrent();
+          text = await driver.generate(request, signal);
+        }
+        assertCurrent();
+        return text;
       } catch (error) {
         const code = error instanceof PrismError ? error.code : 'browser_generation_failed';
         // One bad request (Prism refused, empty output, cancelled, ...) must not take the

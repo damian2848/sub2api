@@ -39,6 +39,254 @@ async function fixture(t, options = {}) {
   return { manager, log, dataDir, settings };
 }
 
+async function readyFixture(t) {
+  const value = await fixture(t);
+  await value.manager.provision('32', session());
+  await value.manager.bootstrap('32');
+  return { ...value, account: value.manager.get('32') };
+}
+
+function retryFailure() {
+  const error = new PrismError('prism_generation_failed');
+  error.retryConversation = true;
+  return error;
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+const retryRequest = { model: 'gpt-6.1-sol', effort: 'low', input: [] };
+const finalToolReply = '{"tool_call":{"name":"exec_command","arguments":{"cmd":"pwd"}}}';
+
+function retryDriver(account, hooks = {}) {
+  const driver = account.driver;
+  const initialize = driver.initialize.bind(driver);
+  const calls = { generations: [], initializations: [] };
+  driver.generate = async (request, signal) => {
+    calls.generations.push({ request, signal });
+    if (calls.generations.length === 1) {
+      await hooks.first?.();
+      throw retryFailure();
+    }
+    await hooks.retry?.();
+    return finalToolReply;
+  };
+  driver.initialize = async (...args) => {
+    calls.initializations.push(args);
+    await hooks.refresh?.();
+    return initialize(...args);
+  };
+  return calls;
+}
+
+test('one eligible user failure refreshes the same project and returns only the final tool reply', async t => {
+  const { manager, account, log } = await readyFixture(t);
+  const before = { ...account.metadata };
+  const controller = new AbortController();
+  const calls = retryDriver(account);
+  assert.equal(await manager.generate('32', retryRequest, controller.signal), finalToolReply);
+  assert.equal(calls.generations.length, 2);
+  for (const call of calls.generations) {
+    assert.equal(call.request, retryRequest);
+    assert.equal(call.signal, controller.signal);
+  }
+  assert.equal(calls.initializations.length, 1);
+  assert.equal(calls.initializations[0][0], project);
+  assert.deepEqual(calls.initializations[0][3], before.models);
+  assert.equal(account.metadata.project_id, before.project_id);
+  assert.equal(account.metadata.verified_project, before.verified_project);
+  assert.equal(account.metadata.probe_attempted, before.probe_attempted);
+  assert.equal(account.metadata.readiness_probe_count, before.readiness_probe_count);
+  assert.equal(log.generations.length, 1, 'only the original bootstrap issued a readiness probe');
+  assert.equal(manager.status('32').ready, true);
+});
+
+test('a second eligible failure is returned without a second refresh or a third model call', async t => {
+  const { manager, account } = await readyFixture(t);
+  const second = retryFailure();
+  const calls = retryDriver(account, { retry() { throw second; } });
+  await assert.rejects(manager.generate('32', retryRequest), error => error === second);
+  assert.equal(calls.generations.length, 2);
+  assert.equal(calls.initializations.length, 1);
+  assert.equal(manager.status('32').ready, true);
+});
+
+test('ordinary generation errors and non-Prism retry lookalikes are never refreshed', async t => {
+  for (const kind of ['ordinary', 'non_prism']) {
+    await t.test(kind, async child => {
+      const { manager, account } = await readyFixture(child);
+      const failure = kind === 'ordinary' ? new PrismError('prism_generation_failed') : new Error('native error');
+      if (kind === 'non_prism') failure.retryConversation = true;
+      const calls = retryDriver(account);
+      account.driver.generate = async () => { calls.generations.push({}); throw failure; };
+      await assert.rejects(manager.generate('32', retryRequest), error => error === failure);
+      assert.equal(calls.generations.length, 1);
+      assert.equal(calls.initializations.length, 0);
+    });
+  }
+});
+
+test('bootstrap never retries an eligible native error or automatically repeats its readiness probe', async t => {
+  const { manager } = await fixture(t);
+  await manager.provision('32', session());
+  const account = manager.get('32');
+  let calls = 0;
+  const failure = retryFailure();
+  account.driver.generate = async () => { calls += 1; throw failure; };
+  await assert.rejects(manager.bootstrap('32'), error => error === failure);
+  assert.equal(calls, 1);
+  assert.equal(account.metadata.readiness_probe_count, 1);
+  assert.equal(account.metadata.probe_attempted, true);
+  await assert.rejects(manager.bootstrap('32'), error => error.code === 'readiness_probe_requires_reauthorization');
+  assert.equal(calls, 1);
+});
+
+test('cancellation before refresh, during refresh or after retry prevents another call or final reply', async t => {
+  for (const phase of ['first', 'refresh', 'retry']) {
+    await t.test(phase, async child => {
+      const { manager, account } = await readyFixture(child);
+      const entered = deferred();
+      const release = deferred();
+      const controller = new AbortController();
+      const calls = retryDriver(account, { [phase]: async () => { entered.resolve(); await release.promise; } });
+      const generation = manager.generate('32', retryRequest, controller.signal);
+      await entered.promise;
+      const reason = new PrismError('request_timeout', 504);
+      const rejected = assert.rejects(generation, error => error === reason);
+      controller.abort(reason);
+      release.resolve();
+      await rejected;
+      assert.equal(calls.generations.length, phase === 'retry' ? 2 : 1);
+      assert.equal(calls.initializations.length, phase === 'first' ? 0 : 1);
+    });
+  }
+});
+
+test('revocation before refresh, during refresh or after retry cannot restore readiness or return a tool', async t => {
+  for (const phase of ['first', 'refresh', 'retry']) {
+    await t.test(phase, async child => {
+      const { manager, account } = await readyFixture(child);
+      const entered = deferred();
+      const release = deferred();
+      const calls = retryDriver(account, { [phase]: async () => { entered.resolve(); await release.promise; } });
+      const generation = manager.generate('32', retryRequest);
+      await entered.promise;
+      const rejected = assert.rejects(generation, error => error.code === 'session_revoked');
+      const revoked = manager.revoke('32');
+      release.resolve();
+      await rejected;
+      await revoked;
+      assert.equal(calls.generations.length, phase === 'retry' ? 2 : 1);
+      assert.equal(calls.initializations.length, phase === 'first' ? 0 : 1);
+      assert.equal(account.driver, null);
+      assert.equal(account.metadata.key_hash, null);
+      assert.equal(account.metadata.project_id, project);
+      assert.equal(manager.status('32').ready, false);
+      assert.equal(manager.status('32').phase, 'authentication_required');
+    });
+  }
+});
+
+test('cancellation or revocation during catalog persistence cannot revive the account or start the retry', async t => {
+  for (const action of ['cancel', 'revoke']) {
+    await t.test(action, async child => {
+      const { manager, account } = await readyFixture(child);
+      const calls = retryDriver(account);
+      const entered = deferred();
+      const release = deferred();
+      const controller = new AbortController();
+      const persist = manager.persist.bind(manager);
+      let block = true;
+      manager.persist = async value => {
+        if (block) { block = false; entered.resolve(); await release.promise; }
+        return persist(value);
+      };
+      const generation = manager.generate('32', retryRequest, controller.signal);
+      await entered.promise;
+      const code = action === 'revoke' ? 'session_revoked' : 'request_cancelled';
+      const rejected = assert.rejects(generation, error => error.code === code);
+      const revoked = action === 'revoke' ? manager.revoke('32') : null;
+      if (action === 'cancel') controller.abort();
+      release.resolve();
+      await rejected;
+      await revoked;
+      assert.equal(calls.generations.length, 1);
+      assert.equal(calls.initializations.length, 1);
+      assert.equal(manager.status('32').ready, false);
+      if (action === 'revoke') {
+        assert.equal(account.driver, null);
+        assert.equal(account.metadata.key_hash, null);
+        assert.equal(manager.status('32').phase, 'authentication_required');
+      }
+    });
+  }
+});
+
+test('refresh persists a smaller catalog and never retries with a fallback model', async t => {
+  const { manager, account, dataDir } = await readyFixture(t);
+  const calls = retryDriver(account);
+  const initialize = account.driver.initialize;
+  account.driver.initialize = async (...args) => { await initialize(...args); return ['gpt-6-luna']; };
+  await assert.rejects(manager.generate('32', retryRequest), error => error.code === 'model_not_available');
+  assert.equal(calls.generations.length, 1);
+  assert.equal(calls.initializations.length, 1);
+  assert.deepEqual(account.metadata.models, ['gpt-6-luna']);
+  assert.deepEqual(JSON.parse(await readFile(join(dataDir, '32.json'), 'utf8')).models, ['gpt-6-luna']);
+  assert.equal(account.metadata.project_id, project);
+  assert.equal(account.metadata.verified_project, project);
+  assert.equal(account.metadata.readiness_probe_count, 1);
+});
+
+test('a token that expires while refreshing cannot start a second generation', async t => {
+  const { manager, account } = await readyFixture(t);
+  const calls = retryDriver(account, { refresh() { account.expiresAt = Math.floor(Date.now() / 1000) - 1; } });
+  await assert.rejects(manager.generate('32', retryRequest), error => error.code === 'account_not_ready' && error.status === 503);
+  assert.equal(calls.generations.length, 1);
+  assert.equal(calls.initializations.length, 1);
+  assert.equal(manager.status('32').ready, false);
+});
+
+test('a failed project refresh takes readiness offline and never issues the retry', async t => {
+  const { manager, account } = await readyFixture(t);
+  const failure = new PrismError('model_catalog_unavailable');
+  const calls = retryDriver(account, { refresh() { throw failure; } });
+  await assert.rejects(manager.generate('32', retryRequest), error => error === failure);
+  assert.equal(calls.generations.length, 1);
+  assert.equal(calls.initializations.length, 1);
+  assert.equal(manager.status('32').ready, false);
+  assert.equal(manager.status('32').phase, 'request_failed');
+  assert.equal(manager.status('32').error_code, 'model_catalog_unavailable');
+});
+
+test('streaming recovery emits one final tool call and no failed-attempt error event', async t => {
+  const { manager, account } = await readyFixture(t);
+  const calls = retryDriver(account);
+  const server = createPrismServer({ manager, managementKey: 'm'.repeat(40) });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/accounts/32/v1/responses`, {
+    method: 'POST', headers: { Authorization: `Bearer ${session().api_key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: retryRequest.model, stream: true, input: 'Print the current directory.',
+      tools: [{ type: 'function', name: 'exec_command', parameters: { type: 'object', properties: { cmd: { type: 'string' } } } }] }),
+  });
+  const stream = await response.text();
+  assert.equal(response.status, 200);
+  assert.equal(calls.generations.length, 2);
+  assert.equal(calls.initializations.length, 1);
+  assert.doesNotMatch(stream, /event: error|prism_generation_failed/);
+  assert.equal((stream.match(/event: response\.function_call_arguments\.done\n/g) || []).length, 1);
+  assert.equal((stream.match(/event: response\.output_item\.done\n/g) || []).length, 1);
+  const completed = stream.split('\n').find(line => line.startsWith('data: ') && JSON.parse(line.slice(6)).type === 'response.completed');
+  const output = JSON.parse(completed.slice(6)).response.output;
+  assert.equal(output.length, 1);
+  assert.equal(output[0].type, 'function_call');
+  assert.equal(output[0].name, 'exec_command');
+  assert.equal(output[0].arguments, '{"cmd":"pwd"}');
+});
+
 test('session synchronization sends no model call; ready project survives refresh and restart', async t => {
   const { manager, log, dataDir, settings } = await fixture(t);
   await manager.provision('32', session());

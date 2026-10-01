@@ -156,7 +156,14 @@ export class BrowserSession {
     this.audit('upstream_result', { status: data.response?.status,
       reported_model: data.response?.payload?.model || null,
       failure_code: /^[a-z_]{1,100}$/.test(data.response?.payload?.reason || '') ? data.response.payload.reason : undefined });
-    if (data.response?.status !== 'success') return turn.reject(new PrismError('prism_generation_failed'));
+    if (data.response?.status !== 'success') {
+      const payload = data.response?.payload;
+      const error = new PrismError('prism_generation_failed');
+      error.retryConversation = data.status === 'completed' && data.response?.status === 'error' &&
+        payload?.httpStatus === 403 && payload?.reason === 'unknown' && payload?.message ===
+        'Error while processing conversation (403 Forbidden). Please submit prompt again.';
+      return turn.reject(error);
+    }
     const payload = data.response.payload || {};
     if (payload.model && payload.model !== turn.request.model) return turn.reject(new PrismError('upstream_model_mismatch'));
     const output = payload.output;
