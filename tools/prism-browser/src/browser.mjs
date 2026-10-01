@@ -98,6 +98,7 @@ export class BrowserSession {
         return route.abort();
       }
       turn.started = true;
+      turn.startRequest = request;
       turn.conversationId = body.conversationId;
       this.audit('upstream_start', { model: body.metadata.model, effort: body.metadata.reasoning_effort,
         sentinel_present: Boolean(request.headers?.()['openai-sentinel-token']), input_roles: turn.request.input.map(item => item.role) });
@@ -126,8 +127,16 @@ export class BrowserSession {
     if (!['/api/llm/response_with_tools_start', '/api/llm/response_with_tools_status'].includes(path)) return;
     const turn = this.turn;
     if (!turn?.started) return;
-    if (path === '/api/llm/response_with_tools_start') {
-      const sent = response.request().postDataJSON();
+    const request = response.request();
+    const sent = request.postDataJSON();
+    const isStart = path === '/api/llm/response_with_tools_start';
+    // Old tabs can finish polling after a new chat has started, including HTTP errors.
+    const matchesTurn = () => this.turn === turn && !turn.completed && (isStart
+      ? request === turn.startRequest && sent?.conversationId === turn.conversationId
+      : Boolean(turn.requestId && sent?.request_id === turn.requestId &&
+        (!sent.conversation_id || sent.conversation_id === turn.conversationId)));
+    if (!matchesTurn()) return;
+    if (isStart) {
       this.audit('upstream_start_actual_input', { input_roles: (sent?.input || []).map(item => item.role) });
     }
     if (!response.ok()) {
@@ -136,6 +145,9 @@ export class BrowserSession {
         ? 'session_expired' : 'prism_upstream_http_error', [401, 403].includes(response.status()) ? 401 : 502));
     }
     const data = await response.json();
+    if (!matchesTurn()) return;
+    if (data.request_id && turn.requestId && data.request_id !== turn.requestId) return;
+    if (data.conversation_id && data.conversation_id !== turn.conversationId) return;
     if (data.request_id) turn.requestId = data.request_id;
     if (data.turn_state) turn.turnState = data.turn_state;
     if (data.conversation_id) turn.conversationId = data.conversation_id;

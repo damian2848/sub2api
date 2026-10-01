@@ -4,10 +4,110 @@ import { BrowserSession, FALLBACK_MODEL, catalogCollapsed, modelFromLabel } from
 
 function route(body, path = '/api/llm/response_with_tools_start') {
   const state = { aborted: false, body: null };
-  return { state, request: () => ({ url: () => `https://prism.openai.com${path}`, method: () => 'POST',
-    postDataJSON: () => body }), async abort() { state.aborted = true; },
+  const request = { url: () => `https://prism.openai.com${path}`, method: () => 'POST', postDataJSON: () => body };
+  return { state, request: () => request, async abort() { state.aborted = true; },
   async continue(options) { state.body = options ? JSON.parse(options.postData) : body; } };
 }
+
+function response(request, data, status = 200) {
+  return { url: request.url, request: () => request, ok: () => status >= 200 && status < 300,
+    status: () => status, json: async () => data };
+}
+
+async function activeTurn() {
+  const driver = new BrowserSession({}, () => {});
+  driver.projectId = '01234567-89ab-4cde-8123-0123456789ab';
+  const outcomes = [];
+  const turn = { started: false, request: { model: 'gpt-5.6-sol', effort: 'medium', input: [] },
+    resolve(text) { outcomes.push({ text }); }, reject(error) { outcomes.push({ error: error.code }); } };
+  driver.turn = turn;
+  const start = route({ conversationId: 'current-conversation', metadata: {
+    projectId: driver.projectId, model: turn.request.model, reasoning_effort: turn.request.effort } });
+  await driver.route(start);
+  return { driver, turn, start, outcomes };
+}
+
+const running = { request_id: 'current-request', turn_state: 'current-state', status: 'running' };
+const completed = { ...running, status: 'completed', response: { status: 'success', payload: {
+  output: [{ type: 'message', content: [{ type: 'output_text', text: 'READY' }] }] } } };
+
+test('old chat responses and HTTP errors cannot reject or overwrite the active turn', async () => {
+  const { driver, turn, start, outcomes } = await activeTurn();
+  await driver.observe(response(start.request(), running));
+  const staleStart = route({ conversationId: 'previous-conversation' });
+  const unacceptedStart = route({ conversationId: 'current-conversation' });
+  const staleStatus = route({ request_id: 'previous-request', turn_state: 'previous-state',
+    conversation_id: 'previous-conversation' }, '/api/llm/response_with_tools_status');
+  const failed = { request_id: 'previous-request', turn_state: 'previous-state',
+    conversation_id: 'previous-conversation', status: 'error', response: { status: 'error' } };
+  for (const request of [staleStart.request(), unacceptedStart.request(), staleStatus.request()]) {
+    await driver.observe(response(request, failed));
+    await driver.observe(response(request, null, 403));
+  }
+  assert.deepEqual(outcomes, []);
+  assert.equal(turn.requestId, running.request_id);
+  assert.equal(turn.turnState, running.turn_state);
+  assert.equal(turn.conversationId, 'current-conversation');
+  assert.equal(turn.completed, undefined);
+});
+
+test('unbound status and mismatched request or response identifiers are ignored', async () => {
+  const { driver, turn, start, outcomes } = await activeTurn();
+  const status = route({ request_id: running.request_id, turn_state: running.turn_state },
+    '/api/llm/response_with_tools_status');
+  await driver.observe(response(status.request(), completed));
+  assert.deepEqual(outcomes, []);
+  await driver.observe(response(start.request(), running));
+  await driver.observe(response(status.request(), { ...completed, request_id: 'other-request' }));
+  await driver.observe(response(status.request(), { ...completed, conversation_id: 'other-conversation' }));
+  const wrongConversation = route({ request_id: running.request_id, conversation_id: 'other-conversation' },
+    '/api/llm/response_with_tools_status');
+  await driver.observe(response(wrongConversation.request(), completed));
+  await driver.observe(response(wrongConversation.request(), null, 502));
+  assert.deepEqual(outcomes, []);
+  assert.equal(turn.requestId, running.request_id);
+  assert.equal(turn.turnState, running.turn_state);
+});
+
+test('an accepted start may complete immediately and current polls may carry opaque rotating state', async () => {
+  const immediate = await activeTurn();
+  await immediate.driver.observe(response(immediate.start.request(), completed));
+  assert.deepEqual(immediate.outcomes, [{ text: 'READY' }]);
+  const polled = await activeTurn();
+  await polled.driver.observe(response(polled.start.request(), { ...running, turn_state: { generation: 2 } }));
+  const status = route({ request_id: running.request_id, turn_state: { generation: 1 } },
+    '/api/llm/response_with_tools_status');
+  await polled.driver.observe(response(status.request(), { ...completed, turn_state: { generation: 3 } }));
+  assert.deepEqual(polled.outcomes, [{ text: 'READY' }]);
+  assert.deepEqual(polled.turn.turnState, { generation: 3 });
+});
+
+test('a response that finishes parsing after its turn is replaced cannot settle the replacement', async () => {
+  const { driver, start, outcomes } = await activeTurn();
+  let finishJSON;
+  const pending = response(start.request(), completed);
+  pending.json = () => new Promise(resolve => { finishJSON = resolve; });
+  const observation = driver.observe(pending);
+  const replacement = { started: true, request: { model: 'gpt-5.6-sol' }, conversationId: 'replacement',
+    resolve() { assert.fail('replacement resolved'); }, reject() { assert.fail('replacement rejected'); } };
+  driver.turn = replacement;
+  finishJSON(completed);
+  await observation;
+  assert.deepEqual(outcomes, []);
+  assert.equal(replacement.requestId, undefined);
+});
+
+test('HTTP errors from the accepted current start and current status still fail the turn', async () => {
+  const startFailure = await activeTurn();
+  await startFailure.driver.observe(response(startFailure.start.request(), null, 403));
+  assert.deepEqual(startFailure.outcomes, [{ error: 'session_expired' }]);
+  const statusFailure = await activeTurn();
+  await statusFailure.driver.observe(response(statusFailure.start.request(), running));
+  const status = route({ request_id: running.request_id, turn_state: running.turn_state },
+    '/api/llm/response_with_tools_status');
+  await statusFailure.driver.observe(response(status.request(), null, 502));
+  assert.deepEqual(statusFailure.outcomes, [{ error: 'prism_upstream_http_error' }]);
+});
 
 test('one UI start replaces the UI text, preserves official metadata and blocks an automatic replay', async () => {
   const driver = new BrowserSession({}, () => {});
