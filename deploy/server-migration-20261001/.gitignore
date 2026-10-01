@@ -1,0 +1,5 @@
+# Only source scripts and the runbook belong in this archive.
+*
+!.gitignore
+!README.md
+!*.py
