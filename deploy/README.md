@@ -32,6 +32,32 @@ This directory contains files for deploying Sub2API on Linux servers and Apple-s
 | `mihomo-codex.service` | Systemd unit for the Mihomo ticket proxy |
 | `mihomo-codex.config.example.yaml` | Sanitized Mihomo subscription configuration example |
 | `EDGE_SECURITY.md` | Reverse proxy, CDN/WAF, trusted proxy, and ingress hardening guide |
+| `docker-compose.prism2api.yml` | Optional free-astra/Prism2API sidecar overlay |
+| `.env.prism2api.example` | Prism2API sidecar environment template |
+| `prism2api-account.example.json` | OpenAI API-key account payload for the sidecar |
+| `PRISM2API_SUB2API.md` | Full Prism2API setup, networking, and limitations guide |
+
+### Prism2API / free-astra
+
+Sub2API can use free-astra's `prism2api` through its existing OpenAI API-key
+account path. The optional overlay keeps port 8319 on the internal
+`sub2api-network` bridge and makes the service available as
+`http://prism2api:8319/v1`. It works with either Compose deployment file:
+
+```bash
+cp .env.example .env
+cat .env.prism2api.example >> .env
+# Edit .env: set PRISM_API_KEY, PRISM2API_SOURCE, PRISM2API_DATA_DIR,
+# POSTGRES_PASSWORD and the other deployment secrets.
+docker compose --env-file .env \
+  -f docker-compose.yml -f docker-compose.prism2api.yml up -d --build
+```
+
+Create an OpenAI API-key account using
+[`prism2api-account.example.json`](./prism2api-account.example.json). Keep
+concurrency at `1`, disable embeddings and upstream billing probes, and bind
+the account to a real group. The full Chinese setup and limitations are in
+[`PRISM2API_SUB2API.md`](./PRISM2API_SUB2API.md).
 
 ---
 

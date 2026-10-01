@@ -1,0 +1,25 @@
+{
+  "name": "Prism2API free-astra",
+  "notes": "OpenAI-compatible Prism2API sidecar; usage is estimated and the session expires.",
+  "platform": "openai",
+  "type": "apikey",
+  "credentials": {
+    "api_key": "replace-with-the-same-PRISM_API_KEY",
+    "base_url": "http://prism2api:8319/v1",
+    "model_mapping": {
+      "prism-astra": "gpt-6-astra",
+      "prism-sol": "gpt-5.6-sol",
+      "prism-terra": "gpt-5.6-terra"
+    },
+    "openai_capabilities": [
+      "chat_completions"
+    ]
+  },
+  "extra": {
+    "openai_responses_mode": "force_responses"
+  },
+  "concurrency": 1,
+  "priority": 0,
+  "group_ids": [],
+  "upstream_billing_probe_enabled": false
+}

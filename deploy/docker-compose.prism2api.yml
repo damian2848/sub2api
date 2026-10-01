@@ -1,0 +1,62 @@
+# Optional Prism2API (free-astra) sidecar.
+#
+# Use this file together with docker-compose.yml or docker-compose.local.yml.
+# It deliberately does not publish port 8319: Sub2API reaches the sidecar over
+# the existing sub2api-network bridge.
+#
+# Required variables:
+#   PRISM2API_SOURCE   path to a checkout of free-astra
+#   PRISM2API_DATA_DIR host directory containing session.json
+#   PRISM_API_KEY      shared key used by the Sub2API OpenAI API-key account
+
+services:
+  sub2api:
+    depends_on:
+      prism2api:
+        condition: service_healthy
+
+  prism2api:
+    build:
+      context: ${PRISM2API_SOURCE:?Set PRISM2API_SOURCE to the free-astra checkout}
+      dockerfile: Dockerfile
+    image: local/prism2api:0.2
+    container_name: prism2api
+    restart: unless-stopped
+    # The upstream compose defaults to root so a session.json imported by root
+    # remains readable. Set PRISM2API_UID/GID after chowning the data directory
+    # when a non-root container process is required.
+    user: "${PRISM2API_UID:-0}:${PRISM2API_GID:-0}"
+    environment:
+      PRISM_API_KEY: "${PRISM_API_KEY:?Set PRISM_API_KEY}"
+      PRISM_HOST: "0.0.0.0"
+      PRISM_PORT: "8319"
+      PRISM_SESSION: "/data/session.json"
+      PRISM_NO_AUTO_REFRESH: "1"
+      PRISM_EFFORT: "${PRISM_EFFORT:-medium}"
+      PRISM_TIMEOUT: "${PRISM_TIMEOUT:-240}"
+      PRISM_CONCURRENCY: "${PRISM_CONCURRENCY:-1}"
+      PRISM_KEEPALIVE: "${PRISM_KEEPALIVE:-600}"
+      PRISM_MAX_TRANSCRIPT: "${PRISM_MAX_TRANSCRIPT:-24000}"
+      HTTPS_PROXY: "${HTTPS_PROXY:-}"
+      HTTP_PROXY: "${HTTP_PROXY:-}"
+      NO_PROXY: "${NO_PROXY:-127.0.0.1,localhost,prism2api}"
+    volumes:
+      - "${PRISM2API_DATA_DIR:?Set PRISM2API_DATA_DIR}:/data"
+    expose:
+      - "8319"
+    networks:
+      - sub2api-network
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8319/health', timeout=5)"
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 10s
+
+networks:
+  sub2api-network:
+    driver: bridge
