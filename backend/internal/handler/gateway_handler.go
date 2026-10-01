@@ -1174,7 +1174,7 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 	}
 
 	if platform == service.PlatformComposite {
-		availableModels := h.compositeAvailableModels(c.Request.Context(), groupID, true)
+		availableModels := h.compositeAvailableModels(c.Request.Context(), groupID, "")
 		if apiKey != nil && apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
 			source := availableModels
 			if len(source) == 0 {
@@ -1274,7 +1274,7 @@ func (h *GatewayHandler) codexModelIDsForGroup(ctx context.Context, group *servi
 		platform = group.Platform
 	}
 	if platform == service.PlatformComposite {
-		availableModels := h.compositeAvailableModels(ctx, groupID, false)
+		availableModels := h.compositeAvailableModels(ctx, groupID, service.CompositeRouteEndpointResponses)
 		fallbackModels := defaultCodexModelIDsForPlatform(service.PlatformComposite)
 		if group.ModelAllowlistEnabled() {
 			source := availableModels
@@ -1300,10 +1300,7 @@ func (h *GatewayHandler) codexModelIDsForGroup(ctx context.Context, group *servi
 	return fallbackModels
 }
 
-// compositeAvailableModels lists the models the composite group can serve.
-// includeSystemOne adds TypeSafe models, which only work through /v1/systemone;
-// LLM client catalogs (Codex) must exclude them.
-func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *int64, includeSystemOne bool) []string {
+func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *int64, endpoint string) []string {
 	if h == nil || h.gatewayService == nil {
 		return nil
 	}
@@ -1311,7 +1308,7 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 	models := make([]string, 0)
 	schedulablePlatforms := h.gatewayService.GetSchedulablePlatforms(ctx, groupID)
 	for _, platform := range []string{service.PlatformAnthropic, service.PlatformGemini, service.PlatformOpenAI, service.PlatformAntigravity, service.PlatformGrok, service.PlatformKimi, service.PlatformZhipu, service.PlatformDeepseek, service.PlatformMiniMax, service.PlatformOpenCodeGo, service.PlatformTypeSafe} {
-		if platform == service.PlatformTypeSafe && !includeSystemOne {
+		if platform == service.PlatformTypeSafe && endpoint != "" {
 			continue
 		}
 		platformModels := h.gatewayService.GetAvailableModels(ctx, groupID, platform)
@@ -1332,6 +1329,16 @@ func (h *GatewayHandler) compositeAvailableModels(ctx context.Context, groupID *
 			}
 			seen[model] = struct{}{}
 			models = append(models, model)
+		}
+	}
+	// A route can expose a public ID that no account model mapping contains.
+	// On lookup failure, retain the existing account-derived catalog only.
+	if routeModels, err := h.gatewayService.GetCompositeRouteModels(ctx, groupID, endpoint); err == nil {
+		for _, model := range routeModels {
+			if _, ok := seen[model]; !ok {
+				seen[model] = struct{}{}
+				models = append(models, model)
+			}
 		}
 	}
 	return models
