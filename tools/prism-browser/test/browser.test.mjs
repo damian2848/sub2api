@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { BrowserSession, FALLBACK_MODEL, catalogCollapsed, catalogFromConfig, modelFromLabel, probeModel } from '../src/browser.mjs';
-import { publicError } from '../src/errors.mjs';
+import { PrismError, publicError } from '../src/errors.mjs';
 
 function route(body, path = '/api/llm/response_with_tools_start') {
   const state = { aborted: false, body: null };
@@ -372,8 +372,18 @@ test('only the current native resubmission terminal error is internally retryabl
     assert.equal(error.code, 'prism_generation_failed');
     assert.equal(error.retryConversation, retryable);
     assert.deepEqual(publicError(error), { error: {
-      message: 'prism_generation_failed', type: 'prism_error', code: 'prism_generation_failed' } });
+      message: 'Prism could not complete the generation; try again', type: 'prism_error', code: 'prism_generation_failed' } });
   }
+});
+
+test('public errors carry a readable fixed reason and never upstream text', () => {
+  const upstream = new PrismError('prism_upstream_http_error', 502);
+  assert.match(publicError(upstream).error.message, /overloaded/);
+  assert.equal(publicError(upstream).error.code, 'prism_upstream_http_error');
+  assert.equal(publicError(new PrismError('model_not_available', 400, 'model')).error.param, 'model');
+  // A code without a dedicated reason is its own message; an unknown failure is a generic code.
+  assert.equal(publicError(new PrismError('route_not_found', 404)).error.message, 'route_not_found');
+  assert.equal(publicError(new Error('raw upstream <secret>')).error.message, 'browser_operation_failed');
 });
 
 test('terminal audit validates the HTTP status and never emits raw error messages or credentials', async () => {

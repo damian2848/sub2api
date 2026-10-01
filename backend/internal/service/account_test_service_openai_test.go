@@ -223,6 +223,34 @@ func TestAccountTestService_OpenAIShadowUsesParentCredentialsAndShadowModel(t *t
 	require.Contains(t, recorder.Body.String(), `"success":true`)
 }
 
+func TestAccountTestService_OpenAIStreamErrorEventShowsItsReason(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cases := []struct {
+		name  string
+		event string
+		want  string
+	}{
+		{"flat Responses error", `{"type":"error","code":"prism_upstream_http_error","message":"Prism returned HTTP 503","param":null,"sequence_number":3}`, "Prism returned HTTP 503"},
+		{"flat error without message uses the code", `{"type":"error","code":"prism_generation_failed"}`, "prism_generation_failed"},
+		{"nested Chat-style error", `{"type":"error","error":{"message":"nested reason","code":"x"}}`, "nested reason"},
+		{"nested error without message uses the code", `{"type":"error","error":{"code":"only_code"}}`, "only_code"},
+		{"nothing usable", `{"type":"error"}`, "Unknown error"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, recorder := newTestContext()
+			resp := newJSONResponse(http.StatusOK, "")
+			resp.Body = io.NopCloser(strings.NewReader("event: error\ndata: " + tc.event + "\n\n"))
+			svc := &AccountTestService{httpUpstream: &queuedHTTPUpstream{responses: []*http.Response{resp}}}
+			account := &Account{ID: 91, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Concurrency: 1,
+				Credentials: map[string]any{"access_token": "test-token"}}
+
+			require.Error(t, svc.testOpenAIAccountConnection(ctx, account, "gpt-5.4", "", ""))
+			require.Contains(t, recorder.Body.String(), tc.want)
+		})
+	}
+}
+
 func TestAccountTestService_OpenAIStreamEOFBeforeCompletedFails(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx, recorder := newTestContext()

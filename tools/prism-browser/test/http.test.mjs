@@ -167,7 +167,7 @@ test('stream timeout returns one safe top-level Responses error following the li
   const events = responseEvents(await response.text());
   assert.deepEqual(events.map(event => event.type), ['response.created', 'response.in_progress', 'error']);
   assert.deepEqual(events.at(-1), { type: 'error', sequence_number: 2,
-    code: 'request_timeout', message: 'request_timeout', param: null });
+    code: 'request_timeout', message: 'Prism did not answer in time', param: null });
   assert.equal(calls, 1);
 });
 

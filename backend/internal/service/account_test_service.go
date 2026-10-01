@@ -3117,15 +3117,35 @@ func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader)
 			}
 			return s.sendErrorAndEnd(c, errorMsg)
 		case "error":
-			errorMsg := "Unknown error"
-			if errData, ok := data["error"].(map[string]any); ok {
-				if msg, ok := errData["message"].(string); ok {
-					errorMsg = msg
-				}
-			}
-			return s.sendErrorAndEnd(c, errorMsg)
+			return s.sendErrorAndEnd(c, openAIStreamErrorMessage(data))
 		}
 	}
+}
+
+// openAIStreamErrorMessage extracts the reason from a Responses stream "error" event. The
+// documented event is flat ({"type":"error","code":...,"message":...}); the Chat-style
+// nested form ({"error":{"message":...}}) is accepted too.
+func openAIStreamErrorMessage(data map[string]any) string {
+	text := func(value any) string {
+		if str, ok := value.(string); ok {
+			return strings.TrimSpace(str)
+		}
+		return ""
+	}
+	if nested, ok := data["error"].(map[string]any); ok {
+		if msg := text(nested["message"]); msg != "" {
+			return msg
+		}
+		if code := text(nested["code"]); code != "" {
+			return code
+		}
+	}
+	for _, key := range []string{"message", "error", "code"} {
+		if msg := text(data[key]); msg != "" {
+			return msg
+		}
+	}
+	return "Unknown error"
 }
 
 // testOpenAIImageAPIKey tests OpenAI image generation using an API Key account.

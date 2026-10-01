@@ -447,7 +447,7 @@ test('Responses errors use safe top-level fields and the next sequence even afte
   await writer.error(new Error('do-not-expose-access-token'));
   const events = asyncEvents(res);
   assert.deepEqual(events.at(-1), { type: 'error', sequence_number: 2,
-    code: 'request_timeout', message: 'request_timeout', param: null });
+    code: 'request_timeout', message: 'Prism did not answer in time', param: null });
   assert.equal(events.filter(event => event.type === 'error').length, 1);
   assert.equal(res.writableEnded, true);
   assert.equal(res.listenerCount('drain'), 0);
