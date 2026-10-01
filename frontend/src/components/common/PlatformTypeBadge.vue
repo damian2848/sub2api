@@ -70,6 +70,7 @@ import { useI18n } from 'vue-i18n'
 import type { AccountPlatform, AccountType } from '@/types'
 import { platformLabel as sharedPlatformLabel } from '@/utils/platformColors'
 import { normalizePlanType, openAIPlanTypeLabel } from '@/utils/planType'
+import { isFreeAstraPrismProviderPreset } from '@/components/account/credentialsBuilder'
 import GrokFreeIcon from './GrokFreeIcon.vue'
 import PlatformIcon from './PlatformIcon.vue'
 import Icon from '@/components/icons/Icon.vue'
@@ -79,6 +80,7 @@ const { t } = useI18n()
 interface Props {
   platform: AccountPlatform
   type: AccountType
+  providerPreset?: string
   authMode?: string
   planType?: string
   privacyMode?: string
@@ -87,7 +89,11 @@ interface Props {
 
 const props = defineProps<Props>()
 
-const platformLabel = computed(() => sharedPlatformLabel(props.platform))
+const platformLabel = computed(() =>
+  props.platform === 'openai' && props.type === 'apikey' && isFreeAstraPrismProviderPreset(props.providerPreset)
+    ? 'Free-Astra / Prism'
+    : sharedPlatformLabel(props.platform)
+)
 
 const normalizedAuthMode = computed(() =>
   (props.authMode || '').trim().toLowerCase().replace(/[\s_-]+/g, '')

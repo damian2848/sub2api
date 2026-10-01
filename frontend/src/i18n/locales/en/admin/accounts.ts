@@ -651,6 +651,14 @@ export default {
       openai: {
         baseUrlHint: 'Leave default for official OpenAI API',
         apiKeyHint: 'Your OpenAI API Key',
+        providerPreset: {
+          title: 'Provider preset',
+          officialDesc: 'Official OpenAI-compatible API',
+          freeAstraPrismDesc: 'Free-Astra / Prism2API sidecar',
+          baseUrlHint: 'Prism2API service URL, including /v1',
+          apiKeyHint: 'Use the same PRISM_API_KEY as the Prism2API service',
+          hint: 'The Prism preset uses the internal Docker service name. Change Base URL when Prism runs outside the Sub2API network.'
+        },
         oauthPassthrough: 'Auto passthrough (auth only)',
         excelBPS: 'Excel / BPS protocol',
         excelBPSOmitUnsupportedTools: 'Keep BPS and omit unsupported hosted tools',

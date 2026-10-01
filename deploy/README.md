@@ -53,10 +53,12 @@ docker compose --env-file .env \
   -f docker-compose.yml -f docker-compose.prism2api.yml up -d --build
 ```
 
-Create an OpenAI API-key account using
-[`prism2api-account.example.json`](./prism2api-account.example.json). Keep
-concurrency at `1`, disable embeddings and upstream billing probes, and bind
-the account to a real group. The full Chinese setup and limitations are in
+Create an OpenAI API-key account and choose the **Free-Astra / Prism** provider
+preset in the admin UI. It fills the internal Base URL, model mapping, text-only
+capabilities, Responses mode, and concurrency defaults. Keep the API key equal
+to `PRISM_API_KEY`, bind the account to a real group, and use
+[`prism2api-account.example.json`](./prism2api-account.example.json) when an API
+payload is needed. The full Chinese setup and limitations are in
 [`PRISM2API_SUB2API.md`](./PRISM2API_SUB2API.md).
 
 ---

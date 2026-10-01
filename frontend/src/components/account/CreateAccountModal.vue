@@ -364,7 +364,7 @@
       <!-- Account Type Selection (OpenAI) -->
       <div v-if="form.platform === 'openai'">
         <label class="input-label">{{ t('admin.accounts.accountType') }}</label>
-        <div class="mt-2 grid grid-cols-3 gap-3" data-tour="account-form-type">
+        <div class="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3" data-tour="account-form-type">
           <button
             type="button"
             @click="accountCategory = 'oauth-based'; openaiTwoFA = false"
@@ -429,6 +429,55 @@
 
         </div>
         <p v-if="isOpenAITwoFA" class="input-hint">{{ t('tokenGuard.twoFA.nameHint') }}</p>
+      </div>
+
+      <!-- OpenAI-compatible provider presets -->
+      <div
+        v-if="form.platform === 'openai' && accountCategory === 'apikey'"
+        class="rounded-lg border border-gray-200 p-4 dark:border-dark-600"
+      >
+        <label class="input-label mb-2">{{ t('admin.accounts.openai.providerPreset.title') }}</label>
+        <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <button
+            type="button"
+            data-testid="openai-provider-preset-official"
+            @click="selectOpenAIProviderPreset('openai')"
+            :class="[
+              'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+              openAIProviderPreset === 'openai'
+                ? 'border-green-500 bg-green-50 dark:bg-green-900/20'
+                : 'border-gray-200 hover:border-green-300 dark:border-dark-600 dark:hover:border-green-700'
+            ]"
+          >
+            <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400">
+              <Icon name="sparkles" size="sm" />
+            </div>
+            <div>
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">OpenAI</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.providerPreset.officialDesc') }}</span>
+            </div>
+          </button>
+          <button
+            type="button"
+            data-testid="openai-provider-preset-free-astra-prism"
+            @click="selectOpenAIProviderPreset('free_astra_prism')"
+            :class="[
+              'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+              openAIProviderPreset === 'free_astra_prism'
+                ? 'border-fuchsia-500 bg-fuchsia-50 dark:bg-fuchsia-900/20'
+                : 'border-gray-200 hover:border-fuchsia-300 dark:border-dark-600 dark:hover:border-fuchsia-700'
+            ]"
+          >
+            <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-fuchsia-500 text-white">
+              <Icon name="bolt" size="sm" />
+            </div>
+            <div>
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">Free-Astra / Prism</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.providerPreset.freeAstraPrismDesc') }}</span>
+            </div>
+          </button>
+        </div>
+        <p class="input-hint">{{ t('admin.accounts.openai.providerPreset.hint') }}</p>
       </div>
 
       <!-- Account Type Selection (Grok) -->
@@ -3931,6 +3980,11 @@ import {
   defaultCNAdaptiveBaseUrls,
   defaultCNBaseUrl,
   defaultOpenCodeProtocolRules,
+  FREE_ASTRA_PRISM_BASE_URL,
+  FREE_ASTRA_PRISM_MODEL_MAPPINGS,
+  FREE_ASTRA_PRISM_PROVIDER_PRESET,
+  ACCOUNT_PROVIDER_PRESET_KEY,
+  type OpenAIProviderPreset,
   isCNProviderPlatform,
   isHeaderOverrideCapable,
   validateHeaderOverrideRows,
@@ -4002,6 +4056,7 @@ const withAccountExtraSettings = (extra?: Record<string, unknown>): Record<strin
 }
 
 const baseUrlHint = computed(() => {
+  if (isFreeAstraPrismPreset.value) return t('admin.accounts.openai.providerPreset.baseUrlHint')
   if (form.platform === 'openai') return t('admin.accounts.openai.baseUrlHint')
   if (form.platform === 'gemini') return t('admin.accounts.gemini.baseUrlHint')
   if (form.platform === 'grok') return ''
@@ -4009,6 +4064,7 @@ const baseUrlHint = computed(() => {
 })
 
 const apiKeyHint = computed(() => {
+  if (isFreeAstraPrismPreset.value) return t('admin.accounts.openai.providerPreset.apiKeyHint')
   if (form.platform === 'openai') return t('admin.accounts.openai.apiKeyHint')
   if (form.platform === 'gemini') return t('admin.accounts.gemini.apiKeyHint')
   if (form.platform === 'grok') return ''
@@ -4017,6 +4073,7 @@ const apiKeyHint = computed(() => {
 
 // Base URL / API Key 占位符：国产供应商随账号类型变化。
 const apiKeyBaseUrlPlaceholder = computed(() => {
+  if (isFreeAstraPrismPreset.value) return FREE_ASTRA_PRISM_BASE_URL
   if (isMultiProtocolPlatform.value) {
     const mode = form.platform === 'opencode_go' ? openCodeAccountMode.value : accountMode.value
     return defaultCNBaseUrl(form.platform, mode, apiProtocol.value) || 'https://api.example.com'
@@ -4034,6 +4091,7 @@ const apiKeyBaseUrlPlaceholder = computed(() => {
 })
 
 const apiKeyValuePlaceholder = computed(() => {
+  if (isFreeAstraPrismPreset.value) return 'PRISM_API_KEY'
   switch (form.platform) {
     case 'openai':
       return 'sk-proj-...'
@@ -4144,6 +4202,43 @@ const addMethod = ref<AddMethod>('oauth') // For oauth-based: 'oauth' or 'setup-
 const apiKeyBaseUrl = ref('https://api.anthropic.com')
 const apiKeyValue = ref('')
 const upstreamBillingAutoProbeEnabled = ref(true)
+const openAIProviderPreset = ref<OpenAIProviderPreset>('openai')
+const isFreeAstraPrismPreset = computed(
+  () => form.platform === 'openai' && accountCategory.value === 'apikey' && openAIProviderPreset.value === 'free_astra_prism'
+)
+
+function selectOpenAIProviderPreset(preset: OpenAIProviderPreset) {
+  openAIProviderPreset.value = preset
+  form.platform = 'openai'
+  form.type = 'apikey'
+  accountCategory.value = 'apikey'
+
+  if (preset === 'free_astra_prism') {
+    if (!form.name.trim() || form.name === 'OpenAI API Key') form.name = 'Free-Astra / Prism'
+    apiKeyBaseUrl.value = FREE_ASTRA_PRISM_BASE_URL
+    form.proxy_id = null
+    upstreamBillingAutoProbeEnabled.value = false
+    form.concurrency = 1
+    form.load_factor = null
+    copilotSDKEnabled.value = false
+    openaiPassthroughEnabled.value = false
+    openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
+    openAIResponsesMode.value = 'force_responses'
+    openAIEndpointCapabilities.value = ['chat_completions']
+    modelRestrictionMode.value = 'mapping'
+    modelMappings.value = FREE_ASTRA_PRISM_MODEL_MAPPINGS.map(mapping => ({ ...mapping }))
+    allowedModels.value = []
+    return
+  }
+
+  if (apiKeyBaseUrl.value === FREE_ASTRA_PRISM_BASE_URL) apiKeyBaseUrl.value = 'https://api.openai.com'
+  upstreamBillingAutoProbeEnabled.value = true
+  openAIResponsesMode.value = 'auto'
+  openAIEndpointCapabilities.value = ['chat_completions', 'embeddings']
+  modelRestrictionMode.value = 'whitelist'
+  modelMappings.value = []
+  allowedModels.value = []
+}
 
 // ── 国产供应商（Kimi / Zhipu / DeepSeek）账号类型、API 协议与端点 ──
 const accountMode = ref<CnAccountMode>('payg')
@@ -4825,6 +4920,9 @@ watch(
 watch(
   () => form.platform,
   (newPlatform) => {
+    if (newPlatform !== 'openai') {
+      openAIProviderPreset.value = 'openai'
+    }
     // Reset base URL based on platform
     if (isCNProviderPlatform(newPlatform) || newPlatform === 'opencode_go') {
       const mode = newPlatform === 'opencode_go' ? openCodeAccountMode.value : accountMode.value
@@ -5306,6 +5404,7 @@ const resetForm = () => {
   form.expires_at = null
   accountCategory.value = 'oauth-based'
   addMethod.value = 'oauth'
+  openAIProviderPreset.value = 'openai'
   accountMode.value = 'payg'
   openCodeAccountMode.value = 'zen'
   apiProtocol.value = 'adaptive'
@@ -5496,6 +5595,12 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
     extra.images_url_to_b64_json = true
   } else {
     delete extra.images_url_to_b64_json
+  }
+
+  if (accountCategory.value === 'apikey' && isFreeAstraPrismPreset.value) {
+    extra[ACCOUNT_PROVIDER_PRESET_KEY] = FREE_ASTRA_PRISM_PROVIDER_PRESET
+  } else {
+    delete extra[ACCOUNT_PROVIDER_PRESET_KEY]
   }
 
   return Object.keys(extra).length > 0 ? extra : undefined

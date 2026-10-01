@@ -49,18 +49,22 @@ docker compose --env-file .env \
 
 ## 3. 创建 Sub2API 账号
 
-后台创建账号时选择：
+后台创建账号时选择 `OpenAI` → `API Key`，然后在 **Provider preset** 中选择
+**Free-Astra / Prism**。这个预设会自动填写：
 
-- 平台：`OpenAI`
-- 类型：`API Key`
 - Base URL：`http://prism2api:8319/v1`
-- API Key：填写 `.env` 中相同的 `PRISM_API_KEY`
 - 并发：`1`
-- Endpoint capabilities：只保留文本能力，取消 `embeddings`
+- 只保留文本端点能力，关闭 `embeddings`
 - Responses mode：`force_responses`
 - 关闭 upstream billing probe
+- 直连内部服务，关闭 Copilot、透传及 WebSocket
+- 只映射 Prism 暴露的 `gpt-6-astra`、`gpt-5.6-sol`、`gpt-5.6-terra`
 
-可以直接参考 [prism2api-account.example.json](./prism2api-account.example.json) 的管理员 API payload；创建前需要把 `group_ids` 换成实际分组 ID。模板通过映射只公开 `prism-astra`、`prism-sol`、`prism-terra` 三个别名，并在转发时映射到 Prism 接受的模型 ID。不要打开 `openai_passthrough`，否则任意客户端模型名都会原样发给 Prism，容易把不支持的模型误路由过去。
+然后填入 `.env` 中相同的 `PRISM_API_KEY`，绑定实际分组并保存。预设保存为
+非敏感的 `provider_preset=free_astra_prism` 标记，账号仍通过现有 OpenAI
+兼容网关转发；编辑账号时可以直接切回官方 OpenAI 或修改 Base URL。
+
+也可以直接参考 [prism2api-account.example.json](./prism2api-account.example.json) 的管理员 API payload；创建前需要把 `group_ids` 换成实际分组 ID。不要打开 `openai_passthrough`，否则任意客户端模型名都会原样发给 Prism，容易把不支持的模型误路由过去。
 
 管理员 API 示例（需要管理员 JWT）：
 
@@ -71,7 +75,7 @@ curl -X POST "http://127.0.0.1:8080/api/v1/admin/accounts" \
   --data @prism2api-account.example.json
 ```
 
-后台测试账号时选 `prism-astra`、`prism-sol` 或 `prism-terra`，不要使用 Sub2API 默认的 `gpt-5.4` 测试模型。创建后把账号绑定到实际分组，再用 Sub2API 的 `/v1/models` 和一次最小文本请求验证。
+后台测试账号时选择 `GPT-6 Astra`、`GPT-5.6 Sol` 或 `GPT-5.6 Terra`。创建后把账号绑定到实际分组，再用 Sub2API 的 `/v1/models` 和一次最小文本请求验证。
 
 ## 4. 网络与安全配置
 

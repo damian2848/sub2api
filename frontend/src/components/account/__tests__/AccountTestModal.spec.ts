@@ -167,6 +167,50 @@ describe('AccountTestModal', () => {
     wrapper.unmount()
   })
 
+  it('labels Prism API key accounts and offers only the supported default probe', async () => {
+    const account = {
+      ...buildAccount(),
+      name: 'Prism account',
+      type: 'apikey',
+      extra: { provider_preset: 'free_astra_prism' }
+    }
+    getAvailableModelsMock.mockResolvedValue([{ id: 'gpt-5.6-sol', display_name: 'GPT-5.6 Sol' }])
+    const wrapper = mount(AccountTestModal, {
+      props: { show: false, account },
+      global: { stubs: { BaseDialog: BaseDialogStub, Select: SelectStub, TextArea: TextAreaStub, Icon: true } }
+    })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('Free-Astra / Prism')
+    expect(wrapper.find('option[value="default"]').exists()).toBe(true)
+    expect(wrapper.find('option[value="compact"]').exists()).toBe(false)
+    expect(wrapper.find('option[value="bps_tools"]').exists()).toBe(false)
+    await (wrapper.vm as any).startTest()
+    await flushPromises()
+
+    const [, options] = (global.fetch as any).mock.calls[0]
+    expect(JSON.parse(options.body)).toMatchObject({ model_id: 'gpt-5.6-sol', mode: 'default' })
+    wrapper.unmount()
+  })
+
+  it.each([
+    { platform: 'openai', type: 'oauth', providerPreset: 'free_astra_prism', compact: true },
+    { platform: 'anthropic', type: 'apikey', providerPreset: 'free_astra_prism', compact: false },
+    { platform: 'openai', type: 'apikey', providerPreset: 'unknown_provider', compact: true }
+  ])('ignores the Prism marker for $platform / $type / $providerPreset', async ({ platform, type, providerPreset, compact }) => {
+    const account = { ...buildAccount(), platform, type, extra: { provider_preset: providerPreset } }
+    const wrapper = mount(AccountTestModal, {
+      props: { show: true, account },
+      global: { stubs: { BaseDialog: BaseDialogStub, Select: SelectStub, TextArea: TextAreaStub, Icon: true } }
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('Free-Astra / Prism')
+    expect(wrapper.find('option[value="compact"]').exists()).toBe(compact)
+    wrapper.unmount()
+  })
+
   it('renders Chat Completions path status from test SSE', async () => {
     const encoder = new TextEncoder()
     const chunks = [

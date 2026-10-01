@@ -108,3 +108,25 @@ describe('new Codex subscription labels', () => {
     if (color) expect(wrapper.html()).toContain(color)
   })
 })
+
+describe('PlatformTypeBadge provider presets', () => {
+  it('labels marked OpenAI API key accounts as Free-Astra / Prism', () => {
+    const wrapper = mount(PlatformTypeBadge, {
+      props: { platform: 'openai', type: 'apikey', providerPreset: 'free_astra_prism' }
+    })
+
+    expect(wrapper.text()).toContain('Free-Astra / Prism')
+    expect(wrapper.text()).toContain('Key')
+  })
+
+  it.each([
+    { platform: 'openai' as const, type: 'oauth' as const, providerPreset: 'free_astra_prism', label: 'OpenAI' },
+    { platform: 'anthropic' as const, type: 'apikey' as const, providerPreset: 'free_astra_prism', label: 'Anthropic' },
+    { platform: 'openai' as const, type: 'apikey' as const, providerPreset: 'unknown_provider', label: 'OpenAI' }
+  ])('keeps the platform label for $platform / $type / $providerPreset', ({ label, ...props }) => {
+    const wrapper = mount(PlatformTypeBadge, { props })
+
+    expect(wrapper.text()).toContain(label)
+    expect(wrapper.text()).not.toContain('Free-Astra / Prism')
+  })
+})

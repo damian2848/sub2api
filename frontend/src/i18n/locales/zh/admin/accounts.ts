@@ -769,6 +769,14 @@ export default {
       openai: {
         baseUrlHint: '留空使用官方 OpenAI API',
         apiKeyHint: '您的 OpenAI API Key',
+        providerPreset: {
+          title: 'Provider 预设',
+          officialDesc: '官方 OpenAI 兼容 API',
+          freeAstraPrismDesc: 'Free-Astra / Prism2API sidecar',
+          baseUrlHint: 'Prism2API 服务地址，包含 /v1',
+          apiKeyHint: '与 Prism2API 服务的 PRISM_API_KEY 保持一致',
+          hint: 'Prism 预设使用 Docker 内部服务名；如果 Prism 不在 Sub2API 网络内，请改成实际可访问的 Base URL。'
+        },
         oauthPassthrough: '自动透传（仅替换认证）',
         excelBPS: 'Excel / BPS 协议',
         excelBPSOmitUnsupportedTools: '保持 BPS，省略不支持的托管工具',

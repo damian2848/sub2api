@@ -2384,6 +2384,146 @@ describe('EditAccountModal OpenAI 自动使用重置卡', () => {
 })
 
 
+describe('EditAccountModal Free-Astra / Prism provider preset', () => {
+  beforeEach(() => {
+    authIsSimpleMode.value = true
+    updateAccountMock.mockReset().mockResolvedValue(buildAccount())
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+  })
+
+  it('converts an existing OpenAI API key account to compatible Prism settings', async () => {
+    const account = {
+      ...buildAccount(),
+      concurrency: 10,
+      load_factor: 5,
+      proxy_id: 3,
+      extra: {
+        unrelated: 'preserve',
+        upstream_billing_probe_enabled: true,
+        upstream_billing_rate_sync_enabled: true,
+        openai_copilot_sdk: true,
+        openai_passthrough: true,
+        openai_apikey_responses_websockets_v2_mode: 'ctx_pool',
+        openai_apikey_responses_websockets_v2_enabled: true
+      }
+    }
+    const wrapper = mountModal(account)
+    await flushPromises()
+    await wrapper.get('[data-testid="edit-openai-provider-preset-free-astra-prism"]').trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    const payload = updateAccountMock.mock.calls[0]?.[1]
+    expect(payload).toMatchObject({
+      concurrency: 1,
+      load_factor: 0,
+      proxy_id: 0,
+      upstream_billing_probe_enabled: false,
+      upstream_billing_rate_sync_enabled: false,
+      credentials: {
+        base_url: 'http://prism2api:8319/v1',
+        openai_capabilities: ['chat_completions'],
+        model_mapping: {
+          'gpt-6-astra': 'gpt-6-astra',
+          'gpt-5.6-sol': 'gpt-5.6-sol',
+          'gpt-5.6-terra': 'gpt-5.6-terra'
+        }
+      },
+      extra: {
+        provider_preset: 'free_astra_prism',
+        openai_responses_mode: 'force_responses',
+        openai_apikey_responses_websockets_v2_mode: 'off',
+        openai_apikey_responses_websockets_v2_enabled: false,
+        unrelated: 'preserve'
+      }
+    })
+    expect(payload.extra).not.toHaveProperty('openai_copilot_sdk')
+    expect(payload.extra).not.toHaveProperty('openai_passthrough')
+  })
+
+  it('round-trips a saved Prism preset and its custom endpoint without reapplying defaults', async () => {
+    const account = {
+      ...buildAccount(),
+      concurrency: 2,
+      credentials: {
+        api_key: 'prism-api-key',
+        base_url: 'https://prism.example.com/v1',
+        openai_capabilities: ['chat_completions'],
+        model_mapping: { 'gpt-5.6-sol': 'gpt-5.6-sol' }
+      },
+      extra: {
+        unrelated: 'preserve',
+        provider_preset: 'free_astra_prism',
+        openai_responses_mode: 'force_responses',
+        upstream_billing_probe_enabled: false,
+        upstream_billing_rate_sync_enabled: false
+      }
+    }
+    const wrapper = mountModal(account)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="edit-openai-provider-preset-free-astra-prism"]').classes())
+      .toContain('border-fuchsia-500')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(updateAccountMock.mock.calls[0]?.[1]).toMatchObject({
+      concurrency: 2,
+      upstream_billing_probe_enabled: false,
+      credentials: {
+        base_url: 'https://prism.example.com/v1',
+        openai_capabilities: ['chat_completions'],
+        model_mapping: { 'gpt-5.6-sol': 'gpt-5.6-sol' }
+      },
+      extra: {
+        provider_preset: 'free_astra_prism',
+        openai_responses_mode: 'force_responses',
+        unrelated: 'preserve'
+      }
+    })
+  })
+
+  it('clears Prism metadata and routing defaults when switching back to OpenAI', async () => {
+    const account = {
+      ...buildAccount(),
+      credentials: {
+        api_key: 'prism-api-key',
+        base_url: 'http://prism2api:8319/v1',
+        openai_capabilities: ['chat_completions'],
+        model_mapping: { 'gpt-5.6-sol': 'gpt-5.6-sol' }
+      },
+      extra: { provider_preset: 'free_astra_prism', openai_responses_mode: 'force_responses' }
+    }
+    const wrapper = mountModal(account)
+    await flushPromises()
+    await wrapper.get('[data-testid="edit-openai-provider-preset-official"]').trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    const payload = updateAccountMock.mock.calls[0]?.[1]
+    expect(payload.credentials).toMatchObject({
+      base_url: 'https://api.openai.com'
+    })
+    expect(payload.credentials).not.toHaveProperty('openai_capabilities')
+    expect(payload.credentials).not.toHaveProperty('model_mapping')
+    expect(payload.extra).not.toHaveProperty('provider_preset')
+    expect(payload.extra).not.toHaveProperty('openai_responses_mode')
+  })
+
+  it('keeps an existing OpenAI account on the official preset by default', async () => {
+    const wrapper = mountModal()
+    await flushPromises()
+    expect(wrapper.get('[data-testid="edit-openai-provider-preset-official"]').classes())
+      .toContain('border-green-500')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    const payload = updateAccountMock.mock.calls[0]?.[1]
+    expect(payload.credentials.base_url).toBe('https://api.openai.com')
+    expect(payload.credentials.model_mapping).toEqual({ 'gpt-5.2': 'gpt-5.2' })
+    expect(payload.extra).not.toHaveProperty('provider_preset')
+  })
+})
+
 describe('independent account cost multiplier', () => {
   beforeEach(() => {
     vi.clearAllMocks()

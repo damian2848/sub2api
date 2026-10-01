@@ -33,6 +33,53 @@
 
       <!-- API Key fields (only for apikey type) -->
       <div v-if="account.type === 'apikey'" class="space-y-4">
+        <div
+          v-if="account.platform === 'openai'"
+          class="rounded-lg border border-gray-200 p-4 dark:border-dark-600"
+        >
+          <label class="input-label mb-2">{{ t('admin.accounts.openai.providerPreset.title') }}</label>
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <button
+              type="button"
+              data-testid="edit-openai-provider-preset-official"
+              @click="selectOpenAIProviderPreset('openai')"
+              :class="[
+                'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+                openAIProviderPreset === 'openai'
+                  ? 'border-green-500 bg-green-50 dark:bg-green-900/20'
+                  : 'border-gray-200 hover:border-green-300 dark:border-dark-600 dark:hover:border-green-700'
+              ]"
+            >
+              <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400">
+                <Icon name="sparkles" size="sm" />
+              </div>
+              <div>
+                <span class="block text-sm font-medium text-gray-900 dark:text-white">OpenAI</span>
+                <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.providerPreset.officialDesc') }}</span>
+              </div>
+            </button>
+            <button
+              type="button"
+              data-testid="edit-openai-provider-preset-free-astra-prism"
+              @click="selectOpenAIProviderPreset('free_astra_prism')"
+              :class="[
+                'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+                openAIProviderPreset === 'free_astra_prism'
+                  ? 'border-fuchsia-500 bg-fuchsia-50 dark:bg-fuchsia-900/20'
+                  : 'border-gray-200 hover:border-fuchsia-300 dark:border-dark-600 dark:hover:border-fuchsia-700'
+              ]"
+            >
+              <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-fuchsia-500 text-white">
+                <Icon name="bolt" size="sm" />
+              </div>
+              <div>
+                <span class="block text-sm font-medium text-gray-900 dark:text-white">Free-Astra / Prism</span>
+                <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.providerPreset.freeAstraPrismDesc') }}</span>
+              </div>
+            </button>
+          </div>
+          <p class="input-hint">{{ t('admin.accounts.openai.providerPreset.hint') }}</p>
+        </div>
         <div v-if="!isCNApiKeyAccount || editApiProtocol !== 'adaptive'">
           <label class="input-label">{{ t('admin.accounts.baseUrl') }}</label>
           <input
@@ -220,7 +267,9 @@
             data-lpignore="true"
             data-bwignore="true"
             :placeholder="
-              account.platform === 'openai'
+              isFreeAstraPrismPreset
+                ? 'PRISM_API_KEY'
+                : account.platform === 'openai'
                 ? 'sk-proj-...'
                 : account.platform === 'gemini'
                   ? 'AIza...'
@@ -232,6 +281,7 @@
             "
           />
           <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }}</p>
+          <p v-if="isFreeAstraPrismPreset" class="input-hint">{{ t('admin.accounts.openai.providerPreset.apiKeyHint') }}</p>
         </div>
 
         <!-- Model Restriction Section (不适用于 Antigravity) -->
@@ -3334,6 +3384,12 @@ import {
   cnSupportsNativeResponses,
   defaultCNAdaptiveBaseUrls,
   defaultCNBaseUrl,
+  FREE_ASTRA_PRISM_BASE_URL,
+  FREE_ASTRA_PRISM_MODEL_MAPPINGS,
+  FREE_ASTRA_PRISM_PROVIDER_PRESET,
+  ACCOUNT_PROVIDER_PRESET_KEY,
+  isFreeAstraPrismProviderPreset,
+  type OpenAIProviderPreset,
   isCNProviderPlatform,
   HEADER_OVERRIDE_ENABLED_CREDENTIAL_KEY,
   HEADER_OVERRIDES_CREDENTIAL_KEY,
@@ -3532,6 +3588,7 @@ onMounted(() => {
 
 // Platform-specific hint for Base URL
 const baseUrlHint = computed(() => {
+  if (isFreeAstraPrismPreset.value) return t('admin.accounts.openai.providerPreset.baseUrlHint')
   if (!props.account) return t('admin.accounts.baseUrlHint')
   if (props.account.platform === 'openai') return t('admin.accounts.openai.baseUrlHint')
   if (props.account.platform === 'gemini') return t('admin.accounts.gemini.baseUrlHint')
@@ -3559,6 +3616,38 @@ interface TempUnschedRuleForm {
 const submitting = ref(false)
 const editBaseUrl = ref('https://api.anthropic.com')
 const editApiKey = ref('')
+const openAIProviderPreset = ref<OpenAIProviderPreset>('openai')
+const isFreeAstraPrismPreset = computed(
+  () => props.account?.platform === 'openai' && props.account?.type === 'apikey' && openAIProviderPreset.value === 'free_astra_prism'
+)
+
+function selectOpenAIProviderPreset(preset: OpenAIProviderPreset) {
+  openAIProviderPreset.value = preset
+  if (preset === 'free_astra_prism') {
+    editBaseUrl.value = FREE_ASTRA_PRISM_BASE_URL
+    form.proxy_id = null
+    form.concurrency = 1
+    form.load_factor = null
+    upstreamBillingAutoProbeEnabled.value = false
+    upstreamBillingRateSyncEnabled.value = false
+    copilotSDKEnabled.value = false
+    openaiPassthroughEnabled.value = false
+    openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
+    openAIResponsesMode.value = 'force_responses'
+    openAIEndpointCapabilities.value = ['chat_completions']
+    modelRestrictionMode.value = 'mapping'
+    modelMappings.value = FREE_ASTRA_PRISM_MODEL_MAPPINGS.map(mapping => ({ ...mapping }))
+    allowedModels.value = []
+    return
+  }
+
+  if (editBaseUrl.value === FREE_ASTRA_PRISM_BASE_URL) editBaseUrl.value = 'https://api.openai.com'
+  openAIResponsesMode.value = 'auto'
+  openAIEndpointCapabilities.value = ['chat_completions', 'embeddings']
+  modelRestrictionMode.value = 'whitelist'
+  modelMappings.value = []
+  allowedModels.value = []
+}
 
 // ── 国产供应商（Kimi / Zhipu / DeepSeek）account_mode / api_protocol 编辑 ──
 // account_mode 决定额度/余额监控路径，api_protocol 决定转发端点与格式；
@@ -4412,6 +4501,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   mixedScheduling.value = false
   allowOverages.value = false
 	const extra = newAccount.extra as Record<string, unknown> | undefined
+	openAIProviderPreset.value = isFreeAstraPrismProviderPreset(extra?.[ACCOUNT_PROVIDER_PRESET_KEY])
+	  ? FREE_ASTRA_PRISM_PROVIDER_PRESET
+	  : 'openai'
 	mixedScheduling.value = extra?.mixed_scheduling === true
 	allowOverages.value = extra?.allow_overages === true
 	upstreamRequestIdHeader.value = readUpstreamRequestIdHeader(extra)
@@ -6119,6 +6211,11 @@ const handleSubmit = async () => {
         } else {
           delete newExtra.images_url_to_b64_json
         }
+			if (isFreeAstraPrismPreset.value) {
+				newExtra[ACCOUNT_PROVIDER_PRESET_KEY] = FREE_ASTRA_PRISM_PROVIDER_PRESET
+			} else {
+				delete newExtra[ACCOUNT_PROVIDER_PRESET_KEY]
+			}
 		}
 		if (autoPause5hThreshold.value != null && autoPause5hThreshold.value > 0) {
 			newExtra.auto_pause_5h_threshold = autoPause5hThreshold.value / 100

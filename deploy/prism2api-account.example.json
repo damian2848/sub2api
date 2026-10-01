@@ -7,16 +7,17 @@
     "api_key": "replace-with-the-same-PRISM_API_KEY",
     "base_url": "http://prism2api:8319/v1",
     "model_mapping": {
-      "prism-astra": "gpt-6-astra",
-      "prism-sol": "gpt-5.6-sol",
-      "prism-terra": "gpt-5.6-terra"
+      "gpt-6-astra": "gpt-6-astra",
+      "gpt-5.6-sol": "gpt-5.6-sol",
+      "gpt-5.6-terra": "gpt-5.6-terra"
     },
     "openai_capabilities": [
       "chat_completions"
     ]
   },
   "extra": {
-    "openai_responses_mode": "force_responses"
+    "openai_responses_mode": "force_responses",
+    "provider_preset": "free_astra_prism"
   },
   "concurrency": 1,
   "priority": 0,

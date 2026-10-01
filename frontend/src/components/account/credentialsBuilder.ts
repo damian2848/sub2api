@@ -1,5 +1,21 @@
 import { openAIPlanTypeKey, openAIPlanTypeLabel, openAIPlanTypes } from '@/utils/planType'
 
+// Presets reuse the OpenAI gateway; the non-secret marker is stored in account.extra.
+export const ACCOUNT_PROVIDER_PRESET_KEY = 'provider_preset'
+export const FREE_ASTRA_PRISM_PROVIDER_PRESET = 'free_astra_prism' as const
+export const FREE_ASTRA_PRISM_BASE_URL = 'http://prism2api:8319/v1'
+export const FREE_ASTRA_PRISM_MODEL_MAPPINGS = [
+  { from: 'gpt-6-astra', to: 'gpt-6-astra' },
+  { from: 'gpt-5.6-sol', to: 'gpt-5.6-sol' },
+  { from: 'gpt-5.6-terra', to: 'gpt-5.6-terra' }
+] as const
+
+export type OpenAIProviderPreset = 'openai' | typeof FREE_ASTRA_PRISM_PROVIDER_PRESET
+
+export function isFreeAstraPrismProviderPreset(value: unknown): boolean {
+  return value === FREE_ASTRA_PRISM_PROVIDER_PRESET
+}
+
 export function applyInterceptWarmup(
   credentials: Record<string, unknown>,
   enabled: boolean,
