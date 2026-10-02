@@ -50,3 +50,77 @@ test('the cache keeps at most maxEntries prompts per account, dropping the least
   assert.ok(cache.lookup('32', `a${tokens(2000)}`) > 0);
   assert.ok(cache.lookup('32', `c${tokens(2000)}`) > 0);
 });
+
+function oldEstimate(first, second) {
+  let common = 0;
+  while (common < Math.min(first.length, second.length) && first.charCodeAt(common) === second.charCodeAt(common)) common += 1;
+  const count = Math.floor(common / CHARS_PER_TOKEN);
+  return count < 1024 ? 0 : Math.floor(count / 128) * 128;
+}
+
+test('fifty deterministic randomized prompt pairs exactly match the old prefix algorithm', () => {
+  let seed = 0x20261002;
+  const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 2 ** 32; };
+  for (let index = 0; index < 50; index += 1) {
+    const prefixLength = index < 8 ? [0, 3071, 3072, 3073, 3455, 3456, 3840, 262144][index] : Math.floor(random() * 16000);
+    const prefix = Array.from({ length: prefixLength }, () => String.fromCharCode(Math.floor(random() * 65536))).join('');
+    const first = prefix + 'A' + 'first'.repeat(Math.floor(random() * 100));
+    const second = index % 5 === 0 ? first : index % 5 === 1 ? first + 'extended' : prefix + 'Bsecond';
+    const cache = new PromptCache();
+    cache.record('32', first);
+    assert.equal(cache.lookup('32', second), oldEstimate(first, second), `pair ${index}`);
+    assert.equal(cache.observe('32', second), oldEstimate(first, second), `observe ${index}`);
+    assert.equal(cache.lookup('32', second), oldEstimate(second, second), `identical ${index}`);
+  }
+});
+
+test('a 256 KiB prompt occupies about 11 KiB of hashes and stores no plaintext', () => {
+  const cache = new PromptCache();
+  const prompt = 'x'.repeat(256 * 1024);
+  cache.record('32', prompt);
+  const [entry] = cache.accounts.get('32');
+  assert.deepEqual(Object.keys(entry).sort(), ['hashes', 'length', 'used']);
+  assert.equal(entry.length, prompt.length);
+  assert.equal(entry.hashes.byteLength, Math.ceil(prompt.length / 384) * 16);
+  assert.ok(entry.hashes.byteLength < 11 * 1024);
+  assert.equal(cache.lookup('32', prompt), oldEstimate(prompt, prompt));
+});
+
+test('partial blocks distinguish entries without rounding cached tokens upward', () => {
+  const cache = new PromptCache();
+  const prefix = tokens(1024);
+  cache.record('32', prefix + 'a');
+  cache.record('32', prefix + 'b');
+  assert.equal(cache.accounts.get('32').length, 2);
+  cache.record('32', prefix + 'a');
+  assert.equal(cache.accounts.get('32').length, 2);
+  assert.equal(cache.lookup('32', prefix + 'c'), 1024);
+  assert.equal(cache.lookup('32', tokens(1023)), 0);
+});
+
+test('hashes preserve JS code units including unpaired surrogates and split surrogate pairs', () => {
+  const prefix = 'x'.repeat(383);
+  const first = prefix + '\ud800' + tokens(3000);
+  const second = prefix + '\ud801' + tokens(3000);
+  const cache = new PromptCache();
+  cache.record('32', first);
+  assert.equal(cache.lookup('32', second), 0);
+  const unicode = prefix + '😀' + tokens(3000);
+  cache.record('32', unicode);
+  assert.equal(cache.lookup('32', unicode + 'extended'), oldEstimate(unicode, unicode + 'extended'));
+});
+
+test('the default sixty-four entry bound and record refresh retain TTL behavior', () => {
+  let now = 0;
+  const cache = new PromptCache({ ttlMs: 10, now: () => now });
+  for (let index = 0; index < 65; index += 1) cache.record('32', `${index}:${tokens(2000)}`);
+  assert.equal(cache.accounts.get('32').length, 64);
+  assert.equal(cache.lookup('32', `0:${tokens(2000)}`), 0);
+  now = 9;
+  cache.record('32', `1:${tokens(2000)}`);
+  now = 10;
+  assert.ok(cache.lookup('32', `1:${tokens(2000)}`) > 0);
+  assert.equal(cache.accounts.get('32').length, 1);
+  now = 19;
+  assert.equal(cache.lookup('32', `1:${tokens(2000)}`), 0);
+});
