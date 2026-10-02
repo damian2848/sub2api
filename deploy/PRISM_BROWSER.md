@@ -55,6 +55,7 @@ compose file and listed in `.env.prism-browser.example`):
 | `PRISM_TRANSIENT_RETRIES` | `1` | 0-1 | Automatic resubmissions of a request that failed because Prism's own servers returned an HTTP 5xx. `0` turns it off. |
 | `PRISM_TRANSIENT_RETRY_DELAY_SECONDS` | `4` | 0-60 | Pause before the resubmission, so an overloaded Prism has a moment. |
 | `PRISM_TRANSIENT_RETRY_WAIT_SECONDS` | `15` | 0-120 | Longest wait for an idle worker to take the resubmission before the original error is returned. |
+| `PRISM_PROMPT_CACHE_TTL_SECONDS` | `600` | 0-3600 | How long a processed prompt counts toward the estimated cache read (see *Usage is estimated*). `0` reports no cached tokens. |
 
 Invalid values stop the adapter at startup.
 
@@ -339,6 +340,17 @@ Limitations that remain:
 - **Usage is estimated.** It is a character-based estimate over the flattened
   prompt and the emitted output, marked in `usage.estimation` and
   `X-Prism-Usage: estimated`; it is unsuitable for exact billing.
+  Prism reports no token usage at all (its result carries only the text and
+  async-job metadata), so cache reads are estimated too, the way OpenAI's
+  automatic prompt caching behaves: the longest prefix a prompt shares with a
+  prompt the same source account processed within
+  `PRISM_PROMPT_CACHE_TTL_SECONDS` counts as `input_tokens_details.cached_tokens`
+  (Chat: `prompt_tokens_details.cached_tokens`), once the prompt has 1024
+  tokens and in 128-token blocks. `input_tokens` stays the whole prompt and no
+  cache writes are reported, matching what OpenAI OAuth accounts report, so the
+  gateway bills the cached share at the model's cache-read price. Whether Prism
+  actually hit its cache is not observable; a trimmed transcript changes the
+  prefix and lowers the estimate.
 - **One request at a time per worker.** Requests queue (`PRISM_QUEUE_LIMIT`)
   and a full queue is rejected. Clients on one account can overlap up to its
   ready worker count, while any configured native start allowance is shared.

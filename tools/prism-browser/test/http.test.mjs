@@ -249,3 +249,26 @@ test('unexpected errors do not expose browser messages or session material', asy
   assert.ok(!wire.includes(secret));
   assert.match(wire, /browser_operation_failed/);
 });
+
+test('a follow-up turn reports the shared prompt prefix as estimated cached tokens, failures are not cached', async t => {
+  let fail = false;
+  const { post } = await fixture(t, { async generate() { if (fail) throw new PrismError('prism_generation_failed', 502); return 'done'; } });
+  const history = 'Earlier step and its tool output. '.repeat(400);
+  const first = await (await post('/accounts/32/v1/responses', { ...body, input: history })).json();
+  assert.equal(first.usage.input_tokens_details.cached_tokens, 0);
+  const second = await (await post('/accounts/32/v1/responses', { ...body, input: `${history} New tool result.` })).json();
+  const cached = second.usage.input_tokens_details.cached_tokens;
+  assert.ok(cached >= 1024 && cached % 128 === 0 && cached <= second.usage.input_tokens, String(cached));
+  assert.equal(second.usage.estimation, 'character_based_estimate');
+  // A failed request is not recorded: the next different prompt finds nothing new to share with it.
+  fail = true;
+  assert.equal((await post('/accounts/32/v1/responses', { ...body, input: `Other ${history}` })).status, 502);
+  fail = false;
+  const after = await (await post('/accounts/32/v1/responses', { ...body, input: `Other ${history}` })).json();
+  assert.equal(after.usage.input_tokens_details.cached_tokens, 0);
+  // Turned off, nothing is reported as cached.
+  const off = await fixture(t, {}, { promptCache: { observe: () => 0 } });
+  const plain = await (await off.post('/accounts/32/v1/chat/completions', { model: models[0], stream: false,
+    messages: [{ role: 'user', content: history }] })).json();
+  assert.equal(plain.usage.prompt_tokens_details.cached_tokens, 0);
+});

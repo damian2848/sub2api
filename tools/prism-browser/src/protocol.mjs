@@ -150,11 +150,14 @@ export function parseRequest(body, family, models, limits = {}) {
     toolSpecs: specs.length ? new Map(specs.map(spec => [spec.name, spec])) : null };
 }
 
-export function estimatedUsage(input, text) {
+// input_tokens is the whole prompt; cached_tokens is the estimated share of it read from the prompt
+// cache (see prompt-cache.mjs), never more than the prompt itself.
+export function estimatedUsage(input, text, cachedTokens = 0) {
   const inputTokens = Math.ceil(input.reduce((sum, item) => sum + item.content[0].text.length, 0) / 3);
   const outputTokens = Math.ceil(text.length / 3);
+  const cached = Math.max(0, Math.min(Number.isInteger(cachedTokens) ? cachedTokens : 0, inputTokens));
   return { input_tokens: inputTokens, output_tokens: outputTokens, total_tokens: inputTokens + outputTokens,
-    input_tokens_details: { cached_tokens: 0 }, output_tokens_details: { reasoning_tokens: 0 },
+    input_tokens_details: { cached_tokens: cached }, output_tokens_details: { reasoning_tokens: 0 },
     estimation: 'character_based_estimate' };
 }
 
@@ -163,12 +166,13 @@ export function resultIdentity(request) {
     created: Math.floor(Date.now() / 1000) };
 }
 
-export function resultBody(request, text, identity = resultIdentity(request)) {
+export function resultBody(request, text, identity = resultIdentity(request), { cachedTokens = 0 } = {}) {
   // In tool mode the reply is parsed into the actions asked for and the text for the user.
   const reply = request.toolSpecs ? parseReply(text, request.toolSpecs) : { calls: [], text };
   const { calls } = reply;
   const message = reply.text;
-  const usage = estimatedUsage(request.input, `${message} ${calls.map(call => `${call.name} ${call.arguments}`).join(' ')}`.trim());
+  const usage = estimatedUsage(request.input, `${message} ${calls.map(call => `${call.name} ${call.arguments}`).join(' ')}`.trim(),
+    cachedTokens);
   if (request.family === 'chat') {
     const assistant = { role: 'assistant', content: message || (calls.length ? null : message) };
     if (calls.length) assistant.tool_calls = calls.map(call => ({ id: call.id, type: 'function',
@@ -176,7 +180,8 @@ export function resultBody(request, text, identity = resultIdentity(request)) {
     return { id: identity.id, object: 'chat.completion', created: identity.created, model: request.model,
       choices: [{ index: 0, message: assistant, finish_reason: calls.length ? 'tool_calls' : 'stop' }],
       usage: { prompt_tokens: usage.input_tokens, completion_tokens: usage.output_tokens,
-        total_tokens: usage.total_tokens, estimation: usage.estimation } };
+        total_tokens: usage.total_tokens, prompt_tokens_details: { cached_tokens: usage.input_tokens_details.cached_tokens },
+        estimation: usage.estimation } };
   }
   const output = [];
   // `phase` is the channel Codex uses to fold progress notes under "worked for ..." and to show the

@@ -5,6 +5,7 @@ import { AccountPoolManager } from './pool.mjs';
 import { createHash } from 'node:crypto';
 import { PrismError, aborted, publicError } from './errors.mjs';
 import { createStreamWriter, parseRequest, resultBody } from './protocol.mjs';
+import { PromptCache } from './prompt-cache.mjs';
 
 function bearer(req) {
   const value = req.headers.authorization;
@@ -49,7 +50,7 @@ export function readJSON(req, limit) {
 }
 
 export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024 * 1024, requestTimeout = 1800000,
-  sessionTimeout = 30000, keepaliveMs = 10000, maxTextBytes, maxTranscriptChars }) {
+  sessionTimeout = 30000, keepaliveMs = 10000, maxTextBytes, maxTranscriptChars, promptCache = new PromptCache() }) {
   if (typeof managementKey !== 'string' || managementKey.length < 32) throw new Error('PRISM_MANAGEMENT_KEY must have at least 32 characters');
   const managementHash = createHash('sha256').update(managementKey).digest('hex');
   // Codex requests (tool schemas plus history) are large; management bodies are not.
@@ -119,7 +120,9 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
       aborted(controller.signal);
       const text = await manager.generate(source, request, controller.signal);
       aborted(controller.signal);
-      const result = resultBody(request, text, streamWriter?.identity);
+      // Only a prompt Prism has processed can be in its cache, so it is recorded after success.
+      const cachedTokens = promptCache.observe(source, request.input.map(item => item.content[0].text).join('\n'));
+      const result = resultBody(request, text, streamWriter?.identity, { cachedTokens });
       if (res.destroyed) return;
       if (request.stream) await streamWriter.finish(result);
       else { res.setHeader('X-Prism-Usage', 'estimated'); send(res, 200, result); }
@@ -159,7 +162,9 @@ export async function main() {
   const server = createPrismServer({ manager, managementKey: process.env.PRISM_MANAGEMENT_KEY,
     bodyLimit: integer('PRISM_BODY_LIMIT', 8 * 1024 * 1024, 4096, 32 * 1024 * 1024),
     maxTranscriptChars: integer('PRISM_MAX_TRANSCRIPT_CHARS', 32000, 1000, 1000000),
-    requestTimeout: integer('PRISM_REQUEST_TIMEOUT', 1800, 30, 3600) * 1000 });
+    requestTimeout: integer('PRISM_REQUEST_TIMEOUT', 1800, 30, 3600) * 1000,
+    // 0 turns the estimated cache-read share off (usage then reports no cached tokens).
+    promptCache: new PromptCache({ ttlMs: integer('PRISM_PROMPT_CACHE_TTL_SECONDS', 600, 0, 3600) * 1000 }) });
   const port = integer('PRISM_PORT', 8319, 1, 65535);
   await new Promise(resolve => server.listen(port, process.env.PRISM_HOST || '0.0.0.0', resolve));
   console.log(JSON.stringify({ event: 'listening', port }));

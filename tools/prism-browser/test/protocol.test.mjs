@@ -317,7 +317,16 @@ test('usage is estimated from the whole flattened prompt and the emitted output'
   assert.equal(answer.usage.estimation, 'character_based_estimate');
   assert.equal(answer.usage.output_tokens, Math.ceil('Actual completed output'.length / 3));
   const chat = resultBody(parse({ messages: [{ role: 'user', content: 'Hello there' }] }, 'chat'), 'Hi');
-  assert.deepEqual(chat.usage, { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5, estimation: 'character_based_estimate' });
+  assert.deepEqual(chat.usage, { prompt_tokens: 4, completion_tokens: 1, total_tokens: 5, prompt_tokens_details: { cached_tokens: 0 },
+    estimation: 'character_based_estimate' });
+  // An estimated cache read is reported in both formats and never exceeds the prompt.
+  const cachedCall = resultBody(request, '{"tool_call":{"name":"exec_command","arguments":{"cmd":"ls"}}}', undefined, { cachedTokens: 256 });
+  assert.equal(cachedCall.usage.input_tokens_details.cached_tokens, Math.min(256, cachedCall.usage.input_tokens));
+  assert.equal(cachedCall.usage.input_tokens, call.usage.input_tokens, 'input_tokens stays the whole prompt');
+  const cachedChat = resultBody(parse({ messages: [{ role: 'user', content: 'x'.repeat(3000) }] }, 'chat'), 'Hi', undefined, { cachedTokens: 512 });
+  assert.equal(cachedChat.usage.prompt_tokens_details.cached_tokens, 512);
+  assert.equal(estimatedUsage([{ content: [{ text: 'abc' }] }], 'a', 999).input_tokens_details.cached_tokens, 1);
+  assert.equal(estimatedUsage([{ content: [{ text: 'abc' }] }], 'a', -5).input_tokens_details.cached_tokens, 0);
   assert.equal(estimatedUsage([{ content: [{ text: 'abc' }] }], 'abcd').total_tokens, 3);
 });
 
