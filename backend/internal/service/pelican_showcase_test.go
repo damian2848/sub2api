@@ -204,7 +204,8 @@ func TestPelicanShowcaseViewAndItemVisibility(t *testing.T) {
 			{ID: 10, GroupID: 3}, {ID: 11, GroupID: 3}, {ID: 12, GroupID: 99},
 		},
 	}
-	svc := &PelicanShowcaseService{repo: repo, settings: enabledShowcase()}
+	apiSettings := enabledShowcase()
+	svc := &PelicanShowcaseService{repo: repo, settings: apiSettings}
 	view, err = svc.View(ctx, now)
 	require.NoError(t, err)
 	require.True(t, view.Enabled)
@@ -219,7 +220,7 @@ func TestPelicanShowcaseViewAndItemVisibility(t *testing.T) {
 	require.Empty(t, view.Groups[0].Items, "a showcased group without snapshots is still listed")
 	require.Len(t, view.Groups[1].Items, 2)
 
-	svc.settings.(*showcaseSettingsStub).runtime.APIEnabled = false
+	apiSettings.runtime.APIEnabled = false
 	view, err = svc.View(ctx, now)
 	require.NoError(t, err)
 	require.True(t, view.Enabled)
