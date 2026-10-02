@@ -913,6 +913,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		// 从不可变的 canonical forwardBody 派生本次尝试 body 并整块剔除上游私有的加密
 		// reasoning item（含耦合的 id/summary），避免非透传上游 400 拒绝 Kiro reasoning 形态。
 		attemptBody := h.deriveOpenAIForwardAttemptBody(reqLog, forwardBody, account, &passthroughFailoverState)
+		h.gatewayService.SetPrismFailover(c, apiKey.GroupID, reqModel, account, failedAccountIDs)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -1547,6 +1548,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		defaultMappedModel := strings.TrimSpace(effectiveMappedModel)
 		// 应用渠道模型映射到请求体
 		forwardBody := mappedBodyForMessages(channelMappingMsg.Mapped, channelMappingMsg.MappedModel)
+		h.gatewayService.SetPrismFailover(c, apiKey.GroupID, reqModel, account, failedAccountIDs)
 		writerSizeBeforeForward := c.Writer.Size()
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
@@ -3037,6 +3039,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		// captured by the previous failover account before credential lookup.
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 		currentAccountRelease = wrapReleaseOnDone(ctx, accountReleaseFunc)
+		h.gatewayService.SetPrismFailover(c, apiKey.GroupID, reqModel, account, failedAccountIDs)
 		if err := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, apiKey.GroupID, sessionHash, account.ID); err != nil {
 			reqLog.Warn("openai.websocket_bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		}
@@ -3105,6 +3108,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			ReasoningEffortMappings:     reasoningEffortMappings,
 			TurnStarted:                 recordTurnStart,
 			BeforeRequest: func(turn int, payload []byte, originalModel string) error {
+				h.gatewayService.SetPrismFailover(c, apiKey.GroupID, originalModel, account, failedAccountIDs)
 				c.Set(securityAuditWSTurnContextKey, turn)
 				service.BeginOpsStreamTurn(c, turn)
 				// 连接级 cyber session gate 也在 BeforeRequest 先执行，使 native 与

@@ -280,6 +280,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 					accountReleaseFunc()
 				}
 			}()
+			h.gatewayService.SetPrismFailover(c, apiKey.GroupID, reqModel, account, failedAccountIDs)
 			return h.gatewayService.ForwardAsChatCompletions(rpmAdmission.forwardContext(c.Request.Context(), account), c, account, forwardBody, promptCacheKey, "")
 		}()
 		if retryOpenAIInitialAdmission(c, err, result, body, account.ID, failedAccountIDs, &switchCount, maxAccountSwitches) {

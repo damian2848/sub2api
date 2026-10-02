@@ -110,7 +110,7 @@ test('native allowance includes probes and both workers, cancels waits on revoke
   let created = 0;
   const { manager, log } = await fixture(t, { startLimiterFactory: () => {
     created += 1;
-    return new NativeStartLimiter({ limit: 2, windowMs: 60000 });
+    return new NativeStartLimiter({ limit: 2, windowMs: 60000, maxWaitMs: 60000 });
   } });
   assert.equal(created, 1);
   assert.equal(log.probes.length, 2);
@@ -589,4 +589,40 @@ test('a start Prism refuses cools the whole source: no retry, and waiting or new
   // When the cooldown is over, starts flow again.
   manager.startLimiters.get('32').blockedUntil = 0;
   assert.equal(await manager.generate('32', request('later')), 'reply:later');
+});
+
+for (const refusedAgain of [false, true]) test(`without failover a refused start waits for a new token and retries only once (${refusedAgain})`, async t => {
+  const starts = [];
+  let accepted = 0;
+  const { manager } = await fixture(t, { startLimiterFactory: () => new NativeStartLimiter({
+    burst: 3, refillMs: 20, refillMinMs: 20, refillMaxMs: 40 }), generate: ({ request: value }) => {
+    starts.push(performance.now());
+    if (starts.length === 1 || refusedAgain) throw new PrismError('prism_start_rejected', 429);
+    value.onAccepted();
+    return 'recovered';
+  } });
+  manager.startCooldownMs = 10;
+  const pending = manager.generate('32', { ...request('retry'), failover: 'none', onAccepted: () => { accepted += 1; } });
+  if (refusedAgain) await assert.rejects(pending, error => error.code === 'prism_start_rejected' && error.retryAfterSeconds === 1);
+  else assert.equal(await pending, 'recovered');
+  assert.equal(starts.length, 2);
+  assert.ok(starts[1] - starts[0] >= 29);
+  assert.equal(accepted, refusedAgain ? 0 : 1);
+  assert.equal(manager.status('32').start_bucket.refill_seconds, refusedAgain ? 0.04 : 0.03);
+});
+
+test('cancelling a no-failover cooldown never resubmits the request', async t => {
+  const refused = deferred();
+  let calls = 0;
+  const { manager } = await fixture(t, { generate: () => {
+    calls += 1;
+    refused.resolve();
+    throw new PrismError('prism_start_rejected', 429);
+  } });
+  const controller = new AbortController();
+  const pending = manager.generate('32', { ...request('retry'), failover: 'none' }, controller.signal);
+  await refused.promise;
+  controller.abort();
+  await assert.rejects(pending, error => error.code === 'request_cancelled');
+  assert.equal(calls, 1);
 });

@@ -143,6 +143,34 @@ func TestOpenAIPrismWebSocketClientIsServedThroughTheHTTPBridge(t *testing.T) {
 	require.Contains(t, f.upstream.urls[0], "/accounts/32/v1/responses", "the turn goes to the sidecar over HTTP, not WebSocket")
 	require.Equal(t, "be brief", gjson.GetBytes(f.upstream.bodies[0], "instructions").String())
 	require.True(t, gjson.GetBytes(f.upstream.bodies[0], "stream").Bool())
+	require.Equal(t, "none", f.upstream.headers[0].Get("X-Prism-Failover"))
+}
+
+func TestOpenAIPrismWebSocketSignalsAnAvailableFailover(t *testing.T) {
+	f := newPrismWSFixture(t, true, prismFailoverPrismAccount(11), prismWSBridgedRegular(2))
+	_, err := f.exchange(prismWSTextFrame)
+	require.NoError(t, err)
+	require.Equal(t, "available", f.upstream.headers[0].Get("X-Prism-Failover"))
+}
+
+func TestOpenAIPrismHTTPOverwritesTheClientFailoverHeader(t *testing.T) {
+	for _, available := range []bool{false, true} {
+		accounts := []service.Account{prismFailoverPrismAccount(11)}
+		if available {
+			accounts = append(accounts, prismFailoverRegularAccount(2))
+		}
+		fixture := newPrismWSFixture(t, true, accounts...)
+		ctx, recorder := newPrismFailoverContext("/v1/responses", `{"model":"gpt-6-astra","input":"hello"}`)
+		ctx.Request.Header.Set("X-Prism-Failover", "client-controlled")
+		fixture.handler.Responses(ctx)
+		require.Equal(t, http.StatusOK, recorder.Code)
+		require.Equal(t, []int64{11}, fixture.upstream.calls())
+		expected := "none"
+		if available {
+			expected = "available"
+		}
+		require.Equal(t, expected, fixture.upstream.headers[0].Get("X-Prism-Failover"))
+	}
 }
 
 func TestOpenAIPrismWebSocketPreservesImageAttachments(t *testing.T) {

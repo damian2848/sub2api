@@ -53,13 +53,18 @@ compose file and listed in `.env.prism-browser.example`):
 | `PRISM_MAX_ACCOUNTS` | `16` | 1-256 | Provisioned source accounts. |
 | `PRISM_ACCOUNT_CONCURRENCY` | `2` | 1-4 | Independent workers per source account. Each worker has its own browser context, page and project. |
 | `PRISM_MAX_WORKERS` | `32` | 1-1024 | Global browser-context limit, including contexts initializing or closing. |
-| `PRISM_ACCOUNT_START_LIMIT` | `0` | 0-120 | Native starts per source across every worker, probe and retry. Zero disables admission pacing. |
-| `PRISM_START_WINDOW_SECONDS` | `65` | 1-3600 | Sliding admission window when a start limit is enabled. |
+| `PRISM_ACCOUNT_START_LIMIT` | `0` | 0-120 | Legacy token-bucket capacity when `PRISM_START_BURST` is unset. Zero disables pacing, not rejection cooldowns. |
+| `PRISM_START_WINDOW_SECONDS` | `65` | 1-3600 | Legacy refill derivation: window / start limit seconds per token. |
+| `PRISM_START_BURST` | legacy start limit | 0-120 | Token capacity per source across every worker, readiness probe and retry; 0 disables pacing. |
+| `PRISM_START_REFILL_SECONDS` | legacy window / burst | 0.001-3600 | Initial seconds to replenish one token. |
+| `PRISM_START_REFILL_MIN_SECONDS` | initial refill | 0.001-3600 | Lower bound for the adaptive refill interval. |
+| `PRISM_START_REFILL_MAX_SECONDS` | `90` | 0.001-3600 | Upper bound, at least the initial refill and minimum. |
+| `PRISM_START_MAX_WAIT_SECONDS` | `15` | 0-3600 | Admission waits longer than this fail fast only when another account is available. |
 | `PRISM_TRANSIENT_RETRIES` | `1` | 0-1 | Automatic resubmissions of a request that failed because Prism's own servers returned an HTTP 5xx. `0` turns it off. |
 | `PRISM_TRANSIENT_RETRY_DELAY_SECONDS` | `4` | 0-60 | Pause before the resubmission, so an overloaded Prism has a moment. |
 | `PRISM_TRANSIENT_RETRY_WAIT_SECONDS` | `15` | 0-120 | Longest wait for an idle worker to take the resubmission before the original error is returned. |
 | `PRISM_STATUS_POLL_MS` | `1000` | 0 or 250-10000 | After the official page has polled a turn's status once, the sidecar also polls it at this interval from the same page (the page alone polls every 3.4-4 s), so a finished answer is seen sooner. A failed poll of ours only stops our polling; `0` leaves polling to the page. |
-| `PRISM_START_COOLDOWN_SECONDS` | `60` | 0-600 | After Prism refuses a start on a source, no start is attempted there for this long; waiting and new requests for it are answered 429 at once so the gateway can use another account. `0` disables the cooldown (the 429 still returns). |
+| `PRISM_START_COOLDOWN_SECONDS` | `60` | 0-600 | Minimum pause after a refused start. Admission also waits for the next token. `0` disables this minimum, not token pacing. |
 | `PRISM_PROMPT_CACHE_TTL_SECONDS` | `600` | 0-3600 | How long a processed prompt counts toward the estimated cache read (see *Usage is estimated*). `0` reports no cached tokens. |
 
 Invalid values stop the adapter at startup.
@@ -73,22 +78,31 @@ bounds waiting work per account. Sub2API synchronizes the managed account's
 concurrency to the actual ready worker count. A partially available pool can
 continue using its healthy workers.
 
-Concurrency is separate from the upstream's rate allowance. Two controlled
-production runs on source 32 accepted four native calls, then immediately
-refused subsequent calls until a later window. That deployment therefore uses
-`PRISM_ACCOUNT_START_LIMIT=4` and `PRISM_START_WINDOW_SECONDS=65`. This is an
-observed allowance for that source, not a promise about other Prism accounts.
-Admission happens before UI submission and Sentinel generation. A shared FIFO
-window includes readiness probes and the existing single resubmission attempt;
-it does not add retries. Waiting keeps the ordinary request timeout, SSE
-keepalives and disconnect cancellation. Revocation cancels pending admissions
-while preserving consumed allowance. No pacing applies by default. Queued calls
-can take longer than the upstream generation itself when this limit is enabled.
-The window records admission before UI work, with the deployment's five-second
-margin covering its measured submission overhead. It does not guarantee the
-upstream's timing under an unusually slow UI. Window state is in memory; after
-a restart, allow one configured window since the last native call before
-starting a load test or admitting another burst.
+Concurrency is separate from upstream start pacing. Each source has one shared
+FIFO token bucket, including readiness probes and all retries. Legacy settings
+`PRISM_ACCOUNT_START_LIMIT=4` and `PRISM_START_WINDOW_SECONDS=65` derive a burst
+of 4 and an initial refill of 16.25 seconds per token; explicit new settings
+override these defaults. This is not a promise about Prism's actual allowance.
+After a refused start the bucket clears its tokens and multiplies the refill
+interval by 1.5, up to the configured maximum. Every four accepted starts with
+no intervening refusal multiply it by 0.9, down to the minimum. This AIMD-style
+learning lives only in memory and resets at restart.
+
+The gateway overwrites `X-Prism-Failover` on managed Prism upstream requests.
+`available` means another schedulable, model-compatible account remains outside
+the failed-account set (it need not be Prism); `none` means no such alternative
+was found. Missing or unknown headers retain the old `available` behavior.
+Admission waits exceeding `PRISM_START_MAX_WAIT_SECONDS` return JSON 429 with
+the actual retry delay only for `available`. A refused start also returns 429
+immediately in that mode and cancels its available waiters. With `none`, waiters
+remain queued through cooldown and a refused start retries once on the same
+source after both cooldown and token replenishment. A second refusal returns
+429. All waiting remains subject to the ordinary request timeout and disconnect
+cancellation; no response bytes or SSE keepalives are sent before acceptance.
+Revocation cancels admissions without refunding consumed tokens. Account status
+includes `start_bucket` (tokens, refill seconds and cooldown milliseconds).
+Audits retain `native_start_wait` and `start_rejected_cooldown` and add
+`start_bucket_rejected` and `start_bucket_adjusted`.
 
 ### Automatic retry of Prism server errors
 

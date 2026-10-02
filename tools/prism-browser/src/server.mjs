@@ -7,6 +7,7 @@ import { PrismError, aborted, publicError } from './errors.mjs';
 import { createStreamWriter, parseRequest, resultBody } from './protocol.mjs';
 import { PromptCache } from './prompt-cache.mjs';
 import { attachmentLimits, resolveAttachments } from './attachments.mjs';
+import { nativeStartSettings } from './start-limit.mjs';
 
 function bearer(req) {
   const value = req.headers.authorization;
@@ -113,6 +114,7 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
       const request = parseRequest(await readJSON(req, bodyLimit), action === 'responses' ? 'responses' : 'chat',
         status.models, { ...mediaLimits, ...(maxTextBytes ? { maxTextBytes } : {}),
           ...(maxTranscriptChars ? { maxTranscriptChars } : {}) });
+      request.failover = req.headers['x-prism-failover'] === 'none' ? 'none' : 'available';
       if (request.attachments?.length) {
         request.attachments = await resolveAttachments(request.attachments, { signal: controller.signal, limits: mediaLimits });
       }
@@ -170,8 +172,7 @@ export async function main() {
   const manager = new AccountPoolManager({ dataDir: process.env.PRISM_DATA_DIR || '/data',
     queueLimit: integer('PRISM_QUEUE_LIMIT', 8, 1, 64), maxAccounts: integer('PRISM_MAX_ACCOUNTS', 16, 1, 256),
     concurrency: integer('PRISM_ACCOUNT_CONCURRENCY', 2, 1, 4), maxWorkers: integer('PRISM_MAX_WORKERS', 32, 1, 1024),
-    startLimit: integer('PRISM_ACCOUNT_START_LIMIT', 0, 0, 120),
-    startWindowMs: integer('PRISM_START_WINDOW_SECONDS', 65, 1, 3600) * 1000,
+    startOptions: nativeStartSettings(),
     transientRetries: integer('PRISM_TRANSIENT_RETRIES', 1, 0, 1),
     transientRetryDelayMs: integer('PRISM_TRANSIENT_RETRY_DELAY_SECONDS', 4, 0, 60) * 1000,
     transientRetryWaitMs: integer('PRISM_TRANSIENT_RETRY_WAIT_SECONDS', 15, 0, 120) * 1000,

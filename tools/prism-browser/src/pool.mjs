@@ -8,8 +8,11 @@ import { NativeStartLimiter } from './start-limit.mjs';
 export class AccountPoolManager {
   constructor({ dataDir, concurrency = 2, maxWorkers = 32, queueLimit = 8, maxAccounts = 16,
     startLimit = 0, startWindowMs = 65000, transientRetries = 1, transientRetryDelayMs = 4000, transientRetryWaitMs = 15000,
-    startCooldownMs = 60000,
-    startLimiterFactory = () => new NativeStartLimiter({ limit: startLimit, windowMs: startWindowMs }),
+    startCooldownMs = 60000, startOptions = {},
+    startLimiterFactory = source => new NativeStartLimiter({ limit: startLimit, windowMs: startWindowMs, ...startOptions,
+      onAudit: (event, fields) => {
+        if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event, source, ...fields }));
+      } }),
     browserFactory = launchBrowser,
     sessionFactory = (browser, heartbeat, source, slot) => new BrowserSession(browser, heartbeat, source, slot) }) {
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4 ||
@@ -66,35 +69,46 @@ export class AccountPoolManager {
     const driver = this.sessionFactory(browser, heartbeat, source, slot);
     let limiter = this.startLimiters.get(source);
     if (!limiter) {
-      limiter = this.startLimiterFactory();
+      limiter = this.startLimiterFactory(source);
       this.startLimiters.set(source, limiter);
     }
     const generate = driver.generate.bind(driver);
     driver.generate = async (request, signal, progress) => {
-      const waited = await limiter.acquire(signal);
-      aborted(signal);
-      if (this.stopping) throw new PrismError('service_stopping', 503);
-      const account = this.managers[slot].accounts.get(source);
-      if (account?.driver !== driver) throw new PrismError('session_revoked', 409);
-      if (!account.expiresAt || account.expiresAt <= Date.now() / 1000) {
-        throw new PrismError('account_not_ready', 503);
-      }
-      if (driver.isAlive?.() === false) throw new PrismError('browser_session_closed', 503);
-      if (waited > 0 && process.env.PRISM_AUDIT_REQUESTS === 'true') {
-        console.log(JSON.stringify({ event: 'native_start_wait', source, worker: slot, wait_ms: Math.round(waited) }));
-      }
-      try {
-        return await generate(request, signal, progress);
-      } catch (error) {
-        // Prism refused the start itself: the source is over Prism's start allowance. Retrying here
-        // would be refused too, so the source cools down and every waiting request is handed back.
-        if (error instanceof PrismError && error.code === 'prism_start_rejected') {
-          limiter.cooldown(this.startCooldownMs);
-          error.retryAfterSeconds = Math.max(1, Math.ceil(Math.max(this.startCooldownMs, limiter.cooling()) / 1000));
-          if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event: 'start_rejected_cooldown',
-            source, worker: slot, cooldown_ms: this.startCooldownMs }));
+      const failover = request.failover === 'none' ? 'none' : 'available';
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const waited = await limiter.acquire(signal, { failover });
+        aborted(signal);
+        if (this.stopping) throw new PrismError('service_stopping', 503);
+        const account = this.managers[slot].accounts.get(source);
+        if (account?.driver !== driver) throw new PrismError('session_revoked', 409);
+        if (!account.expiresAt || account.expiresAt <= Date.now() / 1000) {
+          throw new PrismError('account_not_ready', 503);
         }
-        throw error;
+        if (driver.isAlive?.() === false) throw new PrismError('browser_session_closed', 503);
+        if (waited > 0 && process.env.PRISM_AUDIT_REQUESTS === 'true') {
+          console.log(JSON.stringify({ event: 'native_start_wait', source, worker: slot, wait_ms: Math.round(waited) }));
+        }
+        let accepted = false;
+        const onAccepted = () => {
+          if (accepted) return;
+          accepted = true;
+          limiter.accepted?.();
+          request.onAccepted?.();
+        };
+        try {
+          const result = await generate({ ...request, onAccepted }, signal, progress);
+          if (!accepted) limiter.accepted?.();
+          return result;
+        } catch (error) {
+          if (error instanceof PrismError && error.code === 'prism_start_rejected') {
+            limiter.rejected(this.startCooldownMs);
+            error.retryAfterSeconds = Math.max(1, Math.ceil(limiter.waitMs() / 1000));
+            if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event: 'start_rejected_cooldown',
+              source, worker: slot, cooldown_ms: this.startCooldownMs }));
+            if (failover === 'none' && attempt === 0) continue;
+          }
+          throw error;
+        }
       }
     };
     this.drivers.add(driver);
@@ -142,7 +156,8 @@ export class AccountPoolManager {
     return { ...base, ready: ready.length > 0, models, ...(ready.length ? { phase: 'ready', error_code: undefined } : {}),
       last_heartbeat_at: heartbeat || base.last_heartbeat_at,
       concurrency: ready.length, pool_size: this.concurrency, ready_workers: ready.length,
-      busy_workers: ready.filter(worker => worker.busy).length, queued: account.queue.pending };
+      busy_workers: ready.filter(worker => worker.busy).length, queued: account.queue.pending,
+      start_bucket: this.startLimiters.get(source)?.status?.() || null };
   }
 
   authenticateKey(source, key) { return this.primary.authenticateKey(source, key); }

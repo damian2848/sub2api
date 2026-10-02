@@ -32,6 +32,48 @@ const prismMaxPartDepth = 16
 
 const prismStreamCommittedKey = "prism_stream_committed"
 
+const prismFailoverAvailableKey = "prism_failover_available"
+
+func (s *OpenAIGatewayService) PrismFailoverAvailable(ctx context.Context, groupID *int64, model string, currentID int64, excluded map[int64]struct{}) bool {
+	accounts, err := s.listSchedulableAccounts(ctx, groupID, PlatformOpenAI)
+	if err != nil {
+		return false
+	}
+	for index := range accounts {
+		account := &accounts[index]
+		if account.ID == currentID {
+			continue
+		}
+		if _, failed := excluded[account.ID]; failed {
+			continue
+		}
+		if account.IsSchedulable() && account.IsModelSupportedInGroup(groupID, model) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *OpenAIGatewayService) SetPrismFailover(c *gin.Context, groupID *int64, model string, account *Account, excluded map[int64]struct{}) {
+	if c != nil && account.IsManagedPrismAccount() {
+		c.Set(prismFailoverAvailableKey, s.PrismFailoverAvailable(c.Request.Context(), groupID, model, account.ID, excluded))
+	}
+}
+
+func setPrismFailoverHeader(c *gin.Context, account *Account, header http.Header) {
+	header.Del("X-Prism-Failover")
+	if !account.IsManagedPrismAccount() {
+		return
+	}
+	value := "available"
+	if c != nil {
+		if available, exists := c.Get(prismFailoverAvailableKey); exists && available == false {
+			value = "none"
+		}
+	}
+	header.Set("X-Prism-Failover", value)
+}
+
 // MarkPrismStreamCommitted prevents replay once a Prism response ID is public.
 // It is separate from the terminal-response marker so failures can still be sent.
 func MarkPrismStreamCommitted(c *gin.Context) {

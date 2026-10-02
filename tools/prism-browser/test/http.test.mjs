@@ -359,3 +359,40 @@ test('a stream opens only when Prism accepts the start, not when the request arr
   finish.resolve('done');
   assert.match(await response.text(), /event: response.completed/);
 });
+
+test('failover headers default to available and only the exact none value permits waiting', async t => {
+  const seen = [];
+  const { base } = await fixture(t, { async generate(_, request) { seen.push(request.failover); return 'done'; } });
+  for (const value of [undefined, 'none', 'available', 'unknown', 'NONE']) {
+    const response = await fetch(base + '/accounts/32/v1/responses', { method: 'POST', headers: {
+      Authorization: `Bearer ${userKey}`, 'Content-Type': 'application/json',
+      ...(value === undefined ? {} : { 'X-Prism-Failover': value }) }, body: JSON.stringify(body) });
+    assert.equal(response.status, 200);
+    await response.text();
+  }
+  assert.deepEqual(seen, ['available', 'none', 'available', 'available', 'available']);
+});
+
+test('a no-failover stream sends no headers or heartbeat while queued or retrying', async t => {
+  const entered = deferred();
+  const release = deferred();
+  const { base } = await fixture(t, { async generate(_, request) {
+    assert.equal(request.failover, 'none');
+    entered.resolve();
+    await release.promise;
+    request.onAccepted();
+    return 'retried successfully';
+  } }, { keepaliveMs: 5 }, { accept: false });
+  const pending = fetch(base + '/accounts/32/v1/responses', { method: 'POST', headers: {
+    Authorization: `Bearer ${userKey}`, 'Content-Type': 'application/json', 'X-Prism-Failover': 'none' },
+    body: JSON.stringify({ ...body, stream: true }) });
+  await entered.promise;
+  let opened = false;
+  pending.then(() => { opened = true; });
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(opened, false);
+  release.resolve();
+  const response = await pending;
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /retried successfully/);
+});
