@@ -75,7 +75,7 @@ function outputText(output, param, state) {
 const callText = (name, args) => elide(`${name} ${typeof args === 'string' ? args : JSON.stringify(args ?? {})}`, CALL_CHARS);
 
 function addMessage(state, role, text, param) {
-  state.linkInputs.push(text);
+  state.linkInputs.push({ role, text });
   if (role === 'system' || role === 'developer') { state.system.push(text); state.env.push(text); }
   else if (role === 'user') {
     state.env.push(text);
@@ -134,7 +134,6 @@ function responsesConversation(body, limits) {
       state.convo.push({ kind: 'ran', text: callText(item.name ?? '', item.input ?? '') });
     } else if (type === 'function_call_output' || type === 'custom_tool_call_output') {
       const result = outputText(item.output, `${param}.output`, state);
-      state.linkInputs.push(result);
       state.convo.push({ kind: 'result', text: elide(result, RESULT_CHARS) });
     } else if (type === 'item_reference') invalid('item_reference_not_supported', param);
     else if (type !== 'additional_tools' && !SKIPPED_ITEMS.has(type)) invalid('unsupported_input_item', param);

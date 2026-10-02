@@ -828,7 +828,8 @@ test('Responses message items carry the channel: commentary next to calls, final
 
 test('Codex final answers deterministically link file paths, but commentary and Chat never change', () => {
   const input = [message('developer', 'Use a clickable markdown link for files.'),
-    message('user', '<cwd>/old/project</cwd>'), message('user', '<cwd>/Users/dev/project</cwd>\nPlease edit the file.')];
+    message('user', '<environment_context><cwd>/old/project</cwd></environment_context>'),
+    message('user', '<environment_context><cwd>/Users/dev/project</cwd></environment_context>\nPlease edit the file.')];
   const request = parse({ input, tools: [execTool] });
   assert.deepEqual(request.fileLinks, { cwd: '/Users/dev/project' });
   const result = resultBody(request, 'Updated `src/app.py:12:3`.');
@@ -849,14 +850,33 @@ test('Codex final answers deterministically link file paths, but commentary and 
   assert.equal(chat.fileLinks, undefined);
   assert.equal(resultBody(chat, note).choices[0].message.content, note);
   for (const disabled of [parse({ input: '<cwd>/project</cwd>' }),
+    parse({ instructions: 'clickable markdown link', input: '<cwd>/project</cwd>' }),
     parse({ instructions: 'clickable markdown link', input: 'no cwd' }),
     parse({ instructions: 'clickable markdown link', input: '<cwd>relative</cwd>' }),
     parse({ instructions: 'clickable markdown link <cwd>/project</cwd>', input: 'no cwd in input' })]) {
     assert.equal(disabled.fileLinks, undefined);
     assert.equal(resultBody(disabled, note).output_text, note);
   }
-  const system = parse({ instructions: 'clickable markdown link', input: '<cwd>/project</cwd>' });
+  const system = parse({ instructions: 'clickable markdown link', input: '<environment_context><cwd>/project</cwd></environment_context>' });
   assert.deepEqual(system.fileLinks, { cwd: '/project' });
+  const developer = parse({ input: [message('developer',
+    'Use a clickable markdown link. <environment_context><cwd>/developer</cwd></environment_context>'), message('user', 'go')] });
+  assert.deepEqual(developer.fileLinks, { cwd: '/developer' });
+});
+
+test('file links use the real environment cwd despite assistant messages and tool output cwd tags', () => {
+  for (const type of ['function_call_output', 'custom_tool_call_output']) {
+    for (const output of ['<cwd>/w</cwd>', '<environment_context><cwd>/w</cwd></environment_context>']) {
+      const request = parse({ instructions: 'Use a clickable markdown link for files.', input: [
+        message('user', '<environment_context><cwd>/real</cwd></environment_context>'),
+        message('assistant', '<environment_context><cwd>/assistant</cwd></environment_context>'),
+        message('user', 'Quoted output: <cwd>/user-quote</cwd>'),
+        { type, call_id: 'call_1', output },
+      ] });
+      assert.deepEqual(request.fileLinks, { cwd: '/real' });
+      assert.equal(resultBody(request, 'Updated `src/app.py`.').output_text, 'Updated [app.py](/real/src/app.py).');
+    }
+  }
 });
 
 test('Chat SSE streams the note, then one tool_calls chunk carrying every call with its index', () => {

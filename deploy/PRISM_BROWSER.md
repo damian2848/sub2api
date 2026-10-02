@@ -323,9 +323,12 @@ Tool results sent back by the client
 placed in the transcript, so the loop continues turn by turn.
 
 For Responses callers whose system/developer instructions contain
-`clickable markdown link` (case-insensitive), the last `<cwd>...</cwd>` in the
-input enables a deterministic file-link fallback if it is an absolute POSIX
-path. Only a final-answer message without tool calls is rewritten: eligible
+`clickable markdown link` (case-insensitive), the last `<cwd>...</cwd>` inside
+an `<environment_context>` block in a user or developer message enables a
+deterministic file-link fallback if it is an absolute POSIX path. Assistant
+messages, tool outputs, system-message environments and cwd tags outside those
+blocks cannot select or override the base directory. Only a final-answer
+message without tool calls is rewritten: eligible
 inline code such as `src/app.py:12:3` becomes
 `[app.py](/absolute/cwd/src/app.py:12:3)`. Existing links and fenced code are
 preserved, as are commentary, Chat replies, URLs, glob/tilde paths and bare

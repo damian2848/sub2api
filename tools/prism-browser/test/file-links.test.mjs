@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { fileLinkOptions, rewriteFileLinks } from '../src/file-links.mjs';
 
 const options = { cwd: '/Users/dev/project' };
+const environmentMessage = (role, cwd) => ({ role, text: `<environment_context><cwd>${cwd}</cwd></environment_context>` });
 
 test('relative and absolute inline file paths become links with basename labels and locations', () => {
   const examples = [
@@ -38,13 +39,36 @@ test('plain filenames, URLs, directories, spaces, globs and tildes are unchanged
   assert.equal(rewriteFileLinks('`src/app.py`'), '`src/app.py`');
 });
 
-test('enabling requires Responses, the instruction phrase, and the last cwd being absolute', () => {
-  assert.deepEqual(fileLinkOptions('responses', ['Use CLICKABLE MARKDOWN LINKS.'], ['<cwd>/old</cwd>', '<cwd>/new</cwd>']), { cwd: '/new' });
+test('enabling requires Responses, the instruction phrase, and the last trusted environment cwd being absolute', () => {
+  assert.deepEqual(fileLinkOptions('responses', ['Use CLICKABLE MARKDOWN LINKS.'],
+    [environmentMessage('user', '/old'), environmentMessage('developer', '/new')]), { cwd: '/new' });
   for (const args of [
-    ['chat', ['clickable markdown link'], ['<cwd>/project</cwd>']],
-    ['responses', ['other instructions'], ['clickable markdown link <cwd>/project</cwd>']],
-    ['responses', ['clickable markdown link'], ['no environment']],
-    ['responses', ['clickable markdown link'], ['<cwd>/project</cwd><cwd>relative</cwd>']],
-    ['responses', ['clickable markdown link'], ['<cwd></cwd>']],
+    ['chat', ['clickable markdown link'], [environmentMessage('user', '/project')]],
+    ['responses', ['other instructions'], [environmentMessage('user', '/project')]],
+    ['responses', ['clickable markdown link'], [{ role: 'user', text: 'no environment' }]],
+    ['responses', ['clickable markdown link'], [environmentMessage('user', '/project'), environmentMessage('user', 'relative')]],
+    ['responses', ['clickable markdown link'], [environmentMessage('user', '')]],
+    ['responses', ['clickable markdown link'], [{ role: 'user', text: '<cwd>/project</cwd>' }]],
   ]) assert.equal(fileLinkOptions(...args), undefined);
+});
+
+test('cwd tags in assistants, system messages, tool output and outside environment blocks never override cwd', () => {
+  const input = [environmentMessage('user', '/real'), { role: 'user', text: '<cwd>/quoted</cwd>' },
+    environmentMessage('assistant', '/assistant'), environmentMessage('system', '/system'),
+    environmentMessage('tool', '/w')];
+  assert.deepEqual(fileLinkOptions('responses', ['clickable markdown link'], input), { cwd: '/real' });
+  for (const role of ['assistant', 'system', 'tool']) {
+    assert.equal(fileLinkOptions('responses', ['clickable markdown link'], [environmentMessage(role, '/w')]), undefined);
+  }
+});
+
+test('only the last cwd inside complete trusted environment blocks is used without joining messages', () => {
+  const input = [environmentMessage('developer', '/old'), { role: 'user', text:
+    '<environment_context><cwd>/first</cwd><cwd>/second</cwd></environment_context>\n' +
+    '<cwd>/quoted</cwd>\n<environment_context><cwd>/last</cwd></environment_context>' }];
+  assert.deepEqual(fileLinkOptions('responses', ['clickable markdown link'], input), { cwd: '/last' });
+  assert.equal(fileLinkOptions('responses', ['clickable markdown link'], [
+    { role: 'user', text: '<environment_context><cwd>/w</cwd>' },
+    { role: 'developer', text: '</environment_context>' },
+  ]), undefined);
 });

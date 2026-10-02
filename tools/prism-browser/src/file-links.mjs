@@ -4,7 +4,9 @@ const FILE_PATH = /^(?:\/(?:[\w@+.-]+\/)*|(?:[\w@+.-]+\/)+)[\w@+.-]+\.[A-Za-z0-9
 
 export function fileLinkOptions(family, instructions, input) {
   if (family !== 'responses' || !instructions.some(text => /clickable markdown link/i.test(text))) return;
-  const matches = [...input.join('\n').matchAll(/<cwd>([\s\S]*?)<\/cwd>/g)];
+  const matches = input.filter(item => item.role === 'user' || item.role === 'developer')
+    .flatMap(item => [...item.text.matchAll(/<environment_context>([\s\S]*?)<\/environment_context>/g)])
+    .flatMap(block => [...block[1].matchAll(/<cwd>([\s\S]*?)<\/cwd>/g)]);
   const cwd = matches.at(-1)?.[1].trim();
   if (cwd && posix.isAbsolute(cwd) && !/[\r\n]/.test(cwd)) return { cwd };
 }
