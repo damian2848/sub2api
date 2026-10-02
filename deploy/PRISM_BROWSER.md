@@ -228,28 +228,46 @@ How a request is turned into the single user message:
 - **Tools present** (Responses `tools` of type `function`, Chat `tools`, or the
   Codex `additional_tools` input item). The text uses a next-action-emitter
   framing: the model is told it is one component of a pipeline that only emits
-  one JSON action, followed by the action list (names, parameter schemas, short
+  actions, followed by the action list (names, parameter schemas, short
   descriptions), the executor environment (`<environment_context>`, `<cwd>`,
   working-directory lines taken from the client's messages), the `TASK` (the last
   user message) and the `TRANSCRIPT` of earlier turns and tool results. The
   client's own system/developer/`instructions` text is forwarded in this mode
   only when it is short (at most 6000 characters combined): then it appears as a
   delimited block after the protocol, with the reminder to still answer in the
-  JSON action format. Huge prompts (Codex, Claude Code) are omitted so that they
+  tag format. Huge prompts (Codex, Claude Code) are omitted so that they
   cannot bury the protocol. Codex tools in `mcp__*` namespaces and non-function
   (freeform, web search) tools are not offered.
 
-The reply is parsed back: `{"tool_call":{"name":...,"arguments":{...}}}` becomes a
-Responses `function_call` item (with its `namespace` unless it is `functions`) or
-a Chat `tool_calls` entry with `finish_reason: "tool_calls"`. Code fences, short
-leading prose, missing closing braces and string-encoded arguments are tolerated.
-`{"done":"..."}` carries the complete final reply (multi-line, markdown allowed,
-newlines escaped inside the JSON string; raw newlines are tolerated). The model is
-told to use it when the transcript shows the work finished, or when the task needs
-nothing done on the executor's machine (a greeting, a question answerable from the
-conversation), and never to claim work the transcript does not show. It becomes
-the text message. A reply naming a tool that was not offered, or not JSON at all,
-is returned as plain text. Tool results sent back by the client
+The reply is parsed back. Each action is a tag,
+`<tool_call name="exec">...</tool_call>`, and becomes one Responses `function_call`
+item (with its `namespace` unless it is `functions`) or one Chat `tool_calls`
+entry with `finish_reason: "tool_calls"`:
+
+- A tool whose schema is a single string (`{"input": string}`, which is how
+  Codex's freeform `exec` is lowered) is marked `(raw input)` in the action list.
+  Its tag body is the raw text (JavaScript, a patch, a command) passed through
+  as `{"input": "<body>"}`; one enclosing code fence and one leading or trailing
+  line break are removed. If the model wraps the text in a one-field JSON object
+  (`{"code": ...}`, `{"cmd": ...}`, `{"input": ...}`) the wrapper is removed too, so
+  `exec` never receives JSON where it expects JavaScript.
+- Other tools take one JSON object as the tag body (missing closing braces and
+  string-encoded arguments are tolerated).
+- A reply may hold up to eight tags. They are returned as several output items
+  in order, so the client runs them all and sends one set of results back,
+  which saves round trips of 10-30 s each. Text outside the tags (at most 2000
+  characters) is returned as a leading progress message.
+- A reply with no tag is the final answer (markdown allowed): it becomes the
+  text message. The model is told to answer this way when the transcript shows
+  the work finished, or when the task needs nothing done on the executor's
+  machine (a greeting, a question the conversation already answers), and never
+  to claim work the transcript does not show.
+- The previous JSON form, `{"tool_call":{"name":...,"arguments":{...}}}` and
+  `{"done":"..."}`, is still understood for models that answer in it.
+- A call naming a tool that was not offered is dropped; if nothing valid remains,
+  the reply is returned as plain text.
+
+Tool results sent back by the client
 (`function_call_output`, `custom_tool_call_output`, Chat `tool` messages) are
 placed in the transcript, so the loop continues turn by turn.
 
@@ -286,7 +304,12 @@ very large system prompt without tools. `PRISM_BODY_LIMIT` bounds the HTTP body
 
 Streaming sends Responses `response.created` / `response.in_progress` or the
 Chat role chunk as soon as the request is accepted, using one stable response
-identity. SSE comments keep the connection alive during generation. Output
+identity. While Prism generates, the stream sends an SSE comment and (for
+Responses) a `response.in_progress` event every 10 seconds.
+Codex counts only real events toward its stream idle timeout (default 5 minutes,
+`stream_idle_timeout_ms`), so the event, not the comment, is what stops it from
+dropping the stream and retrying ("reconnecting 1/5"), which would start a second
+generation. Output
 events follow when Prism completes; text and tool JSON are validated before
 publication. Writes respect client backpressure, and terminal errors use the
 appropriate streaming protocol:
@@ -295,10 +318,12 @@ appropriate streaming protocol:
   `response.output_item.added`, `response.content_part.added`, chunked
   `response.output_text.delta`, `response.output_text.done`,
   `response.content_part.done`, `response.output_item.done`, `response.completed`.
-- Responses tool call: `response.output_item.added` (in progress, empty
-  arguments), `response.function_call_arguments.delta`/`.done`,
-  `response.output_item.done`, `response.completed`.
-- Chat: a role chunk, then content chunks or one `tool_calls` chunk, a final chunk
+- Responses tool calls: for each call in order, `response.output_item.added` (in
+  progress, empty arguments), `response.function_call_arguments.delta`/`.done`,
+  `response.output_item.done`; then `response.completed`. A progress note is
+  emitted first as a text message item.
+- Chat: a role chunk, then content chunks and/or one `tool_calls` chunk (one entry
+  per call), a final chunk
   with `stop` or `tool_calls`, an optional usage chunk when
   `stream_options.include_usage` is set, and `[DONE]`.
 
@@ -317,9 +342,9 @@ Limitations that remain:
 - **One request at a time per worker.** Requests queue (`PRISM_QUEUE_LIMIT`)
   and a full queue is rejected. Clients on one account can overlap up to its
   ready worker count, while any configured native start allowance is shared.
-- **Tool calls are prompt-emulated**, at most one call per turn. Parallel tool
-  calls, `tool_choice` and strict schemas are not enforced, and weaker adherence
-  to the JSON protocol shows up as plain text instead of a call.
+- **Tool calls are prompt-emulated**, at most eight per reply, run in order (they
+  are not parallel). `tool_choice` and strict schemas are not enforced, and weaker
+  adherence to the tag protocol shows up as plain text instead of a call.
 - **Images and files are unsupported.** The sidecar itself rejects `input_image`,
   `image_url`, `input_file`, `input_audio` and `file` parts with
   `400 image_input_not_supported`. It also rejects a `previous_response_id`
