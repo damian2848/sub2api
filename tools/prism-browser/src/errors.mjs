@@ -58,6 +58,8 @@ const MESSAGES = {
   sandbox_initialization_timeout: 'The Prism sandbox did not become ready in time',
   prism_start_rejected: 'Prism refused to start another generation on this account for now; try again shortly',
   prism_start_limited: 'Prism refused to start another generation on this account for now; try again shortly',
+  // The code is OpenAI's, so clients treat it as a context-window error (compact) instead of retrying.
+  context_length_exceeded: 'The conversation is too long for Prism; compact it or start a new conversation',
 };
 
 export function publicError(error) {

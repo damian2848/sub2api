@@ -52,6 +52,53 @@ export function statusPollInterval(value = process.env.PRISM_STATUS_POLL_MS) {
   return Number.isInteger(parsed) && (parsed === 0 || (parsed >= 250 && parsed <= 10000)) ? parsed : 1000;
 }
 
+// Prism keeps every chat tab it opened mounted (hidden) in the page, and each request opens one more,
+// so the page and the time to prepare a request grow with every turn. Chat tab ids are
+// `chat:<epoch ms>`; file tabs use project node ids.
+export const CHAT_TAB_SELECTOR = '[data-tab-id^="chat:"]';
+// A chat opened while the worker was idle is used only while it is this fresh.
+export const PREPARED_CHAT_MAX_AGE_MS = 10 * 60 * 1000;
+
+// PRISM_PREWARM_CHAT=false turns off opening the next chat (and closing old chat tabs) between turns.
+export function prewarmEnabled(value = process.env.PRISM_PREWARM_CHAT) {
+  return !['false', '0', 'off'].includes(String(value ?? '').trim().toLowerCase());
+}
+
+// Runs in the page: closes every chat tab except the active and the newest one the way a middle click
+// on a tab does (Prism's tab handles mousedown with button 1). One tab at a time with a yield in
+// between, so each close is applied to the tab list the previous one left.
+export async function closeOldChatTabsInPage(selector) {
+  const tabs = () => Array.from(document.querySelectorAll(selector));
+  const stamp = element => Number(element.getAttribute('data-tab-id').slice('chat:'.length)) || 0;
+  const before = tabs();
+  if (before.length < 2) return { before: before.length, after: before.length };
+  const newest = before.reduce((best, element) => stamp(element) > stamp(best) ? element : best);
+  const keep = new Set([newest.getAttribute('data-tab-id'), ...before
+    .filter(element => String(element.className).includes('--tabs-active-border'))
+    .map(element => element.getAttribute('data-tab-id'))]);
+  for (const element of before) {
+    if (keep.has(element.getAttribute('data-tab-id')) || !element.isConnected) continue;
+    element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 1 }));
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  await new Promise(resolve => setTimeout(resolve, 50));
+  return { before: before.length, after: tabs().length };
+}
+
+const inputChars = input => (Array.isArray(input) ? input : []).reduce((sum, item) => sum +
+  (Array.isArray(item?.content) ? item.content.reduce((total, part) =>
+    total + (typeof part?.text === 'string' ? part.text.length : 0), 0) : 0), 0);
+
+// Counts of a Prism output's item types (message, reasoning, ...) for the audit; names only.
+function outputTypes(output) {
+  if (!Array.isArray(output)) return undefined;
+  const counts = {};
+  for (const item of output.slice(0, 200)) {
+    if (typeof item?.type === 'string' && /^[a-z_]{1,40}$/.test(item.type)) counts[item.type] = (counts[item.type] || 0) + 1;
+  }
+  return counts;
+}
+
 export function modelFromLabel(label) {
   const value = label.trim().replace(/\s+/g, ' ');
   const match = /^(\d+(?:\.\d+)?) (Sol|Terra|Luna|Astra)\b/.exec(value);
@@ -77,6 +124,11 @@ export class BrowserSession {
     this.worker = worker;
     // The official page polls status every 3.4-4 s; we poll every statusPollMs as well (0: page only).
     this.statusPollMs = statusPollInterval();
+    this.prewarm = prewarmEnabled();
+    // The next chat, opened while idle: a promise of { page, generation, at } or null.
+    this.preparing = null;
+    // Bumped whenever the page is (re)loaded, so a chat prepared on an earlier load is never used.
+    this.pageGeneration = 0;
   }
 
   audit(event, details) {
@@ -185,8 +237,15 @@ export class BrowserSession {
       turn.started = true;
       turn.startRequest = request;
       turn.conversationId = body.conversationId;
+      turn.startedAt = performance.now();
+      // prep_ms: from taking the request to Prism's start; submit_ms: from pressing Enter to it (the page's
+      // own work, e.g. its Sentinel proof); prewarmed: the chat was opened while the worker was idle.
+      const timing = turn.timing;
       this.audit('upstream_start', { model: turn.request.model, effort: turn.request.effort, ui_model: body.metadata.model,
-        sentinel_present: Boolean(request.headers?.()['openai-sentinel-token']), input_roles: turn.request.input.map(item => item.role) });
+        sentinel_present: Boolean(request.headers?.()['openai-sentinel-token']), input_roles: turn.request.input.map(item => item.role),
+        input_chars: inputChars(turn.request.input),
+        ...(timing ? { prep_ms: Math.round(turn.startedAt - timing.begun), prewarmed: timing.prewarmed,
+          submit_ms: timing.submit ? Math.round(turn.startedAt - timing.submit) : undefined } : {}) });
       // The official UI still generates Sentinel proof, identity, and sandbox metadata.
       // Replace only validated text so no unrelated native UI history is sent. The UI's own model
       // and effort controls can sit on their loading defaults, so the exact requested values
@@ -257,6 +316,7 @@ export class BrowserSession {
     if (data.request_id) turn.requestId = data.request_id;
     if (data.turn_state) turn.turnState = data.turn_state;
     if (data.conversation_id) turn.conversationId = data.conversation_id;
+    this.trackProgress(turn, data.codex_live_progress);
     const terminal = ['completed', 'error', 'failed'].includes(data.status);
     // Prism accepted the start (it is running, or already finished successfully): a streaming
     // caller may now open its stream. A refused start never opens it, so it can still be a 429.
@@ -280,7 +340,15 @@ export class BrowserSession {
         ? payload.httpStatus : undefined,
       resubmission_requested: resubmissionRequested, completed_by: turn.completedBy,
       own_polls: turn.ownPolls, own_poll_failed: turn.ownPollFailed, own_poll_errors: turn.ownPollErrorTotal || 0,
+      prism_ms: turn.startedAt ? Math.round(performance.now() - turn.startedAt) : undefined,
+      internal_tool_calls: turn.internalTools?.size || 0, internal_tool_names: [...(turn.internalToolNames || [])],
+      reasoning_summaries: turn.reasoningSummaries?.size || 0, output_types: outputTypes(payload.output),
       exec_meta_shape: payloadShape(payload.codexExecMeta), debug_shape: payloadShape(payload.codexDebug) });
+    if (data.response?.status !== 'success' && (payload.httpStatus === 413 || payload.reason === 'conversation_too_large')) {
+      // Prism refused the size of the conversation. Every account would refuse it the same way, so it is the
+      // request's fault: a 400 the client can act on (compact), never a 5xx that is retried or cools accounts down.
+      return turn.reject(new PrismError('context_length_exceeded', 400));
+    }
     if (data.response?.status !== 'success' && isStart && resubmissionRequested) {
       // Refused at the start itself ("please submit prompt again"): Prism's start allowance for the
       // account, not a broken project, so no project refresh and no retry on this account.
@@ -302,9 +370,36 @@ export class BrowserSession {
     turn.resolve(text);
   }
 
+  // Prism runs its own agent behind the start. Its live progress lists the tools that agent called and its
+  // reasoning summaries; the audit keeps only how many there were and the tool names.
+  trackProgress(turn, progress) {
+    if (!progress || typeof progress !== 'object') return;
+    if (Array.isArray(progress.toolCalls)) {
+      turn.internalTools ??= new Set();
+      turn.internalToolNames ??= new Set();
+      for (const call of progress.toolCalls.slice(0, 500)) {
+        if (!call || typeof call !== 'object' || turn.internalTools.size >= 1000) continue;
+        turn.internalTools.add(`${call.line_index}:${call.call_id ?? ''}:${call.name ?? ''}`);
+        if (typeof call.name === 'string' && /^[A-Za-z0-9_.:-]{1,64}$/.test(call.name) && turn.internalToolNames.size < 12) {
+          turn.internalToolNames.add(call.name);
+        }
+      }
+    }
+    if (Array.isArray(progress.reasoningSummaries)) {
+      turn.reasoningSummaries ??= new Set();
+      for (const summary of progress.reasoningSummaries.slice(0, 500)) {
+        if (turn.reasoningSummaries.size < 1000) {
+          turn.reasoningSummaries.add(`${summary?.line_index}:${typeof summary?.text === 'string' ? summary.text.length : ''}`);
+        }
+      }
+    }
+  }
+
   async initialize(projectId, onProjectCreated, signal, previousModels = []) {
     const page = this.page;
     const epoch = this.contextEpoch;
+    this.pageGeneration += 1;
+    this.preparing = null;
     const checkCurrent = () => {
       aborted(signal);
       if (this.contextEpoch !== epoch || this.page !== page || !page || page.isClosed?.()) {
@@ -502,16 +597,27 @@ export class BrowserSession {
     const result = new Promise((resolve, reject) => { turn.resolve = resolve; turn.reject = reject; });
     // A native response can finish before press('Enter') returns.
     result.catch(() => {});
+    const preparing = this.preparing;
+    this.preparing = null;
+    turn.timing = { begun: performance.now(), prewarmed: false, submit: 0 };
     this.turn = turn;
     let stage = 'new_chat';
+    let succeeded = false;
     try {
-      return await interruptible(async () => {
+      const text = await interruptible(async () => {
         checkCurrent();
-        await page.getByRole('button', { name: 'New chat tab', exact: true }).click({ timeout: 15000 });
+        // The chat opened while the worker was idle, when it is still usable; otherwise open one now.
+        const prepared = preparing ? await preparing : null;
         checkCurrent();
-        stage = 'composer';
-        const composer = await this.composer(checkCurrent);
-        checkCurrent();
+        let composer = prepared ? await this.preparedComposer(prepared, checkCurrent) : null;
+        if (composer) turn.timing.prewarmed = true;
+        else {
+          await page.getByRole('button', { name: 'New chat tab', exact: true }).click({ timeout: 15000 });
+          checkCurrent();
+          stage = 'composer';
+          composer = await this.composer(checkCurrent);
+          checkCurrent();
+        }
         stage = 'model_selection';
         await this.select(request, checkCurrent);
         checkCurrent();
@@ -526,11 +632,14 @@ export class BrowserSession {
         }
         stage = 'submit';
         turn.submitAllowed = true;
+        turn.timing.submit = performance.now();
         await composer.press('Enter');
         checkCurrent();
         stage = 'generation';
         return result;
       }, signal, () => this.page === page ? this.close() : undefined);
+      succeeded = true;
+      return text;
     } catch (error) {
       this.audit('browser_ui_failure', { stage, error_type: error.constructor.name,
         code: error instanceof PrismError ? error.code : undefined });
@@ -548,7 +657,57 @@ export class BrowserSession {
       throw error instanceof PrismError ? error : new PrismError(`browser_ui_${stage}_failed`);
     } finally {
       if (this.turn === turn) this.turn = null;
+      // Only after a clean turn: a failed one may still be stopping, or be followed by a page reload.
+      if (succeeded && this.page === page && !this.turn) this.schedulePrepare();
     }
+  }
+
+  // While the worker is idle: open the next chat, close the older chat tabs and wait for the composer,
+  // so the next request only fills it in and submits. The promise never rejects; null means "not
+  // prepared" and the request opens its chat itself, as without prewarming.
+  schedulePrepare() {
+    if (!this.prewarm || !this.isAlive()) return;
+    const page = this.page;
+    const generation = this.pageGeneration;
+    const checkCurrent = () => {
+      if (this.page !== page || this.pageGeneration !== generation || !page || page.isClosed?.()) {
+        throw new PrismError('browser_session_closed', 503);
+      }
+    };
+    const begun = performance.now();
+    let stage = 'new_chat';
+    this.preparing = (async () => {
+      try {
+        await page.getByRole('button', { name: 'New chat tab', exact: true }).click({ timeout: 15000 });
+        checkCurrent();
+        stage = 'composer';
+        await this.composer(checkCurrent);
+        stage = 'close_tabs';
+        const tabs = await page.evaluate(closeOldChatTabsInPage, CHAT_TAB_SELECTOR).catch(() => null);
+        checkCurrent();
+        stage = 'composer';
+        await this.composer(checkCurrent);
+        this.audit('chat_prepared', { prepare_ms: Math.round(performance.now() - begun),
+          chat_tabs_before: tabs?.before, chat_tabs_after: tabs?.after });
+        return { page, generation, at: Date.now() };
+      } catch (error) {
+        this.audit('chat_prepare_failed', { stage, error_type: error?.constructor?.name,
+          code: error instanceof PrismError ? error.code : undefined });
+        return null;
+      }
+    })();
+  }
+
+  // The composer of the chat schedulePrepare() opened, if it is from this page load, fresh, and still an
+  // empty, enabled composer; otherwise null.
+  async preparedComposer(prepared, checkCurrent = () => {}) {
+    const page = this.page;
+    if (prepared.page !== page || prepared.generation !== this.pageGeneration ||
+      !(Date.now() - prepared.at <= PREPARED_CHAT_MAX_AGE_MS)) return null;
+    const composer = page.locator('textarea:visible').last();
+    const ready = await composer.evaluate(element => !element.disabled && element.value === '').catch(() => false);
+    checkCurrent();
+    return ready ? composer : null;
   }
 
   // Use the official page's fetch so polling carries its own session and verification; a Node-side
@@ -630,6 +789,7 @@ export class BrowserSession {
     const context = this.context;
     this.context = null;
     this.page = null;
+    this.preparing = null;
     this.creating = false;
     this.bootstrapping = false;
     this.reserveProject = null;
