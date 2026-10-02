@@ -43,7 +43,7 @@ compose file and listed in `.env.prism-browser.example`):
 
 | Variable | Default | Allowed | Meaning |
 | --- | --- | --- | --- |
-| `PRISM_REQUEST_TIMEOUT` | `240` | 30-600 | Seconds for one bootstrap or generation. |
+| `PRISM_REQUEST_TIMEOUT` | `1800` (30 min) | 30-3600 | Seconds for one bootstrap or generation. Prism returns the whole answer only when it is finished, and long outputs at `xhigh` effort (for example a full HTML animation) can take many minutes. The reverse proxy in front of Sub2API must allow at least as long a read timeout. |
 | `PRISM_BODY_LIMIT` | `8388608` (8 MiB) | 4096-33554432 (32 MiB) | Largest request body in bytes. Codex requests with tool schemas and history often exceed 512 KiB. Management requests stay limited to 128 KiB. |
 | `PRISM_MAX_TRANSCRIPT_CHARS` | `32000` | 1000-1000000 | Characters of earlier conversation kept per request; older entries are replaced by a note. The final user message is never cut. |
 | `PRISM_QUEUE_LIMIT` | `8` | 1-64 | Waiting requests per account. |
@@ -110,7 +110,7 @@ Source IDs are positive decimal Sub2API account IDs.
 - A failed first probe is never replayed in the background. An explicit manual
   reconnect can send `{"retry_probe":true}` to allow one further probe. The
   budget of one bootstrap or generation is `PRISM_REQUEST_TIMEOUT` seconds
-  (default 240, at most 600).
+  (default 1800, at most 3600).
 - `GET /internal/accounts/:source/status` returns `phase`, `ready`, `models`
   and optional `error_code`, `last_heartbeat_at` (Unix seconds), `project_id`.
   It also returns `concurrency`, `pool_size`, `ready_workers` (including busy

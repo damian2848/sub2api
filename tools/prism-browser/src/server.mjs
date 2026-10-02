@@ -48,7 +48,7 @@ export function readJSON(req, limit) {
   });
 }
 
-export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024 * 1024, requestTimeout = 240000,
+export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024 * 1024, requestTimeout = 1800000,
   sessionTimeout = 30000, keepaliveMs = 10000, maxTextBytes, maxTranscriptChars }) {
   if (typeof managementKey !== 'string' || managementKey.length < 32) throw new Error('PRISM_MANAGEMENT_KEY must have at least 32 characters');
   const managementHash = createHash('sha256').update(managementKey).digest('hex');
@@ -156,7 +156,7 @@ export async function main() {
   const server = createPrismServer({ manager, managementKey: process.env.PRISM_MANAGEMENT_KEY,
     bodyLimit: integer('PRISM_BODY_LIMIT', 8 * 1024 * 1024, 4096, 32 * 1024 * 1024),
     maxTranscriptChars: integer('PRISM_MAX_TRANSCRIPT_CHARS', 32000, 1000, 1000000),
-    requestTimeout: integer('PRISM_REQUEST_TIMEOUT', 240, 30, 600) * 1000 });
+    requestTimeout: integer('PRISM_REQUEST_TIMEOUT', 1800, 30, 3600) * 1000 });
   const port = integer('PRISM_PORT', 8319, 1, 65535);
   await new Promise(resolve => server.listen(port, process.env.PRISM_HOST || '0.0.0.0', resolve));
   console.log(JSON.stringify({ event: 'listening', port }));
