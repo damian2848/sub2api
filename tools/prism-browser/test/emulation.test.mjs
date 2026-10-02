@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { NOISE, TOOL_INSTRUCTIONS_LIMIT, buildPrompt, clampTranscript, collectTools, elide, envContext, looseJSON, parseDone,
-  parseToolCall, stripFence, toolProtocol, toolReminder } from '../src/emulation.mjs';
+import { MAX_TOOL_CALLS, NOISE, TOOL_INSTRUCTIONS_LIMIT, buildPrompt, clampTranscript, collectTools, elide, envContext, isRawInputSchema,
+  looseJSON, parseDone, parseReply, parseToolCall, rawInput, rawInputFrom, stripFence, toolProtocol, toolReminder } from '../src/emulation.mjs';
 
 test('collectTools keeps plain functions, walks namespaces, skips custom, web_search and MCP tools', () => {
   const tools = collectTools([
@@ -52,7 +52,8 @@ test('lowered Codex exec retains its complete executor API description', () => {
     assert.equal(specs[0].desc, description);
     const prompt = buildPrompt({ convo: [{ kind: 'user', text: 'Print the current directory.' }], tools: specs, budget: 1000 });
     assert.ok(prompt.includes(description));
-    assert.ok(prompt.includes('"input":{"type":"string"}'));
+    assert.match(prompt, /- (?:functions__)?exec \(raw input\)/, 'a freeform exec is listed as raw input, not as a JSON schema');
+    assert.ok(!prompt.includes('"input":{"type":"string"}'));
     assert.match(prompt, /tools\.exec_command\(\{cmd: "pwd"\}\)/);
   }
   // An ordinary exec function with command arguments keeps the concise treatment.
@@ -146,9 +147,9 @@ test('buildPrompt: tool framing, plain passthrough and framed conversation', () 
     { kind: 'ran', text: 'shell {}' }, { kind: 'result', text: 'out' }];
   const tooled = buildPrompt({ system: ['x'.repeat(TOOL_INSTRUCTIONS_LIMIT + 1)], convo, tools: [{ name: 'shell', params: { p: 1 }, desc: 'Run' }],
     envParts: ['<cwd>/w</cwd>'], budget: 1000 });
-  assert.match(tooled, /^<role>next-action emitter<\/role>/);
+  assert.match(tooled, /^<role>action emitter<\/role>/);
   assert.match(tooled, /\n- shell\n {4}params: \{"p":1\}\n {4}Run\n/);
-  assert.match(tooled, /\n<cwd>\/w<\/cwd>\n\nTASK:\nsecond task\n\nTRANSCRIPT SO FAR:\n\[user\]\n {2}first task {2}\n\n\[assistant\]\nok\n\n\[executor ran\]\nshell \{\}\n\n\[result\]\nout\n\n=+\nReply with ONE JSON object now\. Actions: shell\n/);
+  assert.match(tooled, /\n<cwd>\/w<\/cwd>\n\nTASK:\nsecond task\n\nTRANSCRIPT SO FAR:\n\[user\]\n {2}first task {2}\n\n\[assistant\]\nok\n\n\[executor ran\]\nshell \{\}\n\n\[result\]\nout\n\n=+\nReply now\. Either write one or more <tool_call name="ACTION">\.\.\.<\/tool_call> tags, or answer\nin plain text if the TRANSCRIPT shows the work finished or nothing needs doing on the executor\.\nActions: shell\n/);
   assert.ok(!tooled.includes('xxxx') && !tooled.includes('Caller instructions'));
   assert.match(buildPrompt({ convo: [], tools: [{ name: 'shell', params: {}, desc: '' }], budget: 10 }), /TASK:\n\(none\)\n\nTRANSCRIPT SO FAR:\n\(empty - the executor has run nothing yet\)/);
   assert.equal(buildPrompt({ convo: [{ kind: 'user', text: ' raw ' }], tools: [], budget: 10 }), ' raw ');
@@ -158,23 +159,127 @@ test('buildPrompt: tool framing, plain passthrough and framed conversation', () 
   assert.match(framed, /\[assistant\]\na\n\n\[user\]\nu\n\n\[result\]\nr$/);
 });
 
-test('the protocol makes done the complete final reply and the reminder says the same', () => {
+test('the protocol asks for tagged actions, plain-text answers and several actions per turn', () => {
   const protocol = toolProtocol('- shell');
-  assert.ok(!protocol.includes('one line summary') && !protocol.includes('<one line'));
-  assert.ok(protocol.includes('{"done":"<complete final reply to the user>"}'));
-  assert.ok(protocol.includes('COMPLETE reply the user will read'));
-  assert.ok(protocol.includes('markdown allowed, newlines written as \\n inside the JSON string'));
-  assert.ok(protocol.includes('a greeting, or a question\n    that can be answered from the conversation and the transcript alone'));
-  assert.ok(protocol.includes('the TRANSCRIPT shows that the requested work is finished'));
-  assert.ok(protocol.includes('Never claim work the TRANSCRIPT does not show. An empty transcript never proves'));
-  assert.ok(!protocol.includes('Prose output breaks the pipeline'));
+  assert.ok(protocol.includes('<tool_call name="ACTION">') && protocol.includes('</tool_call>'));
+  assert.ok(protocol.includes('If the action is marked (raw input), ARGUMENTS is the raw text itself'));
+  assert.ok(protocol.includes('No JSON, no quotes around it, no escaping, no markdown fence.'));
+  assert.ok(protocol.includes('Never wrap it in an object and never use a key such as "code".'));
+  assert.ok(protocol.includes('Write several tags in ONE reply'));
+  assert.ok(protocol.includes('Answer the user directly, in plain text with no tags'));
+  assert.ok(protocol.includes('Do not explore (listing directories, reading instruction files) unless the task'));
+  assert.ok(protocol.includes('Never claim work the TRANSCRIPT does not show. An empty\n   transcript never proves'));
+  assert.ok(!protocol.includes('{"done"') && !protocol.includes('"tool_call"'), 'the JSON action format is gone from the prompt');
+  assert.ok(protocol.trimEnd().endsWith('Available actions:\n- shell'));
   const reminder = toolReminder('a, b');
-  assert.ok(reminder.includes('Actions: a, b') && reminder.includes('{"done":"<complete reply to the user>"}'));
-  assert.ok(reminder.includes('markdown allowed, \\n for newlines') && reminder.includes('Never claim work the TRANSCRIPT does not show'));
+  assert.ok(reminder.includes('Actions: a, b') && reminder.includes('<tool_call name="ACTION">'));
+  assert.ok(reminder.includes('(raw input) actions take the raw text between the tags, never JSON.'));
 });
 
 test('looseJSON repairs literal control characters inside strings only', () => {
   assert.deepEqual(looseJSON('{"done":"a\nb\tc"}'), { done: 'a\nb\tc' });
   assert.deepEqual(looseJSON('{\n  "done": "a\nb"\n}'), { done: 'a\nb' });
   assert.equal(parseDone('{"done":"x\u0001y"}'), 'x\u0001y');
+});
+
+// ---- the tag protocol ----
+const rawSchema = { type: 'object', properties: { input: { type: 'string', description: 'The raw input.' } }, required: ['input'] };
+const toolSpecs = () => new Map(collectTools([
+  { type: 'function', name: 'exec', description: 'Run JavaScript.', parameters: rawSchema },
+  { type: 'function', name: 'exec_command', description: 'Run a shell command.',
+    parameters: { type: 'object', properties: { cmd: { type: 'string' } }, required: ['cmd'] } },
+  { type: 'namespace', name: 'agents', tools: [{ type: 'function', name: 'spawn', parameters: { type: 'object', properties: { task: { type: 'string' } } } }] },
+]).map(spec => [spec.name, spec]));
+
+test('a freeform tool is recognised by its lowered {input: string} schema only', () => {
+  assert.equal(isRawInputSchema(rawSchema), true);
+  assert.equal(isRawInputSchema({ type: 'object', properties: { input: { type: 'string' } } }), true);
+  assert.equal(isRawInputSchema({ type: 'object', properties: { input: { type: 'string' }, cwd: { type: 'string' } } }), false);
+  assert.equal(isRawInputSchema({ type: 'object', properties: { input: { type: 'number' } } }), false);
+  assert.equal(isRawInputSchema({ type: 'object', properties: { cmd: { type: 'string' } } }), false);
+  assert.equal(isRawInputSchema(undefined), false);
+  const specs = toolSpecs();
+  assert.equal(specs.get('exec').raw, true);
+  assert.equal(specs.get('exec_command').raw, false);
+});
+
+test('raw input between the tags reaches the executor exactly: no JSON, no escaping, any characters', () => {
+  const html = '<!DOCTYPE html>\n<html lang="zh"><body>\n  <svg viewBox="0 0 10 10"><text>\\n "quoted" \'single\' {braces} </div></text></svg>\n<script>const a = {"k": [1, 2]}; console.log(`x${a.k}`);</script>\n</body></html>';
+  const program = `await tools.exec_command({cmd: ${JSON.stringify('printf %s ' + html)}});`;
+  const { calls, text } = parseReply(`<tool_call name="exec">\n${program}\n</tool_call>`, toolSpecs());
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, 'exec');
+  assert.deepEqual(JSON.parse(calls[0].arguments), { input: program });
+  assert.equal(text, '');
+  assert.match(calls[0].id, /^call_[0-9a-f]{24}$/);
+});
+
+test('several tags become several calls in order; the text around them is a short progress note', () => {
+  const reply = 'Writing the file, then checking it.\n<tool_call name="exec_command">{"cmd":"printf a > a.txt"}</tool_call>\n' +
+    '<tool_call name="exec_command">\n{"cmd":"cat a.txt"}\n</tool_call>\nDone soon.';
+  const { calls, text } = parseReply(reply, toolSpecs());
+  assert.deepEqual(calls.map(call => JSON.parse(call.arguments).cmd), ['printf a > a.txt', 'cat a.txt']);
+  assert.equal(text, 'Writing the file, then checking it.\n\nDone soon.');
+  assert.equal(new Set(calls.map(call => call.id)).size, 2);
+  const flood = Array.from({ length: MAX_TOOL_CALLS + 4 }, (_, index) => `<tool_call name="exec_command">{"cmd":"echo ${index}"}</tool_call>`).join('\n');
+  assert.equal(parseReply(flood, toolSpecs()).calls.length, MAX_TOOL_CALLS);
+});
+
+test('a reply cut off inside the last tag still yields its call; namespaces and names are honoured', () => {
+  const cut = parseReply('<tool_call name="exec">text(await tools.exec_command({cmd: "pwd"}));', toolSpecs());
+  assert.equal(JSON.parse(cut.calls[0].arguments).input, 'text(await tools.exec_command({cmd: "pwd"}));');
+  const spawn = parseReply('<tool_call name="spawn">{"task":"x"}</tool_call>', toolSpecs());
+  assert.equal(spawn.calls[0].namespace, 'agents');
+  assert.equal(parseReply('<tool_call name="functions.exec_command">{"cmd":"ls"}</tool_call>', toolSpecs()).calls[0].name, 'exec_command');
+  assert.equal(parseReply("<tool_call name='exec_command'>{\"cmd\":\"ls\"}</tool_call>", toolSpecs()).calls.length, 1);
+});
+
+test('a tool the client did not offer is never a call; with no valid call the reply is plain text', () => {
+  const unknown = '<tool_call name="rm_rf">{"path":"/"}</tool_call>';
+  const reply = parseReply(unknown, toolSpecs());
+  assert.deepEqual(reply.calls, []);
+  assert.equal(reply.text, unknown);
+  const mixed = parseReply(`${unknown}<tool_call name="exec_command">{"cmd":"ls"}</tool_call>`, toolSpecs());
+  assert.deepEqual(mixed.calls.map(call => call.name), ['exec_command']);
+});
+
+test('raw input is unwrapped from a fence or a one-field JSON wrapper, a program that merely starts with a brace is kept', () => {
+  assert.equal(rawInput('\nhello\n'), 'hello');
+  assert.equal(rawInput('\n\nhello\n\n'), '\nhello\n', 'only one line break each side is layout');
+  assert.equal(rawInput('```js\nconst a = 1;\n```'), 'const a = 1;');
+  assert.equal(rawInput('```\nconst a = 1;\n```\n'), 'const a = 1;');
+  assert.equal(rawInput('text\n```js\ncode\n```'), 'text\n```js\ncode\n```', 'a fence inside other text is content');
+  for (const key of ['input', 'code', 'source', 'script', 'cmd']) {
+    assert.equal(rawInputFrom(JSON.stringify({ [key]: 'notify("a");\ntext(1);' })), 'notify("a");\ntext(1);', key);
+  }
+  assert.equal(rawInputFrom('{"code":"x","extra":"y"}'), '{"code":"x","extra":"y"}', 'two fields are not a wrapper');
+  assert.equal(rawInputFrom('{"code":5}'), '{"code":5}');
+  assert.equal(rawInputFrom('{ const a = 1; }\ntext(a);'), '{ const a = 1; }\ntext(a);');
+  const wrapped = parseReply('<tool_call name="exec">{"code":"text(await tools.exec_command({cmd: \\"pwd\\"}));"}</tool_call>', toolSpecs());
+  assert.equal(JSON.parse(wrapped.calls[0].arguments).input, 'text(await tools.exec_command({cmd: "pwd"}));');
+});
+
+test('JSON arguments are repaired the way the older format was, a bad body becomes empty arguments', () => {
+  assert.deepEqual(JSON.parse(parseReply('<tool_call name="exec_command">{"cmd":"ls"</tool_call>', toolSpecs()).calls[0].arguments), { cmd: 'ls' });
+  assert.deepEqual(JSON.parse(parseReply('<tool_call name="exec_command">```json\n{"cmd":"ls"}\n```</tool_call>', toolSpecs()).calls[0].arguments), { cmd: 'ls' });
+  assert.equal(parseReply('<tool_call name="exec_command">ls -la</tool_call>', toolSpecs()).calls[0].arguments, '{}');
+});
+
+test('the older JSON action replies still work, and a raw-input action always ends up with {input: text}', () => {
+  const legacy = parseReply('{"tool_call":{"name":"exec_command","arguments":{"cmd":"ls"}}}', toolSpecs());
+  assert.deepEqual(JSON.parse(legacy.calls[0].arguments), { cmd: 'ls' });
+  const keyed = parseReply('{"tool_call":{"name":"exec","arguments":{"code":"notify(\'a\');"}}}', toolSpecs());
+  assert.deepEqual(JSON.parse(keyed.calls[0].arguments), { input: "notify('a');" });
+  const stringArgs = parseReply('{"tool_call":{"name":"exec","arguments":"text(1);"}}', toolSpecs());
+  assert.deepEqual(JSON.parse(stringArgs.calls[0].arguments), { input: 'text(1);' });
+  const proper = parseReply('{"tool_call":{"name":"exec","arguments":{"input":"text(2);"}}}', toolSpecs());
+  assert.deepEqual(JSON.parse(proper.calls[0].arguments), { input: 'text(2);' });
+  assert.deepEqual(parseReply('{"done":"All finished."}', toolSpecs()), { calls: [], text: 'All finished.' });
+});
+
+test('a plain-text reply is the final answer, whatever it contains', () => {
+  const answer = '你好！\n\n```js\nconsole.log(1)\n```\n- a\n- b';
+  assert.deepEqual(parseReply(answer, toolSpecs()), { calls: [], text: answer });
+  assert.deepEqual(parseReply('', toolSpecs()), { calls: [], text: '' });
+  assert.deepEqual(parseReply(undefined, toolSpecs()), { calls: [], text: '' });
 });

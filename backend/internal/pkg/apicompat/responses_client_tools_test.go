@@ -2,6 +2,7 @@ package apicompat
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -627,6 +628,39 @@ func TestResponsesClientToolStreamRestorer_CustomToolBuffersWrapperAndSequences(
 	require.Equal(t, 10, closed[0].SequenceNumber)
 	require.Equal(t, "custom_tool_call", closed[0].Item.Type)
 	require.Equal(t, "dir", closed[0].Item.Input)
+}
+
+// Prism answers one turn with a progress note plus several tool calls; every call keeps its own buffer.
+func TestResponsesClientToolStreamRestorer_RestoresSeveralCustomCallsInOneResponse(t *testing.T) {
+	restorer := NewResponsesClientToolStreamRestorer(ResponsesClientToolMapping{CustomTools: map[string]bool{"exec": true}})
+	seq := 0
+	next := func() int { seq++; return seq }
+
+	note := restorer.Restore(ResponsesStreamEvent{Type: "response.output_item.added", SequenceNumber: next(), OutputIndex: 0, Item: &ResponsesOutput{Type: "message", ID: "m1", Role: "assistant", Status: "in_progress"}})
+	require.Len(t, note, 1)
+	require.Equal(t, "message", note[0].Item.Type)
+
+	inputs := []string{"console.log(1)", "console.log(2)"}
+	for i, input := range inputs {
+		index := i + 1
+		itemID, callID := fmt.Sprintf("item_%d", index), fmt.Sprintf("call_%d", index)
+		arguments := `{"input":"` + input + `"}`
+		added := restorer.Restore(ResponsesStreamEvent{Type: "response.output_item.added", SequenceNumber: next(), OutputIndex: index, Item: &ResponsesOutput{Type: "function_call", ID: itemID, CallID: callID, Name: "exec", Status: "in_progress"}})
+		require.Len(t, added, 1)
+		require.Equal(t, "custom_tool_call", added[0].Item.Type)
+		require.Empty(t, restorer.Restore(ResponsesStreamEvent{Type: "response.function_call_arguments.delta", SequenceNumber: next(), OutputIndex: index, ItemID: itemID, Delta: arguments}))
+		done := restorer.Restore(ResponsesStreamEvent{Type: "response.function_call_arguments.done", SequenceNumber: next(), OutputIndex: index, ItemID: itemID, Arguments: arguments})
+		require.Len(t, done, 2)
+		require.Equal(t, "response.custom_tool_call_input.delta", done[0].Type)
+		require.Equal(t, input, done[0].Delta)
+		require.Equal(t, "response.custom_tool_call_input.done", done[1].Type)
+		require.Equal(t, input, done[1].Input)
+		closed := restorer.Restore(ResponsesStreamEvent{Type: "response.output_item.done", SequenceNumber: next(), OutputIndex: index, Item: &ResponsesOutput{Type: "function_call", ID: itemID, CallID: callID, Name: "exec", Arguments: arguments, Status: "completed"}})
+		require.Len(t, closed, 1)
+		require.Equal(t, "custom_tool_call", closed[0].Item.Type)
+		require.Equal(t, callID, closed[0].Item.CallID)
+		require.Equal(t, input, closed[0].Item.Input)
+	}
 }
 
 func TestResponsesClientToolStreamRestorer_ToolSearchAndFunction(t *testing.T) {

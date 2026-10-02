@@ -17,60 +17,67 @@ const LIST_BUDGET = 40000;
 // forwarded in tool mode. Larger ones (Codex, Claude Code) bury the pipeline protocol.
 export const TOOL_INSTRUCTIONS_LIMIT = 6000;
 
-export const toolProtocol = actions => `<role>next-action emitter</role>
+export const toolProtocol = actions => `<role>action emitter</role>
 
-You are ONE COMPONENT IN A PIPELINE. A separate executor process runs commands on
-the user's machine. You do not. You never execute anything, you never touch a
-filesystem, and you never report work as done from your own knowledge.
+You are ONE COMPONENT IN A PIPELINE between a user and an executor. The executor
+runs commands on the user's machine. You do not. You never execute anything, you
+never touch a filesystem, and you never report work as done from your own knowledge.
 
-Your entire contract: read the task plus the transcript of what the executor has
-already run, then reply with ONE JSON object. Either it asks the executor to run
-an action, which appends the result to the transcript and asks you again, or it
-carries your final reply to the user. Text outside the JSON object breaks the
-pipeline and is discarded, so never add commentary around it and never use
-markdown fences.
+Each turn you read the TASK and the TRANSCRIPT of what the executor has already
+run, and reply in ONE of two ways.
 
-Available actions:
-${actions}
+1. Ask the executor to run actions. Write every action as a tag:
 
-Shell guidance:
-- \`apply_patch\` is NOT a shell command. Never pipe into it, never call it from a
-  shell. Use it only if it appears as an action in the list above.
-- Do NOT use heredocs (<<EOF). The executor's shell often cannot create the temp
-  file they need.
-- To write a file, redirect printf:
-    printf '%s\\n' 'first line' 'second line' > path/to/file
-- To read a file use \`cat\`, to search use \`rg\`. Verify with \`cat\` after writing.
+<tool_call name="ACTION">
+ARGUMENTS
+</tool_call>
+
+   - If the action takes named parameters, ARGUMENTS is one JSON object, for
+     example {"cmd":"ls -la"}.
+   - If the action is marked (raw input), ARGUMENTS is the raw text itself: the
+     JavaScript source, the patch or the command exactly as the executor must
+     receive it. No JSON, no quotes around it, no escaping, no markdown fence.
+     Never wrap it in an object and never use a key such as "code".
+   - Write several tags in ONE reply when several steps belong together; the
+     executor runs them in order and returns all the results. Do not spend one
+     turn per step.
+   - Text outside the tags is shown to the user as a short progress note. Keep
+     it to one sentence, or leave it out.
+
+2. Answer the user directly, in plain text with no tags (markdown is fine), when
+   either the TRANSCRIPT shows that the requested work is finished (then report
+   what was done and its outcome), or the task needs nothing on the executor's
+   machine: a greeting, or a question that the conversation and the transcript
+   already answer. Never claim work the TRANSCRIPT does not show. An empty
+   transcript never proves that any work has been done.
+
+Working rules:
+- Do not explore (listing directories, reading instruction files) unless the task
+  needs it. If the task is clear, do it right away in the fewest actions.
+- Write a whole file in one action. Create and check it in the same reply when
+  you can.
+- Use the shell only for what the available actions cannot do. \`apply_patch\` is
+  NOT a shell command: use it only if it appears in the list below.
+- Do NOT use heredocs (<<EOF); the executor's shell often cannot create the temp
+  file they need. To write a file from the shell, redirect printf.
 - A command failing does not mean the workspace is read-only. Diagnose the actual
   error text before concluding anything about permissions.
-- File paths in arguments are paths on the EXECUTOR's machine (see the executor
-  environment below). Never guess one, and never pass a path you have not seen in
-  the executor environment or the transcript.
+- File paths are paths on the EXECUTOR's machine (see the executor environment
+  below). Never guess one, and never pass a path you have not seen in the
+  executor environment or the transcript.
 - When a schema says two parameters are mutually exclusive, send only one.
 
-Emit exactly one of:
-  {"tool_call":{"name":"<action>","arguments":{...}}}
-      <- when something must still be run or looked up on the executor's machine
-  {"done":"<complete final reply to the user>"}
-
-The "done" value is the COMPLETE reply the user will read: as long as it needs to
-be, markdown allowed, newlines written as \\n inside the JSON string. It is not a
-one-line status. Use "done" only when either
-  - the TRANSCRIPT shows that the requested work is finished (then report what was
-    done and its outcome), or
-  - the task needs no action on the executor's machine: a greeting, or a question
-    that can be answered from the conversation and the transcript alone.
-Never claim work the TRANSCRIPT does not show. An empty transcript never proves
-that any work has been done.`;
+Available actions:
+${actions}`;
 
 export const toolReminder = names => `
 
 ${rule}
-Reply with ONE JSON object now. Actions: ${names}
-{"tool_call":{"name":"...","arguments":{...}}}  or  {"done":"<complete reply to the user>"}
-"done" is the complete final reply (markdown allowed, \\n for newlines), only when the
-TRANSCRIPT shows the work finished or nothing needs doing on the executor's machine.
-Never claim work the TRANSCRIPT does not show. Nothing outside the JSON. Start with { .
+Reply now. Either write one or more <tool_call name="ACTION">...</tool_call> tags, or answer
+in plain text if the TRANSCRIPT shows the work finished or nothing needs doing on the executor.
+Actions: ${names}
+(raw input) actions take the raw text between the tags, never JSON.
+Never claim work the TRANSCRIPT does not show.
 ${rule}`;
 
 export const FRAME_PREAMBLE = 'You are answering through an API bridge. Reply directly with the answer text. ' +
@@ -93,6 +100,16 @@ export function elide(text, max) {
   return `${text.slice(0, head)}\n...(${text.length - max} chars omitted)...\n${text.slice(text.length - (max - head))}`;
 }
 
+// A freeform (custom) tool reaches this adapter as a function whose only parameter is a string `input`
+// (the gateway lowers it that way). Its argument is raw text, not structured data.
+export function isRawInputSchema(params) {
+  const properties = params && typeof params === 'object' ? params.properties : null;
+  if (!properties || typeof properties !== 'object') return false;
+  const keys = Object.keys(properties);
+  return keys.length === 1 && keys[0] === 'input' && properties.input?.type === 'string' &&
+    (!Array.isArray(params.required) || params.required.every(key => key === 'input'));
+}
+
 function walkTools(list, namespace, out, seen, describe, depth = 0) {
   if (!Array.isArray(list) || depth > 3) return;
   for (const tool of list) {
@@ -111,7 +128,7 @@ function walkTools(list, namespace, out, seen, describe, depth = 0) {
     // The gateway lowers Codex's custom exec to {input:string}. Its description
     // defines the executor APIs, so shortening it makes otherwise valid JS unusable.
     const codeInput = /^(?:functions__)?exec$/.test(fn.name) && params.properties?.input?.type === 'string';
-    out.push({ ns: namespace, name: fn.name, params,
+    out.push({ ns: namespace, name: fn.name, params, raw: isRawInputSchema(params),
       desc: codeInput ? String(fn.description || '').trim() : describe(fn.description) });
   }
 }
@@ -130,7 +147,7 @@ export function collectTools(tools, items = []) {
 }
 
 function actionList(specs) {
-  const line = (spec, cap) => `- ${spec.name}${cap ? `\n    params: ${JSON.stringify(spec.params ?? {}).slice(0, cap)}` : ''}${spec.desc ? `\n    ${spec.desc}` : ''}`;
+  const line = (spec, cap) => `- ${spec.name}${spec.raw ? ' (raw input)' : cap ? `\n    params: ${JSON.stringify(spec.params ?? {}).slice(0, cap)}` : ''}${spec.desc ? `\n    ${spec.desc}` : ''}`;
   let text = '';
   for (const cap of [700, 250, 0]) {
     text = specs.map(spec => line(spec, cap)).join('\n');
@@ -209,7 +226,7 @@ export function buildPrompt({ system = [], convo, tools, envParts = [], budget }
     let text = toolProtocol(actionList(tools));
     const instructions = joinInstructions(system);
     if (instructions && instructions.length <= TOOL_INSTRUCTIONS_LIMIT) {
-      text += `\n\nCaller instructions (follow them, but always reply in the JSON action format defined above):\n<system_instructions>\n${instructions}\n</system_instructions>`;
+      text += `\n\nCaller instructions (follow them, but always reply in the tag format defined above):\n<system_instructions>\n${instructions}\n</system_instructions>`;
     }
     const context = envContext(envParts);
     if (context) text += `\n\nThe executor runs here. Use these real paths - never invent a sandbox path like /codex_workspace/...:\n${context}`;
@@ -303,4 +320,85 @@ export function parseToolCall(text, tools) {
   if (typeof args === 'string') args = looseJSON(args) ?? {};
   if (!args || typeof args !== 'object' || Array.isArray(args)) args = {};
   return { id: `call_${randomBytes(12).toString('hex')}`, name, arguments: JSON.stringify(args), namespace: tools.get(name) };
+}
+
+// ---- Reply parsing (tag protocol, with the older JSON action format as a fallback) ----
+
+export const MAX_TOOL_CALLS = 8;
+const TOOL_TAG = /<tool_call\s+name\s*=\s*["']?([A-Za-z0-9_.:-]+)["']?\s*>([\s\S]*?)(?:<\/tool_call\s*>|$)/g;
+// Single-field wrappers a model puts around raw text although it was told not to.
+const WRAPPER_KEYS = new Set(['input', 'code', 'source', 'script', 'js', 'javascript', 'text', 'content', 'command', 'cmd']);
+const callId = () => `call_${randomBytes(12).toString('hex')}`;
+
+// The raw text between the tags exactly as the executor must receive it: one leading and one trailing
+// line break are layout, a single enclosing markdown fence is a habit; everything else is the program.
+export function rawInput(body) {
+  let text = String(body ?? '').replace(/^\r?\n/, '').replace(/\r?\n$/, '');
+  const fenced = /^\s*```[A-Za-z0-9_+.-]*[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```\s*$/.exec(text);
+  if (fenced) text = fenced[1];
+  return text;
+}
+
+// The text a raw-input action gets from whatever the model wrote between the tags. A one-field JSON
+// wrapper ({"input": ...}, {"code": ...}) is unwrapped, because a freeform tool such as Codex's exec runs
+// its input verbatim and would otherwise fail on the braces and quotes.
+export function rawInputFrom(body) {
+  const text = rawInput(body);
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{')) {
+    const value = looseJSON(trimmed);
+    const keys = value ? Object.keys(value) : [];
+    if (keys.length === 1 && WRAPPER_KEYS.has(keys[0]) && typeof value[keys[0]] === 'string') return value[keys[0]];
+  }
+  return text;
+}
+
+function buildCall(name, body, tools) {
+  const bare = name.replace(/^functions[./]/, '');
+  const spec = tools.get(bare);
+  if (!spec) return null;
+  let args;
+  if (spec.raw) args = { input: rawInputFrom(body) };
+  else {
+    const value = looseJSON(stripFence(String(body ?? '').trim()));
+    args = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  }
+  return { id: callId(), name: bare, arguments: JSON.stringify(args), namespace: spec.ns };
+}
+
+// A legacy {"tool_call":{...}} reply: a raw-input action must still end up with {input: <text>}.
+function legacyCall(text, tools) {
+  const call = parseToolCall(text, new Map([...tools].map(([name, spec]) => [name, spec.ns])));
+  if (!call) return null;
+  const spec = tools.get(call.name);
+  if (!spec?.raw) return call;
+  // parseToolCall keeps only JSON arguments; a raw-input action may have been given plain text.
+  const original = looseJSON(stripFence(String(text ?? '')))?.tool_call?.arguments;
+  const input = typeof original === 'string' ? rawInputFrom(original)
+    : typeof original?.input === 'string' ? original.input : rawInputFrom(call.arguments);
+  return { ...call, arguments: JSON.stringify({ input }) };
+}
+
+const progressNote = text => text.replace(/\n{3,}/g, '\n\n').trim().slice(0, 2000);
+
+// { calls, text }: the actions the model asked for (at most MAX_TOOL_CALLS, in order) and the text that goes to
+// the user. With calls the text is a short progress note; without them it is the final answer.
+export function parseReply(reply, tools) {
+  const source = String(reply ?? '');
+  const calls = [];
+  const prose = [];
+  let last = 0;
+  for (const match of source.matchAll(TOOL_TAG)) {
+    prose.push(source.slice(last, match.index));
+    last = match.index + match[0].length;
+    if (calls.length >= MAX_TOOL_CALLS) continue;
+    const call = buildCall(match[1], match[2], tools);
+    if (call) calls.push(call);
+  }
+  prose.push(source.slice(last));
+  if (calls.length) return { calls, text: progressNote(prose.join('\n')) };
+  const legacy = legacyCall(source, tools);
+  if (legacy) return { calls: [legacy], text: '' };
+  const done = parseDone(source);
+  return { calls: [], text: done !== null ? done : source };
 }

@@ -6,7 +6,7 @@
 // See ../THIRD_PARTY_NOTICES.md for the full license text.
 import { randomBytes, randomUUID } from 'node:crypto';
 import { PrismError, publicError } from './errors.mjs';
-import { NOISE, buildPrompt, collectTools, elide, parseDone, parseToolCall } from './emulation.mjs';
+import { NOISE, buildPrompt, collectTools, elide, parseReply } from './emulation.mjs';
 
 const DEFAULT_MAX_TEXT_BYTES = 256 * 1024;
 const RESULT_CHARS = 8000;
@@ -145,7 +145,8 @@ export function parseRequest(body, family, models, limits = {}) {
   return { family, model: body.model, input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text }] }],
     effort: mapEffort(chat ? body.reasoning_effort ?? body.reasoning?.effort : body.reasoning?.effort ?? body.reasoning_effort),
     stream: body.stream === true, includeUsage: body.stream_options?.include_usage === true,
-    tools: specs.length ? new Map(specs.map(spec => [spec.name, spec.ns])) : null };
+    tools: specs.length ? new Map(specs.map(spec => [spec.name, spec.ns])) : null,
+    toolSpecs: specs.length ? new Map(specs.map(spec => [spec.name, spec])) : null };
 }
 
 export function estimatedUsage(input, text) {
@@ -162,30 +163,28 @@ export function resultIdentity(request) {
 }
 
 export function resultBody(request, text, identity = resultIdentity(request)) {
-  let call = null;
-  if (request.tools) {
-    call = parseToolCall(text, request.tools);
-    if (!call) {
-      const done = parseDone(text);
-      if (done !== null) text = done;
-    }
-  }
-  const usage = estimatedUsage(request.input, call ? `${call.name} ${call.arguments}` : text);
-  const { id, created } = identity;
+  // In tool mode the reply is parsed into the actions asked for and the text for the user.
+  const reply = request.toolSpecs ? parseReply(text, request.toolSpecs) : { calls: [], text };
+  const { calls } = reply;
+  const message = reply.text;
+  const usage = estimatedUsage(request.input, `${message} ${calls.map(call => `${call.name} ${call.arguments}`).join(' ')}`.trim());
   if (request.family === 'chat') {
-    const message = call ? { role: 'assistant', content: null, tool_calls: [{ id: call.id, type: 'function',
-      function: { name: call.name, arguments: call.arguments } }] } : { role: 'assistant', content: text };
-    return { id, object: 'chat.completion', created, model: request.model,
-      choices: [{ index: 0, message, finish_reason: call ? 'tool_calls' : 'stop' }],
+    const assistant = { role: 'assistant', content: message || (calls.length ? null : message) };
+    if (calls.length) assistant.tool_calls = calls.map(call => ({ id: call.id, type: 'function',
+      function: { name: call.name, arguments: call.arguments } }));
+    return { id: identity.id, object: 'chat.completion', created: identity.created, model: request.model,
+      choices: [{ index: 0, message: assistant, finish_reason: calls.length ? 'tool_calls' : 'stop' }],
       usage: { prompt_tokens: usage.input_tokens, completion_tokens: usage.output_tokens,
         total_tokens: usage.total_tokens, estimation: usage.estimation } };
   }
-  const item = call ? { id: `fc_${randomBytes(12).toString('hex')}`, type: 'function_call', call_id: call.id, name: call.name,
-    arguments: call.arguments, status: 'completed', ...(call.namespace && call.namespace !== 'functions' ? { namespace: call.namespace } : {}) }
-    : { id: `msg_${randomUUID()}`, type: 'message', role: 'assistant', status: 'completed',
-      content: [{ type: 'output_text', text, annotations: [] }] };
-  return { id, object: 'response', created_at: created, status: 'completed', model: request.model,
-    output: [item], output_text: call ? '' : text, usage };
+  const output = [];
+  if (message || !calls.length) output.push({ id: `msg_${randomUUID()}`, type: 'message', role: 'assistant',
+    status: 'completed', content: [{ type: 'output_text', text: message, annotations: [] }] });
+  for (const call of calls) output.push({ id: `fc_${randomBytes(12).toString('hex')}`, type: 'function_call',
+    call_id: call.id, name: call.name, arguments: call.arguments, status: 'completed',
+    ...(call.namespace && call.namespace !== 'functions' ? { namespace: call.namespace } : {}) });
+  return { id: identity.id, object: 'response', created_at: identity.created, status: 'completed', model: request.model,
+    output, output_text: message, usage };
 }
 
 // Fixed-size slices that never split a surrogate pair.
@@ -207,48 +206,57 @@ function streamFrames(request, identity) {
   const chunk = (delta, finishReason = null) => `data: ${JSON.stringify({
     id: identity.id, object: 'chat.completion.chunk', created: identity.created, model: request.model,
     choices: [{ index: 0, delta, finish_reason: finishReason }] })}\n\n`;
+  const shell = request.family === 'chat' ? null : { id: identity.id, object: 'response', created_at: identity.created,
+    status: 'in_progress', model: request.model, output: [], output_text: '', usage: null };
   return {
     *begin() {
       if (request.family === 'chat') {
         yield chunk({ role: 'assistant', content: '' });
         return;
       }
-      const shell = { id: identity.id, object: 'response', created_at: identity.created,
-        status: 'in_progress', model: request.model, output: [], output_text: '', usage: null };
       yield event('response.created', { response: shell });
       yield event('response.in_progress', { response: shell });
+    },
+    // Sent while Prism is still generating. A comment keeps proxies open, but clients such as Codex only
+    // count real events towards their stream idle timeout (5 minutes by default): after that they drop the
+    // connection and resubmit the whole request, which starts a second generation. A repeated
+    // response.in_progress carries no content and is ignored by clients and by the gateway's converters.
+    *heartbeat() {
+      yield ': waiting for Prism\n\n';
+      if (request.family !== 'chat') yield event('response.in_progress', { response: shell });
     },
     *finish(result) {
       if (request.family === 'chat') {
         const choice = result.choices[0];
+        if (choice.message.content) for (const piece of slices(choice.message.content)) yield chunk({ content: piece });
         if (choice.message.tool_calls) yield chunk({ tool_calls: choice.message.tool_calls.map((call, index) => ({ index, ...call })) });
-        else for (const piece of slices(choice.message.content)) yield chunk({ content: piece });
         yield chunk({}, choice.finish_reason);
         if (request.includeUsage) yield `data: ${JSON.stringify({ id: result.id, object: 'chat.completion.chunk',
           created: result.created, model: result.model, choices: [], usage: result.usage })}\n\n`;
         yield 'data: [DONE]\n\n';
         return;
       }
-      const item = result.output[0];
-      if (item.type === 'function_call') {
-        yield event('response.output_item.added', { output_index: 0, item: { ...item, status: 'in_progress', arguments: '' } });
-        for (const delta of slices(item.arguments)) {
-          yield event('response.function_call_arguments.delta', { item_id: item.id, output_index: 0, delta });
+      for (const [outputIndex, item] of result.output.entries()) {
+        if (item.type === 'function_call') {
+          yield event('response.output_item.added', { output_index: outputIndex, item: { ...item, status: 'in_progress', arguments: '' } });
+          for (const delta of slices(item.arguments)) {
+            yield event('response.function_call_arguments.delta', { item_id: item.id, output_index: outputIndex, delta });
+          }
+          yield event('response.function_call_arguments.done', { item_id: item.id, output_index: outputIndex, name: item.name,
+            arguments: item.arguments });
+          yield event('response.output_item.done', { output_index: outputIndex, item });
+        } else {
+          const part = item.content[0];
+          yield event('response.output_item.added', { output_index: outputIndex, item: { ...item, status: 'in_progress', content: [] } });
+          yield event('response.content_part.added', { item_id: item.id, output_index: outputIndex, content_index: 0,
+            part: { ...part, text: '' } });
+          for (const delta of slices(part.text)) {
+            yield event('response.output_text.delta', { item_id: item.id, output_index: outputIndex, content_index: 0, delta });
+          }
+          yield event('response.output_text.done', { item_id: item.id, output_index: outputIndex, content_index: 0, text: part.text });
+          yield event('response.content_part.done', { item_id: item.id, output_index: outputIndex, content_index: 0, part });
+          yield event('response.output_item.done', { output_index: outputIndex, item });
         }
-        yield event('response.function_call_arguments.done', { item_id: item.id, output_index: 0, name: item.name,
-          arguments: item.arguments });
-        yield event('response.output_item.done', { output_index: 0, item });
-      } else {
-        const part = item.content[0];
-        yield event('response.output_item.added', { output_index: 0, item: { ...item, status: 'in_progress', content: [] } });
-        yield event('response.content_part.added', { item_id: item.id, output_index: 0, content_index: 0,
-          part: { ...part, text: '' } });
-        for (const delta of slices(part.text)) {
-          yield event('response.output_text.delta', { item_id: item.id, output_index: 0, content_index: 0, delta });
-        }
-        yield event('response.output_text.done', { item_id: item.id, output_index: 0, content_index: 0, text: part.text });
-        yield event('response.content_part.done', { item_id: item.id, output_index: 0, content_index: 0, part });
-        yield event('response.output_item.done', { output_index: 0, item });
       }
       yield event('response.completed', { response: result });
     },
@@ -323,7 +331,7 @@ export function createStreamWriter(res, request, { signal, onDisconnect } = {}) 
     },
     heartbeat() {
       if (pending || terminalRequested || ended) return Promise.resolve();
-      return run([': waiting for Prism\n\n']);
+      return run(frames.heartbeat());
     },
     finish(result) {
       if (terminalRequested || ended) return pending || Promise.resolve();

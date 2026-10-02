@@ -165,9 +165,14 @@ test('stream timeout returns one safe top-level Responses error following the li
   } }, { requestTimeout: 20, keepaliveMs: 2 });
   const response = await post('/accounts/32/v1/responses', { ...body, stream: true });
   const events = responseEvents(await response.text());
-  assert.deepEqual(events.map(event => event.type), ['response.created', 'response.in_progress', 'error']);
-  assert.deepEqual(events.at(-1), { type: 'error', sequence_number: 2,
+  // The short keepalive interval adds in_progress heartbeats between the lifecycle and the error.
+  const types = events.map(event => event.type);
+  assert.deepEqual(types.slice(0, 2), ['response.created', 'response.in_progress']);
+  assert.ok(types.slice(2, -1).every(type => type === 'response.in_progress'));
+  assert.equal(types.at(-1), 'error');
+  assert.deepEqual(events.at(-1), { type: 'error', sequence_number: events.length - 1,
     code: 'request_timeout', message: 'Prism did not answer in time', param: null });
+  assert.deepEqual(events.map(event => event.sequence_number), events.map((_, index) => index));
   assert.equal(calls, 1);
 });
 

@@ -66,7 +66,7 @@ test('Codex Responses body folds into exactly one user message with task, transc
   assert.deepEqual([request.input[0].type, request.input[0].role, request.input[0].content.length, request.input[0].content[0].type],
     ['message', 'user', 1, 'input_text']);
   const prompt = text(request);
-  assert.match(prompt, /^<role>next-action emitter<\/role>/);
+  assert.match(prompt, /^<role>action emitter<\/role>/);
   assert.match(prompt, /TASK:\nList the files here and tell me how many there are\.\n/);
   assert.match(prompt, /TRANSCRIPT SO FAR:\n\[executor ran\]\nexec_command \{"cmd":"ls"\}\n\n\[result\]\nChunk ID: 1/);
   assert.match(prompt, /Available actions:\n- exec_command\n {4}params: \{"type":"object"/);
@@ -143,11 +143,11 @@ test('Chat with tools produces tool_calls with finish_reason tool_calls', () => 
   tools: [{ type: 'function', function: { name: 'exec_command', description: 'Run a command',
     parameters: { type: 'object', properties: { cmd: { type: 'string' } } } } }] }, 'chat');
   const prompt = text(request);
-  assert.match(prompt, /^<role>next-action emitter<\/role>/);
+  assert.match(prompt, /^<role>action emitter<\/role>/);
   assert.match(prompt, /TASK:\nHow many\?\n/);
   assert.match(prompt, /\[user\]\nList files\n\n\[assistant\]\nRunning it\.\n\n\[executor ran\]\nexec_command \{"cmd":"ls"\}\n\n\[result\]\na\.txt/);
   // The short system prompt is forwarded as a delimited block after the protocol.
-  assert.match(prompt, /Never claim work the TRANSCRIPT does not show\. An empty transcript never proves\nthat any work has been done\.\n\nCaller instructions \(follow them, but always reply in the JSON action format defined above\):\n<system_instructions>\nYou are a shell helper\.\n<\/system_instructions>\n\nTASK:/);
+  assert.match(prompt, /Available actions:\n- [\s\S]*?\n\nCaller instructions \(follow them, but always reply in the tag format defined above\):\n<system_instructions>\nYou are a shell helper\.\n<\/system_instructions>\n\nTASK:/);
   const result = resultBody(request, '{"tool_call":{"name":"exec_command","arguments":{"cmd":"ls | wc -l"}}}');
   const choice = result.choices[0];
   assert.equal(choice.finish_reason, 'tool_calls');
@@ -402,6 +402,34 @@ test('async Responses lifecycle is early and keeps one identity and continuous s
   assert.equal(res.writableEnded, true);
 });
 
+test('while Prism generates, a Responses stream sends real in_progress events as heartbeats and Chat only comments', async () => {
+  const responses = writableResponse();
+  const writer = createStreamWriter(responses, parse({ input: 'x', stream: true }));
+  const tick = () => new Promise(resolve => setImmediate(resolve));
+  await writer.begin();
+  await tick();
+  await writer.heartbeat();
+  await tick();
+  await writer.heartbeat();
+  const events = asyncEvents(responses);
+  assert.deepEqual(events.map(event => event.type), ['response.created', 'response.in_progress', 'response.in_progress', 'response.in_progress']);
+  assert.deepEqual(events.map(event => event.sequence_number), [0, 1, 2, 3], 'sequence numbers keep counting');
+  assert.ok(events.every(event => event.response.id === writer.identity.id && event.response.status === 'in_progress' &&
+    event.response.output.length === 0 && event.response.usage === null), 'a heartbeat carries no content');
+  // begin() and each heartbeat also send the comment, which keeps proxies open.
+  assert.equal(responses.frames.filter(frame => frame === ': waiting for Prism\n\n').length, 3);
+  await writer.finish(resultBody(parse({ input: 'x' }), 'done', writer.identity));
+  assert.equal(asyncEvents(responses).filter(event => event.type === 'response.completed').length, 1);
+
+  const chat = writableResponse();
+  const chatWriter = createStreamWriter(chat, parse({ messages: [{ role: 'user', content: 'x' }], stream: true }, 'chat'));
+  await chatWriter.begin();
+  await tick();
+  await chatWriter.heartbeat();
+  assert.equal(chat.frames.filter(frame => frame === ': waiting for Prism\n\n').length, 2, 'begin and one heartbeat');
+  assert.ok(!chat.frames.some(frame => String(frame).includes('response.in_progress')), 'Chat gets no Responses events');
+});
+
 test('async writes wait for drain and skip heartbeats while backpressured', async () => {
   const res = writableResponse();
   const writer = createStreamWriter(res, parse({ input: 'x', stream: true }));
@@ -595,7 +623,7 @@ test('Claude Code style Chat request keeps the environment lines, drops the syst
     parameters: { type: 'object', properties: { file_path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } } } } }],
   tool_choice: 'auto', parallel_tool_calls: true, max_tokens: 8192, stream: true }, 'chat');
   const prompt = text(request);
-  assert.match(prompt, /^<role>next-action emitter<\/role>/);
+  assert.match(prompt, /^<role>action emitter<\/role>/);
   assert.ok(!prompt.includes('You are Claude Code'));
   assert.match(prompt, /<env>\nWorking directory: \/Users\/dev\/project\nIs directory a git repo: Yes\nPlatform: darwin\n<\/env>/);
   assert.match(prompt, /TASK:\nFix the failing test in utils\.\n/);
@@ -661,10 +689,91 @@ test('short caller instructions are forwarded in tool mode, large ones are dropp
   // Order: protocol, caller instructions, executor environment, task.
   const ordered = text(parse({ instructions: 'Always answer in French.', tools: [execTool], input: [
     message('user', '<environment_context><cwd>/w</cwd></environment_context>'), message('user', 'go')] }));
-  const positions = ['The "done" value is the COMPLETE reply', 'Caller instructions', 'Always answer in French.', 'The executor runs here', '<cwd>/w</cwd>', 'TASK:']
+  const positions = ['Available actions:', 'Caller instructions', 'Always answer in French.', 'The executor runs here', '<cwd>/w</cwd>', 'TASK:']
     .map(marker => ordered.indexOf(marker));
   assert.ok(positions.every(position => position >= 0) && positions.every((position, index) => !index || position > positions[index - 1]), String(positions));
   // No instructions, no block. The huge Codex-style prompt stays out.
   assert.ok(!text(parse({ tools: [execTool], input: 'go' })).includes('Caller instructions'));
   assert.ok(!text(parse(codexBody())).includes('Caller instructions'));
+});
+
+// ---- several actions per reply, progress notes and plain final answers ----
+const freeformExec = { type: 'function', name: 'exec', description: 'Run JavaScript in the executor.',
+  parameters: { type: 'object', properties: { input: { type: 'string' } }, required: ['input'] } };
+const twoCalls = 'Writing the file and checking it.\n<tool_call name="exec_command">{"cmd":"printf a > a.txt"}</tool_call>\n' +
+  '<tool_call name="exec_command">{"cmd":"cat a.txt"}</tool_call>';
+
+test('Responses: a progress note then one function_call per tag, in order, with usage that counts the calls', () => {
+  const request = parse({ input: 'go', tools: [execTool] });
+  const result = resultBody(request, twoCalls);
+  assert.deepEqual(result.output.map(item => item.type), ['message', 'function_call', 'function_call']);
+  assert.equal(result.output[0].content[0].text, 'Writing the file and checking it.');
+  assert.equal(result.output_text, 'Writing the file and checking it.');
+  assert.deepEqual(result.output.slice(1).map(item => JSON.parse(item.arguments).cmd), ['printf a > a.txt', 'cat a.txt']);
+  assert.ok(result.output.slice(1).every(item => item.status === 'completed' && /^call_/.test(item.call_id) && /^fc_/.test(item.id) && !('namespace' in item)));
+  assert.equal(new Set(result.output.map(item => item.id)).size, 3);
+  assert.ok(result.usage.output_tokens >= Math.ceil(twoCalls.length / 3) - 25, 'the calls are part of the estimated output');
+  // Without a note there is no empty message item in front of the calls.
+  const bare = resultBody(request, '<tool_call name="exec_command">{"cmd":"ls"}</tool_call>');
+  assert.deepEqual(bare.output.map(item => item.type), ['function_call']);
+  assert.equal(bare.output_text, '');
+});
+
+test('Chat: the note is the content next to tool_calls, and finish_reason follows the calls', () => {
+  const request = parse({ messages: [{ role: 'user', content: 'go' }], tools: [{ type: 'function', function: execTool }] }, 'chat');
+  const result = resultBody(request, twoCalls);
+  const choice = result.choices[0];
+  assert.equal(choice.message.content, 'Writing the file and checking it.');
+  assert.deepEqual(choice.message.tool_calls.map(call => JSON.parse(call.function.arguments).cmd), ['printf a > a.txt', 'cat a.txt']);
+  assert.equal(choice.finish_reason, 'tool_calls');
+  const answer = resultBody(request, 'All done. The file holds `a`.');
+  assert.deepEqual([answer.choices[0].finish_reason, answer.choices[0].message.content, 'tool_calls' in answer.choices[0].message],
+    ['stop', 'All done. The file holds `a`.', false]);
+  const noNote = resultBody(request, '<tool_call name="exec_command">{"cmd":"ls"}</tool_call>');
+  assert.equal(noNote.choices[0].message.content, null);
+});
+
+test('tool mode with a plain-text reply is a normal assistant message, not a wrapped answer', () => {
+  const request = parse({ input: 'hi', tools: [execTool] });
+  const result = resultBody(request, '你好！有什么可以帮你的吗？');
+  assert.deepEqual(result.output.map(item => item.type), ['message']);
+  assert.equal(result.output[0].content[0].text, '你好！有什么可以帮你的吗？');
+});
+
+test('a very large HTML file reaches a freeform exec byte for byte', () => {
+  const rows = Array.from({ length: 600 }, (_, index) => `<g id="r${index}"><circle cx="${index}" cy="5" r="2" fill="#${(index * 977 % 0xffffff).toString(16).padStart(6, '0')}"/><text>"q" \\n ${index}</text></g>`);
+  const html = `<!DOCTYPE html>\n<html><body>\n<svg viewBox="0 0 700 20">\n${rows.join('\n')}\n</svg>\n</body></html>\n`;
+  const program = `await tools.exec_command({cmd: "printf '%s' " + ${JSON.stringify(JSON.stringify(html))} + " > pelican.html"});`;
+  assert.ok(program.length > 40000);
+  const request = parse({ input: 'write pelican.html', tools: [freeformExec] });
+  const call = resultBody(request, `<tool_call name="exec">\n${program}\n</tool_call>`).output[0];
+  assert.equal(JSON.parse(call.arguments).input, program);
+});
+
+test('Responses SSE with a note and several calls streams every item with its own output_index and one sequence', () => {
+  const request = parse({ input: 'go', tools: [execTool], stream: true });
+  const res = writableResponse();
+  writeCompletedStream(res, request, resultBody(request, twoCalls));
+  const events = res.frames.filter(frame => frame.startsWith('event: ')).map(frame => JSON.parse(frame.split('\n')[1].slice(6)));
+  assert.deepEqual(events.map(event => event.sequence_number), events.map((_, index) => index));
+  const added = events.filter(event => event.type === 'response.output_item.added');
+  assert.deepEqual(added.map(event => [event.output_index, event.item.type]), [[0, 'message'], [1, 'function_call'], [2, 'function_call']]);
+  assert.deepEqual(events.filter(event => event.type === 'response.output_item.done').map(event => event.output_index), [0, 1, 2]);
+  assert.deepEqual(events.filter(event => event.type === 'response.function_call_arguments.done').map(event => JSON.parse(event.arguments).cmd),
+    ['printf a > a.txt', 'cat a.txt']);
+  assert.equal(events.at(-1).type, 'response.completed');
+  assert.deepEqual(events.at(-1).response.output.map(item => item.type), ['message', 'function_call', 'function_call']);
+});
+
+test('Chat SSE streams the note, then one tool_calls chunk carrying every call with its index', () => {
+  const request = parse({ messages: [{ role: 'user', content: 'go' }], tools: [{ type: 'function', function: execTool }], stream: true }, 'chat');
+  const res = writableResponse();
+  writeCompletedStream(res, request, resultBody(request, twoCalls));
+  const chunks = res.frames.filter(frame => frame.startsWith('data: {')).map(frame => JSON.parse(frame.slice(6)));
+  const content = chunks.flatMap(chunk => chunk.choices[0]?.delta?.content ?? []).join('');
+  assert.equal(content, 'Writing the file and checking it.');
+  const calls = chunks.flatMap(chunk => chunk.choices[0]?.delta?.tool_calls ?? []);
+  assert.deepEqual(calls.map(call => call.index), [0, 1]);
+  assert.equal(chunks.at(-1).choices[0].finish_reason, 'tool_calls');
+  assert.ok(res.frames.at(-1).endsWith('data: [DONE]\n\n'));
 });
