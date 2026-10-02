@@ -587,3 +587,18 @@ test('the menu is not read until Statsig reports Ready, and a missing Statsig on
   controller.abort();
   await assert.rejects(ready.driver.waitForStatsig(controller.signal), error => error.code === 'request_cancelled');
 });
+
+test('payloadShape logs structure and counters, never text', async () => {
+  const { payloadShape } = await import('../src/browser.mjs');
+  const shape = payloadShape({
+    usage: { input_tokens: 1200, cached_input_tokens: 1024, output_tokens: 80, details: [{ reasoning_tokens: 30 }] },
+    prompt: 'secret prompt text', durationMs: 4200, sessionId: 12345, 'bad key!': 1, flags: { on: true, none: null },
+  });
+  assert.deepEqual(shape, [
+    'durationMs: 4200', 'flags.none: null', 'flags.on: boolean', 'prompt: string(18)', 'sessionId: number',
+    'usage.cached_input_tokens: 1024', 'usage.details: array(1)', 'usage.details[0].reasoning_tokens: 30',
+    'usage.input_tokens: 1200', 'usage.output_tokens: 80']);
+  assert.ok(!shape.join(' ').includes('secret'));
+  assert.deepEqual(payloadShape(undefined), [': undefined']);
+  assert.ok(payloadShape(Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`k${i}`, i]))).length <= 80);
+});

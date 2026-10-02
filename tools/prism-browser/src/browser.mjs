@@ -27,6 +27,24 @@ export function catalogFromConfig(models) {
 // The model a readiness probe uses: the known-good fallback when offered, else the first model.
 export const probeModel = models => models.includes(FALLBACK_MODEL) ? FALLBACK_MODEL : models[0];
 
+// Structure of a Prism metadata object for the audit log: key paths and value types only. Numbers are
+// kept just for keys that look like counters (tokens, usage, cache, timings); text is never logged.
+const COUNTER_KEY = /token|usage|cache|cached|count|_ms$|ms$|duration|elapsed/i;
+export function payloadShape(value, path = '', out = [], depth = 0) {
+  if (out.length >= 80) return out;
+  if (Array.isArray(value)) {
+    out.push(`${path}: array(${value.length})`);
+    if (value.length && depth < 5) payloadShape(value[0], `${path}[0]`, out, depth + 1);
+  } else if (value && typeof value === 'object') {
+    const keys = Object.keys(value).filter(key => /^[A-Za-z0-9_.-]{1,64}$/.test(key)).sort();
+    if (!keys.length || depth >= 5) out.push(`${path}: object(${Object.keys(value).length})`);
+    else for (const key of keys) payloadShape(value[key], path ? `${path}.${key}` : key, out, depth + 1);
+  } else if (typeof value === 'number') {
+    out.push(`${path}: ${COUNTER_KEY.test(path.split('.').at(-1) || '') && Number.isFinite(value) ? value : 'number'}`);
+  } else out.push(`${path}: ${value === null ? 'null' : typeof value === 'string' ? `string(${value.length})` : typeof value}`);
+  return out;
+}
+
 export function modelFromLabel(label) {
   const value = label.trim().replace(/\s+/g, ' ');
   const match = /^(\d+(?:\.\d+)?) (Sol|Terra|Luna|Astra)\b/.exec(value);
@@ -216,7 +234,8 @@ export class BrowserSession {
       failure_code: /^[a-z_]{1,100}$/.test(payload.reason || '') ? payload.reason : undefined,
       payload_http_status: Number.isInteger(payload.httpStatus) && payload.httpStatus >= 100 && payload.httpStatus <= 599
         ? payload.httpStatus : undefined,
-      resubmission_requested: resubmissionRequested });
+      resubmission_requested: resubmissionRequested,
+      exec_meta_shape: payloadShape(payload.codexExecMeta), debug_shape: payloadShape(payload.codexDebug) });
     if (data.response?.status !== 'success') {
       const error = new PrismError('prism_generation_failed');
       error.retryConversation = resubmissionRequested;
