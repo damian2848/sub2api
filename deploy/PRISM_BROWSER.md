@@ -63,11 +63,16 @@ compose file and listed in `.env.prism-browser.example`):
 | `PRISM_TRANSIENT_RETRIES` | `1` | 0-1 | Automatic resubmissions of a request that failed because Prism's own servers returned an HTTP 5xx. `0` turns it off. |
 | `PRISM_TRANSIENT_RETRY_DELAY_SECONDS` | `4` | 0-60 | Pause before the resubmission, so an overloaded Prism has a moment. |
 | `PRISM_TRANSIENT_RETRY_WAIT_SECONDS` | `15` | 0-120 | Longest wait for an idle worker to take the resubmission before the original error is returned. |
-| `PRISM_STATUS_POLL_MS` | `1000` | 0 or 250-10000 | After the official page has polled a turn's status once, the sidecar also polls it at this interval from the same page (the page alone polls every 3.4-4 s), so a finished answer is seen sooner. A failed poll of ours only stops our polling; `0` leaves polling to the page. |
+| `PRISM_STATUS_POLL_MS` | `1000` | 0 or 250-10000 | After the page's first successful poll, poll independently at this interval. Failures back off to at most 8000 ms; only three consecutive failures stop independent polling. `0` leaves polling to the page. |
 | `PRISM_START_COOLDOWN_SECONDS` | `60` | 0-600 | Minimum pause after a refused start. Admission also waits for the next token. `0` disables this minimum, not token pacing. |
 | `PRISM_PROMPT_CACHE_TTL_SECONDS` | `600` | 0-3600 | How long a processed prompt counts toward the estimated cache read (see *Usage is estimated*). `0` reports no cached tokens. |
 
 Invalid values stop the adapter at startup.
+Leave `PRISM_START_BURST`, `PRISM_START_REFILL_SECONDS` and
+`PRISM_START_REFILL_MIN_SECONDS` blank in the deployment files to inherit their
+derived defaults. Hard-coding zero for the new burst would override an existing
+nonzero legacy start limit. Refill settings accept fractional seconds; the
+initial interval must lie between the minimum and maximum when pacing is on.
 
 The image pins Playwright and Chromium to `1.56.1`. Workers share one Chromium
 process, while their contexts, pages and projects remain independent. Size
@@ -103,6 +108,14 @@ Revocation cancels admissions without refunding consumed tokens. Account status
 includes `start_bucket` (tokens, refill seconds and cooldown milliseconds).
 Audits retain `native_start_wait` and `start_rejected_cooldown` and add
 `start_bucket_rejected` and `start_bucket_adjusted`.
+
+Independent status polling tolerates transient HTTP errors, unreadable JSON and
+request exceptions. After each failure its next interval is
+`min(8000, PRISM_STATUS_POLL_MS * 2^consecutive_failures)` milliseconds; a
+successful poll resets that streak. Only three consecutive failures stop our
+poller and leave completion to the page. Page polling errors remain nonfatal
+while our poller is healthy. `upstream_result.own_poll_errors` counts all failed
+independent polls in the turn, including failures before a recovered streak.
 
 ### Automatic retry of Prism server errors
 
@@ -224,20 +237,24 @@ Sentinel proof are preserved. Each call uses a new chat tab; the native start's
 and one of Prism's four efforts (low, medium, high, xhigh), because the UI's own controls can still be on
 their loading defaults. The readiness probe uses `gpt-5.6-sol` when the catalog
 offers it. Each native
-attempt initiates one upstream start. A user call can make a second attempt only
-for the narrowly defined terminal resubmission error described above, and only
-when it arrives after Prism accepted the start.
+attempt initiates one upstream start. The existing project-refresh retry for
+the narrowly defined terminal resubmission error after acceptance is unchanged.
+Separately, a start refused before acceptance may be retried once after pacing
+and cooldown when no alternative account is available.
 
 **Start rejections.** When Prism answers the start itself with that error ("Please
 submit prompt again", HTTP 403 inside the payload), the account is over Prism's
-start allowance, not in a broken project state: retrying there is refused too.
-The sidecar does not refresh the project or retry. It cools the source down for
-`PRISM_START_COOLDOWN_SECONDS` and answers HTTP 429 with `Retry-After` and an
-OpenAI rate-limit body (`type: rate_limit_exceeded`, `resets_in_seconds`); requests
-waiting for that source, or arriving during the cooldown, get the same 429 at
-once. The gateway marks the account rate-limited until then and sends the request
-to another account of the group. Measured on 2026-10-02, one source accepted a
-burst of about 3-4 starts and then about one more per minute.
+start allowance, not in a broken project state. The sidecar does not refresh the
+project. It clears the source's tokens, adapts the refill interval and observes
+the minimum `PRISM_START_COOLDOWN_SECONDS` pause. With an alternative account it
+answers HTTP 429 with `Retry-After` and an OpenAI rate-limit body
+(`type: rate_limit_exceeded`, `resets_in_seconds`), cancels available waiters,
+and lets the gateway cool the account and switch. Without an alternative, it
+waits for both cooldown and a new token and retries once on the same source;
+only a second refusal returns 429. New available requests with short enough
+waits may queue; none requests remain queued regardless of the fast-fail
+threshold. Measured on 2026-10-02, one source accepted a burst of about 3-4 starts
+and then about one more per minute; adaptive pacing does not hard-code that fit.
 
 For Codex's standard code-mode tools, Sub2API lowers Responses custom tools
 (including `exec` in `additional_tools`) to a function with one string argument,
@@ -304,6 +321,19 @@ entry with `finish_reason: "tool_calls"`:
 Tool results sent back by the client
 (`function_call_output`, `custom_tool_call_output`, Chat `tool` messages) are
 placed in the transcript, so the loop continues turn by turn.
+
+For Responses callers whose system/developer instructions contain
+`clickable markdown link` (case-insensitive), the last `<cwd>...</cwd>` in the
+input enables a deterministic file-link fallback if it is an absolute POSIX
+path. Only a final-answer message without tool calls is rewritten: eligible
+inline code such as `src/app.py:12:3` becomes
+`[app.py](/absolute/cwd/src/app.py:12:3)`. Existing links and fenced code are
+preserved, as are commentary, Chat replies, URLs, glob/tilde paths and bare
+filenames such as `account.go:914`. Relative paths are normalized against cwd;
+absolute paths are retained. The forwarded `<output_conventions>` remain in
+place. The fallback cannot create a link if the model omits a file path or does
+not put it in inline code. These locally added links do not inflate estimated
+upstream output-token usage.
 
 Accepted input:
 
@@ -373,6 +403,16 @@ each turn. Request limits bound each upload, not the lifetime size of a project.
 Failed or cancelled preparation closes the browser context before reuse.
 No SSE headers are sent until Prism accepts the subsequent model start.
 
+Any reverse proxy or CDN in front of the sidecar must allow a response-header
+wait longer than the longest queue/cooldown/retry delay. No response headers,
+body bytes or heartbeat frames are sent while admission is pending, so a
+pre-response timeout (for example Cloudflare's default 100-second no-response
+limit) can interrupt a healthy queued request. Size that timeout for the total
+`PRISM_REQUEST_TIMEOUT` budget when no alternative account exists, or bypass
+the short-timeout proxy on this internal hop. Sub2API's
+`GATEWAY_OPENAI_RESPONSE_HEADER_TIMEOUT` should be `0` (unlimited), or exceed
+the longest pre-acceptance wait. SSE keepalives only help after acceptance.
+
 Streaming sends Responses `response.created` / `response.in_progress` or the
 Chat role chunk as soon as Prism has accepted the start, using one stable response
 identity. Until then (queueing, the UI steps, the start request) nothing is sent,
@@ -409,7 +449,7 @@ Limitations that remain:
   are never replayed. The specific terminal resubmission error may trigger one
   retry within the original timeout budget.
 - **Usage is estimated.** It is a character-based estimate over the flattened
-  prompt and the emitted output, marked in `usage.estimation` and
+  prompt and the model output before local link rewriting, marked in `usage.estimation` and
   `X-Prism-Usage: estimated`; it is unsuitable for exact billing.
   Prism reports no token usage at all (its result carries only the text and
   async-job metadata), so cache reads are estimated too, the way OpenAI's
@@ -424,6 +464,13 @@ Limitations that remain:
   prefix and lowers the estimate. Attachment requests report no estimated
   cached tokens; image/PDF inspection and file bytes are not included in the
   character-based token estimate.
+  The estimator stores at most 64 prompts per source, as packed 16-byte chained
+  SHA-256 hashes of 384 JavaScript characters per block plus length and last-use
+  metadata, not plaintext. UTF-16 code-unit hashing preserves prefix identity
+  even across surrogate boundaries. Only complete matching blocks count toward
+  cached tokens (128 per block, at least eight blocks); a final partial hash is
+  retained only to distinguish entries. A 256 KiB ASCII prompt uses 10,928 bytes
+  of hashes, about 11 KiB, instead of retaining its full text.
 - **One request at a time per worker.** Requests queue (`PRISM_QUEUE_LIMIT`)
   and a full queue is rejected. Clients on one account can overlap up to its
   ready worker count, while any configured native start allowance is shared.
