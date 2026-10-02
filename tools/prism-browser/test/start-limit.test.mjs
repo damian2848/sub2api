@@ -304,6 +304,32 @@ test('the default wait admits the first available request after the bucket empti
   }
 });
 
+test('unset or blank refill maximum admits legacy intervals above ninety seconds', () => {
+  for (const windowSeconds of [65, 120, 3600]) {
+    for (const value of [undefined, '']) {
+      const settings = nativeStartSettings({ PRISM_ACCOUNT_START_LIMIT: '1',
+        PRISM_START_WINDOW_SECONDS: String(windowSeconds), PRISM_START_REFILL_MAX_SECONDS: value });
+      assert.equal(settings.refillMs, windowSeconds * 1000);
+      assert.equal(settings.refillMaxMs, Math.max(90000, settings.refillMs));
+      const limiter = new NativeStartLimiter(settings);
+      limiter.rejected(0);
+      assert.equal(limiter.refillMs, Math.min(settings.refillMaxMs, settings.refillMs * 1.5));
+      limiter.close();
+    }
+    const direct = new NativeStartLimiter({ limit: 1, windowMs: windowSeconds * 1000 });
+    assert.equal(direct.refillMaxMs, Math.max(90000, direct.refillMs));
+    direct.close();
+  }
+});
+
+test('explicit refill maximum overrides the derived default and still validates interval bounds', () => {
+  const env = { PRISM_START_BURST: '1', PRISM_START_REFILL_SECONDS: '120' };
+  assert.equal(nativeStartSettings({ ...env, PRISM_START_REFILL_MAX_SECONDS: '180' }).refillMaxMs, 180000);
+  assert.equal(nativeStartSettings({ ...env, PRISM_START_REFILL_MAX_SECONDS: '120' }).refillMaxMs, 120000);
+  assert.throws(() => nativeStartSettings({ ...env, PRISM_START_REFILL_MAX_SECONDS: '90' }), /invalid_native_start_refill/);
+  assert.throws(() => nativeStartSettings({ ...env, PRISM_START_REFILL_MAX_SECONDS: '0' }), /invalid PRISM_START_REFILL_MAX_SECONDS/);
+});
+
 test('available fails fast with the exact wait while none queues until a token exists', async t => {
   const { limiter, scheduler } = fixture(t, { limit: 1, refillMs: 16250, maxWaitMs: 15000 });
   await limiter.acquire();

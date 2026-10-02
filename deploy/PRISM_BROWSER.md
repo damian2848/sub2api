@@ -58,7 +58,7 @@ compose file and listed in `.env.prism-browser.example`):
 | `PRISM_START_BURST` | legacy start limit | 0-120 | Token capacity per source across every worker, readiness probe and retry; 0 disables pacing. |
 | `PRISM_START_REFILL_SECONDS` | legacy window / burst | 0.001-3600 | Initial seconds to replenish one token. |
 | `PRISM_START_REFILL_MIN_SECONDS` | initial refill | 0.001-3600 | Lower bound for the adaptive refill interval. |
-| `PRISM_START_REFILL_MAX_SECONDS` | `90` | 0.001-3600 | Upper bound, at least the initial refill and minimum. |
+| `PRISM_START_REFILL_MAX_SECONDS` | max(90, initial refill) | 0.001-3600 | Upper bound in seconds, at least the initial refill and minimum. The derived default also accepts legacy intervals above 90 seconds. |
 | `PRISM_START_MAX_WAIT_SECONDS` | max(15, initial refill) | 0-3600 | Seconds to wait before failing fast only when another account is available. By default the first request after a depleted bucket can wait for one token. |
 | `PRISM_TRANSIENT_RETRIES` | `1` | 0-1 | Automatic resubmissions of a request that failed because Prism's own servers returned an HTTP 5xx. `0` turns it off. |
 | `PRISM_TRANSIENT_RETRY_DELAY_SECONDS` | `4` | 0-60 | Pause before the resubmission, so an overloaded Prism has a moment. |
@@ -68,8 +68,9 @@ compose file and listed in `.env.prism-browser.example`):
 | `PRISM_PROMPT_CACHE_TTL_SECONDS` | `600` | 0-3600 | How long a processed prompt counts toward the estimated cache read (see *Usage is estimated*). `0` reports no cached tokens. |
 
 Invalid values stop the adapter at startup.
-Leave `PRISM_START_BURST`, `PRISM_START_REFILL_SECONDS` and
-`PRISM_START_REFILL_MIN_SECONDS` and `PRISM_START_MAX_WAIT_SECONDS` blank in the deployment files to inherit their
+Leave `PRISM_START_BURST`, `PRISM_START_REFILL_SECONDS`,
+`PRISM_START_REFILL_MIN_SECONDS`, `PRISM_START_REFILL_MAX_SECONDS` and
+`PRISM_START_MAX_WAIT_SECONDS` blank in the deployment files to inherit their
 derived defaults. Hard-coding zero for the new burst would override an existing
 nonzero legacy start limit. Refill settings accept fractional seconds; the
 initial interval must lie between the minimum and maximum when pacing is on.
