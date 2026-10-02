@@ -8,6 +8,7 @@ import { NativeStartLimiter } from './start-limit.mjs';
 export class AccountPoolManager {
   constructor({ dataDir, concurrency = 2, maxWorkers = 32, queueLimit = 8, maxAccounts = 16,
     startLimit = 0, startWindowMs = 65000, transientRetries = 1, transientRetryDelayMs = 4000, transientRetryWaitMs = 15000,
+    startCooldownMs = 60000,
     startLimiterFactory = () => new NativeStartLimiter({ limit: startLimit, windowMs: startWindowMs }),
     browserFactory = launchBrowser,
     sessionFactory = (browser, heartbeat, source, slot) => new BrowserSession(browser, heartbeat, source, slot) }) {
@@ -20,6 +21,10 @@ export class AccountPoolManager {
     if (![0, 1].includes(transientRetries) || !Number.isInteger(transientRetryDelayMs) || transientRetryDelayMs < 0 ||
       transientRetryDelayMs > 60000 || !Number.isInteger(transientRetryWaitMs) || transientRetryWaitMs < 0 ||
       transientRetryWaitMs > 120000) throw new Error('invalid_transient_retry');
+    if (!Number.isInteger(startCooldownMs) || startCooldownMs < 0 || startCooldownMs > 600000) {
+      throw new Error('invalid_start_cooldown');
+    }
+    this.startCooldownMs = startCooldownMs;
     this.transientRetries = transientRetries;
     this.transientRetryDelayMs = transientRetryDelayMs;
     this.transientRetryWaitMs = transientRetryWaitMs;
@@ -78,7 +83,19 @@ export class AccountPoolManager {
       if (waited > 0 && process.env.PRISM_AUDIT_REQUESTS === 'true') {
         console.log(JSON.stringify({ event: 'native_start_wait', source, worker: slot, wait_ms: Math.round(waited) }));
       }
-      return generate(request, signal, progress);
+      try {
+        return await generate(request, signal, progress);
+      } catch (error) {
+        // Prism refused the start itself: the source is over Prism's start allowance. Retrying here
+        // would be refused too, so the source cools down and every waiting request is handed back.
+        if (error instanceof PrismError && error.code === 'prism_start_rejected') {
+          limiter.cooldown(this.startCooldownMs);
+          error.retryAfterSeconds = Math.max(1, Math.ceil(Math.max(this.startCooldownMs, limiter.cooling()) / 1000));
+          if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event: 'start_rejected_cooldown',
+            source, worker: slot, cooldown_ms: this.startCooldownMs }));
+        }
+        throw error;
+      }
     };
     this.drivers.add(driver);
     const close = driver.close.bind(driver);

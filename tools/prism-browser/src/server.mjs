@@ -12,11 +12,12 @@ function bearer(req) {
   return typeof value === 'string' && /^Bearer [^\s]+$/.test(value) ? value.slice(7) : '';
 }
 
-function send(res, status, value) {
+function send(res, status, value, retryAfterSeconds) {
   if (res.destroyed || res.writableEnded) return;
   const body = JSON.stringify(value);
   res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body),
-    'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
+    'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
+    ...(Number.isInteger(retryAfterSeconds) ? { 'Retry-After': String(retryAfterSeconds) } : {}) });
   res.end(body);
 }
 
@@ -107,7 +108,10 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
       if (!status.ready) throw new PrismError('account_not_ready', 503);
       const request = parseRequest(await readJSON(req, bodyLimit), action === 'responses' ? 'responses' : 'chat',
         status.models, { ...(maxTextBytes ? { maxTextBytes } : {}), ...(maxTranscriptChars ? { maxTranscriptChars } : {}) });
-      if (request.stream) {
+      // A stream opens only once Prism has accepted the start. Until then nothing is sent, so a start
+      // Prism refuses can still be answered with a plain 429 and the gateway can use another account.
+      let streamOpening = null;
+      const openStream = () => streamOpening ??= (async () => {
         res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-store',
           Connection: 'keep-alive', 'X-Accel-Buffering': 'no', 'X-Prism-Usage': 'estimated' });
         res.flushHeaders();
@@ -116,10 +120,12 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
         keepalive = setInterval(() => {
           streamWriter.heartbeat().catch(disconnect);
         }, keepaliveMs);
-      }
+      })();
+      if (request.stream) request.onAccepted = () => { if (!res.destroyed) openStream().catch(disconnect); };
       aborted(controller.signal);
       const text = await manager.generate(source, request, controller.signal);
       aborted(controller.signal);
+      if (request.stream) await openStream();
       // Only a prompt Prism has processed can be in its cache, so it is recorded after success.
       const cachedTokens = promptCache.observe(source, request.input.map(item => item.content[0].text).join('\n'));
       const result = resultBody(request, text, streamWriter?.identity, { cachedTokens });
@@ -130,7 +136,7 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
       if (res.destroyed || res.writableEnded) return;
       const output = publicError(error);
       if (streamWriter) await streamWriter.error(error).catch(disconnect);
-      else send(res, error instanceof PrismError ? error.status : 502, output);
+      else send(res, error instanceof PrismError ? error.status : 502, output, error?.retryAfterSeconds);
     } finally {
       clearTimeout(timer);
       clearInterval(keepalive);
@@ -157,7 +163,8 @@ export async function main() {
     startWindowMs: integer('PRISM_START_WINDOW_SECONDS', 65, 1, 3600) * 1000,
     transientRetries: integer('PRISM_TRANSIENT_RETRIES', 1, 0, 1),
     transientRetryDelayMs: integer('PRISM_TRANSIENT_RETRY_DELAY_SECONDS', 4, 0, 60) * 1000,
-    transientRetryWaitMs: integer('PRISM_TRANSIENT_RETRY_WAIT_SECONDS', 15, 0, 120) * 1000 });
+    transientRetryWaitMs: integer('PRISM_TRANSIENT_RETRY_WAIT_SECONDS', 15, 0, 120) * 1000,
+    startCooldownMs: integer('PRISM_START_COOLDOWN_SECONDS', 60, 0, 600) * 1000 });
   // Read by each browser session; validated here so a bad value stops startup. 0 or 250-10000.
   const statusPollMs = integer('PRISM_STATUS_POLL_MS', 1000, 0, 10000);
   if (statusPollMs > 0 && statusPollMs < 250) throw new Error('invalid PRISM_STATUS_POLL_MS');

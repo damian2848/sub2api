@@ -56,10 +56,18 @@ const MESSAGES = {
   account_queue_full: 'The Prism account is busy; try again shortly',
   request_timeout: 'Prism did not answer in time',
   sandbox_initialization_timeout: 'The Prism sandbox did not become ready in time',
+  prism_start_rejected: 'Prism refused to start another generation on this account for now; try again shortly',
+  prism_start_limited: 'Prism refused to start another generation on this account for now; try again shortly',
 };
 
 export function publicError(error) {
   const safe = error instanceof PrismError ? error : new PrismError('browser_operation_failed');
+  // A 429 uses OpenAI's rate-limit shape so the gateway can cool the account down until
+  // resets_in_seconds and serve the request from another account.
+  if (safe.status === 429 && Number.isInteger(safe.retryAfterSeconds)) {
+    return { error: { message: MESSAGES[safe.code] ?? safe.code, type: 'rate_limit_exceeded', code: safe.code,
+      resets_in_seconds: safe.retryAfterSeconds } };
+  }
   return { error: { message: MESSAGES[safe.code] ?? safe.code, type: safe.status < 500 ? 'invalid_request_error' :
     'prism_error', code: safe.code, ...(safe.param ? { param: safe.param } : {}) } };
 }

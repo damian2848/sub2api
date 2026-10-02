@@ -394,7 +394,10 @@ test('only the current native resubmission terminal error is internally retryabl
     const stale = route({ conversationId: 'previous-conversation' });
     await driver.observe(response(stale.request(), failure));
     assert.equal(error, undefined);
-    await driver.observe(response(start.request(), data));
+    // After the start was accepted, the failure arrives on a status poll.
+    await driver.observe(response(start.request(), running));
+    await driver.observe(response(route({ request_id: running.request_id, turn_state: running.turn_state },
+      '/api/llm/response_with_tools_status').request(), data));
     assert.equal(error.code, 'prism_generation_failed');
     assert.equal(error.retryConversation, retryable);
     assert.deepEqual(publicError(error), { error: {
@@ -688,4 +691,30 @@ test('PRISM_STATUS_POLL_MS accepts 0 or 250-10000 and falls back to 1000', () =>
   assert.equal(statusPollInterval('250'), 250);
   assert.equal(statusPollInterval('10000'), 10000);
   for (const bad of ['100', '10001', 'abc', '1.5']) assert.equal(statusPollInterval(bad), 1000, bad);
+});
+
+test('a start Prism refuses at once is a start rejection: no project refresh, no retry, never opens a stream', async () => {
+  const payload = { httpStatus: 403, reason: 'unknown',
+    message: 'Error while processing conversation (403 Forbidden). Please submit prompt again.' };
+  const refused = { ...running, status: 'completed', response: { status: 'error', payload } };
+  const { driver, turn, start } = await activeTurn();
+  let error;
+  let accepted = 0;
+  turn.request.onAccepted = () => { accepted += 1; };
+  turn.reject = value => { error = value; };
+  await driver.observe(response(start.request(), refused));
+  assert.equal(error.code, 'prism_start_rejected');
+  assert.equal(error.status, 429);
+  assert.equal(error.retryConversation, undefined);
+  assert.equal(accepted, 0);
+  // Other immediate failures stay generation failures, and an accepted start signals once.
+  const other = await activeTurn();
+  other.turn.reject = value => { error = value; };
+  await other.driver.observe(response(other.start.request(), { ...refused, response: { status: 'error',
+    payload: { ...payload, reason: 'model_not_available' } } }));
+  assert.equal(error.code, 'prism_generation_failed');
+  const ok = await activeTurn();
+  ok.turn.request.onAccepted = () => { accepted += 1; };
+  await ok.driver.observe(response(ok.start.request(), running));
+  assert.equal(accepted, 1);
 });

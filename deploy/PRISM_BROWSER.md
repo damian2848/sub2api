@@ -56,6 +56,7 @@ compose file and listed in `.env.prism-browser.example`):
 | `PRISM_TRANSIENT_RETRY_DELAY_SECONDS` | `4` | 0-60 | Pause before the resubmission, so an overloaded Prism has a moment. |
 | `PRISM_TRANSIENT_RETRY_WAIT_SECONDS` | `15` | 0-120 | Longest wait for an idle worker to take the resubmission before the original error is returned. |
 | `PRISM_STATUS_POLL_MS` | `1000` | 0 or 250-10000 | After the official page has polled a turn's status once, the sidecar also polls it at this interval from the same page (the page alone polls every 3.4-4 s), so a finished answer is seen sooner. A failed poll of ours only stops our polling; `0` leaves polling to the page. |
+| `PRISM_START_COOLDOWN_SECONDS` | `60` | 0-600 | After Prism refuses a start on a source, no start is attempted there for this long; waiting and new requests for it are answered 429 at once so the gateway can use another account. `0` disables the cooldown (the 429 still returns). |
 | `PRISM_PROMPT_CACHE_TTL_SECONDS` | `600` | 0-3600 | How long a processed prompt counts toward the estimated cache read (see *Usage is estimated*). `0` reports no cached tokens. |
 
 Invalid values stop the adapter at startup.
@@ -205,7 +206,19 @@ and one of Prism's four efforts (low, medium, high, xhigh), because the UI's own
 their loading defaults. The readiness probe uses `gpt-5.6-sol` when the catalog
 offers it. Each native
 attempt initiates one upstream start. A user call can make a second attempt only
-for the narrowly defined terminal resubmission error described above.
+for the narrowly defined terminal resubmission error described above, and only
+when it arrives after Prism accepted the start.
+
+**Start rejections.** When Prism answers the start itself with that error ("Please
+submit prompt again", HTTP 403 inside the payload), the account is over Prism's
+start allowance, not in a broken project state: retrying there is refused too.
+The sidecar does not refresh the project or retry. It cools the source down for
+`PRISM_START_COOLDOWN_SECONDS` and answers HTTP 429 with `Retry-After` and an
+OpenAI rate-limit body (`type: rate_limit_exceeded`, `resets_in_seconds`); requests
+waiting for that source, or arriving during the cooldown, get the same 429 at
+once. The gateway marks the account rate-limited until then and sends the request
+to another account of the group. Measured on 2026-10-02, one source accepted a
+burst of about 3-4 starts and then about one more per minute.
 
 For Codex's standard code-mode tools, Sub2API lowers Responses custom tools
 (including `exec` in `additional_tools`) to a function with one string argument,
@@ -305,8 +318,9 @@ very large system prompt without tools. `PRISM_BODY_LIMIT` bounds the HTTP body
 (default 8 MiB, at most 32 MiB; management requests stay at 128 KiB).
 
 Streaming sends Responses `response.created` / `response.in_progress` or the
-Chat role chunk as soon as the request is accepted, using one stable response
-identity. While Prism generates, the stream sends an SSE comment and (for
+Chat role chunk as soon as Prism has accepted the start, using one stable response
+identity. Until then (queueing, the UI steps, the start request) nothing is sent,
+so a refused start can still be answered with a plain 429 the gateway fails over. While Prism generates, the stream sends an SSE comment and (for
 Responses) a `response.in_progress` event every 10 seconds.
 Codex counts only real events toward its stream idle timeout (default 5 minutes,
 `stream_idle_timeout_ms`), so the event, not the comment, is what stops it from

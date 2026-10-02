@@ -244,6 +244,10 @@ export class BrowserSession {
     if (data.request_id) turn.requestId = data.request_id;
     if (data.turn_state) turn.turnState = data.turn_state;
     if (data.conversation_id) turn.conversationId = data.conversation_id;
+    const terminal = ['completed', 'error', 'failed'].includes(data.status);
+    // Prism accepted the start (it is running, or already finished successfully): a streaming
+    // caller may now open its stream. A refused start never opens it, so it can still be a 429.
+    if (isStart && !(terminal && data.response?.status !== 'success')) turn.request.onAccepted?.();
     if (!isStart && !own && !turn.statusTemplate && sent && typeof sent === 'object') {
       // The page's first good poll gives the exact body shape (diff_format etc.); ours copy it.
       turn.statusTemplate = sent;
@@ -264,6 +268,11 @@ export class BrowserSession {
       resubmission_requested: resubmissionRequested, completed_by: turn.completedBy,
       own_polls: turn.ownPolls, own_poll_failed: turn.ownPollFailed,
       exec_meta_shape: payloadShape(payload.codexExecMeta), debug_shape: payloadShape(payload.codexDebug) });
+    if (data.response?.status !== 'success' && isStart && resubmissionRequested) {
+      // Refused at the start itself ("please submit prompt again"): Prism's start allowance for the
+      // account, not a broken project, so no project refresh and no retry on this account.
+      return turn.reject(new PrismError('prism_start_rejected', 429));
+    }
     if (data.response?.status !== 'success') {
       const error = new PrismError('prism_generation_failed');
       error.retryConversation = resubmissionRequested;

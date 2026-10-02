@@ -214,3 +214,27 @@ test('an early timer wake cannot grant a start before its window expires', async
   assert.equal(await waiting, 20);
   assert.equal(scheduler.maxTimers, 1);
 });
+
+test('a cooldown refuses waiting and new starts at once with the time left, then lets starts through again', async () => {
+  const time = clock();
+  const limiter = new NativeStartLimiter({ limit: 1, windowMs: 65000, ...time });
+  assert.equal(await limiter.acquire(), 0);
+  const waiting = limiter.acquire();
+  limiter.cooldown(60000);
+  await assert.rejects(waiting, error => error.code === 'prism_start_limited' && error.status === 429 &&
+    error.retryAfterSeconds === 60);
+  time.advance(20500);
+  await assert.rejects(limiter.acquire(), error => error.code === 'prism_start_limited' && error.retryAfterSeconds === 40);
+  assert.equal(limiter.cooling(), 39500);
+  limiter.cooldown(1000); // a shorter cooldown never shortens a running one
+  assert.equal(limiter.cooling(), 39500);
+  time.advance(65000);
+  assert.equal(limiter.cooling(), 0);
+  assert.equal(await limiter.acquire(), 0);
+  // Cooldowns also apply when no start limit is configured.
+  const unlimited = new NativeStartLimiter({ limit: 0, ...clock() });
+  unlimited.cooldown(5000);
+  await assert.rejects(unlimited.acquire(), error => error.code === 'prism_start_limited');
+  unlimited.cooldown(0);
+  unlimited.cooldown(-1);
+});

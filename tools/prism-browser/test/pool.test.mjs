@@ -570,3 +570,23 @@ test('exclusive queue operations form a barrier while independent ready jobs can
   assert.deepEqual(order, ['first', 'second', 'control', 'last']);
   queue.close();
 });
+
+test('a start Prism refuses cools the whole source: no retry, and waiting or new requests are handed back at once', async t => {
+  const calls = [];
+  const { manager, log } = await fixture(t, { generate: ({ slot, request: value }) => {
+    calls.push({ slot, marker: value.marker });
+    if (value.marker === 'refused') throw new PrismError('prism_start_rejected', 429);
+    return `reply:${value.marker}`;
+  } });
+  manager.transientRetryDelayMs = 0;
+  await assert.rejects(manager.generate('32', request('refused')), error => error.code === 'prism_start_rejected' &&
+    error.status === 429 && error.retryAfterSeconds === 60);
+  assert.deepEqual(calls.map(call => call.marker), ['refused'], 'never retried on this source');
+  // During the cooldown nothing reaches Prism; the caller gets a 429 with the time left.
+  await assert.rejects(manager.generate('32', request('next')), error => error.code === 'prism_start_limited' &&
+    error.status === 429 && error.retryAfterSeconds > 0 && error.retryAfterSeconds <= 60);
+  assert.equal(log.generations.filter(item => item.marker === 'next').length, 0);
+  // When the cooldown is over, starts flow again.
+  manager.startLimiters.get('32').blockedUntil = 0;
+  assert.equal(await manager.generate('32', request('later')), 'reply:later');
+});

@@ -20,8 +20,16 @@ function mockManager(overrides = {}) {
     async generate() { return 'Only the actual browser result'; }, ...overrides,
   };
 }
-async function fixture(t, overrides, settings = {}) {
-  const server = createPrismServer({ manager: mockManager(overrides), managementKey, ...settings });
+// Like the browser driver, the mock reports that Prism accepted the start before it generates;
+// `{ accept: false }` leaves that to the overriding generate.
+async function fixture(t, overrides, settings = {}, { accept = true } = {}) {
+  const manager = mockManager(overrides);
+  const generate = manager.generate;
+  manager.generate = (source, request, ...rest) => {
+    if (accept) request.onAccepted?.();
+    return generate.call(manager, source, request, ...rest);
+  };
+  const server = createPrismServer({ manager, managementKey, ...settings });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -271,4 +279,39 @@ test('a follow-up turn reports the shared prompt prefix as estimated cached toke
   const plain = await (await off.post('/accounts/32/v1/chat/completions', { model: models[0], stream: false,
     messages: [{ role: 'user', content: history }] })).json();
   assert.equal(plain.usage.prompt_tokens_details.cached_tokens, 0);
+});
+
+test('a start refused before Prism accepted it answers a stream with a plain 429 the gateway can fail over', async t => {
+  const refused = Object.assign(new PrismError('prism_start_limited', 429), { retryAfterSeconds: 42 });
+  const { post } = await fixture(t, { async generate() { throw refused; } }, {}, { accept: false });
+  const response = await post('/accounts/32/v1/responses', { ...body, stream: true });
+  assert.equal(response.status, 429);
+  assert.equal(response.headers.get('retry-after'), '42');
+  assert.match(response.headers.get('content-type'), /application\/json/);
+  assert.deepEqual(await response.json(), { error: { type: 'rate_limit_exceeded', code: 'prism_start_limited',
+    resets_in_seconds: 42, message: "Prism refused to start another generation on this account for now; try again shortly" } });
+  // Accepted first, the same failure arrives inside the opened stream.
+  const opened = await fixture(t, { async generate(_, request) { request.onAccepted(); throw refused; } }, {}, { accept: false });
+  const stream = await opened.post('/accounts/32/v1/responses', { ...body, stream: true });
+  assert.equal(stream.status, 200);
+  assert.equal(responseEvents(await stream.text()).at(-1).code, 'prism_start_limited');
+});
+
+test('a stream opens only when Prism accepts the start, not when the request arrives', async t => {
+  const accepted = deferred();
+  const finish = deferred();
+  let request;
+  const { post } = await fixture(t, { async generate(_, value) { request = value; accepted.resolve(); return finish.promise; } }, {},
+    { accept: false });
+  const pending = post('/accounts/32/v1/responses', { ...body, stream: true });
+  await accepted.promise;
+  let headersArrived = false;
+  pending.then(() => { headersArrived = true; });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(headersArrived, false, 'nothing is sent before the start is accepted');
+  request.onAccepted();
+  const response = await pending;
+  assert.equal(response.status, 200);
+  finish.resolve('done');
+  assert.match(await response.text(), /event: response.completed/);
 });

@@ -1,5 +1,13 @@
 import { PrismError, aborted } from './errors.mjs';
 
+// Prism refused a start on this source: the request goes back as 429 with the time left, so the
+// gateway cools this account down and sends the request to another one right away.
+export function startLimitedError(remainingMs) {
+  const error = new PrismError('prism_start_limited', 429);
+  error.retryAfterSeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+  return error;
+}
+
 export class NativeStartLimiter {
   constructor({ limit = 0, windowMs = 65000, now = () => performance.now(),
     setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
@@ -19,11 +27,24 @@ export class NativeStartLimiter {
     this.jobs = [];
     this.timer = null;
     this.closed = false;
+    this.blockedUntil = 0;
   }
+
+  // After Prism refused a start, no start is attempted on this source for `ms`: queued and new
+  // requests are refused at once instead of waiting, so they can be served by another account.
+  cooldown(ms) {
+    if (!(ms > 0)) return;
+    this.blockedUntil = Math.max(this.blockedUntil, this.now() + ms);
+    this.cancelPending(startLimitedError(this.blockedUntil - this.now()));
+  }
+
+  cooling() { return Math.max(0, this.blockedUntil - this.now()); }
 
   acquire(signal) {
     if (this.closed) return Promise.reject(new PrismError('service_stopping', 503));
     try { aborted(signal); } catch (error) { return Promise.reject(error); }
+    const cooling = this.cooling();
+    if (cooling > 0) return Promise.reject(startLimitedError(cooling));
     if (!this.limit) return Promise.resolve(0);
     return new Promise((resolve, reject) => {
       const job = { signal, resolve, reject, queuedAt: this.now() };
