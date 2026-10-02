@@ -71,8 +71,9 @@ git push fork main
 gh workflow run release.yml --repo damian2848/sub2api --ref main \
   -f tag=main -f dry_run=true -f simple_release=false -f publish_images=false
 
-# 3. 演练通过后，在同一个提交上打带注释标签，正文使用上面的结构
-git tag -a v<版本> -F notes.md
+# 3. 演练通过后，在同一个提交上打带注释标签，正文使用上面的结构。
+#    必须加 --cleanup=verbatim：默认会把以 # 开头的行当作注释删掉，章节标题（## 亮点 等）会全部丢失。
+git tag -a v<版本> -F notes.md --cleanup=verbatim
 git push fork v<版本>
 
 # 4. 推送标签后如果没有出现发布任务，手动触发
@@ -91,4 +92,4 @@ gh release view v<版本> --repo damian2848/sub2api --json assets,body
 - 附件共 10 个：五个平台的主程序、`checksums.txt`、两个架构的重新登录运行时、`prism-browser_<版本>.tar.gz` 及其 `.sha256`。
 - 下载一个主程序，`sha256sum -c checksums.txt --ignore-missing` 通过，运行 `--version` 返回目标版本和完整提交号。
 - 解开 `prism-browser_<版本>.tar.gz`，确认包含 `tools/prism-browser/Dockerfile`、`deploy/docker-compose.prism-browser.yml`、`deploy/.env.prism-browser.example` 和 `deploy/PRISM_BROWSER.md`。
-- 发布页正文和标签正文一致，页脚的安装命令指向这个标签。
+- 发布页正文和标签正文一致（包括 `## ` 章节标题），页脚的安装命令指向这个标签。已发布的标签不要移动；正文有问题时用 `gh release edit <标签> --notes-file` 修正发布页。
