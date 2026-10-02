@@ -76,7 +76,10 @@ gh workflow run release.yml --repo damian2848/sub2api --ref main \
 git tag -a v<版本> -F notes.md --cleanup=verbatim
 git push fork v<版本>
 
-# 4. 推送标签后如果没有出现发布任务，手动触发
+# 4. 推送标签会自动触发 Release（事件为 push，不发布镜像、不发通知）。先确认：
+gh run list --repo damian2848/sub2api --workflow release.yml --limit 3
+#    只有在列表里没有这个标签的 push 运行时才手动触发；两次都跑会对同一个标签重复发布
+#    （并发组会让第二次排队，等第一次完成后再发一遍）。需要手动触发时：
 gh workflow run release.yml --repo damian2848/sub2api --ref main \
   -f tag=v<版本> -f dry_run=false -f simple_release=false -f publish_images=false -f notify_release=false
 ```
