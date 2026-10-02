@@ -236,6 +236,48 @@ func TestPrismGatewayForwardsChatToolsAndHistory(t *testing.T) {
 	require.Equal(t, "call_1", gjson.GetBytes(upstreamBody, "messages.3.tool_call_id").String())
 }
 
+func TestPrismGatewayPreservesAttachmentsInHistoryAndToolOutputs(t *testing.T) {
+	for _, test := range []struct{ family, path, body, inputKey string }{
+		{"responses", "/v1/responses", `{"model":"gpt-6.1-sol","stream":false,"input":[
+			{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]},
+			{"type":"function_call","call_id":"call_1","name":"fetch","arguments":"{}"},
+			{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_file","filename":"notes.txt","file_data":"aGk="}]},
+			{"role":"user","content":[{"type":"input_file","file_url":"https://example.test/file.pdf"},{"type":"input_text","text":"read all files"}]}]}`, "input"},
+		{"chat", "/v1/chat/completions", `{"model":"gpt-6.1-sol","stream":false,"messages":[
+			{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"fetch","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"call_1","content":[{"type":"file","file":{"filename":"notes.txt","file_data":"aGk="}}]},
+			{"role":"user","content":[{"type":"file","file":{"file_url":"https://example.test/file.pdf"}},{"type":"text","text":"read all files"}]}]}`, "messages"},
+	} {
+		t.Run(test.family, func(t *testing.T) {
+			h := newPrismGatewayHarness(t, nil, nil)
+			recorder, _, err := h.forward(test.family, test.path, []byte(test.body), nil)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			require.JSONEq(t, gjson.Get(test.body, test.inputKey).Raw, gjson.GetBytes(h.upstreamBody(t), test.inputKey).Raw)
+		})
+	}
+}
+
+func TestPrismGatewayMessagesPreservesImagesAndDocuments(t *testing.T) {
+	h := newPrismGatewayHarness(t, nil, nil)
+	body := `{"model":"gpt-6.1-sol","max_tokens":64,"stream":false,"messages":[
+		{"role":"user","content":[{"type":"image","source":{"type":"url","url":"https://example.test/image.png"}},
+			{"type":"document","title":"notes.pdf","source":{"type":"base64","media_type":"application/pdf","data":"AAAA"}}]},
+		{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"fetch","input":{}}]},
+		{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[
+			{"type":"text","text":"Fetched"},{"type":"document","source":{"type":"url","url":"https://example.test/report.pdf"}}]}]}]}`
+	recorder, _, err := h.forward("messages", "/v1/messages", []byte(body), nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	upstreamBody := h.upstreamBody(t)
+	require.Contains(t, string(upstreamBody), `"image_url":"https://example.test/image.png"`)
+	require.Contains(t, string(upstreamBody), `"filename":"notes.pdf"`)
+	require.Contains(t, string(upstreamBody), `"file_data":"data:application/pdf;base64,AAAA"`)
+	require.Contains(t, string(upstreamBody), `"file_url":"https://example.test/report.pdf"`)
+	require.Contains(t, string(upstreamBody), `"output":"Fetched"`)
+}
+
 func TestPrismGatewayMessagesKeepsFullHistoryAfterEnsuringTheSession(t *testing.T) {
 	h := newPrismGatewayHarness(t, nil, nil)
 	require.False(t, shouldForwardOpenAIResponsesViaRawChatCompletions(h.account),
@@ -272,25 +314,25 @@ func TestPrismGatewayMessagesKeepsFullHistoryAfterEnsuringTheSession(t *testing.
 }
 
 func TestPrismGatewayFailsOverUnservableRequestsBeforeTouchingPrism(t *testing.T) {
-	image := `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}`
+	audio := `{"type":"audio","source":{"type":"base64","media_type":"audio/wav","data":"AAAA"}}`
 	for _, test := range []struct {
 		name, family, path, body string
 		reason                   GatewayFailureReason
 	}{
-		{name: "responses_image", family: "responses", path: "/v1/responses", reason: PrismNonTextInputReason,
-			body: `{"model":"gpt-6.1-sol","input":[{"role":"user","content":[{"type":"input_text","text":"see"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`},
+		{name: "responses_audio", family: "responses", path: "/v1/responses", reason: PrismNonTextInputReason,
+			body: `{"model":"gpt-6.1-sol","input":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}]}`},
 		{name: "responses_previous_response_id", family: "responses", path: "/v1/responses", reason: PrismPreviousResponseUnsupportedReason,
 			body: `{"model":"gpt-6.1-sol","input":"next","previous_response_id":"resp_1"}`},
 		{name: "responses_compact", family: "responses", path: "/v1/responses/compact", reason: PrismCompactUnsupportedReason,
 			body: `{"model":"gpt-6.1-sol","input":"summarize"}`},
-		{name: "chat_image", family: "chat", path: "/v1/chat/completions", reason: PrismNonTextInputReason,
-			body: `{"model":"gpt-6.1-sol","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.test/a.png"}}]}]}`},
-		{name: "messages_image", family: "messages", path: "/v1/messages", reason: PrismNonTextInputReason,
-			body: `{"model":"gpt-6.1-sol","max_tokens":16,"messages":[{"role":"user","content":[{"type":"text","text":"see"},` + image + `]}]}`},
-		{name: "messages_tool_result_image", family: "messages", path: "/v1/messages", reason: PrismNonTextInputReason,
+		{name: "chat_audio", family: "chat", path: "/v1/chat/completions", reason: PrismNonTextInputReason,
+			body: `{"model":"gpt-6.1-sol","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}]}`},
+		{name: "messages_audio", family: "messages", path: "/v1/messages", reason: PrismNonTextInputReason,
+			body: `{"model":"gpt-6.1-sol","max_tokens":16,"messages":[{"role":"user","content":[{"type":"text","text":"listen"},` + audio + `]}]}`},
+		{name: "messages_tool_result_audio", family: "messages", path: "/v1/messages", reason: PrismNonTextInputReason,
 			body: `{"model":"gpt-6.1-sol","max_tokens":16,"messages":[{"role":"user","content":"read it"},
 				{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}]},
-				{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[` + image + `]}]}]}`},
+				{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[` + audio + `]}]}]}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			h := newPrismGatewayHarness(t, nil, nil)

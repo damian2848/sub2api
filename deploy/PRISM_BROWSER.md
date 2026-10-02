@@ -45,6 +45,9 @@ compose file and listed in `.env.prism-browser.example`):
 | --- | --- | --- | --- |
 | `PRISM_REQUEST_TIMEOUT` | `1800` (30 min) | 30-3600 | Seconds for one bootstrap or generation. Prism returns the whole answer only when it is finished, and long outputs at `xhigh` effort (for example a full HTML animation) can take many minutes. The reverse proxy in front of Sub2API must allow at least as long a read timeout. |
 | `PRISM_BODY_LIMIT` | `8388608` (8 MiB) | 4096-33554432 (32 MiB) | Largest request body in bytes. Codex requests with tool schemas and history often exceed 512 KiB. Management requests stay limited to 128 KiB. |
+| `PRISM_MAX_ATTACHMENTS` | `8` | 1-32 | Attachment parts per request, including history and tool outputs. |
+| `PRISM_MAX_ATTACHMENT_BYTES` | `10485760` (10 MiB) | 1-33554432 | Decoded bytes per attachment. Inline base64 also counts toward the HTTP body limit. |
+| `PRISM_MAX_TOTAL_ATTACHMENT_BYTES` | `20971520` (20 MiB) | 1-67108864 | Total decoded attachment bytes per request. |
 | `PRISM_MAX_TRANSCRIPT_CHARS` | `32000` | 1000-1000000 | Characters of earlier conversation kept per request; older entries are replaced by a note. The final user message is never cut. |
 | `PRISM_QUEUE_LIMIT` | `8` | 1-64 | Waiting requests per account. |
 | `PRISM_MAX_ACCOUNTS` | `16` | 1-256 | Provisioned source accounts. |
@@ -176,6 +179,8 @@ Per-account clients use `Authorization: Bearer <api_key>` and the base URL
 `/accounts/:source/v1`. The only routes are `models`, `responses`, and
 `chat/completions`. The key is persisted as a SHA-256 hash and cannot authorize
 another source account or a management operation.
+Model listings declare `input_modalities: ["text", "image"]` and
+`output_modalities: ["text"]`; documents use the attachment workflow below.
 
 Authentication on these routes is deliberately not a 401 unless the key itself is
 wrong, because Sub2API treats an upstream 401 on an API-key account as a dead
@@ -296,6 +301,14 @@ Accepted input:
   and `tool`.
 - Content parts `text`, `input_text`, `output_text` or plain strings. Codex
   scaffolding user messages (plugin and skill lists) are dropped.
+- Images: Responses `input_image.image_url` and Chat `image_url.url`, as a
+  base64 data URL or a public HTTP(S) URL. PNG, JPEG, WebP and GIF are accepted.
+- Files: Responses `input_file` with `filename` and `file_data` or `file_url`,
+  and Chat `file` parts with the same fields inside their `file` object. `file_data` accepts base64 or a
+  base64 data URL. PDF and UTF-8 text files are accepted, including Markdown,
+  CSV, JSON and source-code text. Anthropic images and base64/URL documents
+  are converted by Sub2API before forwarding. OpenAI `file_id` references
+  cannot be resolved by this adapter.
 - `model` must be in the account catalog (`model_not_available`). Reasoning effort
   comes from Chat `reasoning_effort` or Responses `reasoning.effort`. Prism's
   UI offers four levels for every model and all four are passed through:
@@ -316,6 +329,35 @@ rejected. A request fails with `input_too_large` only if the final flattened
 text still exceeds 256 KiB, for example one gigantic final user message or a
 very large system prompt without tools. `PRISM_BODY_LIMIT` bounds the HTTP body
 (default 8 MiB, at most 32 MiB; management requests stay at 128 KiB).
+
+### Attachment upload and references
+
+Attachments are decoded or downloaded before browser admission. Downloads have
+a 15-second deadline per file, at most three redirects and decoded byte limits.
+Only public HTTP(S) destinations are allowed; credentials, private or reserved
+addresses and compressed responses are refused. Each DNS result and redirect
+is validated, and the connection uses the validated address. No caller API key
+or OAuth token is sent to attachment URLs.
+
+Each attachment gets a sanitized filename containing its content digest. The
+worker uploads the bytes through Prism's official **Upload files & photos**
+control and waits for the composer to register the file and finish pending
+uploads. This matters: forwarding an OpenAI data URL, or only POSTing file
+bytes, does not register a readable Prism project attachment.
+
+The adapter validates the native `input_file` reference against the managed
+project and expected filename, then adds its `/prism-uploads/...` path to the
+flattened message. `[Attachment N]` markers preserve where files appeared in
+history and tool outputs. The prompt permits native read-only inspection of
+these files, while caller tool calls still use the emulated action protocol.
+Unrelated native history is never imported into the API conversation. Every
+retry registers the same bytes in its selected worker's project.
+
+Uploads remain in the worker's dedicated managed project; the same filename
+and content can use Prism's existing-file control. They are not deleted after
+each turn. Request limits bound each upload, not the lifetime size of a project.
+Failed or cancelled preparation closes the browser context before reuse.
+No SSE headers are sent until Prism accepts the subsequent model start.
 
 Streaming sends Responses `response.created` / `response.in_progress` or the
 Chat role chunk as soon as Prism has accepted the start, using one stable response
@@ -365,16 +407,20 @@ Limitations that remain:
   cache writes are reported, matching what OpenAI OAuth accounts report, so the
   gateway bills the cached share at the model's cache-read price. Whether Prism
   actually hit its cache is not observable; a trimmed transcript changes the
-  prefix and lowers the estimate.
+  prefix and lowers the estimate. Attachment requests report no estimated
+  cached tokens; image/PDF inspection and file bytes are not included in the
+  character-based token estimate.
 - **One request at a time per worker.** Requests queue (`PRISM_QUEUE_LIMIT`)
   and a full queue is rejected. Clients on one account can overlap up to its
   ready worker count, while any configured native start allowance is shared.
 - **Tool calls are prompt-emulated**, at most eight per reply, run in order (they
   are not parallel). `tool_choice` and strict schemas are not enforced, and weaker
   adherence to the tag protocol shows up as plain text instead of a call.
-- **Images and files are unsupported.** The sidecar itself rejects `input_image`,
-  `image_url`, `input_file`, `input_audio` and `file` parts with
-  `400 image_input_not_supported`. It also rejects a `previous_response_id`
+- **Audio and OpenAI file IDs are unsupported.** Audio parts still return
+  `400 image_input_not_supported` (the legacy error code); unresolved `file_id`
+  returns `400 attachment_file_id_not_supported`. A native WAV upload was
+  accepted, but the model could not read it in the controlled test. The adapter
+  also rejects a `previous_response_id`
   (`400 previous_response_not_supported`): nothing is stored server side, so a
   client must resend the history. These are safety nets; the gateway is meant to
   deal with such requests before they reach a Prism account (next section).
@@ -400,7 +446,7 @@ accounts through its `http_bridge` WebSocket mode:
   `previous_response_id` stripped, because Prism keeps no server-side
   conversation.
 - Requests that a Prism account cannot serve are failed over to another account in
-  the group, without penalising the Prism account: requests with image, file or
+  the group, without penalising the Prism account: requests with
   audio parts, a `previous_response_id` without history to resend, and
   `/responses/compact`. Only when no other account can serve such a request does
   the client get `400` (or WebSocket close code `1008`).
@@ -420,6 +466,8 @@ The tests use simulated browser sessions and cover request flattening for
 Codex, Claude Code style and plain chat requests, tool-call parsing and output
 shapes, ignored and rejected parameters, size clamping, every SSE variant, model
 catalog recovery, account health after failed requests, credential isolation,
+attachment decoding, bounded public-URL downloads, native upload registration
+and exact file references,
 single-start behavior per native attempt, bounded conversation resubmission,
 persistent recovery, explicit probe retries, queue limits,
 cancellation, HTTP authentication, timeouts and error redaction. They do not

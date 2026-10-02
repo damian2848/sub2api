@@ -1,4 +1,5 @@
 import { PrismError, aborted, interruptible } from './errors.mjs';
+import { NativeAttachmentUpload, nativeAttachmentInput } from './browser-attachments.mjs';
 
 const origin = 'https://prism.openai.com';
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -153,6 +154,9 @@ export class BrowserSession {
       return route.abort();
     }
     if (path === '/api/backend/1/new' && !this.bootstrapping && !this.projectId) return route.abort();
+    if (path === '/api/project-files/upload' && mutation) {
+      if (!this.turn?.attachments?.allowsUpload(request)) return route.abort();
+    }
     if (path === '/api/llm/response_with_tools_start') {
       const turn = this.turn;
       if (!turn || turn.started || turn.signal?.aborted) return route.abort();
@@ -169,6 +173,15 @@ export class BrowserSession {
         turn.reject(new PrismError(mismatch));
         return route.abort();
       }
+      let input = turn.request.input;
+      if (turn.request.attachments?.length) {
+        try {
+          input = nativeAttachmentInput(input, body, turn.request.attachments, turn.attachments?.references);
+        } catch (error) {
+          turn.reject(error);
+          return route.abort();
+        }
+      }
       turn.started = true;
       turn.startRequest = request;
       turn.conversationId = body.conversationId;
@@ -178,7 +191,7 @@ export class BrowserSession {
       // Replace only validated text so no unrelated native UI history is sent. The UI's own model
       // and effort controls can sit on their loading defaults, so the exact requested values
       // replace them; select() has already confirmed the model is in Prism's catalog.
-      return route.continue({ postData: JSON.stringify({ ...body, input: turn.request.input,
+      return route.continue({ postData: JSON.stringify({ ...body, input,
         metadata: { ...body.metadata, model: turn.request.model, reasoning_effort: turn.request.effort } }) });
     }
     if (path.startsWith('/api/llm/') && !this.turn && !path.endsWith('_stop')) return route.abort();
@@ -504,6 +517,13 @@ export class BrowserSession {
         stage = 'submit';
         await composer.fill('Process the submitted text.');
         checkCurrent();
+        if (request.attachments?.length) {
+          stage = 'attachments';
+          turn.attachments = new NativeAttachmentUpload(page, this.projectId, request.attachments, signal, checkCurrent);
+          await turn.attachments.prepare();
+          checkCurrent();
+        }
+        stage = 'submit';
         turn.submitAllowed = true;
         await composer.press('Enter');
         checkCurrent();
@@ -521,6 +541,7 @@ export class BrowserSession {
       }
       if (this.turn === turn) {
         if (signal?.aborted) await this.close();
+        else if (turn.attachments && !turn.started) await this.terminateContext();
         else await this.stop();
       }
       throw error instanceof PrismError ? error : new PrismError(`browser_ui_${stage}_failed`);

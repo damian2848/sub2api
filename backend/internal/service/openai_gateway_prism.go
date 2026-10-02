@@ -20,11 +20,10 @@ const (
 	PrismCompactUnsupportedReason          = GatewayFailureReason("compact_not_supported")
 )
 
-// prismNonTextPartTypes are the Responses and Chat content part types that carry
-// something other than text. The sidecar relays text only.
-var prismNonTextPartTypes = map[string]struct{}{
-	"input_image": {}, "input_file": {}, "input_audio": {},
-	"image_url": {}, "file": {},
+// Images and files are uploaded by the sidecar before the native Prism turn.
+// Audio remains unsupported; keep the existing rejection code for clients.
+var prismUnsupportedPartTypes = map[string]struct{}{
+	"input_audio": {}, "audio": {},
 }
 
 // prismMaxPartDepth bounds the content scan: real parts sit three levels below
@@ -132,7 +131,7 @@ func newPrismUnsupportedRequestError(reason GatewayFailureReason, message string
 }
 
 // prismUnsupportedRequest returns a failover error when body carries something
-// the Prism sidecar rejects: image, file or audio input, previous_response_id
+// the Prism sidecar rejects: audio input, previous_response_id
 // or the compact endpoint. Everything else (instructions, history, tools and
 // unknown parameters) is the sidecar's to accept or ignore. The error is
 // returned before anything is written to the client, so the handler can move on
@@ -150,14 +149,14 @@ func prismUnsupportedRequest(c *gin.Context, body []byte, chat bool) *UpstreamFa
 				"Prism accounts do not support previous_response_id; send the full conversation in input")
 		}
 	}
-	if prismHasNonTextPart(gjson.GetBytes(body, inputKey), 0) {
+	if prismHasUnsupportedPart(gjson.GetBytes(body, inputKey), 0) {
 		return newPrismUnsupportedRequestError(PrismNonTextInputReason,
-			"Prism accounts accept text input only; image, file and audio content parts are not supported")
+			"Prism accounts do not support audio input")
 	}
 	return nil
 }
 
-func prismHasNonTextPart(value gjson.Result, depth int) bool {
+func prismHasUnsupportedPart(value gjson.Result, depth int) bool {
 	isObject := value.IsObject()
 	if depth > prismMaxPartDepth || !isObject && !value.IsArray() {
 		return false
@@ -166,9 +165,9 @@ func prismHasNonTextPart(value gjson.Result, depth int) bool {
 	value.ForEach(func(key, item gjson.Result) bool {
 		switch {
 		case item.IsObject() || item.IsArray():
-			found = prismHasNonTextPart(item, depth+1)
+			found = prismHasUnsupportedPart(item, depth+1)
 		case isObject && item.Type == gjson.String && key.String() == "type":
-			_, found = prismNonTextPartTypes[item.String()]
+			_, found = prismUnsupportedPartTypes[item.String()]
 		}
 		return !found
 	})

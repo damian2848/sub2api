@@ -15,6 +15,9 @@ const EXTENSIONS = new Map([...TYPES].map(([mime, extension]) => [extension, mim
 for (const [extension, mime] of [['jpeg', 'image/jpeg'], ['log', 'text/plain'], ['yml', 'application/yaml']]) {
   EXTENSIONS.set(extension, mime);
 }
+for (const extension of ['js', 'mjs', 'cjs', 'ts', 'tsx', 'jsx', 'vue', 'svelte', 'css', 'scss', 'less', 'py', 'go',
+  'rs', 'rb', 'java', 'c', 'cc', 'cpp', 'h', 'hpp', 'cs', 'swift', 'kt', 'kts', 'php', 'sh', 'sql', 'toml', 'ini',
+  'conf', 'config', 'xml', 'tex', 'r', 'ipynb', 'diff', 'patch']) EXTENSIONS.set(extension, 'text/plain');
 const TEXT_TYPES = new Set([...TYPES.keys()].filter(mime => !mime.startsWith('image/') && mime !== 'application/pdf'));
 const fail = (code, param) => { throw new PrismError(code, 400, param); };
 const envInt = (name, fallback) => {
@@ -34,8 +37,6 @@ function cleanFilename(value, param) {
   if (value !== undefined && (typeof value !== 'string' || !value.trim())) fail('invalid_attachment_filename', param);
   const name = (value ?? 'attachment').replace(/\\/g, '/').split('/').pop()
     .replace(/[^a-zA-Z0-9._-]+/g, '_').replace(/^\.+/, '').slice(0, 120) || 'attachment';
-  const extension = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
-  if (extension && !EXTENSIONS.has(extension)) fail('attachment_type_not_supported', param);
   return name;
 }
 
@@ -45,7 +46,10 @@ function filenameType(filename) {
 
 function mimeType(value) {
   const mime = typeof value === 'string' ? value.split(';', 1)[0].trim().toLowerCase() : '';
-  return mime === 'image/jpg' ? 'image/jpeg' : mime;
+  if (mime === 'image/jpg') return 'image/jpeg';
+  if (['application/javascript', 'application/typescript', 'text/javascript', 'text/x-python', 'text/x-shellscript',
+    'application/x-yaml', 'text/x-yaml', 'text/x-markdown', 'application/xml', 'text/xml', 'text/css'].includes(mime)) return 'text/plain';
+  return mime;
 }
 
 function checkedData(data, mime, filename, kind, param, limits) {
@@ -57,7 +61,8 @@ function checkedData(data, mime, filename, kind, param, limits) {
         data.subarray(0, 4).toString('ascii') === 'RIFF' && data.subarray(8, 12).toString('ascii') === 'WEBP' ? 'image/webp' :
           data.subarray(0, 5).toString('ascii') === '%PDF-' ? 'application/pdf' : '';
   const supplied = mimeType(mime);
-  const declared = supplied === 'application/octet-stream' || !supplied ? filenameType(filename) ?? detected : supplied;
+  const declared = supplied === 'application/octet-stream' || !supplied ? filenameType(filename) ??
+    (detected || (kind === 'file' ? 'text/plain' : '')) : supplied;
   if (!TYPES.has(declared) || (kind === 'image' && !declared.startsWith('image/'))) fail('attachment_type_not_supported', param);
   if (TEXT_TYPES.has(declared)) {
     try { new TextDecoder('utf-8', { fatal: true }).decode(data); } catch { fail('invalid_attachment_data', param); }
@@ -69,12 +74,12 @@ function checkedData(data, mime, filename, kind, param, limits) {
   }
   const sha256 = createHash('sha256').update(data).digest('hex');
   const stem = filename.replace(/\.[^.]+$/, '').slice(0, 80) || 'attachment';
-  return { data, mimeType: declared, sha256, filename: `${stem}-${sha256.slice(0, 16)}.${TYPES.get(declared)}` };
+  const extension = TEXT_TYPES.has(declared) && extensionMime ? filename.split('.').pop().toLowerCase() : TYPES.get(declared);
+  return { data, mimeType: declared, sha256, filename: `${stem}-${sha256.slice(0, 16)}.${extension}` };
 }
 
 function decodeBase64(value, param, limits) {
-  if (typeof value !== 'string' || !value.length || value.length % 4 !== 0 ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+  if (typeof value !== 'string' || !value.length || value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {
     fail('invalid_attachment_data', param);
   }
   if (value.length / 4 * 3 - (value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0) > limits.maxAttachmentBytes) {
@@ -242,7 +247,9 @@ export async function resolveAttachments(attachments = [], { signal, limits: ove
           maxBytes: Math.min(limits.maxAttachmentBytes, limits.maxTotalAttachmentBytes - totalBytes), deadline, lookup, request }, attachment.param);
         if ('location' in downloaded) {
           if (!downloaded.location || redirects >= 3) fail('attachment_download_failed', attachment.param);
-          url = checkedURL(new URL(downloaded.location, url).href, attachment.param);
+          let target;
+          try { target = new URL(downloaded.location, url).href; } catch { fail('invalid_attachment_url', attachment.param); }
+          url = checkedURL(target, attachment.param);
           continue;
         }
         const { url: ignored, ...retained } = attachment;

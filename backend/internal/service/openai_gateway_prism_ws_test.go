@@ -285,7 +285,7 @@ func TestPrismWebSocketBridgeServesEveryTurnOverHTTPWithFullHistory(t *testing.T
 // never write to the client: on the first turn the handler picks another
 // account, on a later turn the current turn is retried there with the history.
 func TestPrismWebSocketBridgeFailsOverTurnsPrismCannotServe(t *testing.T) {
-	image := `{"type":"message","role":"user","content":[{"type":"input_text","text":"look"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}`
+	audio := `{"type":"message","role":"user","content":[{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}`
 	for _, test := range []struct {
 		name     string
 		firstTry string // frame of the first turn
@@ -294,13 +294,13 @@ func TestPrismWebSocketBridgeFailsOverTurnsPrismCannotServe(t *testing.T) {
 		reason   GatewayFailureReason
 		prepare  func(*prismGatewayHarness)
 	}{
-		{name: "first_turn_image", reason: PrismNonTextInputReason,
-			firstTry: `{"type":"response.create","model":"gpt-6.1-sol","input":[` + image + `]}`},
+		{name: "first_turn_audio", reason: PrismNonTextInputReason,
+			firstTry: `{"type":"response.create","model":"gpt-6.1-sol","input":[` + audio + `]}`},
 		{name: "first_turn_resumed_session_without_history", reason: PrismPreviousResponseUnsupportedReason,
 			firstTry: prismWSFrame("continue", "resp_from_elsewhere")},
-		{name: "later_turn_image", retry: true, reason: PrismNonTextInputReason,
+		{name: "later_turn_audio", retry: true, reason: PrismNonTextInputReason,
 			firstTry: prismWSFrame("first question", ""),
-			second:   `{"type":"response.create","model":"gpt-6.1-sol","previous_response_id":"r1","input":[` + image + `]}`},
+			second:   `{"type":"response.create","model":"gpt-6.1-sol","previous_response_id":"r1","input":[` + audio + `]}`},
 		{name: "later_turn_session_down", retry: true, reason: PrismSessionUnavailableReason,
 			firstTry: prismWSFrame("first question", ""),
 			second:   prismWSFrame("second question", "r1"),

@@ -126,6 +126,7 @@ func prismWSBridgedRegular(id int64) service.Account {
 const (
 	prismWSTextFrame  = `{"type":"response.create","model":"gpt-6-astra","instructions":"be brief","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`
 	prismWSImageFrame = `{"type":"response.create","model":"gpt-6-astra","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"look"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`
+	prismWSAudioFrame = `{"type":"response.create","model":"gpt-6-astra","input":[{"type":"message","role":"user","content":[{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}]}`
 )
 
 // A Prism-only group serves Codex WebSocket clients: the turn is bridged to the
@@ -144,16 +145,26 @@ func TestOpenAIPrismWebSocketClientIsServedThroughTheHTTPBridge(t *testing.T) {
 	require.True(t, gjson.GetBytes(f.upstream.bodies[0], "stream").Bool())
 }
 
+func TestOpenAIPrismWebSocketPreservesImageAttachments(t *testing.T) {
+	f := newPrismWSFixture(t, true, prismFailoverPrismAccount(11))
+	events, err := f.exchange(prismWSImageFrame)
+	require.NoError(t, err)
+	require.Contains(t, events[len(events)-1], prismServedText)
+	require.Equal(t, []int64{11}, f.upstream.calls())
+	require.Equal(t, "input_image", gjson.GetBytes(f.upstream.bodies[0], "input.0.content.1.type").String())
+	require.Equal(t, "data:image/png;base64,AAAA", gjson.GetBytes(f.upstream.bodies[0], "input.0.content.1.image_url").String())
+}
+
 // Declining a frame costs no switch budget (maxAccountSwitches is 0 here) and
 // no penalty; the next account serves it.
 func TestOpenAIPrismWebSocketDeclinedFrameMovesToAnotherAccount(t *testing.T) {
 	f := newPrismWSFixture(t, true, prismFailoverPrismAccount(11), prismWSBridgedRegular(2))
 
-	events, err := f.exchange(prismWSImageFrame)
+	events, err := f.exchange(prismWSAudioFrame)
 
 	require.NoError(t, err)
 	require.Contains(t, events[len(events)-1], prismServedText)
-	require.Equal(t, []int64{2}, f.upstream.calls(), "only the regular account may receive the image")
+	require.Equal(t, []int64{2}, f.upstream.calls(), "only the regular account may receive the audio")
 }
 
 // A down session is an account fault and takes the normal failover path, which
@@ -174,13 +185,13 @@ func TestOpenAIPrismWebSocketSessionFailureMovesToAnotherAccount(t *testing.T) {
 func TestOpenAIPrismWebSocketDeclinedFrameClosesWithAClearReasonWhenNoAccountRemains(t *testing.T) {
 	f := newPrismWSFixture(t, true, prismFailoverPrismAccount(11))
 
-	events, err := f.exchange(prismWSImageFrame)
+	events, err := f.exchange(prismWSAudioFrame)
 
 	require.Empty(t, events)
 	var closeErr coderws.CloseError
 	require.ErrorAs(t, err, &closeErr)
 	require.Equal(t, coderws.StatusPolicyViolation, closeErr.Code)
-	require.Contains(t, closeErr.Reason, "Prism accounts accept text input only")
+	require.Contains(t, closeErr.Reason, "Prism accounts do not support audio input")
 	require.Empty(t, f.upstream.calls())
 }
 

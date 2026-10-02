@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto';
 import { PrismError, aborted, publicError } from './errors.mjs';
 import { createStreamWriter, parseRequest, resultBody } from './protocol.mjs';
 import { PromptCache } from './prompt-cache.mjs';
+import { attachmentLimits, resolveAttachments } from './attachments.mjs';
 
 function bearer(req) {
   const value = req.headers.authorization;
@@ -51,11 +52,13 @@ export function readJSON(req, limit) {
 }
 
 export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024 * 1024, requestTimeout = 1800000,
-  sessionTimeout = 30000, keepaliveMs = 10000, maxTextBytes, maxTranscriptChars, promptCache = new PromptCache() }) {
+  sessionTimeout = 30000, keepaliveMs = 10000, maxTextBytes, maxTranscriptChars,
+  maxAttachments, maxAttachmentBytes, maxTotalAttachmentBytes, promptCache = new PromptCache() }) {
   if (typeof managementKey !== 'string' || managementKey.length < 32) throw new Error('PRISM_MANAGEMENT_KEY must have at least 32 characters');
   const managementHash = createHash('sha256').update(managementKey).digest('hex');
   // Codex requests (tool schemas plus history) are large; management bodies are not.
   const managementLimit = Math.min(bodyLimit, 128 * 1024);
+  const mediaLimits = attachmentLimits({ maxAttachments, maxAttachmentBytes, maxTotalAttachmentBytes });
   const server = createServer(async (req, res) => {
     const controller = new AbortController();
     let timer;
@@ -99,7 +102,8 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
         const status = manager.status(source);
         if (!status.ready) throw new PrismError('account_not_ready', 503);
         return send(res, 200, { object: 'list', data: status.models.map(id => ({
-          id, object: 'model', created: 0, owned_by: 'prism' })) });
+          id, object: 'model', created: 0, owned_by: 'prism',
+          input_modalities: ['text', 'image'], output_modalities: ['text'] })) });
       }
       if (!['responses', 'chat/completions'].includes(action) || req.method !== 'POST') {
         throw new PrismError('method_not_allowed', 405);
@@ -107,7 +111,11 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
       const status = manager.status(source);
       if (!status.ready) throw new PrismError('account_not_ready', 503);
       const request = parseRequest(await readJSON(req, bodyLimit), action === 'responses' ? 'responses' : 'chat',
-        status.models, { ...(maxTextBytes ? { maxTextBytes } : {}), ...(maxTranscriptChars ? { maxTranscriptChars } : {}) });
+        status.models, { ...mediaLimits, ...(maxTextBytes ? { maxTextBytes } : {}),
+          ...(maxTranscriptChars ? { maxTranscriptChars } : {}) });
+      if (request.attachments?.length) {
+        request.attachments = await resolveAttachments(request.attachments, { signal: controller.signal, limits: mediaLimits });
+      }
       // A stream opens only once Prism has accepted the start. Until then nothing is sent, so a start
       // Prism refuses can still be answered with a plain 429 and the gateway can use another account.
       let streamOpening = null;
@@ -127,7 +135,10 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
       aborted(controller.signal);
       if (request.stream) await openStream();
       // Only a prompt Prism has processed can be in its cache, so it is recorded after success.
-      const cachedTokens = promptCache.observe(source, request.input.map(item => item.content[0].text).join('\n'));
+      const prompt = request.input.map(item => item.content.filter(part => part.type === 'input_text')
+        .map(part => part.text).join('')).join('\n');
+      // The text markers do not describe attachment contents or Prism's native file inspection.
+      const cachedTokens = request.attachments?.length ? 0 : promptCache.observe(source, prompt);
       const result = resultBody(request, text, streamWriter?.identity, { cachedTokens });
       if (res.destroyed) return;
       if (request.stream) await streamWriter.finish(result);
@@ -171,6 +182,9 @@ export async function main() {
   await manager.init();
   const server = createPrismServer({ manager, managementKey: process.env.PRISM_MANAGEMENT_KEY,
     bodyLimit: integer('PRISM_BODY_LIMIT', 8 * 1024 * 1024, 4096, 32 * 1024 * 1024),
+    maxAttachments: integer('PRISM_MAX_ATTACHMENTS', 8, 1, 32),
+    maxAttachmentBytes: integer('PRISM_MAX_ATTACHMENT_BYTES', 10 * 1024 * 1024, 1, 32 * 1024 * 1024),
+    maxTotalAttachmentBytes: integer('PRISM_MAX_TOTAL_ATTACHMENT_BYTES', 20 * 1024 * 1024, 1, 64 * 1024 * 1024),
     maxTranscriptChars: integer('PRISM_MAX_TRANSCRIPT_CHARS', 32000, 1000, 1000000),
     requestTimeout: integer('PRISM_REQUEST_TIMEOUT', 1800, 30, 3600) * 1000,
     // 0 turns the estimated cache-read share off (usage then reports no cached tokens).

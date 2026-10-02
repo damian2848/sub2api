@@ -926,6 +926,8 @@ func TestPrismGatewayValidatorPassesEveryWellFormedRequestUnchanged(t *testing.T
 		{name: "responses_tools", body: `{"model":"gpt-6.1-sol","input":"hello","tools":[{"type":"web_search"}]}`},
 		{name: "responses_unknown_fields", body: `{"model":"gpt-6.1-sol","input":"hello","temperature":0.5,"service_tier":"priority","metadata":{"a":"b"},"prompt_cache_key":"k"}`},
 		{name: "responses_null_previous_response_id", body: `{"model":"gpt-6.1-sol","input":"hello","previous_response_id":null}`},
+		{name: "responses_image_history_and_tool_output", body: `{"model":"gpt-6.1-sol","input":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]},{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_image","image_url":"https://example.test/image.png"}]},{"role":"user","content":"read it"}]}`},
+		{name: "responses_file", body: `{"model":"gpt-6.1-sol","input":[{"role":"user","content":[{"type":"input_file","filename":"file.txt","file_data":"data:text/plain;base64,aGk="}]}]}`},
 		{name: "responses_codex_style", body: `{"model":"gpt-6.1-sol","instructions":"You are Codex.","stream":true,"store":false,"parallel_tool_calls":true,
 			"reasoning":{"effort":"medium","summary":"auto"},"include":["reasoning.encrypted_content"],"prompt_cache_key":"session",
 			"tools":[{"type":"function","name":"shell","description":"run","parameters":{"type":"object","properties":{"cmd":{"type":"file"}}}},{"type":"web_search"}],
@@ -938,6 +940,7 @@ func TestPrismGatewayValidatorPassesEveryWellFormedRequestUnchanged(t *testing.T
 				{"type":"message","role":"user","content":[{"type":"input_text","text":"mention input_image and image_url literally"}]}]}`},
 		{name: "chat_text", chat: true, body: `{"model":"gpt-6.1-sol","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"low","stream":true,"stream_options":{"include_usage":true}}`},
 		{name: "chat_text_parts", chat: true, body: `{"model":"gpt-6.1-sol","messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`},
+		{name: "chat_image_and_file", chat: true, body: `{"model":"gpt-6.1-sol","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.test/image.png"}},{"type":"file","file":{"filename":"file.txt","file_data":"data:text/plain;base64,aGk="}}]}]}`},
 		{name: "chat_system", chat: true, body: `{"model":"gpt-6.1-sol","messages":[{"role":"system","content":"be concise"}]}`},
 		{name: "chat_empty_messages", chat: true, body: `{"model":"gpt-6.1-sol","messages":[],"max_tokens":100}`},
 		{name: "chat_tools", chat: true, body: `{"model":"gpt-6.1-sol","temperature":0.2,"tool_choice":"auto",
@@ -981,15 +984,9 @@ func TestPrismGatewayValidatorFailsOverRequestsPrismCannotServe(t *testing.T) {
 		suffix     string
 		reason     GatewayFailureReason
 	}{
-		{name: "chat_image", chat: true, reason: PrismNonTextInputReason, body: `{"model":"gpt-6.1-sol","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.test/image.png"}}]}]}`},
-		{name: "chat_image_after_text", chat: true, reason: PrismNonTextInputReason, body: `{"model":"gpt-6.1-sol","messages":[{"role":"user","content":[{"type":"text","text":"look"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]}]}`},
 		{name: "chat_input_audio", chat: true, reason: PrismNonTextInputReason, body: `{"model":"gpt-6.1-sol","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}]}`},
-		{name: "chat_file", chat: true, reason: PrismNonTextInputReason, body: `{"model":"gpt-6.1-sol","messages":[{"role":"user","content":[{"type":"file","file":{"file_id":"file-1"}}]}]}`},
-		{name: "response_image", reason: PrismNonTextInputReason, body: `{"model":"gpt-6.1-sol","input":[{"role":"user","content":[{"type":"input_image","image_url":"https://example.test/image.png"}]}]}`},
-		{name: "response_image_in_history", reason: PrismNonTextInputReason, body: `{"model":"gpt-6.1-sol","instructions":"x","tools":[{"type":"web_search"}],"input":[{"role":"user","content":[{"type":"input_text","text":"hi"},{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]},{"role":"assistant","content":"seen"},{"role":"user","content":"and now?"}]}`},
-		{name: "response_file", reason: PrismNonTextInputReason, body: `{"model":"gpt-6.1-sol","input":[{"role":"user","content":[{"type":"input_file","file_id":"file-1"}]}]}`},
 		{name: "response_audio", reason: PrismNonTextInputReason, body: `{"model":"gpt-6.1-sol","input":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}]}`},
-		{name: "response_tool_output_image", reason: PrismNonTextInputReason, body: `{"model":"gpt-6.1-sol","input":[{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}]}`},
+		{name: "response_tool_output_audio", reason: PrismNonTextInputReason, body: `{"model":"gpt-6.1-sol","input":[{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}]}`},
 		{name: "response_previous_response_id", reason: PrismPreviousResponseUnsupportedReason, body: `{"model":"gpt-6.1-sol","input":"hello","previous_response_id":"resp_123"}`},
 		{name: "response_empty_previous_response_id", reason: PrismPreviousResponseUnsupportedReason, body: `{"model":"gpt-6.1-sol","input":"hello","previous_response_id":""}`},
 		{name: "compact", reason: PrismCompactUnsupportedReason, suffix: "/compact", body: `{"model":"gpt-6.1-sol","input":"hello"}`},
@@ -1022,7 +1019,7 @@ func TestPrismGatewayValidatorFailsOverRequestsPrismCannotServe(t *testing.T) {
 }
 
 func TestPrismUnsupportedRequestDoesNotCoolDownOrPenalizeTheAccount(t *testing.T) {
-	failoverErr := newPrismUnsupportedRequestError(PrismNonTextInputReason, "text only")
+	failoverErr := newPrismUnsupportedRequestError(PrismNonTextInputReason, "audio is not supported")
 	repo := newPrismTestRepository(prismTestManaged("http://prism.test"))
 	svc := &GatewayService{accountRepo: repo}
 	svc.TempUnscheduleRetryableError(context.Background(), 101, failoverErr)

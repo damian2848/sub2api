@@ -7,6 +7,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { PrismError, publicError } from './errors.mjs';
 import { NOISE, buildPrompt, collectTools, elide, parseReply } from './emulation.mjs';
+import { attachmentLimits, normalizeAttachment } from './attachments.mjs';
 
 const DEFAULT_MAX_TEXT_BYTES = 256 * 1024;
 const RESULT_CHARS = 8000;
@@ -33,28 +34,39 @@ function envInt(name, fallback) {
 
 export const mapEffort = value => efforts.get(typeof value === 'string' ? value.toLowerCase() : '') ?? 'medium';
 
-function partText(part, param) {
+function partText(part, param, state) {
   if (typeof part === 'string') return part;
   if (!part || typeof part !== 'object') invalid('unsupported_content_type', param);
-  if (MEDIA_PARTS.has(part.type)) invalid('image_input_not_supported', param);
+  if (part.type === 'input_audio') invalid('image_input_not_supported', param);
+  if (MEDIA_PARTS.has(part.type)) {
+    if (state.attachments.length >= state.limits.maxAttachments) invalid('too_many_attachments', param);
+    const attachment = normalizeAttachment(part, param, state.limits);
+    state.attachmentBytes += attachment.data?.length ?? 0;
+    if (state.attachmentBytes > state.limits.maxTotalAttachmentBytes) invalid('attachments_too_large', param);
+    const index = state.attachments.length + 1;
+    attachment.id = `attachment_${index}`;
+    attachment.marker = `[Attachment ${index}]`;
+    state.attachments.push(attachment);
+    return `\n${attachment.marker}\n`;
+  }
   if (TEXT_PARTS.has(part.type) && typeof part.text === 'string') return part.text;
   if (part.type === 'refusal' && typeof part.refusal === 'string') return part.refusal;
   return invalid('unsupported_content_type', param);
 }
 
-function contentText(content, param) {
+function contentText(content, param, state) {
   if (content === null || content === undefined) return '';
   if (typeof content === 'string') return content;
-  return (Array.isArray(content) ? content : [content]).map((part, index) => partText(part, `${param}.${index}`)).join('');
+  return (Array.isArray(content) ? content : [content]).map((part, index) => partText(part, `${param}.${index}`, state)).join('');
 }
 
 // Tool output: a string, text parts, or arbitrary JSON (serialised as is).
-function outputText(output, param) {
+function outputText(output, param, state) {
   if (output === null || output === undefined) return '';
   if (typeof output === 'string') return output;
   const parts = Array.isArray(output) ? output : [output];
   const typed = value => value && typeof value === 'object';
-  if (parts.some(part => typed(part) && MEDIA_PARTS.has(part.type))) invalid('image_input_not_supported', param);
+  if (parts.some(part => typed(part) && MEDIA_PARTS.has(part.type))) return contentText(parts, param, state);
   if (parts.every(part => typed(part) && TEXT_PARTS.has(part.type) && typeof part.text === 'string')) return parts.map(part => part.text).join('');
   return JSON.stringify(output);
 }
@@ -71,13 +83,17 @@ function addMessage(state, role, text, param) {
   else invalid('unsupported_message_role', `${param}.role`);
 }
 
-function chatConversation(body) {
+function conversationState(limits) {
+  return { system: [], convo: [], env: [], items: [], attachments: [], attachmentBytes: 0, limits };
+}
+
+function chatConversation(body, limits) {
   if (!Array.isArray(body.messages) || !body.messages.length) invalid('messages_required', 'messages');
-  const state = { system: [], convo: [], env: [], items: [] };
+  const state = conversationState(limits);
   body.messages.forEach((message, index) => {
     const param = `messages.${index}`;
     object(message, param);
-    const text = contentText(message.content, `${param}.content`);
+    const text = contentText(message.content, `${param}.content`, state);
     if (message.role === 'tool' || message.role === 'function') {
       state.convo.push({ kind: 'result', text: elide(text, RESULT_CHARS) });
     } else if (message.role === 'assistant') {
@@ -93,8 +109,8 @@ function chatConversation(body) {
   return state;
 }
 
-function responsesConversation(body) {
-  const state = { system: [], convo: [], env: [], items: [] };
+function responsesConversation(body, limits) {
+  const state = conversationState(limits);
   if (typeof body.instructions === 'string' && body.instructions.trim()) {
     state.system.push(body.instructions);
     state.env.push(body.instructions);
@@ -109,13 +125,13 @@ function responsesConversation(body) {
     if (typeof item === 'string') return addMessage(state, 'user', item, param);
     object(item, param);
     const type = item.type ?? 'message';
-    if (type === 'message') return addMessage(state, item.role ?? 'user', contentText(item.content, `${param}.content`), param);
+    if (type === 'message') return addMessage(state, item.role ?? 'user', contentText(item.content, `${param}.content`, state), param);
     if (type === 'function_call') {
       state.convo.push({ kind: 'ran', text: callText(item.name ?? '', item.arguments) });
     } else if (type === 'custom_tool_call') {
       state.convo.push({ kind: 'ran', text: callText(item.name ?? '', item.input ?? '') });
     } else if (type === 'function_call_output' || type === 'custom_tool_call_output') {
-      state.convo.push({ kind: 'result', text: elide(outputText(item.output, `${param}.output`), RESULT_CHARS) });
+      state.convo.push({ kind: 'result', text: elide(outputText(item.output, `${param}.output`, state), RESULT_CHARS) });
     } else if (type === 'item_reference') invalid('item_reference_not_supported', param);
     else if (type !== 'additional_tools' && !SKIPPED_ITEMS.has(type)) invalid('unsupported_input_item', param);
   });
@@ -136,7 +152,8 @@ export function parseRequest(body, family, models, limits = {}) {
   // Every other parameter (sampling, tool_choice, include, store, ...) is ignored, never rejected.
   const chat = family === 'chat';
   const param = chat ? 'messages' : 'input';
-  const state = chat ? chatConversation(body) : responsesConversation(body);
+  const mediaLimits = attachmentLimits(typeof limits === 'number' ? {} : limits);
+  const state = chat ? chatConversation(body, mediaLimits) : responsesConversation(body, mediaLimits);
   if (!state.convo.length && !state.system.length) invalid('empty_input', param);
   const specs = collectTools(body.tools, state.items);
   const text = buildPrompt({ system: state.system, convo: state.convo, tools: specs, envParts: state.env,
@@ -147,7 +164,8 @@ export function parseRequest(body, family, models, limits = {}) {
     effort: mapEffort(chat ? body.reasoning_effort ?? body.reasoning?.effort : body.reasoning?.effort ?? body.reasoning_effort),
     stream: body.stream === true, includeUsage: body.stream_options?.include_usage === true,
     tools: specs.length ? new Map(specs.map(spec => [spec.name, spec.ns])) : null,
-    toolSpecs: specs.length ? new Map(specs.map(spec => [spec.name, spec])) : null };
+    toolSpecs: specs.length ? new Map(specs.map(spec => [spec.name, spec])) : null,
+    ...(state.attachments.length ? { attachments: state.attachments } : {}) };
 }
 
 // input_tokens is the whole prompt; cached_tokens is the estimated share of it read from the prompt

@@ -206,18 +206,48 @@ test('accepted input shapes: string, object, items, tool outputs, custom tools a
   assert.throws(() => parseRequest(null, 'responses', models), error => error.code === 'expected_object');
 });
 
-test('image, file and audio parts are rejected before generation, wherever they appear', () => {
-  const parts = [{ type: 'input_image', image_url: 'https://example.com/a.png' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } },
-    { type: 'input_file', file_id: 'file_1' }, { type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } },
-    { type: 'file', file: { file_id: 'file_2' } }];
-  for (const part of parts) {
-    rejects({ input: [{ role: 'user', content: [{ type: 'input_text', text: 'look' }, part] }] }, 'image_input_not_supported');
-    rejects({ messages: [{ role: 'user', content: [{ type: 'text', text: 'look' }, part] }] }, 'image_input_not_supported', 'chat');
-    rejects({ input: [message('user', 'x'), { type: 'function_call_output', call_id: 'c', output: [part] }] }, 'image_input_not_supported');
-    rejects({ tools: [execTool], input: [{ role: 'user', content: [part] }] }, 'image_input_not_supported');
+test('audio, malformed images and unresolved file IDs are rejected wherever they appear', () => {
+  const parts = [
+    [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }, 'invalid_attachment_data'],
+    [{ type: 'input_file', file_id: 'file_1' }, 'attachment_file_id_not_supported'],
+    [{ type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } }, 'image_input_not_supported'],
+    [{ type: 'file', file: { file_id: 'file_2' } }, 'attachment_file_id_not_supported'],
+  ];
+  for (const [part, code] of parts) {
+    rejects({ input: [{ role: 'user', content: [{ type: 'input_text', text: 'look' }, part] }] }, code);
+    rejects({ messages: [{ role: 'user', content: [{ type: 'text', text: 'look' }, part] }] }, code, 'chat');
+    rejects({ input: [message('user', 'x'), { type: 'function_call_output', call_id: 'c', output: [part] }] }, code);
+    rejects({ tools: [execTool], input: [{ role: 'user', content: [part] }] }, code);
   }
-  assert.throws(() => parse({ input: [{ role: 'user', content: [parts[0]] }] }),
+  assert.throws(() => parse({ input: [{ role: 'user', content: [parts[0][0]] }] }),
     error => error.status === 400 && error.param === 'input.0.content.0');
+});
+
+test('image and file parts in history and tool outputs keep ordered markers and exact bytes', () => {
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j4e8AAAAASUVORK5CYII=';
+  const image = { type: 'input_image', image_url: 'data:image/png;base64,' + png };
+  const file = { type: 'input_file', filename: 'code.txt', file_data: Buffer.from('test code').toString('base64') };
+  const request = parse({ tools: [execTool], input: [
+    { role: 'user', content: [{ type: 'input_text', text: 'Earlier image:' }, image] },
+    message('assistant', 'I will inspect it.'),
+    { type: 'function_call_output', call_id: 'c', output: [{ type: 'input_text', text: 'Fetched file:' }, file] },
+    message('user', 'Read both attachments.'),
+  ] });
+  assert.equal(request.attachments.length, 2);
+  assert.deepEqual(request.attachments.map(item => item.marker), ['[Attachment 1]', '[Attachment 2]']);
+  assert.deepEqual(request.attachments[0].data, Buffer.from(png, 'base64'));
+  assert.equal(request.attachments[1].data.toString(), 'test code');
+  assert.match(text(request), /Earlier image:\n\[Attachment 1\]/);
+  assert.match(text(request), /Fetched file:\n\[Attachment 2\]/);
+  assert.ok(!text(request).includes(png));
+  const chat = parse({ messages: [{ role: 'user', content: [
+    { type: 'image_url', image_url: { url: image.image_url } }, { type: 'file', file },
+  ] }] }, 'chat');
+  assert.equal(chat.attachments.length, 2);
+  assert.equal(text(chat).trim(), '[Attachment 1]\n\n[Attachment 2]');
+  const remote = parse({ input: [{ role: 'user', content: [{ type: 'input_image', image_url: 'https://example.com/a.png' }] }] });
+  assert.equal(remote.attachments[0].url, 'https://example.com/a.png');
+  assert.equal(text(remote).trim(), '[Attachment 1]');
 });
 
 test('previous_response_id is rejected unless null; model must be in the catalog', () => {

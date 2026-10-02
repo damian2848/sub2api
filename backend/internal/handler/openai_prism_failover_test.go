@@ -20,10 +20,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const (
-	prismTestImageDataURL = "data:image/png;base64,AAAA"
-	prismServedText       = "served by the other account"
-)
+const prismServedText = "served by the other account"
 
 func prismFailoverPrismAccount(id int64) service.Account {
 	return service.Account{
@@ -96,16 +93,16 @@ type prismFailoverRequest struct {
 
 func prismFailoverRequests() []prismFailoverRequest {
 	return []prismFailoverRequest{
-		{name: "responses_image", family: "responses", path: "/v1/responses", code: "image_input_not_supported",
-			body: `{"model":"gpt-6-astra","stream":false,"input":[{"role":"user","content":[{"type":"input_text","text":"see"},{"type":"input_image","image_url":"` + prismTestImageDataURL + `"}]}]}`},
+		{name: "responses_audio", family: "responses", path: "/v1/responses", code: "image_input_not_supported",
+			body: `{"model":"gpt-6-astra","stream":false,"input":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}]}`},
 		{name: "responses_previous_response_id", family: "responses", path: "/v1/responses", code: "previous_response_not_supported",
 			body: `{"model":"gpt-6-astra","stream":false,"input":"next","previous_response_id":"resp_123"}`},
 		{name: "responses_compact", family: "responses", path: "/v1/responses/compact", code: "compact_not_supported",
 			body: `{"model":"gpt-6-astra","input":"summarize the conversation"}`},
-		{name: "chat_image", family: "chat", path: "/v1/chat/completions", code: "image_input_not_supported",
-			body: `{"model":"gpt-6-astra","stream":false,"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"` + prismTestImageDataURL + `"}}]}]}`},
-		{name: "messages_image", family: "messages", path: "/v1/messages", code: "image_input_not_supported",
-			body: `{"model":"gpt-6-astra","max_tokens":16,"stream":false,"messages":[{"role":"user","content":[{"type":"text","text":"see"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}]}]}`},
+		{name: "chat_audio", family: "chat", path: "/v1/chat/completions", code: "image_input_not_supported",
+			body: `{"model":"gpt-6-astra","stream":false,"messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}]}`},
+		{name: "messages_audio", family: "messages", path: "/v1/messages", code: "image_input_not_supported",
+			body: `{"model":"gpt-6-astra","max_tokens":16,"stream":false,"messages":[{"role":"user","content":[{"type":"audio","source":{"type":"base64","media_type":"audio/wav","data":"AAAA"}}]}]}`},
 	}
 }
 

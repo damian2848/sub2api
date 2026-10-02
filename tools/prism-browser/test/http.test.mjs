@@ -46,7 +46,10 @@ test('management and user credentials have separate authority', async t => {
   assert.equal((await post('/accounts/32/v1/responses', body, managementKey)).status, 401);
   assert.equal((await fetch(base + '/health')).status, 200);
   const listing = await fetch(base + '/accounts/32/v1/models', { headers: { Authorization: `Bearer ${userKey}` } });
-  assert.deepEqual((await listing.json()).data.map(model => model.id), models);
+  const modelList = (await listing.json()).data;
+  assert.deepEqual(modelList.map(model => model.id), models);
+  assert.deepEqual(modelList[0].input_modalities, ['text', 'image']);
+  assert.deepEqual(modelList[0].output_modalities, ['text']);
   assert.equal((await post('/internal/accounts/32/bootstrap', { retry_probe: true }, managementKey)).status, 200);
 });
 
@@ -57,11 +60,52 @@ test('HTTP body bounds apply and requests Prism cannot serve never reach the bro
   const previous = await post('/accounts/32/v1/responses', { ...body, previous_response_id: 'resp_1' });
   assert.equal(previous.status, 400);
   assert.equal((await previous.json()).error.code, 'previous_response_not_supported');
-  const image = await post('/accounts/32/v1/chat/completions', { model: models[0], messages: [{ role: 'user',
-    content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }] }] });
-  assert.equal(image.status, 400);
-  assert.equal((await image.json()).error.code, 'image_input_not_supported');
+  const audio = await post('/accounts/32/v1/chat/completions', { model: models[0], messages: [{ role: 'user',
+    content: [{ type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } }] }] });
+  assert.equal(audio.status, 400);
+  assert.equal((await audio.json()).error.code, 'image_input_not_supported');
   assert.equal((await post('/accounts/32/v1/responses', { ...body, model: 'unknown' })).status, 400);
+  assert.equal(calls, 0);
+});
+
+test('Responses and Chat resolve attachment bytes before the browser starts', async t => {
+  const seen = [];
+  const { post } = await fixture(t, { async generate(_, request) { seen.push(request); return 'attachment read'; } });
+  const text = Buffer.from('attachment content');
+  for (const family of ['responses', 'chat/completions']) {
+    const part = family === 'responses'
+      ? { type: 'input_file', filename: 'notes.txt', file_data: text.toString('base64') }
+      : { type: 'file', file: { filename: 'notes.txt', file_data: text.toString('base64') } };
+    const value = { model: models[0], stream: true, [family === 'responses' ? 'input' : 'messages']:
+      [{ role: 'user', content: [part] }] };
+    const response = await post('/accounts/32/v1/' + family, value);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /text\/event-stream/);
+    assert.match(await response.text(), /attachment read/);
+    const request = seen.at(-1);
+    assert.equal(request.attachments.length, 1);
+    assert.deepEqual(request.attachments[0].data, text);
+    assert.match(request.attachments[0].filename, /^notes-[a-f0-9]{16}\.txt$/);
+    assert.match(request.input[0].content[0].text, /\[Attachment 1\]/);
+  }
+});
+
+test('attachment validation stays before SSE commitment and browser admission', async t => {
+  let calls = 0;
+  const { post } = await fixture(t, { async generate() { calls++; return 'unexpected'; } },
+    { maxAttachmentBytes: 8, maxAttachments: 1 });
+  const input = parts => ({ model: models[0], stream: true, input: [{ role: 'user', content: parts }] });
+  const file = value => ({ type: 'input_file', filename: 'note.txt', file_data: Buffer.from(value).toString('base64') });
+  for (const [value, code] of [
+    [input([file('larger than limit')]), 'attachment_too_large'],
+    [input([file('a'), file('b')]), 'too_many_attachments'],
+    [input([{ type: 'input_image', image_url: 'http://127.0.0.1/private.png' }]), 'attachment_url_not_allowed'],
+  ]) {
+    const response = await post('/accounts/32/v1/responses', value);
+    assert.equal(response.status, 400);
+    assert.match(response.headers.get('content-type'), /application\/json/);
+    assert.equal((await response.json()).error.code, code);
+  }
   assert.equal(calls, 0);
 });
 
