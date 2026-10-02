@@ -8,6 +8,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { PrismError, publicError } from './errors.mjs';
 import { NOISE, buildPrompt, collectTools, elide, parseReply } from './emulation.mjs';
 import { attachmentLimits, normalizeAttachment } from './attachments.mjs';
+import { fileLinkOptions, rewriteFileLinks } from './file-links.mjs';
 
 const DEFAULT_MAX_TEXT_BYTES = 256 * 1024;
 const RESULT_CHARS = 8000;
@@ -74,6 +75,7 @@ function outputText(output, param, state) {
 const callText = (name, args) => elide(`${name} ${typeof args === 'string' ? args : JSON.stringify(args ?? {})}`, CALL_CHARS);
 
 function addMessage(state, role, text, param) {
+  state.linkInputs.push(text);
   if (role === 'system' || role === 'developer') { state.system.push(text); state.env.push(text); }
   else if (role === 'user') {
     state.env.push(text);
@@ -84,7 +86,7 @@ function addMessage(state, role, text, param) {
 }
 
 function conversationState(limits) {
-  return { system: [], convo: [], env: [], items: [], attachments: [], attachmentBytes: 0, limits };
+  return { system: [], convo: [], env: [], linkInputs: [], items: [], attachments: [], attachmentBytes: 0, limits };
 }
 
 function chatConversation(body, limits) {
@@ -131,7 +133,9 @@ function responsesConversation(body, limits) {
     } else if (type === 'custom_tool_call') {
       state.convo.push({ kind: 'ran', text: callText(item.name ?? '', item.input ?? '') });
     } else if (type === 'function_call_output' || type === 'custom_tool_call_output') {
-      state.convo.push({ kind: 'result', text: elide(outputText(item.output, `${param}.output`, state), RESULT_CHARS) });
+      const result = outputText(item.output, `${param}.output`, state);
+      state.linkInputs.push(result);
+      state.convo.push({ kind: 'result', text: elide(result, RESULT_CHARS) });
     } else if (type === 'item_reference') invalid('item_reference_not_supported', param);
     else if (type !== 'additional_tools' && !SKIPPED_ITEMS.has(type)) invalid('unsupported_input_item', param);
   });
@@ -160,12 +164,13 @@ export function parseRequest(body, family, models, limits = {}) {
     budget: maxTranscriptChars });
   if (!text.trim()) invalid('empty_input', param);
   if (Buffer.byteLength(text) > maxTextBytes) invalid('input_too_large', param);
+  const fileLinks = fileLinkOptions(family, state.system, state.linkInputs);
   return { family, model: body.model, input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text }] }],
     effort: mapEffort(chat ? body.reasoning_effort ?? body.reasoning?.effort : body.reasoning?.effort ?? body.reasoning_effort),
     stream: body.stream === true, includeUsage: body.stream_options?.include_usage === true,
     tools: specs.length ? new Map(specs.map(spec => [spec.name, spec.ns])) : null,
     toolSpecs: specs.length ? new Map(specs.map(spec => [spec.name, spec])) : null,
-    ...(state.attachments.length ? { attachments: state.attachments } : {}) };
+    ...(state.attachments.length ? { attachments: state.attachments } : {}), ...(fileLinks ? { fileLinks } : {}) };
 }
 
 // input_tokens is the whole prompt; cached_tokens is the estimated share of it read from the prompt
@@ -188,8 +193,8 @@ export function resultBody(request, text, identity = resultIdentity(request), { 
   // In tool mode the reply is parsed into the actions asked for and the text for the user.
   const reply = request.toolSpecs ? parseReply(text, request.toolSpecs) : { calls: [], text };
   const { calls } = reply;
-  const message = reply.text;
-  const usage = estimatedUsage(request.input, `${message} ${calls.map(call => `${call.name} ${call.arguments}`).join(' ')}`.trim(),
+  const message = request.family === 'responses' && !calls.length ? rewriteFileLinks(reply.text, request.fileLinks) : reply.text;
+  const usage = estimatedUsage(request.input, `${reply.text} ${calls.map(call => `${call.name} ${call.arguments}`).join(' ')}`.trim(),
     cachedTokens);
   if (request.family === 'chat') {
     const assistant = { role: 'assistant', content: message || (calls.length ? null : message) };

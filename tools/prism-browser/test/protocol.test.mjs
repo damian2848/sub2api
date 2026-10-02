@@ -826,6 +826,39 @@ test('Responses message items carry the channel: commentary next to calls, final
   assert.ok(!JSON.stringify(resultBody(chat, twoCalls)).includes('phase'));
 });
 
+test('Codex final answers deterministically link file paths, but commentary and Chat never change', () => {
+  const input = [message('developer', 'Use a clickable markdown link for files.'),
+    message('user', '<cwd>/old/project</cwd>'), message('user', '<cwd>/Users/dev/project</cwd>\nPlease edit the file.')];
+  const request = parse({ input, tools: [execTool] });
+  assert.deepEqual(request.fileLinks, { cwd: '/Users/dev/project' });
+  const result = resultBody(request, 'Updated `src/app.py:12:3`.');
+  assert.equal(result.output[0].phase, 'final_answer');
+  assert.equal(result.output_text, 'Updated [app.py](/Users/dev/project/src/app.py:12:3).');
+  assert.equal(result.output[0].content[0].text, result.output_text);
+  const { res, wire } = capture();
+  writeCompletedStream(res, request, result);
+  const events = responsesEvents(wire());
+  assert.equal(events.filter(event => event.type === 'response.output_text.delta').map(event => event.delta).join(''), result.output_text);
+  assert.equal(events.at(-1).response.output_text, result.output_text);
+  assert.equal(result.usage.output_tokens, estimatedUsage(request.input, 'Updated `src/app.py:12:3`.').output_tokens);
+  const note = 'Checking `src/app.py`.';
+  const commentary = resultBody(request, note + '\n<tool_call name="exec_command">{"cmd":"ls"}</tool_call>');
+  assert.equal(commentary.output[0].phase, 'commentary');
+  assert.equal(commentary.output_text, note);
+  const chat = parse({ messages: input }, 'chat');
+  assert.equal(chat.fileLinks, undefined);
+  assert.equal(resultBody(chat, note).choices[0].message.content, note);
+  for (const disabled of [parse({ input: '<cwd>/project</cwd>' }),
+    parse({ instructions: 'clickable markdown link', input: 'no cwd' }),
+    parse({ instructions: 'clickable markdown link', input: '<cwd>relative</cwd>' }),
+    parse({ instructions: 'clickable markdown link <cwd>/project</cwd>', input: 'no cwd in input' })]) {
+    assert.equal(disabled.fileLinks, undefined);
+    assert.equal(resultBody(disabled, note).output_text, note);
+  }
+  const system = parse({ instructions: 'clickable markdown link', input: '<cwd>/project</cwd>' });
+  assert.deepEqual(system.fileLinks, { cwd: '/project' });
+});
+
 test('Chat SSE streams the note, then one tool_calls chunk carrying every call with its index', () => {
   const request = parse({ messages: [{ role: 'user', content: 'go' }], tools: [{ type: 'function', function: execTool }], stream: true }, 'chat');
   const res = writableResponse();
