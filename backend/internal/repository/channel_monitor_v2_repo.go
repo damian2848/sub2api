@@ -1195,6 +1195,11 @@ func channelMonitorV2Where(filter service.ChannelMonitorV2Filter, cfg service.Ch
 		args = append(args, pq.Array(groups))
 		conditions = append(conditions, fmt.Sprintf("%s.group_id = ANY($%d)", alias, len(args)))
 	}
+	// A deleted group leaves its metric rows behind, and the group join still finds the soft-deleted
+	// row, so without this it keeps appearing as a group that no longer exists. Rows without a group
+	// (group_id 0) are kept.
+	conditions = append(conditions, fmt.Sprintf(
+		"(COALESCE(%[1]s.group_id, 0) = 0 OR EXISTS (SELECT 1 FROM groups live_group WHERE live_group.id = %[1]s.group_id AND live_group.deleted_at IS NULL))", alias))
 	return "WHERE " + strings.Join(conditions, " AND "), args
 }
 

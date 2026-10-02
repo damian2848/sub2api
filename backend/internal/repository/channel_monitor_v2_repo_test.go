@@ -98,6 +98,21 @@ func TestChannelMonitorV2WhereUsesConfiguredScopeAndEmptyFilterMeansAllConfigure
 	require.Len(t, args, 4)
 }
 
+func TestChannelMonitorV2WhereHidesDeletedGroupsButKeepsUngroupedRows(t *testing.T) {
+	filter := service.ChannelMonitorV2Filter{Start: time.Unix(1, 0), End: time.Unix(2, 0)}
+	cfg := service.ChannelMonitorV2Config{
+		Platforms: []service.ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true}},
+	}
+	where, args := channelMonitorV2Where(filter, cfg, "m")
+	require.Contains(t, where, "COALESCE(m.group_id, 0) = 0 OR EXISTS (SELECT 1 FROM groups live_group")
+	require.Contains(t, where, "live_group.id = m.group_id AND live_group.deleted_at IS NULL")
+	require.Len(t, args, 3, "the deleted-group rule must not add arguments")
+
+	other, _ := channelMonitorV2Where(filter, cfg, "metric")
+	require.Contains(t, other, "COALESCE(metric.group_id, 0) = 0 OR EXISTS")
+	require.Contains(t, other, "live_group.id = metric.group_id")
+}
+
 func TestChannelMonitorV2WhereRejectsGroupFilterOutsideConfiguredScope(t *testing.T) {
 	filter := service.ChannelMonitorV2Filter{
 		Start: time.Unix(1, 0), End: time.Unix(2, 0), GroupIDs: []int64{9},
