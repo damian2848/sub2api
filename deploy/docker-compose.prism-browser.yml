@@ -32,7 +32,7 @@ services:
       PRISM_START_REFILL_MIN_SECONDS: "${PRISM_START_REFILL_MIN_SECONDS:-}"
       # Blank defaults to max(90 seconds, initial refill), preserving slower legacy pacing.
       PRISM_START_REFILL_MAX_SECONDS: "${PRISM_START_REFILL_MAX_SECONDS:-}"
-      # Blank defaults to max(15 seconds, initial refill); only applies with a backup account.
+      # Blank defaults to max(15 seconds, initial refill), or 15 without a start limit; only applies with a backup account.
       PRISM_START_MAX_WAIT_SECONDS: "${PRISM_START_MAX_WAIT_SECONDS:-}"
       # Minimum pause after Prism refuses a start; token replenishment may take longer.
       PRISM_START_COOLDOWN_SECONDS: "${PRISM_START_COOLDOWN_SECONDS:-60}"

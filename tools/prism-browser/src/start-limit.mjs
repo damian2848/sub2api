@@ -20,7 +20,8 @@ export function nativeStartSettings(env = process.env) {
   const refillMs = number('PRISM_START_REFILL_SECONDS', windowMs / (burst || 1) / 1000, 0.001, 3600) * 1000;
   const refillMinMs = number('PRISM_START_REFILL_MIN_SECONDS', refillMs / 1000, 0.001, 3600) * 1000;
   const refillMaxMs = number('PRISM_START_REFILL_MAX_SECONDS', Math.max(90, refillMs / 1000), 0.001, 3600) * 1000;
-  const maxWaitMs = number('PRISM_START_MAX_WAIT_SECONDS', Math.max(15, refillMs / 1000), 0, 3600) * 1000;
+  // Without a bucket the wait is only a post-rejection cooldown, so the derived refill says nothing.
+  const maxWaitMs = number('PRISM_START_MAX_WAIT_SECONDS', burst ? Math.max(15, refillMs / 1000) : 15, 0, 3600) * 1000;
   const settings = { limit, windowMs, burst, refillMs, refillMinMs, refillMaxMs, maxWaitMs };
   new NativeStartLimiter(settings).close();
   return settings;
@@ -28,7 +29,7 @@ export function nativeStartSettings(env = process.env) {
 
 export class NativeStartLimiter {
   constructor({ limit = 0, windowMs = 65000, burst = limit, refillMs = windowMs / (burst || 1),
-    refillMinMs = refillMs, refillMaxMs = Math.max(90000, refillMs), maxWaitMs = Math.max(15000, refillMs), onAudit = () => {},
+    refillMinMs = refillMs, refillMaxMs = Math.max(90000, refillMs), maxWaitMs = burst ? Math.max(15000, refillMs) : 15000, onAudit = () => {},
     now = () => performance.now(), setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
     if (!Number.isInteger(limit) || limit < 0 || limit > 120) throw new RangeError('invalid_native_start_limit');
     if (!Number.isInteger(windowMs) || windowMs <= 0 || windowMs > 3600000) {

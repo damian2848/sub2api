@@ -364,3 +364,21 @@ test('unlimited buckets still queue none through cooldown and cancellation', asy
   scheduler.advance(50);
   assert.equal(await pending, 50);
 });
+
+test('without a start limit the default wait stays at 15 seconds, so a cooling source hands new requests back', async t => {
+  for (const value of [undefined, '']) {
+    assert.equal(nativeStartSettings({ PRISM_START_MAX_WAIT_SECONDS: value }).maxWaitMs, 15000);
+    assert.equal(nativeStartSettings({ PRISM_ACCOUNT_START_LIMIT: '0', PRISM_START_WINDOW_SECONDS: '65',
+      PRISM_START_MAX_WAIT_SECONDS: value }).maxWaitMs, 15000);
+  }
+  assert.equal(nativeStartSettings({ PRISM_START_MAX_WAIT_SECONDS: '40' }).maxWaitMs, 40000);
+  const { limiter, scheduler } = fixture(t, { limit: 0 });
+  assert.equal(limiter.maxWaitMs, 15000);
+  limiter.rejected(60000);
+  // During the 60 s cooldown a new request with another account available is refused at once,
+  // like the requests that were already waiting, instead of waiting out the cooldown.
+  await assert.rejects(limiter.acquire(), error => error.code === 'prism_start_limited' && error.retryAfterSeconds === 60);
+  const waiting = limiter.acquire(undefined, { failover: 'none' });
+  scheduler.advance(60000);
+  assert.equal(await waiting, 60000);
+});

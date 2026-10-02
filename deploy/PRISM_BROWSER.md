@@ -59,7 +59,7 @@ compose file and listed in `.env.prism-browser.example`):
 | `PRISM_START_REFILL_SECONDS` | legacy window / burst | 0.001-3600 | Initial seconds to replenish one token. |
 | `PRISM_START_REFILL_MIN_SECONDS` | initial refill | 0.001-3600 | Lower bound for the adaptive refill interval. |
 | `PRISM_START_REFILL_MAX_SECONDS` | max(90, initial refill) | 0.001-3600 | Upper bound in seconds, at least the initial refill and minimum. The derived default also accepts legacy intervals above 90 seconds. |
-| `PRISM_START_MAX_WAIT_SECONDS` | max(15, initial refill) | 0-3600 | Seconds to wait before failing fast only when another account is available. By default the first request after a depleted bucket can wait for one token. |
+| `PRISM_START_MAX_WAIT_SECONDS` | max(15, initial refill); 15 without a start limit | 0-3600 | Seconds to wait before failing fast only when another account is available. By default the first request after a depleted bucket can wait for one token. Without a start limit the only wait is a post-rejection cooldown, which is longer than 15 s, so requests are handed to another account at once. |
 | `PRISM_TRANSIENT_RETRIES` | `1` | 0-1 | Automatic resubmissions of a request that failed because Prism's own servers returned an HTTP 5xx. `0` turns it off. |
 | `PRISM_TRANSIENT_RETRY_DELAY_SECONDS` | `4` | 0-60 | Pause before the resubmission, so an overloaded Prism has a moment. |
 | `PRISM_TRANSIENT_RETRY_WAIT_SECONDS` | `15` | 0-120 | Longest wait for an idle worker to take the resubmission before the original error is returned. |
