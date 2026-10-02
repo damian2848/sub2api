@@ -52,6 +52,9 @@ compose file and listed in `.env.prism-browser.example`):
 | `PRISM_MAX_WORKERS` | `32` | 1-1024 | Global browser-context limit, including contexts initializing or closing. |
 | `PRISM_ACCOUNT_START_LIMIT` | `0` | 0-120 | Native starts per source across every worker, probe and retry. Zero disables admission pacing. |
 | `PRISM_START_WINDOW_SECONDS` | `65` | 1-3600 | Sliding admission window when a start limit is enabled. |
+| `PRISM_TRANSIENT_RETRIES` | `1` | 0-1 | Automatic resubmissions of a request that failed because Prism's own servers returned an HTTP 5xx. `0` turns it off. |
+| `PRISM_TRANSIENT_RETRY_DELAY_SECONDS` | `4` | 0-60 | Pause before the resubmission, so an overloaded Prism has a moment. |
+| `PRISM_TRANSIENT_RETRY_WAIT_SECONDS` | `15` | 0-120 | Longest wait for an idle worker to take the resubmission before the original error is returned. |
 
 Invalid values stop the adapter at startup.
 
@@ -80,6 +83,29 @@ margin covering its measured submission overhead. It does not guarantee the
 upstream's timing under an unusually slow UI. Window state is in memory; after
 a restart, allow one configured window since the last native call before
 starting a load test or admitting another burst.
+
+### Automatic retry of Prism server errors
+
+Prism sometimes answers with an HTTP 5xx (its servers are overloaded or a gateway failed): on the start
+request, on a status poll, or as the terminal result of a turn. Its own web app does not retry these, so
+without help the request fails after minutes of work. The pool resubmits such a request **once**:
+
+- Only for a 5xx from Prism, never for 4xx, a rate limit (403/429), a rejected model, an expired session,
+  an empty answer or any failure of the sidecar itself.
+- Only before any text was published to the client. SSE comments and lifecycle frames do not count, so a
+  streaming client can see the retry only as a longer wait.
+- After a short pause (`PRISM_TRANSIENT_RETRY_DELAY_SECONDS`), on another idle worker of the same
+  account (a failed turn usually closes its own browser context), or on the same one if it is still
+  usable. If no worker frees up within `PRISM_TRANSIENT_RETRY_WAIT_SECONDS` the original error is returned
+  and the gateway can fail over to another account.
+- At most one extra attempt; a second failure is returned as it is. The retry shares the request's
+  `PRISM_REQUEST_TIMEOUT` and takes another start from the per-source allowance.
+- Replaying is safe: Prism returns text only and runs nothing on the caller's machine; tool calls are
+  parsed from that text and executed by the client. A failed first turn may still be finishing on Prism's
+  side (a stop is requested), so a retry can cost one extra generation there.
+
+With `PRISM_ACCOUNT_CONCURRENCY=1` there is no second worker, so the retry is only used when the same
+worker is still usable.
 
 ## Management API
 

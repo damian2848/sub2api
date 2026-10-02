@@ -151,7 +151,10 @@ export async function main() {
     queueLimit: integer('PRISM_QUEUE_LIMIT', 8, 1, 64), maxAccounts: integer('PRISM_MAX_ACCOUNTS', 16, 1, 256),
     concurrency: integer('PRISM_ACCOUNT_CONCURRENCY', 2, 1, 4), maxWorkers: integer('PRISM_MAX_WORKERS', 32, 1, 1024),
     startLimit: integer('PRISM_ACCOUNT_START_LIMIT', 0, 0, 120),
-    startWindowMs: integer('PRISM_START_WINDOW_SECONDS', 65, 1, 3600) * 1000 });
+    startWindowMs: integer('PRISM_START_WINDOW_SECONDS', 65, 1, 3600) * 1000,
+    transientRetries: integer('PRISM_TRANSIENT_RETRIES', 1, 0, 1),
+    transientRetryDelayMs: integer('PRISM_TRANSIENT_RETRY_DELAY_SECONDS', 4, 0, 60) * 1000,
+    transientRetryWaitMs: integer('PRISM_TRANSIENT_RETRY_WAIT_SECONDS', 15, 0, 120) * 1000 });
   await manager.init();
   const server = createPrismServer({ manager, managementKey: process.env.PRISM_MANAGEMENT_KEY,
     bodyLimit: integer('PRISM_BODY_LIMIT', 8 * 1024 * 1024, 4096, 32 * 1024 * 1024),

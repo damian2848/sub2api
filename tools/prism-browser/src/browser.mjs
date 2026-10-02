@@ -190,9 +190,13 @@ export class BrowserSession {
       this.audit('upstream_start_actual_input', { input_roles: (sent?.input || []).map(item => item.role) });
     }
     if (!response.ok()) {
-      this.audit('upstream_http_error', { status: response.status() });
-      return turn.reject(new PrismError([401, 403].includes(response.status())
-        ? 'session_expired' : 'prism_upstream_http_error', [401, 403].includes(response.status()) ? 401 : 502));
+      const status = response.status();
+      this.audit('upstream_http_error', { status });
+      const error = new PrismError([401, 403].includes(status) ? 'session_expired' : 'prism_upstream_http_error',
+        [401, 403].includes(status) ? 401 : 502);
+      // Prism's own servers failed (overloaded, bad gateway, ...): one resubmission may succeed.
+      error.transient = Number.isInteger(status) && status >= 500 && status <= 599;
+      return turn.reject(error);
     }
     const data = await response.json();
     if (!matchesTurn()) return;
@@ -216,6 +220,7 @@ export class BrowserSession {
     if (data.response?.status !== 'success') {
       const error = new PrismError('prism_generation_failed');
       error.retryConversation = resubmissionRequested;
+      error.transient = Number.isInteger(payload.httpStatus) && payload.httpStatus >= 500 && payload.httpStatus <= 599;
       return turn.reject(error);
     }
     if (payload.model && payload.model !== turn.request.model) return turn.reject(new PrismError('upstream_model_mismatch'));

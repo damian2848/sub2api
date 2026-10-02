@@ -2,12 +2,12 @@ import { join } from 'node:path';
 import { AccountManager } from './accounts.mjs';
 import { AccountQueue } from './queue.mjs';
 import { BrowserSession, launchBrowser } from './browser.mjs';
-import { PrismError, aborted } from './errors.mjs';
+import { PrismError, aborted, pause } from './errors.mjs';
 import { NativeStartLimiter } from './start-limit.mjs';
 
 export class AccountPoolManager {
   constructor({ dataDir, concurrency = 2, maxWorkers = 32, queueLimit = 8, maxAccounts = 16,
-    startLimit = 0, startWindowMs = 65000,
+    startLimit = 0, startWindowMs = 65000, transientRetries = 1, transientRetryDelayMs = 4000, transientRetryWaitMs = 15000,
     startLimiterFactory = () => new NativeStartLimiter({ limit: startLimit, windowMs: startWindowMs }),
     browserFactory = launchBrowser,
     sessionFactory = (browser, heartbeat, source, slot) => new BrowserSession(browser, heartbeat, source, slot) }) {
@@ -17,6 +17,12 @@ export class AccountPoolManager {
       !Number.isInteger(startWindowMs) || startWindowMs < 1 || startWindowMs > 3600000) {
       throw new Error('invalid_native_start_limit');
     }
+    if (![0, 1].includes(transientRetries) || !Number.isInteger(transientRetryDelayMs) || transientRetryDelayMs < 0 ||
+      transientRetryDelayMs > 60000 || !Number.isInteger(transientRetryWaitMs) || transientRetryWaitMs < 0 ||
+      transientRetryWaitMs > 120000) throw new Error('invalid_transient_retry');
+    this.transientRetries = transientRetries;
+    this.transientRetryDelayMs = transientRetryDelayMs;
+    this.transientRetryWaitMs = transientRetryWaitMs;
     this.concurrency = concurrency;
     this.maxWorkers = maxWorkers;
     this.queueLimit = queueLimit;
@@ -211,22 +217,38 @@ export class AccountPoolManager {
     return null;
   }
 
+  // An idle, usable worker for the one transient retry: another worker is preferred because a failed
+  // turn usually closes its own browser context, but the failed one is fine if it is still usable.
+  // Waits briefly for a busy worker to free up, then gives up (the caller surfaces the original error).
+  async retryWorker(source, account, version, model, failed, signal) {
+    const deadline = performance.now() + this.transientRetryWaitMs;
+    for (;;) {
+      this.assertCurrent(account, version, signal);
+      const idle = account.workers.filter(worker => !worker.busy && this.usable(source, worker) &&
+        this.workerStatus(source, worker).models.includes(model));
+      const other = idle.find(worker => worker !== failed);
+      if (other || idle.length) return other || idle[0];
+      if (performance.now() >= deadline) return null;
+      await pause(250, signal);
+    }
+  }
+
   async generate(source, request, signal, onText) {
     const account = this.runtime(source);
     const version = account.version;
     const queuedAt = performance.now();
-    return account.queue.run(async () => {
+    let published = false;
+    const progress = onText ? value => {
       this.assertCurrent(account, version, signal);
-      const worker = this.available(source, account, request.model);
-      if (!worker) throw new PrismError('account_busy', 409);
+      onText(value);
+      published = true;
+    } : undefined;
+    const run = async worker => {
       worker.busy = true;
       account.next = (worker.slot + 1) % account.workers.length;
       const startedAt = performance.now();
       try {
-        const text = await worker.manager.generate(source, request, signal, onText ? value => {
-          this.assertCurrent(account, version, signal);
-          onText(value);
-        } : undefined);
+        const text = await worker.manager.generate(source, request, signal, progress);
         this.assertCurrent(account, version, signal);
         return text;
       } finally {
@@ -234,6 +256,28 @@ export class AccountPoolManager {
         if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event: 'request_timing',
           source, worker: worker.slot, model: request.model, queue_wait_ms: Math.round(startedAt - queuedAt),
           generation_ms: Math.round(performance.now() - startedAt) }));
+      }
+    };
+    return account.queue.run(async () => {
+      this.assertCurrent(account, version, signal);
+      let worker = this.available(source, account, request.model);
+      if (!worker) throw new PrismError('account_busy', 409);
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await run(worker);
+        } catch (error) {
+          // Prism's own servers failed (HTTP 5xx on start or status, or a terminal 5xx) before any text was
+          // published: one resubmission, after a short pause, on another worker. Anything else, a second
+          // failure, or a request that is already gone surfaces as it is.
+          if (attempt >= this.transientRetries || published || !(error instanceof PrismError) || error.transient !== true) throw error;
+          this.assertCurrent(account, version, signal);
+          await pause(this.transientRetryDelayMs, signal);
+          const next = await this.retryWorker(source, account, version, request.model, worker, signal);
+          if (!next) throw error;
+          if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event: 'transient_retry',
+            source, model: request.model, from_worker: worker.slot, to_worker: next.slot, code: error.code }));
+          worker = next;
+        }
       }
     }, signal, { canStart: () => { this.assertCurrent(account, version, signal); return Boolean(this.available(source, account, request.model)); } });
   }

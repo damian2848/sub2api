@@ -450,6 +450,112 @@ test('one worker conversation recovery does not interrupt the other worker', asy
   assert.equal(calls, 2);
 });
 
+const transient = code => Object.assign(new PrismError(code, 502), { transient: true });
+
+test('a transient Prism 5xx is retried once on the other worker and the client never sees it', async t => {
+  const calls = [];
+  const { manager, log } = await fixture(t, { generate: ({ slot, request: value }) => {
+    calls.push(slot);
+    if (slot === calls[0]) throw transient('prism_upstream_http_error');
+    return `reply:${value.marker}`;
+  }, settings: undefined });
+  manager.transientRetryDelayMs = 0;
+  assert.equal(await manager.generate('32', request('flaky')), 'reply:flaky');
+  assert.equal(calls.length, 2);
+  assert.notEqual(calls[0], calls[1], 'the retry goes to the other worker');
+  assert.equal(log.generations.filter(item => item.marker === 'flaky').length, 2);
+});
+
+test('a second transient failure surfaces after exactly one retry', async t => {
+  let calls = 0;
+  const { manager } = await fixture(t, { generate: () => { calls += 1; throw transient('prism_upstream_http_error'); } });
+  manager.transientRetryDelayMs = 0;
+  await assert.rejects(manager.generate('32', request('down')), error => error.code === 'prism_upstream_http_error');
+  assert.equal(calls, 2);
+});
+
+test('errors that are not transient, or retries turned off, are never resubmitted', async t => {
+  let calls = 0;
+  const failing = new PrismError('prism_generation_failed', 502);
+  const first = await fixture(t, { generate: () => { calls += 1; throw failing; } });
+  first.manager.transientRetryDelayMs = 0;
+  await assert.rejects(first.manager.generate('32', request('hard')), error => error === failing);
+  assert.equal(calls, 1);
+  calls = 0;
+  const off = await fixture(t, { generate: () => { calls += 1; throw transient('prism_upstream_http_error'); } });
+  off.manager.transientRetries = 0;
+  await assert.rejects(off.manager.generate('32', request('off')), error => error.code === 'prism_upstream_http_error');
+  assert.equal(calls, 1);
+});
+
+test('a transient failure after published text is not resubmitted', async t => {
+  let calls = 0;
+  const { manager } = await fixture(t, { generate: ({ progress }) => {
+    calls += 1;
+    progress('partial');
+    throw transient('prism_upstream_http_error');
+  } });
+  manager.transientRetryDelayMs = 0;
+  const seen = [];
+  await assert.rejects(manager.generate('32', request('streamed'), undefined, value => seen.push(value)),
+    error => error.code === 'prism_upstream_http_error');
+  assert.equal(calls, 1);
+  assert.deepEqual(seen, ['partial']);
+});
+
+test('with no idle worker for the whole wait the original error surfaces and the busy worker is untouched', async t => {
+  const release = deferred();
+  const { manager } = await fixture(t, { generate: async ({ request: value, driver }) => {
+    if (value.marker === 'holder') { await release.promise; return 'held'; }
+    // Like a real failed turn, the browser context of the failing worker is gone.
+    driver.isAlive = () => false;
+    throw transient('prism_upstream_http_error');
+  } });
+  manager.transientRetryDelayMs = 0;
+  manager.transientRetryWaitMs = 60;
+  const holder = manager.generate('32', request('holder'));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const started = Date.now();
+  await assert.rejects(manager.generate('32', request('needs-retry')), error => error.code === 'prism_upstream_http_error');
+  assert.ok(Date.now() - started >= 50, 'it waited for an idle worker before giving up');
+  release.resolve();
+  assert.equal(await holder, 'held');
+});
+
+test('the retry takes a worker that frees up during the wait', async t => {
+  const release = deferred();
+  const attempts = [];
+  const { manager } = await fixture(t, { generate: async ({ slot, request: value, driver }) => {
+    attempts.push([value.marker, slot]);
+    if (value.marker === 'holder') { await release.promise; return 'held'; }
+    if (attempts.filter(item => item[0] === 'wait-for-it').length === 1) {
+      driver.isAlive = () => false;
+      setTimeout(release.resolve, 40);
+      throw transient('prism_upstream_http_error');
+    }
+    return 'second-try';
+  } });
+  manager.transientRetryDelayMs = 0;
+  manager.transientRetryWaitMs = 2000;
+  const holder = manager.generate('32', request('holder'));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(await manager.generate('32', request('wait-for-it')), 'second-try');
+  assert.equal(await holder, 'held');
+  const first = attempts.find(item => item[0] === 'wait-for-it')[1];
+  assert.notEqual(attempts.filter(item => item[0] === 'wait-for-it').at(-1)[1], first);
+});
+
+test('cancelling during the pause ends the request with the cancellation, not a second attempt', async t => {
+  let calls = 0;
+  const { manager } = await fixture(t, { generate: () => { calls += 1; throw transient('prism_upstream_http_error'); } });
+  manager.transientRetryDelayMs = 5000;
+  const controller = new AbortController();
+  const cancelled = manager.generate('32', request('cancel-me'), controller.signal);
+  setTimeout(() => controller.abort(), 30);
+  await assert.rejects(cancelled, error => error.code === 'request_cancelled');
+  assert.equal(calls, 1);
+});
+
 test('exclusive queue operations form a barrier while independent ready jobs can overlap', async () => {
   const queue = new AccountQueue(4, 2);
   const release = deferred();

@@ -11,6 +11,19 @@ export function aborted(signal) {
   if (signal?.aborted) throw signal.reason instanceof PrismError ? signal.reason : new PrismError('request_cancelled', 499);
 }
 
+// Sleeps for `ms`, ending early with the request's cancellation reason if it is aborted.
+export function pause(ms, signal) {
+  aborted(signal);
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason instanceof PrismError ? signal.reason : new PrismError('request_cancelled', 499));
+    };
+    const timer = setTimeout(() => { signal?.removeEventListener('abort', onAbort); resolve(); }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 export async function interruptible(work, signal, cancel) {
   aborted(signal);
   let listener;

@@ -348,6 +348,31 @@ test('HTTP errors from the accepted current start and current status still fail 
   assert.deepEqual(statusFailure.outcomes, [{ error: 'prism_upstream_http_error' }]);
 });
 
+test('only Prism-side 5xx failures are marked transient for the one resubmission', async () => {
+  const flagged = async (where, status) => {
+    const current = await activeTurn();
+    let error;
+    current.turn.reject = value => { error = value; };
+    if (where === 'start') await current.driver.observe(response(current.start.request(), null, status));
+    else if (where === 'status') {
+      await current.driver.observe(response(current.start.request(), running));
+      const poll = route({ request_id: running.request_id, turn_state: running.turn_state }, '/api/llm/response_with_tools_status');
+      await current.driver.observe(response(poll.request(), null, status));
+    } else {
+      const payload = { httpStatus: status, reason: 'unknown', message: 'Our servers are currently overloaded. Please try again later.' };
+      await current.driver.observe(response(current.start.request(),
+        { ...running, status: 'completed', response: { status: 'error', payload } }));
+    }
+    return error?.transient === true;
+  };
+  for (const where of ['start', 'status', 'terminal']) {
+    for (const status of [500, 502, 503, 504, 529]) assert.equal(await flagged(where, status), true, `${where} ${status}`);
+    for (const status of [400, 401, 403, 404, 429]) assert.equal(await flagged(where, status), false, `${where} ${status}`);
+  }
+  // Non-numeric or missing terminal statuses are never transient.
+  for (const httpStatus of ['503', undefined, null, 503.5]) assert.equal(await flagged('terminal', httpStatus), false, String(httpStatus));
+});
+
 test('only the current native resubmission terminal error is internally retryable', async () => {
   const payload = { httpStatus: 403, reason: 'unknown',
     message: 'Error while processing conversation (403 Forbidden). Please submit prompt again.' };
