@@ -186,3 +186,28 @@ func TestPelicanTestUsageBufferedStreams(t *testing.T) {
 	require.InDelta(t, 0.021, *cost, 1e-12)
 	require.False(t, partial)
 }
+
+func TestPelicanTestUsageSnapshotWithoutPricing(t *testing.T) {
+	collector := &pelicanTestUsageCollector{model: "mapped-model"}
+	ctx := context.WithValue(context.Background(), pelicanTestUsageKey{}, collector)
+	first := startPelicanTestUsage(ctx, "openai")
+	first.read(`{"type":"response.in_progress","response":{"usage":{"input_tokens":1000,"output_tokens":10,"input_tokens_details":{"cached_tokens":800}}}}`)
+	first.read(`{"type":"response.completed","response":{"model":"actual-model","usage":{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800},"output_tokens_details":{"reasoning_tokens":150}}}}`)
+	second := startPelicanTestUsage(ctx, "gemini")
+	second.read(`{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":300,"cachedContentTokenCount":100,"candidatesTokenCount":40,"thoughtsTokenCount":20}}`)
+	usage := collector.probeUsage(nil, &Account{})
+	require.Equal(t, "probe", usage.Source)
+	require.Equal(t, int64(2), usage.RequestCount)
+	require.Equal(t, int64(400), usage.InputTokens)
+	require.Equal(t, int64(260), usage.OutputTokens, "reasoning is already included in output tokens")
+	require.Equal(t, int64(900), usage.CacheReadTokens)
+	require.Equal(t, int64(170), usage.ReasoningTokens)
+	require.Nil(t, usage.CostUSD)
+	require.True(t, usage.CostIncomplete)
+	require.False(t, usage.UsageIncomplete, "missing prices do not make recorded token totals unknown")
+	startPelicanTestUsage(ctx, "chat")
+	usage = collector.probeUsage(nil, &Account{})
+	require.Equal(t, int64(3), usage.RequestCount)
+	require.True(t, usage.UsageIncomplete)
+	require.Equal(t, int64(400), usage.InputTokens, "an unmetered attempt does not discard recorded tokens")
+}

@@ -183,21 +183,21 @@ export function isChannelMonitorRouteEnabled(): boolean {
   return isFeatureFlagEnabled(FeatureFlags.channelMonitor)
 }
 
-export type ChannelMonitorMode = 'v1' | 'v2'
+export type ChannelMonitorMode = 'v1' | 'v2' | 'hybrid'
 
-/** Exclusive channel-monitor implementation. Invalid/missing → v1 (opt-in to v2). */
+/** Legacy values retain their capability; hybrid enables both workers. */
 export function getChannelMonitorMode(): ChannelMonitorMode {
   const appStore = useAppStore()
   const mode = appStore.cachedPublicSettings?.channel_monitor_mode
-  return mode === 'v2' ? 'v2' : 'v1'
+  return mode === 'v2' || mode === 'hybrid' ? mode : 'v1'
 }
 
 export function isChannelMonitorV1Mode(): boolean {
-  return isChannelMonitorRouteEnabled() && getChannelMonitorMode() === 'v1'
+  return isChannelMonitorRouteEnabled() && getChannelMonitorMode() !== 'v2'
 }
 
 export function isChannelMonitorV2Mode(): boolean {
-  return isChannelMonitorRouteEnabled() && getChannelMonitorMode() === 'v2'
+  return isChannelMonitorRouteEnabled() && getChannelMonitorMode() !== 'v1'
 }
 
 export function getChannelMonitorRefreshIntervalSeconds(): number {

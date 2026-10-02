@@ -158,6 +158,30 @@ func (_u *ChannelMonitorHistoryUpdate) ClearQuota() *ChannelMonitorHistoryUpdate
 	return _u
 }
 
+// SetMetering sets the "metering" field.
+func (_u *ChannelMonitorHistoryUpdate) SetMetering(v map[string]interface{}) *ChannelMonitorHistoryUpdate {
+	_u.mutation.SetMetering(v)
+	return _u
+}
+
+// ClearMetering clears the value of the "metering" field.
+func (_u *ChannelMonitorHistoryUpdate) ClearMetering() *ChannelMonitorHistoryUpdate {
+	_u.mutation.ClearMetering()
+	return _u
+}
+
+// SetObservationScope sets the "observation_scope" field.
+func (_u *ChannelMonitorHistoryUpdate) SetObservationScope(v map[string]interface{}) *ChannelMonitorHistoryUpdate {
+	_u.mutation.SetObservationScope(v)
+	return _u
+}
+
+// ClearObservationScope clears the value of the "observation_scope" field.
+func (_u *ChannelMonitorHistoryUpdate) ClearObservationScope() *ChannelMonitorHistoryUpdate {
+	_u.mutation.ClearObservationScope()
+	return _u
+}
+
 // SetCheckedAt sets the "checked_at" field.
 func (_u *ChannelMonitorHistoryUpdate) SetCheckedAt(v time.Time) *ChannelMonitorHistoryUpdate {
 	_u.mutation.SetCheckedAt(v)
@@ -285,6 +309,18 @@ func (_u *ChannelMonitorHistoryUpdate) sqlSave(ctx context.Context) (_node int, 
 	}
 	if _u.mutation.QuotaCleared() {
 		_spec.ClearField(channelmonitorhistory.FieldQuota, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.Metering(); ok {
+		_spec.SetField(channelmonitorhistory.FieldMetering, field.TypeJSON, value)
+	}
+	if _u.mutation.MeteringCleared() {
+		_spec.ClearField(channelmonitorhistory.FieldMetering, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.ObservationScope(); ok {
+		_spec.SetField(channelmonitorhistory.FieldObservationScope, field.TypeJSON, value)
+	}
+	if _u.mutation.ObservationScopeCleared() {
+		_spec.ClearField(channelmonitorhistory.FieldObservationScope, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.CheckedAt(); ok {
 		_spec.SetField(channelmonitorhistory.FieldCheckedAt, field.TypeTime, value)
@@ -466,6 +502,30 @@ func (_u *ChannelMonitorHistoryUpdateOne) ClearQuota() *ChannelMonitorHistoryUpd
 	return _u
 }
 
+// SetMetering sets the "metering" field.
+func (_u *ChannelMonitorHistoryUpdateOne) SetMetering(v map[string]interface{}) *ChannelMonitorHistoryUpdateOne {
+	_u.mutation.SetMetering(v)
+	return _u
+}
+
+// ClearMetering clears the value of the "metering" field.
+func (_u *ChannelMonitorHistoryUpdateOne) ClearMetering() *ChannelMonitorHistoryUpdateOne {
+	_u.mutation.ClearMetering()
+	return _u
+}
+
+// SetObservationScope sets the "observation_scope" field.
+func (_u *ChannelMonitorHistoryUpdateOne) SetObservationScope(v map[string]interface{}) *ChannelMonitorHistoryUpdateOne {
+	_u.mutation.SetObservationScope(v)
+	return _u
+}
+
+// ClearObservationScope clears the value of the "observation_scope" field.
+func (_u *ChannelMonitorHistoryUpdateOne) ClearObservationScope() *ChannelMonitorHistoryUpdateOne {
+	_u.mutation.ClearObservationScope()
+	return _u
+}
+
 // SetCheckedAt sets the "checked_at" field.
 func (_u *ChannelMonitorHistoryUpdateOne) SetCheckedAt(v time.Time) *ChannelMonitorHistoryUpdateOne {
 	_u.mutation.SetCheckedAt(v)
@@ -623,6 +683,18 @@ func (_u *ChannelMonitorHistoryUpdateOne) sqlSave(ctx context.Context) (_node *C
 	}
 	if _u.mutation.QuotaCleared() {
 		_spec.ClearField(channelmonitorhistory.FieldQuota, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.Metering(); ok {
+		_spec.SetField(channelmonitorhistory.FieldMetering, field.TypeJSON, value)
+	}
+	if _u.mutation.MeteringCleared() {
+		_spec.ClearField(channelmonitorhistory.FieldMetering, field.TypeJSON)
+	}
+	if value, ok := _u.mutation.ObservationScope(); ok {
+		_spec.SetField(channelmonitorhistory.FieldObservationScope, field.TypeJSON, value)
+	}
+	if _u.mutation.ObservationScopeCleared() {
+		_spec.ClearField(channelmonitorhistory.FieldObservationScope, field.TypeJSON)
 	}
 	if value, ok := _u.mutation.CheckedAt(); ok {
 		_spec.SetField(channelmonitorhistory.FieldCheckedAt, field.TypeTime, value)

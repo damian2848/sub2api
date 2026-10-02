@@ -49,6 +49,8 @@ func (ChannelMonitorHistory) Fields() []ent.Field {
 		// 归一化配额快照（domain.MonitorQuotaSnapshot，JSONB）；探活模式为 NULL。
 		field.JSON("quota", &domain.MonitorQuotaSnapshot{}).
 			Optional(),
+		field.JSON("metering", map[string]any{}).Optional(),
+		field.JSON("observation_scope", map[string]any{}).Optional(),
 		field.Time("checked_at").
 			Default(time.Now),
 	}

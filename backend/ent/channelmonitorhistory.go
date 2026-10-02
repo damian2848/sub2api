@@ -34,6 +34,10 @@ type ChannelMonitorHistory struct {
 	Message string `json:"message,omitempty"`
 	// Quota holds the value of the "quota" field.
 	Quota *domain.MonitorQuotaSnapshot `json:"quota,omitempty"`
+	// Metering holds the value of the "metering" field.
+	Metering map[string]interface{} `json:"metering,omitempty"`
+	// ObservationScope holds the value of the "observation_scope" field.
+	ObservationScope map[string]interface{} `json:"observation_scope,omitempty"`
 	// CheckedAt holds the value of the "checked_at" field.
 	CheckedAt time.Time `json:"checked_at,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
@@ -67,7 +71,7 @@ func (*ChannelMonitorHistory) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case channelmonitorhistory.FieldQuota:
+		case channelmonitorhistory.FieldQuota, channelmonitorhistory.FieldMetering, channelmonitorhistory.FieldObservationScope:
 			values[i] = new([]byte)
 		case channelmonitorhistory.FieldID, channelmonitorhistory.FieldMonitorID, channelmonitorhistory.FieldLatencyMs, channelmonitorhistory.FieldPingLatencyMs:
 			values[i] = new(sql.NullInt64)
@@ -142,6 +146,22 @@ func (_m *ChannelMonitorHistory) assignValues(columns []string, values []any) er
 					return fmt.Errorf("unmarshal field quota: %w", err)
 				}
 			}
+		case channelmonitorhistory.FieldMetering:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field metering", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.Metering); err != nil {
+					return fmt.Errorf("unmarshal field metering: %w", err)
+				}
+			}
+		case channelmonitorhistory.FieldObservationScope:
+			if value, ok := values[i].(*[]byte); !ok {
+				return fmt.Errorf("unexpected type %T for field observation_scope", values[i])
+			} else if value != nil && len(*value) > 0 {
+				if err := json.Unmarshal(*value, &_m.ObservationScope); err != nil {
+					return fmt.Errorf("unmarshal field observation_scope: %w", err)
+				}
+			}
 		case channelmonitorhistory.FieldCheckedAt:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field checked_at", values[i])
@@ -213,6 +233,12 @@ func (_m *ChannelMonitorHistory) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("quota=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Quota))
+	builder.WriteString(", ")
+	builder.WriteString("metering=")
+	builder.WriteString(fmt.Sprintf("%v", _m.Metering))
+	builder.WriteString(", ")
+	builder.WriteString("observation_scope=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ObservationScope))
 	builder.WriteString(", ")
 	builder.WriteString("checked_at=")
 	builder.WriteString(_m.CheckedAt.Format(time.ANSIC))

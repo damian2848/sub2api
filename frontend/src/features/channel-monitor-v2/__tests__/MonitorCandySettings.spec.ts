@@ -18,10 +18,13 @@ it('creates a group probe with a configurable model, effort and interval, never 
   const value = wrapper.emitted('update:modelValue')![0][0] as any[]
   expect(value).toEqual([{ group_id: 7, model: '', enabled: true, reasoning_effort: 'medium', interval_minutes: 1 }])
   await wrapper.setProps({ modelValue: value })
-  expect(wrapper.get('[data-testid="candy-group-select"]').text()).not.toContain('Whole group')
+  expect(wrapper.get('[data-testid="candy-group-select"]').text()).toContain('Whole group')
   expect(value[0]).not.toHaveProperty('account_id')
   await wrapper.find('input[maxlength="100"]').setValue('group-model')
   expect((wrapper.emitted('update:modelValue')!.at(-1)![0] as any[])[0].model).toBe('group-model')
+  await wrapper.get('[data-testid="candy-group-select"]').setValue('7')
+  await wrapper.get('[data-testid="add-candy-probe"]').trigger('click')
+  expect((wrapper.emitted('update:modelValue')!.at(-1)![0] as any[]).map(probe => probe.group_id)).toEqual([7, 7])
   wrapper.unmount()
 })
 

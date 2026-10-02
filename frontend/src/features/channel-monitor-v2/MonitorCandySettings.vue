@@ -6,7 +6,7 @@
     </header>
     <div class="space-y-4 p-5">
       <p class="rounded-xl bg-amber-50 p-3 text-xs text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">{{ t('channelMonitorV2.candy.costHint') }}</p>
-      <div v-for="(probe, index) in modelValue || []" :key="probe.group_id" class="rounded-2xl border border-gray-200 p-4 dark:border-dark-700">
+      <div v-for="(probe, index) in modelValue || []" :key="index" class="rounded-2xl border border-gray-200 p-4 dark:border-dark-700">
         <div class="mb-3 flex items-center gap-3">
           <Toggle :model-value="probe.enabled" @update:model-value="patch(index, { enabled: $event })" />
           <strong class="min-w-0 flex-1 truncate text-sm text-gray-800 dark:text-gray-100">{{ groupName(probe.group_id) }}</strong>
@@ -37,7 +37,7 @@ const props = defineProps<{ modelValue?: MonitorCandyProbe[]; groups: Array<{ id
 const emit = defineEmits<{ 'update:modelValue': [MonitorCandyProbe[]] }>()
 const { t } = useI18n()
 const selectedGroup = ref(0)
-const available = computed(() => props.groups.filter(group => !props.modelValue?.some(probe => probe.group_id === group.id)))
+const available = computed(() => props.groups)
 const groupName = (id: number) => props.groups.find(group => group.id === id)?.name || `#${id}`
 function patch(index: number, value: Partial<MonitorCandyProbe>) { emit('update:modelValue', (props.modelValue || []).map((probe, i) => i === index ? { ...probe, ...value } : probe)) }
 function remove(index: number) { emit('update:modelValue', (props.modelValue || []).filter((_, i) => i !== index)) }

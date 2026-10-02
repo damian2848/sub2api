@@ -138,6 +138,7 @@ func normalizeGrokAccountTestMode(mode string) string {
 
 // AccountTestService handles account testing operations
 type AccountTestService struct {
+	probeRecorder             ChannelMonitorProbeRecorder
 	accountRepo               AccountRepository
 	geminiTokenProvider       *GeminiTokenProvider
 	claudeTokenProvider       *ClaudeTokenProvider
@@ -160,6 +161,10 @@ type AccountTestService struct {
 	// grokWSDialer is optional; realtime account tests use the default OpenAI-style
 	// WS dialer when nil (supports proxy + coder/websocket handshake).
 	grokWSDialer openAIWSClientDialer
+}
+
+func (s *AccountTestService) SetProbeRecorder(recorder ChannelMonitorProbeRecorder) {
+	s.probeRecorder = recorder
 }
 
 func (s *AccountTestService) SetSettingService(settingService *SettingService) {

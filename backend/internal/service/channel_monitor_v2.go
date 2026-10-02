@@ -246,15 +246,16 @@ type ChannelMonitorV2ModelRow struct {
 }
 
 type ChannelMonitorV2MatrixRow struct {
-	Candy               *ChannelMonitorV2CandyHistory `json:"candy,omitempty"`
-	GroupRateMultiplier *float64                      `json:"group_rate_multiplier,omitempty"`
-	Platform            string                        `json:"platform"`
-	GroupID             *int64                        `json:"group_id,omitempty"`
-	GroupName           string                        `json:"group_name,omitempty"`
-	Model               string                        `json:"model,omitempty"`
-	Metrics             ChannelMonitorV2Metric        `json:"metrics"`
-	Health              ChannelMonitorV2Health        `json:"health"`
-	Buckets             []ChannelMonitorV2TrendPoint  `json:"buckets"`
+	CandyHistories      []*ChannelMonitorV2CandyHistory `json:"candy_histories,omitempty"`
+	Candy               *ChannelMonitorV2CandyHistory   `json:"candy,omitempty"`
+	GroupRateMultiplier *float64                        `json:"group_rate_multiplier,omitempty"`
+	Platform            string                          `json:"platform"`
+	GroupID             *int64                          `json:"group_id,omitempty"`
+	GroupName           string                          `json:"group_name,omitempty"`
+	Model               string                          `json:"model,omitempty"`
+	Metrics             ChannelMonitorV2Metric          `json:"metrics"`
+	Health              ChannelMonitorV2Health          `json:"health"`
+	Buckets             []ChannelMonitorV2TrendPoint    `json:"buckets"`
 }
 
 type ChannelMonitorV2Matrix struct {
@@ -431,7 +432,7 @@ func (s *ChannelMonitorV2Service) getEnabledConfig(ctx context.Context) (*Channe
 	if err != nil {
 		return nil, err
 	}
-	if cfg == nil || !cfg.Enabled {
+	if cfg == nil {
 		return nil, ErrChannelMonitorDisabled
 	}
 	return cfg, nil
@@ -487,6 +488,15 @@ func (s *ChannelMonitorV2Service) Dimensions(ctx context.Context, filter Channel
 	dims, err := s.repo.GetDimensions(ctx, filter, *cfg)
 	if err != nil {
 		return nil, err
+	}
+	if targets, ok := s.repo.(interface {
+		ListMonitorObservationTargets(context.Context, ChannelMonitorV2Filter) ([]ChannelMonitorObservation, error)
+	}); ok {
+		rows, loadErr := targets.ListMonitorObservationTargets(ctx, filter)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		mergeMonitorObservationDimensions(dims, rows, filter, cfg)
 	}
 	// Dimension request_count is operational volume; strip for non-admin callers
 	// at the API edge. Dimensions is shared by user/admin routes — redaction is

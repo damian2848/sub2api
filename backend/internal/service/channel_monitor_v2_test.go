@@ -371,10 +371,10 @@ func TestChannelMonitorV2TopUsersKeepsSelfOutsideLimit(t *testing.T) {
 	require.Equal(t, 12, out[10].Rank)
 }
 
-func TestChannelMonitorV2ReadAPIsRejectDisabledConfig(t *testing.T) {
+func TestChannelMonitorV2ReadAPIsKeepHistoryWhenCollectionDisabled(t *testing.T) {
 	repo := &channelMonitorV2RepoStub{config: ChannelMonitorV2Config{Enabled: false}}
 	_, err := NewChannelMonitorV2Service(repo).Matrix(context.Background(), ChannelMonitorV2Filter{}, ChannelMonitorV2GroupByPlatform, false)
-	require.ErrorIs(t, err, ErrChannelMonitorDisabled)
+	require.NoError(t, err)
 }
 
 func TestNormalizeChannelMonitorV2IgnoredCategories(t *testing.T) {

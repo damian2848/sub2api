@@ -90,6 +90,18 @@ func (_c *ChannelMonitorHistoryCreate) SetQuota(v *domain.MonitorQuotaSnapshot) 
 	return _c
 }
 
+// SetMetering sets the "metering" field.
+func (_c *ChannelMonitorHistoryCreate) SetMetering(v map[string]interface{}) *ChannelMonitorHistoryCreate {
+	_c.mutation.SetMetering(v)
+	return _c
+}
+
+// SetObservationScope sets the "observation_scope" field.
+func (_c *ChannelMonitorHistoryCreate) SetObservationScope(v map[string]interface{}) *ChannelMonitorHistoryCreate {
+	_c.mutation.SetObservationScope(v)
+	return _c
+}
+
 // SetCheckedAt sets the "checked_at" field.
 func (_c *ChannelMonitorHistoryCreate) SetCheckedAt(v time.Time) *ChannelMonitorHistoryCreate {
 	_c.mutation.SetCheckedAt(v)
@@ -236,6 +248,14 @@ func (_c *ChannelMonitorHistoryCreate) createSpec() (*ChannelMonitorHistory, *sq
 	if value, ok := _c.mutation.Quota(); ok {
 		_spec.SetField(channelmonitorhistory.FieldQuota, field.TypeJSON, value)
 		_node.Quota = value
+	}
+	if value, ok := _c.mutation.Metering(); ok {
+		_spec.SetField(channelmonitorhistory.FieldMetering, field.TypeJSON, value)
+		_node.Metering = value
+	}
+	if value, ok := _c.mutation.ObservationScope(); ok {
+		_spec.SetField(channelmonitorhistory.FieldObservationScope, field.TypeJSON, value)
+		_node.ObservationScope = value
 	}
 	if value, ok := _c.mutation.CheckedAt(); ok {
 		_spec.SetField(channelmonitorhistory.FieldCheckedAt, field.TypeTime, value)
@@ -430,6 +450,42 @@ func (u *ChannelMonitorHistoryUpsert) ClearQuota() *ChannelMonitorHistoryUpsert 
 	return u
 }
 
+// SetMetering sets the "metering" field.
+func (u *ChannelMonitorHistoryUpsert) SetMetering(v map[string]interface{}) *ChannelMonitorHistoryUpsert {
+	u.Set(channelmonitorhistory.FieldMetering, v)
+	return u
+}
+
+// UpdateMetering sets the "metering" field to the value that was provided on create.
+func (u *ChannelMonitorHistoryUpsert) UpdateMetering() *ChannelMonitorHistoryUpsert {
+	u.SetExcluded(channelmonitorhistory.FieldMetering)
+	return u
+}
+
+// ClearMetering clears the value of the "metering" field.
+func (u *ChannelMonitorHistoryUpsert) ClearMetering() *ChannelMonitorHistoryUpsert {
+	u.SetNull(channelmonitorhistory.FieldMetering)
+	return u
+}
+
+// SetObservationScope sets the "observation_scope" field.
+func (u *ChannelMonitorHistoryUpsert) SetObservationScope(v map[string]interface{}) *ChannelMonitorHistoryUpsert {
+	u.Set(channelmonitorhistory.FieldObservationScope, v)
+	return u
+}
+
+// UpdateObservationScope sets the "observation_scope" field to the value that was provided on create.
+func (u *ChannelMonitorHistoryUpsert) UpdateObservationScope() *ChannelMonitorHistoryUpsert {
+	u.SetExcluded(channelmonitorhistory.FieldObservationScope)
+	return u
+}
+
+// ClearObservationScope clears the value of the "observation_scope" field.
+func (u *ChannelMonitorHistoryUpsert) ClearObservationScope() *ChannelMonitorHistoryUpsert {
+	u.SetNull(channelmonitorhistory.FieldObservationScope)
+	return u
+}
+
 // SetCheckedAt sets the "checked_at" field.
 func (u *ChannelMonitorHistoryUpsert) SetCheckedAt(v time.Time) *ChannelMonitorHistoryUpsert {
 	u.Set(channelmonitorhistory.FieldCheckedAt, v)
@@ -619,6 +675,48 @@ func (u *ChannelMonitorHistoryUpsertOne) UpdateQuota() *ChannelMonitorHistoryUps
 func (u *ChannelMonitorHistoryUpsertOne) ClearQuota() *ChannelMonitorHistoryUpsertOne {
 	return u.Update(func(s *ChannelMonitorHistoryUpsert) {
 		s.ClearQuota()
+	})
+}
+
+// SetMetering sets the "metering" field.
+func (u *ChannelMonitorHistoryUpsertOne) SetMetering(v map[string]interface{}) *ChannelMonitorHistoryUpsertOne {
+	return u.Update(func(s *ChannelMonitorHistoryUpsert) {
+		s.SetMetering(v)
+	})
+}
+
+// UpdateMetering sets the "metering" field to the value that was provided on create.
+func (u *ChannelMonitorHistoryUpsertOne) UpdateMetering() *ChannelMonitorHistoryUpsertOne {
+	return u.Update(func(s *ChannelMonitorHistoryUpsert) {
+		s.UpdateMetering()
+	})
+}
+
+// ClearMetering clears the value of the "metering" field.
+func (u *ChannelMonitorHistoryUpsertOne) ClearMetering() *ChannelMonitorHistoryUpsertOne {
+	return u.Update(func(s *ChannelMonitorHistoryUpsert) {
+		s.ClearMetering()
+	})
+}
+
+// SetObservationScope sets the "observation_scope" field.
+func (u *ChannelMonitorHistoryUpsertOne) SetObservationScope(v map[string]interface{}) *ChannelMonitorHistoryUpsertOne {
+	return u.Update(func(s *ChannelMonitorHistoryUpsert) {
+		s.SetObservationScope(v)
+	})
+}
+
+// UpdateObservationScope sets the "observation_scope" field to the value that was provided on create.
+func (u *ChannelMonitorHistoryUpsertOne) UpdateObservationScope() *ChannelMonitorHistoryUpsertOne {
+	return u.Update(func(s *ChannelMonitorHistoryUpsert) {
+		s.UpdateObservationScope()
+	})
+}
+
+// ClearObservationScope clears the value of the "observation_scope" field.
+func (u *ChannelMonitorHistoryUpsertOne) ClearObservationScope() *ChannelMonitorHistoryUpsertOne {
+	return u.Update(func(s *ChannelMonitorHistoryUpsert) {
+		s.ClearObservationScope()
 	})
 }
 
@@ -977,6 +1075,48 @@ func (u *ChannelMonitorHistoryUpsertBulk) UpdateQuota() *ChannelMonitorHistoryUp
 func (u *ChannelMonitorHistoryUpsertBulk) ClearQuota() *ChannelMonitorHistoryUpsertBulk {
 	return u.Update(func(s *ChannelMonitorHistoryUpsert) {
 		s.ClearQuota()
+	})
+}
+
+// SetMetering sets the "metering" field.
+func (u *ChannelMonitorHistoryUpsertBulk) SetMetering(v map[string]interface{}) *ChannelMonitorHistoryUpsertBulk {
+	return u.Update(func(s *ChannelMonitorHistoryUpsert) {
+		s.SetMetering(v)
+	})
+}
+
+// UpdateMetering sets the "metering" field to the value that was provided on create.
+func (u *ChannelMonitorHistoryUpsertBulk) UpdateMetering() *ChannelMonitorHistoryUpsertBulk {
+	return u.Update(func(s *ChannelMonitorHistoryUpsert) {
+		s.UpdateMetering()
+	})
+}
+
+// ClearMetering clears the value of the "metering" field.
+func (u *ChannelMonitorHistoryUpsertBulk) ClearMetering() *ChannelMonitorHistoryUpsertBulk {
+	return u.Update(func(s *ChannelMonitorHistoryUpsert) {
+		s.ClearMetering()
+	})
+}
+
+// SetObservationScope sets the "observation_scope" field.
+func (u *ChannelMonitorHistoryUpsertBulk) SetObservationScope(v map[string]interface{}) *ChannelMonitorHistoryUpsertBulk {
+	return u.Update(func(s *ChannelMonitorHistoryUpsert) {
+		s.SetObservationScope(v)
+	})
+}
+
+// UpdateObservationScope sets the "observation_scope" field to the value that was provided on create.
+func (u *ChannelMonitorHistoryUpsertBulk) UpdateObservationScope() *ChannelMonitorHistoryUpsertBulk {
+	return u.Update(func(s *ChannelMonitorHistoryUpsert) {
+		s.UpdateObservationScope()
+	})
+}
+
+// ClearObservationScope clears the value of the "observation_scope" field.
+func (u *ChannelMonitorHistoryUpsertBulk) ClearObservationScope() *ChannelMonitorHistoryUpsertBulk {
+	return u.Update(func(s *ChannelMonitorHistoryUpsert) {
+		s.ClearObservationScope()
 	})
 }
 

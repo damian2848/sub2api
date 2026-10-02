@@ -763,11 +763,13 @@ func (r *channelMonitorV2Repository) loadErrorDetails(ctx context.Context, filte
 	conditions := []string{
 		"current_error.created_at >= $1",
 		"current_error.created_at < $2",
+		"current_error.source = 'business'",
 		"NOT current_error.is_count_tokens",
 		"(COALESCE(current_error.status_code, 0) >= 400 OR current_error.error_type = 'cyber_policy')",
 		`(NULLIF(current_error.request_id, '') IS NULL OR NOT EXISTS (
 				SELECT 1 FROM ops_error_logs newer
 				WHERE newer.request_id = current_error.request_id
+				  AND newer.source = 'business'
 				  AND NOT newer.is_count_tokens
 				  AND (COALESCE(newer.status_code, 0) >= 400 OR newer.error_type = 'cyber_policy')
 				  AND (newer.created_at, newer.id) > (current_error.created_at, current_error.id)

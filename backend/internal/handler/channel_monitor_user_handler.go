@@ -37,7 +37,7 @@ func (h *ChannelMonitorUserHandler) featureEnabled(c *gin.Context) bool {
 		return true
 	}
 	runtime := h.settingService.GetChannelMonitorRuntime(c.Request.Context())
-	return runtime.Enabled && runtime.Mode == service.ChannelMonitorModeV1
+	return runtime.Enabled
 }
 
 // quotaVisible 返回用户端是否展示配额/余额快照（channel_monitor_show_quota，

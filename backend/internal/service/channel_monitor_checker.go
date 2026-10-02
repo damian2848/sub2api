@@ -68,6 +68,22 @@ func runCheckForModel(ctx context.Context, provider, endpoint, apiKey, model str
 
 	start := time.Now()
 	respText, rawBody, statusCode, err := callProvider(ctx, provider, endpoint, apiKey, model, challenge.Prompt, opts)
+	protocol := "chat"
+	if provider == MonitorProviderAnthropic {
+		protocol = "anthropic"
+	}
+	if provider == MonitorProviderGemini {
+		protocol = "gemini"
+	}
+	if opts != nil && opts.APIMode == MonitorAPIModeResponses {
+		protocol = "responses"
+	}
+	usage := &pelicanTestUsage{protocol: protocol, model: model}
+	usage.read(rawBody)
+	usage.complete = err == nil && statusCode >= 200 && statusCode < 300
+	collector := &pelicanTestUsageCollector{model: model, requests: []*pelicanTestUsage{usage}}
+	metering := collector.probeUsage(nil, nil)
+	res.Usage = &metering
 	latency := time.Since(start)
 	latencyMs := int(latency / time.Millisecond)
 	res.LatencyMs = &latencyMs
@@ -541,6 +557,9 @@ func postRawJSON(ctx context.Context, fullURL string, payload []byte, headers ma
 	req.Header.Set("Accept", "application/json")
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	if err := SignChannelMonitorProbeRequest(ctx, req); err != nil {
+		return nil, 0, err
 	}
 
 	resp, err := monitorHTTPClient.Do(req)

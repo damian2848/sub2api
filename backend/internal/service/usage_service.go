@@ -94,6 +94,7 @@ func (s *UsageService) Create(ctx context.Context, req CreateUsageLogRequest) (*
 
 	// 创建使用日志
 	usageLog := &UsageLog{
+		Source:                ChannelMonitorRequestSource(ctx),
 		UserID:                req.UserID,
 		APIKeyID:              req.APIKeyID,
 		AccountID:             req.AccountID,

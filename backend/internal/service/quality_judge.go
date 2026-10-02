@@ -21,11 +21,12 @@ type QualityJudgeConfig struct {
 	Prompt  string `json:"prompt"`
 }
 type QualityJudgment struct {
-	Verdict   string `json:"verdict"`
-	Reason    string `json:"reason"`
-	AccountID int64  `json:"account_id,omitempty"`
-	GroupID   int64  `json:"group_id,omitempty"`
-	ModelID   string `json:"model_id,omitempty"`
+	Verdict   string                    `json:"verdict"`
+	Reason    string                    `json:"reason"`
+	AccountID int64                     `json:"account_id,omitempty"`
+	GroupID   int64                     `json:"group_id,omitempty"`
+	ModelID   string                    `json:"model_id,omitempty"`
+	Usage     *ChannelMonitorProbeUsage `json:"usage,omitempty"`
 }
 
 type qualityJudgeAccounts interface {
@@ -43,14 +44,19 @@ type QualityJudgeService struct {
 	groups   qualityJudgeGroups
 	slots    qualityJudgeSlots
 	request  func(context.Context, int64, string, string) (string, error)
+	billing  *BillingService
 }
 
 func NewQualityJudgeService(accounts AccountRepository, groups GroupRepository, slots *ConcurrencyService, tests *AccountTestService) *QualityJudgeService {
-	return &QualityJudgeService{accounts: accounts, groups: groups, slots: slots, request: tests.runQualityJudgeRequest}
+	service := &QualityJudgeService{accounts: accounts, groups: groups, slots: slots, request: tests.runQualityJudgeRequest}
+	if tests != nil && tests.openaiGatewayService != nil {
+		service.billing = tests.openaiGatewayService.billingService
+	}
+	return service
 }
 
 func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cfg *PelicanTestConfig, answer string) *QualityJudgment {
-	result := &QualityJudgment{Verdict: "unknown", Reason: "judge_not_configured"}
+	result := &QualityJudgment{Verdict: "unknown", Reason: "judge_not_configured", Usage: &ChannelMonitorProbeUsage{Source: "probe", CostUSD: new(float64)}}
 	if cfg.Quality == nil || cfg.Quality.Judge == nil {
 		return result
 	}
@@ -95,12 +101,21 @@ func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cf
 		if slot == nil || !slot.Acquired {
 			continue
 		}
+		if attempts == 0 {
+			result.Usage.CostUSD = nil
+		}
 		attempts++
 		output, requestErr := func() (string, error) {
 			if slot.ReleaseFunc != nil {
 				defer slot.ReleaseFunc()
 			}
-			return s.request(ctx, account.ID, judge.ModelID, prompt)
+			// Judge requests own their collector so the caller can add them exactly once.
+			collector := &pelicanTestUsageCollector{model: account.GetMappedModel(judge.ModelID)}
+			defer func() {
+				usage := collector.probeUsage(s.billing, account)
+				result.Usage.Add(&usage)
+			}()
+			return s.request(context.WithValue(ctx, pelicanTestUsageKey{}, collector), account.ID, judge.ModelID, prompt)
 		}()
 		result.AccountID = account.ID
 		if requestErr != nil {
@@ -111,6 +126,7 @@ func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cf
 				verdict.AccountID = account.ID
 				verdict.GroupID = judge.GroupID
 				verdict.ModelID = judge.ModelID
+				verdict.Usage = result.Usage
 				return verdict
 			}
 			result.Reason = "judge_invalid_response"

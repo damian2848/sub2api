@@ -92,8 +92,76 @@ func TestQualityJudgeSkipsUnavailableOrUnsupportedAccounts(t *testing.T) {
 		t.Fatal("must not issue request")
 		return "", nil
 	}
-	require.Equal(t, "judge_no_available_account", svc.Judge(context.Background(), 1, cfg, "answer").Reason)
+	judgment := svc.Judge(context.Background(), 1, cfg, "answer")
+	require.Equal(t, "judge_no_available_account", judgment.Reason)
+	require.NotNil(t, judgment.Usage.CostUSD)
+	require.Zero(t, *judgment.Usage.CostUSD)
+	require.Zero(t, judgment.Usage.RequestCount)
+	require.False(t, judgment.Usage.CostIncomplete)
 	require.Equal(t, []int64{3}, slots.acquired)
+}
+
+func TestQualityJudgeMetersFailedAndSuccessfulRequestsWithoutCallerDoubleCount(t *testing.T) {
+	svc, cfg, accounts, slots := judgeFixture()
+	svc.billing = newTestBillingService()
+	for i := range accounts.accounts {
+		accounts.accounts[i].Credentials = map[string]any{"model_mapping": map[string]any{cfg.Quality.Judge.ModelID: "claude-sonnet-4"}}
+	}
+	accounts.accounts[1].Extra = map[string]any{AccountCostMultiplierExtraKey: 0.25}
+	accounts.accounts[2].Extra = map[string]any{AccountCostMultiplierExtraKey: 0.5}
+	caller := &pelicanTestUsageCollector{model: "claude-sonnet-4"}
+	ctx := context.WithValue(context.Background(), pelicanTestUsageKey{}, caller)
+	question := startPelicanTestUsage(ctx, "openai")
+	question.read(`{"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":3}}}`)
+	svc.request = func(ctx context.Context, id int64, _ string, _ string) (string, error) {
+		collector := pelicanUsageFromContext(ctx)
+		require.NotSame(t, caller, collector)
+		require.Equal(t, "claude-sonnet-4", collector.model)
+		usage := startPelicanTestUsage(ctx, "openai")
+		usage.read(`{"type":"response.completed","response":{"usage":{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800},"output_tokens_details":{"reasoning_tokens":150}}}}`)
+		if id == 2 {
+			return "", fmt.Errorf("failed after upstream usage arrived")
+		}
+		return `{"verdict":"correct","reason":"equivalent"}`, nil
+	}
+	judgment := svc.Judge(ctx, 1, cfg, "21")
+	require.Equal(t, "correct", judgment.Verdict)
+	require.Equal(t, int64(3), judgment.AccountID)
+	require.Equal(t, int64(8), judgment.GroupID)
+	require.Equal(t, cfg.Quality.Judge.ModelID, judgment.ModelID)
+	require.Equal(t, int64(2), judgment.Usage.RequestCount)
+	require.Equal(t, int64(400), judgment.Usage.InputTokens)
+	require.Equal(t, int64(400), judgment.Usage.OutputTokens)
+	require.Equal(t, int64(1600), judgment.Usage.CacheReadTokens)
+	require.Equal(t, int64(300), judgment.Usage.ReasoningTokens)
+	require.NotNil(t, judgment.Usage.CostUSD)
+	require.False(t, judgment.Usage.CostIncomplete)
+	require.False(t, judgment.Usage.UsageIncomplete)
+	require.Equal(t, slots.acquired, slots.released)
+	require.Len(t, caller.requests, 1, "judge collectors must not also enter the tested answer collector")
+	combined := caller.probeUsage(svc.billing, &Account{})
+	combined.Add(judgment.Usage)
+	require.Equal(t, int64(3), combined.RequestCount)
+	require.Equal(t, int64(407), combined.InputTokens)
+	require.Equal(t, int64(403), combined.OutputTokens)
+}
+
+func TestQualityJudgeUnknownRetainsUsageWithoutPricing(t *testing.T) {
+	svc, cfg, _, _ := judgeFixture()
+	svc.request = func(ctx context.Context, _ int64, _, _ string) (string, error) {
+		usage := startPelicanTestUsage(ctx, "openai")
+		usage.read(`{"type":"response.completed","response":{"usage":{"input_tokens":5,"output_tokens":1}}}`)
+		return "invalid judgment", nil
+	}
+	judgment := svc.Judge(context.Background(), 1, cfg, "21")
+	require.Equal(t, "unknown", judgment.Verdict)
+	require.Equal(t, "judge_invalid_response", judgment.Reason)
+	require.Equal(t, int64(2), judgment.Usage.RequestCount)
+	require.Equal(t, int64(10), judgment.Usage.InputTokens)
+	require.Equal(t, int64(2), judgment.Usage.OutputTokens)
+	require.True(t, judgment.Usage.CostIncomplete)
+	require.False(t, judgment.Usage.UsageIncomplete)
+	require.Nil(t, judgment.Usage.CostUSD, "unpriced requests stay unknown rather than using the no-request zero baseline")
 }
 func TestQualityJudgeRejectsAmbiguousOutput(t *testing.T) {
 	for _, output := range []string{`{"verdict":"correct"}`, `{"verdict":true,"reason":"ok"}`, `{"verdict":"correct","verdict":"incorrect","reason":"contradiction"}`, `{"verdict":"incorrect","reason":"no"} trailing`, "```json\n{}\n```", `{"verdict":"correct","reason":"ok","other":true}`, strings.Repeat("x", 8001)} {

@@ -349,6 +349,7 @@ func usageRecordContext(parent context.Context, base context.Context) context.Co
 	if requestID, _ := parent.Value(ctxkey.RequestID).(string); strings.TrimSpace(requestID) != "" {
 		base = context.WithValue(base, ctxkey.RequestID, strings.TrimSpace(requestID))
 	}
+	base = service.CopyChannelMonitorRequestSource(parent, base)
 	return requesttiming.With(base, requesttiming.From(parent))
 }
 
@@ -4358,6 +4359,7 @@ const cyberPolicyRecordedKey = "ops_cyber_recorded"
 // async goroutine for building the cyber ops_error_logs entry.
 type cyberPolicyOpsErrorMeta struct {
 	RequestID         string
+	Source            string
 	ClientRequestID   string
 	Platform          string
 	Model             string
@@ -4386,6 +4388,7 @@ func buildCyberPolicyOpsErrorEntry(meta cyberPolicyOpsErrorMeta, mark *service.C
 	rt := int16(service.RequestTypeCyberBlocked)
 	entry := &service.OpsInsertErrorLogInput{
 		RequestID:         meta.RequestID,
+		Source:            meta.Source,
 		ClientRequestID:   meta.ClientRequestID,
 		Platform:          meta.Platform,
 		Model:             meta.Model,
@@ -4434,6 +4437,7 @@ func buildCyberSessionBlockedOpsEntry(meta cyberPolicyOpsErrorMeta) *service.Ops
 	rt := int16(service.RequestTypeCyberBlocked)
 	entry := &service.OpsInsertErrorLogInput{
 		RequestID:         meta.RequestID,
+		Source:            meta.Source,
 		ClientRequestID:   meta.ClientRequestID,
 		Platform:          meta.Platform,
 		Model:             meta.Model,
@@ -4474,6 +4478,7 @@ func buildCyberSessionIdentityRejectedOpsEntry(meta cyberPolicyOpsErrorMeta) *se
 	rt := int16(service.RequestTypeCyberBlocked)
 	entry := &service.OpsInsertErrorLogInput{
 		RequestID:         meta.RequestID,
+		Source:            meta.Source,
 		ClientRequestID:   meta.ClientRequestID,
 		Platform:          meta.Platform,
 		Model:             meta.Model,
@@ -4662,6 +4667,7 @@ func (h *OpenAIGatewayHandler) enqueueCyberSessionBlockedOpsEntry(c *gin.Context
 		requestCtx = c.Request.Context()
 	}
 	meta.Platform = resolveOpsPlatform(requestCtx, apiKey, guessPlatformFromPath(meta.RequestPath))
+	meta.Source = service.ChannelMonitorRequestSource(requestCtx)
 	if c.Request != nil {
 		meta.ClientRequestID, _ = c.Request.Context().Value(ctxkey.ClientRequestID).(string)
 		meta.UserAgent = c.GetHeader("User-Agent")
@@ -4704,6 +4710,7 @@ func (h *OpenAIGatewayHandler) enqueueCyberSessionIdentityRejectedOpsEntry(c *gi
 		meta.ClientIP = strings.TrimSpace(ip.GetClientIP(c))
 	}
 	meta.Platform = resolveOpsPlatform(requestCtx, apiKey, guessPlatformFromPath(meta.RequestPath))
+	meta.Source = service.ChannelMonitorRequestSource(requestCtx)
 	meta.APIKeyID = apiKey.ID
 	meta.GroupID = apiKey.GroupID
 	meta.APIKeyPrefix = keyPrefix(apiKey.Key, 8)
@@ -4793,6 +4800,7 @@ func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarkedWithIdentity(c *gin.Cont
 	}
 	opsMeta := cyberPolicyOpsErrorMeta{
 		RequestID:         requestID,
+		Source:            service.ChannelMonitorRequestSource(requestCtx),
 		ClientRequestID:   clientRequestID,
 		Platform:          platform,
 		Model:             model,
@@ -4820,8 +4828,9 @@ func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarkedWithIdentity(c *gin.Cont
 			cancel()
 		}
 	}
+	usageParent := service.CopyChannelMonitorRequestSource(requestCtx, context.Background())
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(usageParent, 30*time.Second)
 		defer cancel()
 		if cmSvc != nil {
 			cmSvc.RecordCyberPolicyEvent(ctx, service.CyberPolicyRecordInput{

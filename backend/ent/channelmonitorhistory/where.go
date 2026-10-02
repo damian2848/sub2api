@@ -375,6 +375,26 @@ func QuotaNotNil() predicate.ChannelMonitorHistory {
 	return predicate.ChannelMonitorHistory(sql.FieldNotNull(FieldQuota))
 }
 
+// MeteringIsNil applies the IsNil predicate on the "metering" field.
+func MeteringIsNil() predicate.ChannelMonitorHistory {
+	return predicate.ChannelMonitorHistory(sql.FieldIsNull(FieldMetering))
+}
+
+// MeteringNotNil applies the NotNil predicate on the "metering" field.
+func MeteringNotNil() predicate.ChannelMonitorHistory {
+	return predicate.ChannelMonitorHistory(sql.FieldNotNull(FieldMetering))
+}
+
+// ObservationScopeIsNil applies the IsNil predicate on the "observation_scope" field.
+func ObservationScopeIsNil() predicate.ChannelMonitorHistory {
+	return predicate.ChannelMonitorHistory(sql.FieldIsNull(FieldObservationScope))
+}
+
+// ObservationScopeNotNil applies the NotNil predicate on the "observation_scope" field.
+func ObservationScopeNotNil() predicate.ChannelMonitorHistory {
+	return predicate.ChannelMonitorHistory(sql.FieldNotNull(FieldObservationScope))
+}
+
 // CheckedAtEQ applies the EQ predicate on the "checked_at" field.
 func CheckedAtEQ(v time.Time) predicate.ChannelMonitorHistory {
 	return predicate.ChannelMonitorHistory(sql.FieldEQ(FieldCheckedAt, v))

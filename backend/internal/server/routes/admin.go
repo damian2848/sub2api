@@ -910,7 +910,7 @@ func registerChannelRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerChannelMonitorRoutes(admin *gin.RouterGroup, h *handler.Handlers, settingService *service.SettingService) {
-	guard := channelMonitorAdminFeatureGuard(settingService)
+	guard := channelMonitorFeatureGuard(settingService)
 	monitors := admin.Group("/channel-monitors")
 	monitors.Use(guard)
 	{
@@ -959,33 +959,23 @@ func registerAffiliateRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerChannelMonitorV2Routes(admin *gin.RouterGroup, h *handler.Handlers, settingService *service.SettingService) {
-	// Config GET/PUT: feature enabled only (operators can prepare V2 before flipping mode).
-	// Read/matrix endpoints: require mode=v2 so V1 deployments do not serve passive data.
-	featureGuard := channelMonitorAdminFeatureGuard(settingService)
-	modeV2Guard := channelMonitorModeV2Guard(settingService)
-
+	// Stored usage stays readable in every mode; runtime gates control collection.
 	monitor := admin.Group("/channel-monitor-v2")
+	monitor.Use(channelMonitorFeatureGuard(settingService))
 	{
-		config := monitor.Group("")
-		config.Use(featureGuard)
-		{
-			config.GET("/config", h.ChannelMonitorV2.GetConfig)
-			config.PUT("/config", h.ChannelMonitorV2.UpdateConfig)
-		}
-		reads := monitor.Group("")
-		reads.Use(modeV2Guard)
-		{
-			reads.GET("/dimensions", h.ChannelMonitorV2.Dimensions)
-			reads.GET("/snapshot", h.ChannelMonitorV2.AdminSnapshot)
-			reads.GET("/models", h.ChannelMonitorV2.AdminModels)
-			reads.GET("/matrix", h.ChannelMonitorV2.AdminMatrix)
-			reads.GET("/errors", h.ChannelMonitorV2.Errors)
-			reads.GET("/users", h.ChannelMonitorV2.AdminUsers)
-		}
+		monitor.GET("/config", h.ChannelMonitorV2.GetConfig)
+		monitor.PUT("/config", h.ChannelMonitorV2.UpdateConfig)
+		monitor.GET("/dimensions", h.ChannelMonitorV2.Dimensions)
+		monitor.GET("/snapshot", h.ChannelMonitorV2.AdminSnapshot)
+		monitor.GET("/models", h.ChannelMonitorV2.AdminModels)
+		monitor.GET("/matrix", h.ChannelMonitorV2.AdminMatrix)
+		monitor.GET("/errors", h.ChannelMonitorV2.Errors)
+		monitor.GET("/users", h.ChannelMonitorV2.AdminUsers)
+		monitor.GET("/observations", h.ChannelMonitorV2.AdminObservations)
 	}
 }
 
-func channelMonitorAdminFeatureGuard(settingService *service.SettingService) gin.HandlerFunc {
+func channelMonitorFeatureGuard(settingService *service.SettingService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if settingService != nil && settingService.GetChannelMonitorRuntime(c.Request.Context()).Enabled {
 			c.Next()
@@ -993,28 +983,5 @@ func channelMonitorAdminFeatureGuard(settingService *service.SettingService) gin
 		}
 		response.ErrorFrom(c, service.ErrChannelMonitorDisabled)
 		c.Abort()
-	}
-}
-
-// channelMonitorModeV2Guard requires feature enabled and channel_monitor_mode=v2.
-func channelMonitorModeV2Guard(settingService *service.SettingService) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		if settingService == nil {
-			response.ErrorFrom(c, service.ErrChannelMonitorDisabled)
-			c.Abort()
-			return
-		}
-		rt := settingService.GetChannelMonitorRuntime(c.Request.Context())
-		if !rt.Enabled {
-			response.ErrorFrom(c, service.ErrChannelMonitorDisabled)
-			c.Abort()
-			return
-		}
-		if !rt.PassiveAggregationAllowed() {
-			response.ErrorFrom(c, service.ErrChannelMonitorModeMismatch)
-			c.Abort()
-			return
-		}
-		c.Next()
 	}
 }

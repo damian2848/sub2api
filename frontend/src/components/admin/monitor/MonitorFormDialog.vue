@@ -149,6 +149,13 @@
       </div>
 
       <div>
+        <label class="input-label">{{ t('channelMonitorV2.observations.boundGroup') }}</label>
+        <select v-model="form.group_id" class="input" data-testid="monitor-bound-group">
+          <option :value="null">{{ t('channelMonitorV2.observations.externalTarget') }}</option>
+          <option v-for="group in monitorGroups" :key="group.id" :value="group.id" :disabled="group.platform !== form.provider && group.platform !== 'composite'">{{ group.name }} · {{ group.platform }}</option>
+        </select>
+      </div>
+      <div>
         <label class="input-label">{{ t('admin.channelMonitor.form.groupName') }}</label>
         <input v-model="form.group_name" type="text" class="input" :placeholder="t('admin.channelMonitor.form.groupNamePlaceholder')" />
       </div>
@@ -250,7 +257,7 @@ import type {
   UpdateParams,
 } from '@/api/admin/channelMonitor'
 import type { ChannelMonitorTemplate } from '@/api/admin/channelMonitorTemplate'
-import type { ApiKey } from '@/types'
+import type { AdminGroup, ApiKey } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Toggle from '@/components/common/Toggle.vue'
 import Select from '@/components/common/Select.vue'
@@ -317,6 +324,14 @@ const showKeyPicker = ref(false)
 const myKeysLoading = ref(false)
 const myActiveKeys = ref<ApiKey[]>([])
 const userGroupRates = ref<Record<number, number>>({})
+const monitorGroups = ref<AdminGroup[]>([])
+async function loadMonitorGroups() {
+  try {
+    monitorGroups.value = await adminAPI.groups.getAllIncludingInactive()
+  } catch (error) {
+    appStore.showError(extractApiErrorMessage(error, t('channelMonitorV2.settings.loadFailed')))
+  }
+}
 
 interface MonitorForm {
   name: string
@@ -329,6 +344,7 @@ interface MonitorForm {
   primary_model: string
   extra_models: string[]
   group_name: string
+  group_id: number | null
   interval_seconds: number
   jitter_seconds: number
   enabled: boolean
@@ -350,6 +366,7 @@ const form = reactive<MonitorForm>({
   primary_model: '',
   extra_models: [],
   group_name: '',
+  group_id: null,
   interval_seconds: systemDefaultInterval.value,
   jitter_seconds: 0,
   enabled: true,
@@ -737,6 +754,7 @@ function resetForm() {
   form.primary_model = ''
   form.extra_models = []
   form.group_name = ''
+  form.group_id = null
   form.interval_seconds = systemDefaultInterval.value
   form.jitter_seconds = 0
   form.enabled = true
@@ -759,6 +777,7 @@ function loadFromMonitor(m: ChannelMonitor) {
   form.primary_model = m.primary_model
   form.extra_models = [...(m.extra_models || [])]
   form.group_name = m.group_name || ''
+  form.group_id = m.group_id ?? null
   form.interval_seconds = m.interval_seconds || systemDefaultInterval.value
   form.jitter_seconds = m.jitter_seconds || 0
   form.enabled = m.enabled
@@ -776,6 +795,7 @@ watch(
   ([show, m]) => {
     if (!show) return
     void loadTemplates()
+    void loadMonitorGroups()
     if (m) loadFromMonitor(m)
     else resetForm()
   },
@@ -827,6 +847,7 @@ function buildPayload(): CreateParams {
     primary_model: usesProbePart.value ? form.primary_model.trim() : 'quota',
     extra_models: usesProbePart.value ? form.extra_models : [],
     group_name: form.group_name.trim(),
+    ...(form.group_id ? { group_id: form.group_id } : {}),
     enabled: form.enabled,
     interval_seconds: form.interval_seconds,
     jitter_seconds: form.jitter_seconds || 0,
@@ -868,6 +889,7 @@ async function handleSubmit() {
       // account_id 同理：probe 模式不带账号，update 发 0 显式解绑存量关联
       // （后端 0=清空、null=不动）。仅 update——create 发 0 会落 &0 触发 FK 违约。
       if (!usesQuotaMode.value) req.account_id = 0
+      if (!form.group_id) req.group_id = 0
       await adminAPI.channelMonitor.update(target.id, req)
       appStore.showSuccess(t('admin.channelMonitor.updateSuccess'))
     } else {

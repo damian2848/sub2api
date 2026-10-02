@@ -125,12 +125,23 @@ func NewScheduledTestResultRepository(db *sql.DB) service.ScheduledTestResultRep
 
 func (r *scheduledTestResultRepository) Create(ctx context.Context, result *service.ScheduledTestResult) (*service.ScheduledTestResult, error) {
 	row := r.db.QueryRowContext(ctx, `
-		INSERT INTO scheduled_test_results (plan_id, status, response_text, error_message, latency_ms, started_at, finished_at, created_at, pelican_config, quality_action, quality_judgment, quality_round_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11)
-		RETURNING id, plan_id, status, response_text, error_message, latency_ms, started_at, finished_at, created_at, pelican_config, quality_action, quality_judgment, quality_round_id
-	`, result.PlanID, result.Status, result.ResponseText, result.ErrorMessage, result.LatencyMs, result.StartedAt, result.FinishedAt, marshalPelicanConfig(result.PelicanConfig), result.QualityAction, marshalQualityJudgment(result.QualityJudgment), result.QualityRoundID)
+		WITH saved AS (INSERT INTO scheduled_test_results (plan_id, status, response_text, error_message, latency_ms, started_at, finished_at, created_at, pelican_config, quality_action, quality_judgment, quality_round_id, metering, observation_scope)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13)
+		RETURNING *), archived AS (
+		INSERT INTO channel_monitor_quality_observations(result_id,plan_id,model,type,verdict,checked_at,latency_ms,message,schedule,metering,observation_scope)
+		SELECT s.id,s.plan_id,COALESCE(NULLIF(s.pelican_config->>'model_id',''),p.model_id),
+		CASE WHEN s.pelican_config->>'question_kind'='state_probe' THEN 'state_probe' ELSE 'quality' END,
+		CASE WHEN s.pelican_config->>'question_kind'='state_probe' THEN CASE WHEN s.status='success' THEN 'healthy' WHEN s.error_message='state_degraded' THEN 'degraded' ELSE 'inconclusive' END
+		WHEN s.status='success' AND s.quality_judgment->>'verdict'='correct' THEN 'correct'
+		WHEN s.error_message='answer_mismatch' AND s.quality_judgment->>'verdict'='incorrect' THEN 'incorrect' ELSE 'inconclusive' END,
+		s.started_at,s.latency_ms,s.error_message,p.cron_expression,s.metering,s.observation_scope
+		FROM saved s JOIN scheduled_test_plans p ON p.id=s.plan_id WHERE jsonb_typeof(s.pelican_config->'quality')='object' OR s.pelican_config->>'question_kind'='state_probe'
+		ON CONFLICT(result_id) DO NOTHING)
+		SELECT id, plan_id, status, response_text, error_message, latency_ms, started_at, finished_at, created_at, pelican_config, quality_action, quality_judgment, quality_round_id FROM saved
+	`, result.PlanID, result.Status, result.ResponseText, result.ErrorMessage, result.LatencyMs, result.StartedAt, result.FinishedAt, marshalPelicanConfig(result.PelicanConfig), result.QualityAction, marshalQualityJudgment(result.QualityJudgment), result.QualityRoundID, marshalMonitorMetadata(result.Usage), marshalMonitorMetadata(result.ObservationScope))
 
 	out := &service.ScheduledTestResult{}
+	out.Usage, out.ObservationScope = result.Usage, result.ObservationScope
 	var judgment []byte
 	var config []byte
 	if err := row.Scan(

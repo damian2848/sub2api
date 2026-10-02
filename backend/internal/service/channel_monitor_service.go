@@ -158,6 +158,9 @@ func (s *ChannelMonitorService) Create(ctx context.Context, p ChannelMonitorCrea
 	if err := s.validateLinkedAccount(ctx, p.Provider, p.AccountID); err != nil {
 		return nil, err
 	}
+	if err := s.validateMonitorGroup(ctx, p.Provider, p.GroupID); err != nil {
+		return nil, err
+	}
 	checkMode := defaultCheckMode(p.CheckMode)
 	encrypted, err := s.encryptor.Encrypt(p.APIKey)
 	if err != nil {
@@ -172,6 +175,7 @@ func (s *ChannelMonitorService) Create(ctx context.Context, p ChannelMonitorCrea
 		PrimaryModel:     normalizeMonitorPrimaryModel(p.Provider, checkMode, p.PrimaryModel),
 		ExtraModels:      normalizeModels(p.ExtraModels),
 		GroupName:        strings.TrimSpace(p.GroupName),
+		GroupID:          cloneInt64Pointer(p.GroupID),
 		Enabled:          p.Enabled,
 		IntervalSeconds:  p.IntervalSeconds,
 		JitterSeconds:    p.JitterSeconds,
@@ -239,6 +243,7 @@ func (s *ChannelMonitorService) Duplicate(
 		PrimaryModel:         source.PrimaryModel,
 		ExtraModels:          append([]string{}, source.ExtraModels...),
 		GroupName:            source.GroupName,
+		GroupID:              cloneInt64Pointer(source.GroupID),
 		Enabled:              false,
 		IntervalSeconds:      source.IntervalSeconds,
 		JitterSeconds:        source.JitterSeconds,
@@ -435,6 +440,9 @@ func (s *ChannelMonitorService) Update(ctx context.Context, id int64, p ChannelM
 	if err := applyMonitorUpdate(existing, p); err != nil {
 		return nil, err
 	}
+	if err := s.validateMonitorGroup(ctx, existing.Provider, existing.GroupID); err != nil {
+		return nil, err
+	}
 
 	newPlainAPIKey, apiKeyUpdated, err := s.applyAPIKeyUpdate(existing, p.APIKey)
 	if err != nil {
@@ -597,8 +605,7 @@ func (s *ChannelMonitorService) ListHistory(ctx context.Context, id int64, model
 
 // RunCheck 同步触发对一个监控的检测：并发跑 primary + extra 模型，
 // 写历史记录并更新 last_checked_at。返回每个模型的检测结果。
-// 仅当 channel_monitor_enabled=true 且 channel_monitor_mode=v1 时真正探测；
-// mode=v2 时返回 ErrChannelMonitorActiveProbesRetired，不产生上游流量。
+// 仅当主动探测启用时执行；被动模式不会产生上游流量。
 //
 // 按 check_mode 分派：probe（默认，现状探活）/ quota（仅查关联账号配额，
 // 零 LLM 成本）/ quota_probe（探活 + 配额快照挂主模型行）。
@@ -618,6 +625,7 @@ func (s *ChannelMonitorService) RunCheck(ctx context.Context, id int64) ([]*Chec
 	if checkMode != MonitorCheckModeQuota && m.APIKeyDecryptFailed {
 		return nil, ErrChannelMonitorAPIKeyDecryptFailed
 	}
+	ctx = WithChannelMonitorProbeSigner(ctx, s.encryptor)
 
 	var results []*CheckResult
 	switch checkMode {
@@ -670,9 +678,12 @@ func attachQuotaSnapshot(results []*CheckResult, snapshot *domain.MonitorQuotaSn
 // persistCheckResults 写入本次检测的历史记录并更新 last_checked_at。
 // 任一写库失败都只记日志，不影响调用方拿到 results（与 MVP 期望一致：宁可漏记历史也要先返回结果）。
 func (s *ChannelMonitorService) persistCheckResults(ctx context.Context, m *ChannelMonitor, results []*CheckResult) {
+	scope := s.monitorObservationScope(ctx, m)
 	rows := make([]*ChannelMonitorHistoryRow, 0, len(results))
 	for _, r := range results {
 		rows = append(rows, &ChannelMonitorHistoryRow{
+			Usage:         r.Usage,
+			Scope:         scope,
 			MonitorID:     m.ID,
 			Model:         r.Model,
 			Status:        r.Status,
@@ -942,6 +953,15 @@ func applyMonitorUpdate(existing *ChannelMonitor, p ChannelMonitorUpdateParams) 
 	}
 	if p.GroupName != nil {
 		existing.GroupName = strings.TrimSpace(*p.GroupName)
+	}
+	if p.GroupID != nil {
+		if *p.GroupID < 0 {
+			return ErrChannelMonitorV2InvalidConfig
+		}
+		existing.GroupID = cloneInt64Pointer(p.GroupID)
+		if *p.GroupID == 0 {
+			existing.GroupID = nil
+		}
 	}
 	if p.Enabled != nil {
 		existing.Enabled = *p.Enabled

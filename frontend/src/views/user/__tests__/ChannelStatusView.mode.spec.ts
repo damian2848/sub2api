@@ -17,22 +17,22 @@ vi.mock('../ChannelStatusV2View.vue', () => ({
 
 import ChannelStatusView from '../ChannelStatusView.vue'
 
-describe('ChannelStatusView mode switch', () => {
+describe('Unified ChannelStatusView', () => {
   beforeEach(() => {
     isV1.mockReset()
   })
 
-  it('renders V2 when not in v1 mode', () => {
+  it('renders the unified monitor in passive mode', () => {
     isV1.mockReturnValue(false)
     const wrapper = mount(ChannelStatusView)
     expect(wrapper.find('[data-testid="v2"]').exists()).toBe(true)
     expect(wrapper.find('[data-testid="v1"]').exists()).toBe(false)
   })
 
-  it('renders V1 when in v1 mode', () => {
+  it('keeps the unified monitor in active-only mode', () => {
     isV1.mockReturnValue(true)
     const wrapper = mount(ChannelStatusView)
-    expect(wrapper.find('[data-testid="v1"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="v2"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="v1"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="v2"]').exists()).toBe(true)
   })
 })

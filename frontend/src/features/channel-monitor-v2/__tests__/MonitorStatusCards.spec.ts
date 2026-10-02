@@ -23,6 +23,20 @@ it('renders platform groups, three passive metrics and observed-only candy bars'
   wrapper.unmount()
 })
 
+it('renders independent histories for multiple models in the same group', () => {
+  const row = { platform: 'openai', group_id: 7, group_name: 'Multi model', metrics: { has_samples: false, request_count: 0, ttft: { p50_ms: null } }, health: { overall: 'unknown' }, buckets: [],
+    candy_histories: [
+      { model: 'model-a', reasoning_effort: 'medium', interval_minutes: 1, results: [] },
+      { model: 'model-b', reasoning_effort: 'high', interval_minutes: 5, results: [] },
+    ],
+  } as unknown as MonitorMatrixRow
+  const wrapper = mount(MonitorStatusCards, { props: { items: [row], countdown: 60, loading: false, now: Date.now() }, global: { stubs: { ProviderIcon: true } } })
+  expect(wrapper.findAll('[data-testid="candy-history-slots"]')).toHaveLength(2)
+  expect(wrapper.text()).toContain('model-a')
+  expect(wrapper.text()).toContain('model-b')
+  wrapper.unmount()
+})
+
 it('does not show zero traffic as 100 percent availability or invent candy records', () => {
   const row = { platform: 'openai', group_id: 7, group_name: 'No samples', metrics: { has_samples: false, request_count: 0, cache_rate: 0, error_rate: 0, ttft: { p50_ms: null } }, health: { overall: 'unknown' }, buckets: [], candy: { model: 'model', reasoning_effort: 'medium', interval_minutes: 1, results: [] } } as unknown as MonitorMatrixRow
   const wrapper = mount(MonitorStatusCards, { props: { items: [row], countdown: 32, loading: false, now: Date.now() }, global: { stubs: { ProviderIcon: true } } })

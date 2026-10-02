@@ -38,6 +38,19 @@ func (s *AccountTestService) RunPelicanBackground(ctx context.Context, accountID
 	if isOpenAICodexStateProbePlan(cfg) {
 		return s.runOpenAICodexStateProbeScheduled(ctx, accountID, model, cfg)
 	}
+	var account *Account
+	if s.accountRepo != nil {
+		account, _ = s.accountRepo.GetByID(ctx, accountID)
+	}
+	scope := accountObservationScope(account)
+	collector := pelicanUsageFromContext(ctx)
+	if collector == nil {
+		collector = &pelicanTestUsageCollector{model: model}
+		if account != nil {
+			collector.model = account.GetMappedModel(model)
+		}
+		ctx = context.WithValue(ctx, pelicanTestUsageKey{}, collector)
+	}
 	// Recognize the exact built-in question in legacy HTML plans as well.
 	if isBuiltinCandyPlan(cfg) {
 		copy := *cfg
@@ -79,7 +92,12 @@ func (s *AccountTestService) RunPelicanBackground(ctx context.Context, accountID
 	finished := time.Now()
 	snapshot := *cfg
 	snapshot.ModelID = model
-	return &ScheduledTestResult{Status: status, ResponseText: output, ErrorMessage: message, LatencyMs: finished.Sub(started).Milliseconds(), StartedAt: started, FinishedAt: finished, PelicanConfig: &snapshot}, nil
+	var billing *BillingService
+	if s.openaiGatewayService != nil {
+		billing = s.openaiGatewayService.billingService
+	}
+	usage := collector.probeUsage(billing, account)
+	return &ScheduledTestResult{Status: status, ResponseText: output, ErrorMessage: message, LatencyMs: finished.Sub(started).Milliseconds(), StartedAt: started, FinishedAt: finished, PelicanConfig: &snapshot, Usage: &usage, ObservationScope: scope}, nil
 }
 
 func (s *ScheduledTestRunnerService) runPelicanPlan(ctx context.Context, plan *ScheduledTestPlan) {
@@ -190,6 +208,9 @@ func (s *ScheduledTestRunnerService) runPelicanSample(ctx context.Context, plan 
 			judgment = s.judgeQuality(ctx, plan.AccountID, plan.PelicanConfig, result.ResponseText)
 		}
 		applyQualityJudgment(result, judgment)
+		if judgment != nil {
+			result.Usage = AddChannelMonitorProbeUsage(result.Usage, judgment.Usage)
+		}
 		result.FinishedAt = time.Now()
 		result.LatencyMs = result.FinishedAt.Sub(result.StartedAt).Milliseconds()
 	}

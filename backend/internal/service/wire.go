@@ -276,6 +276,7 @@ func ProvideAccountUsageService(
 
 func ProvideAccountTestService(
 	accountRepo AccountRepository,
+	monitorRepo ChannelMonitorV2Repository,
 	geminiTokenProvider *GeminiTokenProvider,
 	claudeTokenProvider *ClaudeTokenProvider,
 	grokTokenProvider *GrokTokenProvider,
@@ -301,6 +302,9 @@ func ProvideAccountTestService(
 	service.SetOpenAIGatewayService(openAIGatewayService)
 	service.SetSettingService(settingService)
 	service.SetPluginManager(pluginManager)
+	if recorder, ok := monitorRepo.(ChannelMonitorProbeRecorder); ok {
+		service.SetProbeRecorder(recorder)
+	}
 	return service
 }
 

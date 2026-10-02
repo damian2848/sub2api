@@ -2,7 +2,7 @@
   <div
     ref="containerRef"
     class="filter-menu relative"
-    :class="compact ? 'min-w-[6.5rem] sm:min-w-[7.25rem]' : 'min-w-[150px] sm:min-w-[160px]'"
+    :class="compact ? 'filter-menu-compact min-w-0 sm:min-w-[7.25rem]' : 'min-w-[150px] sm:min-w-[160px]'"
   >
     <button
       ref="triggerRef"
@@ -264,7 +264,7 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 640px) {
-  .filter-menu {
+  .filter-menu:not(.filter-menu-compact) {
     min-width: 100%;
   }
 }

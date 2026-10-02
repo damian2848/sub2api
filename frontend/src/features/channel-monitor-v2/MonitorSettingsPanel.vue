@@ -31,10 +31,7 @@
       role="status"
     >
       {{
-        t('channelMonitorV2.settings.modeBanner', {
-          mode: systemModeLabel,
-          modeV2: t('channelMonitorV2.settings.modeV2'),
-        })
+        t('channelMonitorV2.settings.modeBanner')
       }}
       <router-link class="ml-1 font-medium underline" to="/admin/settings">{{ t('admin.settings.tabs.features') }}</router-link>
     </div>
@@ -270,7 +267,7 @@ import MonitorCandySettings from './MonitorCandySettings.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import { getChannelMonitorMode, isChannelMonitorV2Mode } from '@/utils/featureFlags'
+import { isChannelMonitorV2Mode } from '@/utils/featureFlags'
 import {
   getConfig,
   updateConfig,
@@ -298,14 +295,6 @@ const countedErrorCategoryCount = computed(
 )
 /** System settings mode must be v2 for aggregation to run; config remains editable for prep. */
 const systemModeV2 = computed(() => isChannelMonitorV2Mode())
-const systemModeLabel = computed(() => {
-  if (!appStore.cachedPublicSettings?.channel_monitor_enabled) {
-    return t('channelMonitorV2.settings.modeClosed')
-  }
-  return getChannelMonitorMode() === 'v1'
-    ? t('channelMonitorV2.settings.modeV1')
-    : t('channelMonitorV2.settings.modeV2')
-})
 const defaultThresholds = {
   minimum_sample: 50,
   warning_error_rate: 0.05,

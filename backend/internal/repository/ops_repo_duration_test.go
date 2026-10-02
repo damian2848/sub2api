@@ -24,11 +24,12 @@ func TestOpsErrorDurationPersistsInSingleAndBatchInserts(t *testing.T) {
 			db, mock := newSQLMock(t)
 			repo := NewOpsRepository(db)
 			input := &service.OpsInsertErrorLogInput{ErrorPhase: "request", ErrorType: "client_canceled", StatusCode: 499, DurationMs: tc.value, CreatedAt: time.Now()}
-			args := make([]driver.Value, 39)
+			args := make([]driver.Value, 40)
 			for i := 0; i < 38; i++ {
 				args[i] = sqlmock.AnyArg()
 			}
 			args[38] = tc.expected
+			args[39] = service.RequestSourceBusiness
 			mock.ExpectQuery("(?s)INSERT INTO ops_error_logs.*duration_ms.*RETURNING id").WithArgs(args...).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
 			id, err := repo.InsertErrorLog(context.Background(), input)
 			require.NoError(t, err)

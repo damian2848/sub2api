@@ -748,6 +748,33 @@ describe("admin SettingsView payment visible method controls", () => {
     adminSettingsFetch.mockResolvedValue(undefined);
   });
 
+  it('enables passive aggregation alongside existing active probes and saves hybrid mode', async () => {
+    settingsRoute.query = { tab: 'features' };
+    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, channel_monitor_enabled: true, channel_monitor_mode: 'v1' });
+    const wrapper = mountView();
+    await flushPromises();
+    expect((wrapper.get('[data-testid="monitor-active-toggle"]').element as HTMLInputElement).checked).toBe(true);
+    expect((wrapper.get('[data-testid="monitor-passive-toggle"]').element as HTMLInputElement).checked).toBe(false);
+    await wrapper.get('[data-testid="monitor-passive-toggle"]').setValue(true);
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({ channel_monitor_enabled: true, channel_monitor_mode: 'hybrid' }));
+  });
+
+  it('loads both hybrid sources and disables the total monitor when neither remains enabled', async () => {
+    settingsRoute.query = { tab: 'features' };
+    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, channel_monitor_enabled: true, channel_monitor_mode: 'hybrid' });
+    const wrapper = mountView();
+    await flushPromises();
+    expect((wrapper.get('[data-testid="monitor-active-toggle"]').element as HTMLInputElement).checked).toBe(true);
+    expect((wrapper.get('[data-testid="monitor-passive-toggle"]').element as HTMLInputElement).checked).toBe(true);
+    await wrapper.get('[data-testid="monitor-active-toggle"]').setValue(false);
+    await wrapper.get('[data-testid="monitor-passive-toggle"]').setValue(false);
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({ channel_monitor_enabled: false, channel_monitor_mode: 'v2' }));
+  });
+
   it("opens the risk settings from a deep link after loading without changing switches", async () => {
     settingsRoute.query = { tab: 'features' };
     settingsRoute.hash = '#settings-section-features-risk-control';

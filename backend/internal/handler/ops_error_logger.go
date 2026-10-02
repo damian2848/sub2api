@@ -1703,6 +1703,9 @@ func applyOpsLatencyFieldsFromContext(c *gin.Context, entry *service.OpsInsertEr
 	if c == nil || entry == nil {
 		return
 	}
+	if c.Request != nil {
+		entry.Source = service.ChannelMonitorRequestSource(c.Request.Context())
+	}
 	entry.DurationMs = getContextLatencyMs(c, service.OpsRequestDurationMsKey)
 	// Dedicated error paths can enqueue before the middleware unwinds.
 	if entry.DurationMs == nil && c.Request != nil {

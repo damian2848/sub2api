@@ -35,6 +35,19 @@ func NewChannelMonitorRepository(client *dbent.Client, db *sql.DB) service.Chann
 	return &channelMonitorRepository{client: client, db: db}
 }
 
+func (r *channelMonitorRepository) GetMonitorGroup(ctx context.Context, id int64) (*service.Group, error) {
+	group := &service.Group{}
+	err := r.db.QueryRowContext(ctx, `SELECT id,name,platform FROM groups WHERE id=$1 AND deleted_at IS NULL`, id).Scan(&group.ID, &group.Name, &group.Platform)
+	return group, err
+}
+
+func channelMonitorMetadata(value any) map[string]any {
+	data, _ := json.Marshal(value)
+	var result map[string]any
+	_ = json.Unmarshal(data, &result)
+	return result
+}
+
 // ---------- CRUD ----------
 
 func (r *channelMonitorRepository) Create(ctx context.Context, m *service.ChannelMonitor) error {
@@ -60,6 +73,9 @@ func (r *channelMonitorRepository) Create(ctx context.Context, m *service.Channe
 	}
 	if m.AccountID != nil {
 		builder = builder.SetAccountID(*m.AccountID)
+	}
+	if m.GroupID != nil {
+		builder = builder.SetGroupID(*m.GroupID)
 	}
 	if m.BodyOverride != nil {
 		builder = builder.SetBodyOverride(m.BodyOverride)
@@ -112,6 +128,7 @@ func (r *channelMonitorRepository) GetByID(ctx context.Context, id int64) (*serv
 func (r *channelMonitorRepository) Update(ctx context.Context, m *service.ChannelMonitor) error {
 	client := clientFromContext(ctx, r.client)
 	updater := client.ChannelMonitor.UpdateOneID(m.ID).
+		SetNillableGroupID(m.GroupID).
 		SetName(m.Name).
 		SetProvider(channelmonitor.Provider(m.Provider)).
 		SetAPIMode(defaultAPIModeRepo(m.APIMode)).
@@ -126,6 +143,9 @@ func (r *channelMonitorRepository) Update(ctx context.Context, m *service.Channe
 		SetExtraHeaders(channelMonitorHeadersForPersistence(m)).
 		SetBodyOverrideMode(defaultBodyModeRepo(m.BodyOverrideMode)).
 		SetCheckMode(defaultCheckModeRepo(m.CheckMode))
+	if m.GroupID == nil {
+		updater = updater.ClearGroupID()
+	}
 	if m.TemplateID != nil {
 		updater = updater.SetTemplateID(*m.TemplateID)
 	} else {
@@ -251,6 +271,12 @@ func (r *channelMonitorRepository) InsertHistoryBatch(ctx context.Context, rows 
 		}
 		if row.Quota != nil {
 			c = c.SetQuota(row.Quota)
+		}
+		if row.Usage != nil {
+			c = c.SetMetering(channelMonitorMetadata(row.Usage))
+		}
+		if row.Scope != nil {
+			c = c.SetObservationScope(channelMonitorMetadata(row.Scope))
 		}
 		bulk = append(bulk, c)
 	}
@@ -779,6 +805,7 @@ func entToServiceMonitor(row *dbent.ChannelMonitor) *service.ChannelMonitor {
 		PrimaryModel:         row.PrimaryModel,
 		ExtraModels:          extras,
 		GroupName:            row.GroupName,
+		GroupID:              row.GroupID,
 		Enabled:              row.Enabled,
 		IntervalSeconds:      row.IntervalSeconds,
 		JitterSeconds:        row.JitterSeconds,

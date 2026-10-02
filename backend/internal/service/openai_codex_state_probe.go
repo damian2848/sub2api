@@ -57,11 +57,13 @@ var ErrOpenAICodexStateProbeBusy = infraerrors.Conflict("STATE_PROBE_BUSY", "该
 
 // OpenAICodexStateProbeResult 是一次门票探针的完整结果，可直接作为接口 JSON 返回。
 type OpenAICodexStateProbeResult struct {
-	AccountID int64                   `json:"account_id"`
-	Model     string                  `json:"model"`
-	Verdict   OpenAICodexStateVerdict `json:"verdict"`
-	Reason    string                  `json:"reason"`
-	Failure   string                  `json:"failure,omitempty"`
+	Usage     *ChannelMonitorProbeUsage       `json:"usage,omitempty"`
+	Scope     *ChannelMonitorObservationScope `json:"-"`
+	AccountID int64                           `json:"account_id"`
+	Model     string                          `json:"model"`
+	Verdict   OpenAICodexStateVerdict         `json:"verdict"`
+	Reason    string                          `json:"reason"`
+	Failure   string                          `json:"failure,omitempty"`
 	// Detail 是脱敏截断后的上游报错原文，便于看出「模型不支持」之类的具体原因。
 	Detail string `json:"detail,omitempty"`
 
@@ -105,7 +107,12 @@ func (s *OpenAIGatewayService) ProbeOpenAICodexState(ctx context.Context, accoun
 func (s *OpenAIGatewayService) probeOpenAICodexState(ctx context.Context, account *Account, model string, ignoreBPS bool) *OpenAICodexStateProbeResult {
 	started := time.Now()
 	result := &OpenAICodexStateProbeResult{Verdict: OpenAICodexStateInconclusive, StartedAt: started}
+	collector := &pelicanTestUsageCollector{model: model}
+	ctx = context.WithValue(ctx, pelicanTestUsageKey{}, collector)
+	result.Scope = accountObservationScope(account)
 	defer func() {
+		usage := collector.probeUsage(s.billingService, account)
+		result.Usage = &usage
 		result.FinishedAt = time.Now()
 		result.LatencyMs = result.FinishedAt.Sub(started).Milliseconds()
 		if result.Reason == "" {
@@ -258,6 +265,7 @@ func openAICodexStateProbeUnsupportedReason(account *Account, requestedModel str
 // lite 形态（292/332 长度的票）上没有验证。每发用新的 session_id，也与验证时一致。
 func (s *OpenAIGatewayService) fireOpenAICodexStateShot(ctx context.Context, account *Account, token, model, proxy, turnState, cookie string) (openAICodexStateShot, error) {
 	var out openAICodexStateShot
+	usage := startPelicanTestUsage(ctx, "responses")
 	shotCtx, cancel := context.WithTimeout(ctx, openAICodexStateProbeShotTimeout)
 	defer cancel()
 
@@ -321,6 +329,11 @@ func (s *OpenAIGatewayService) fireOpenAICodexStateShot(ctx context.Context, acc
 		return out, nil
 	}
 	out.model = openAICodexStateStreamModel(data)
+	for _, payload := range openAICodexStateStreamEvents(data) {
+		if usage != nil {
+			usage.read(string(payload))
+		}
+	}
 	if out.streamErr = validateCodexProbeResponse(data); out.streamErr != nil {
 		out.detail = openAICodexStateDetail(openAICodexStateStreamErrorPayload(data))
 	}
@@ -438,7 +451,15 @@ func openAICodexStateStreamErrorPayload(data []byte) []byte {
 // ProbeOpenAICodexState 按账号 ID 跑一次门票探针。同一账号同一时刻只允许一次探针，
 // 避免并发的两发互相干扰门票判据。
 func (s *AccountTestService) ProbeOpenAICodexState(ctx context.Context, accountID int64, model string) (*OpenAICodexStateProbeResult, error) {
-	return s.probeOpenAICodexState(ctx, accountID, model, false)
+	result, err := s.probeOpenAICodexState(ctx, accountID, model, false)
+	if err == nil && s.probeRecorder != nil && result != nil {
+		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if saveErr := s.probeRecorder.RecordStateProbe(saveCtx, result); saveErr != nil {
+			return result, fmt.Errorf("save state probe observation: %w", saveErr)
+		}
+	}
+	return result, err
 }
 
 func (s *AccountTestService) probeOpenAICodexState(ctx context.Context, accountID int64, model string, ignoreBPS bool) (*OpenAICodexStateProbeResult, error) {

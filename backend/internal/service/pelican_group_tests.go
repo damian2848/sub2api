@@ -72,23 +72,28 @@ type PelicanGroupTestAttempt struct {
 // PelicanGroupTestResult is one sample. AccountID is the account that gave the final
 // answer (0 when the scheduler found none); only admins see it.
 type PelicanGroupTestResult struct {
-	ID             int64                     `json:"id"`
-	PlanID         int64                     `json:"plan_id"`
-	GroupID        int64                     `json:"group_id"`
-	GroupName      string                    `json:"group_name,omitempty"`
-	AccountID      int64                     `json:"account_id"`
-	AccountName    string                    `json:"account_name"`
-	Attempts       []PelicanGroupTestAttempt `json:"attempts"`
-	Status         string                    `json:"status"`
-	ResponseText   string                    `json:"response_text,omitempty"`
-	ErrorMessage   string                    `json:"error_message"`
-	LatencyMs      int64                     `json:"latency_ms"`
-	CostUSD        *float64                  `json:"cost_usd"`
-	CostIncomplete bool                      `json:"cost_incomplete"`
-	PelicanConfig  *PelicanTestConfig        `json:"pelican_config,omitempty"`
-	StartedAt      time.Time                 `json:"started_at"`
-	FinishedAt     time.Time                 `json:"finished_at"`
-	CreatedAt      time.Time                 `json:"created_at"`
+	ID             int64                        `json:"id"`
+	PlanID         int64                        `json:"plan_id"`
+	GroupID        int64                        `json:"group_id"`
+	GroupName      string                       `json:"group_name,omitempty"`
+	AccountID      int64                        `json:"account_id"`
+	AccountName    string                       `json:"account_name"`
+	Attempts       []PelicanGroupTestAttempt    `json:"attempts"`
+	Status         string                       `json:"status"`
+	ResponseText   string                       `json:"response_text,omitempty"`
+	ErrorMessage   string                       `json:"error_message"`
+	LatencyMs      int64                        `json:"latency_ms"`
+	CostUSD        *float64                     `json:"cost_usd"`
+	CostIncomplete bool                         `json:"cost_incomplete"`
+	Platform       string                       `json:"platform,omitempty"`
+	UpstreamModel  string                       `json:"upstream_model,omitempty"`
+	AttemptCount   int                          `json:"attempt_count"`
+	Usage          *ChannelMonitorProbeUsage    `json:"usage,omitempty"`
+	ProbeAttempts  []ChannelMonitorProbeAttempt `json:"-"`
+	PelicanConfig  *PelicanTestConfig           `json:"pelican_config,omitempty"`
+	StartedAt      time.Time                    `json:"started_at"`
+	FinishedAt     time.Time                    `json:"finished_at"`
+	CreatedAt      time.Time                    `json:"created_at"`
 }
 
 // PelicanGroupTestPlanInput is what an admin edits; the question is always the HTML drawing kind.
@@ -417,6 +422,9 @@ func (s *PelicanGroupTestService) runSample(ctx context.Context, plan *PelicanGr
 	started := s.now()
 	var costUSD float64
 	priced, attempted, incomplete := false, false, false
+	probeUsage := &ChannelMonitorProbeUsage{Source: "probe"}
+	probeAttempts := []ChannelMonitorProbeAttempt{}
+	var platform, upstreamModel string
 	defer func() {
 		if result != nil {
 			if priced || !attempted {
@@ -425,6 +433,11 @@ func (s *PelicanGroupTestService) runSample(ctx context.Context, plan *PelicanGr
 				result.CostUSD = nil
 			}
 			result.CostIncomplete = incomplete || (attempted && !priced)
+			result.Platform, result.UpstreamModel = platform, upstreamModel
+			result.AttemptCount = len(probeAttempts)
+			result.ProbeAttempts = probeAttempts
+			probeUsage.CostUSD, probeUsage.CostIncomplete = result.CostUSD, result.CostIncomplete
+			result.Usage = probeUsage
 		}
 	}()
 	defer func() {
@@ -449,11 +462,17 @@ func (s *PelicanGroupTestService) runSample(ctx context.Context, plan *PelicanGr
 		}
 		var sample *ScheduledTestResult
 		attempted = true
+		platform = route.account.Platform
 		usage := &pelicanTestUsageCollector{model: route.account.GetMappedModel(route.model)}
 		func() {
 			defer route.release()
 			defer func() {
 				cost, partial := usage.cost(s.billing, route.account)
+				snapshot := usage.snapshot()
+				snapshot.CostUSD, snapshot.CostIncomplete = cost, partial
+				probeUsage.Add(snapshot)
+				upstreamModel = usage.upstreamModel()
+				probeAttempts = append(probeAttempts, ChannelMonitorProbeAttempt{AccountID: route.account.ID, Platform: route.account.Platform, RequestedModel: plan.ModelID, UpstreamModel: upstreamModel, Usage: snapshot})
 				incomplete = incomplete || partial
 				if cost != nil {
 					costUSD += *cost

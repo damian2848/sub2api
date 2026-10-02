@@ -15,13 +15,19 @@ export function monitorRefreshSeconds(configSeconds: number | undefined, rows: r
   if (bootstrap) return 10
   let seconds = configSeconds && Number.isFinite(configSeconds) && configSeconds > 0 ? configSeconds : 300
   for (const row of rows) {
-    const interval = row.candy?.interval_minutes
-    if (interval && Number.isFinite(interval) && interval > 0) {
-      seconds = Math.min(seconds, interval * 60)
+    for (const history of monitorCandyHistories(row)) {
+      const interval = history.interval_minutes
+      if (interval && Number.isFinite(interval) && interval > 0) {
+        seconds = Math.min(seconds, interval * 60)
+      }
     }
   }
   // Refresh before a healthy minute probe can appear stale in a five-minute snapshot.
   return Math.max(60, seconds)
+}
+
+export function monitorCandyHistories(row: MonitorMatrixRow): MonitorCandyHistory[] {
+  return row.candy_histories?.length ? row.candy_histories : row.candy ? [row.candy] : []
 }
 
 // Keep real time gaps. Each bar summarizes observed health in one of 18 equal

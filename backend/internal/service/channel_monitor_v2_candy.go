@@ -15,8 +15,80 @@ import (
 const (
 	channelCandyMaxProbes             = 64
 	ChannelMonitorV2CandyHistoryLimit = 100
-	ChannelMonitorV2CandyRetention    = 24 * time.Hour
+	ChannelMonitorV2CandyRetention    = 30 * 24 * time.Hour
 )
+
+// Probe consumption is an upstream cost snapshot and never a customer debit.
+type ChannelMonitorProbeUsage struct {
+	Source                string   `json:"source"`
+	RequestCount          int64    `json:"request_count"`
+	InputTokens           int64    `json:"input_tokens"`
+	OutputTokens          int64    `json:"output_tokens"`
+	CacheReadTokens       int64    `json:"cache_read_tokens"`
+	CacheCreationTokens   int64    `json:"cache_creation_tokens"`
+	CacheCreation5mTokens int64    `json:"cache_creation_5m_tokens"`
+	CacheCreation1hTokens int64    `json:"cache_creation_1h_tokens"`
+	ReasoningTokens       int64    `json:"reasoning_tokens"`
+	CostUSD               *float64 `json:"cost_usd"`
+	CostIncomplete        bool     `json:"cost_incomplete"`
+	UsageIncomplete       bool     `json:"usage_incomplete"`
+}
+
+func (u *ChannelMonitorProbeUsage) Add(other *ChannelMonitorProbeUsage) {
+	u.Source = "probe"
+	if other == nil {
+		u.CostIncomplete, u.UsageIncomplete = true, true
+		return
+	}
+	u.RequestCount += other.RequestCount
+	u.InputTokens += other.InputTokens
+	u.OutputTokens += other.OutputTokens
+	u.CacheReadTokens += other.CacheReadTokens
+	u.CacheCreationTokens += other.CacheCreationTokens
+	u.CacheCreation5mTokens += other.CacheCreation5mTokens
+	u.CacheCreation1hTokens += other.CacheCreation1hTokens
+	u.ReasoningTokens += other.ReasoningTokens
+	u.CostIncomplete = u.CostIncomplete || other.CostIncomplete
+	u.UsageIncomplete = u.UsageIncomplete || other.UsageIncomplete
+	if other.CostUSD != nil {
+		// A skipped request's zero cannot fill unknown pricing from an earlier call.
+		if u.CostUSD == nil && u.CostIncomplete && other.RequestCount == 0 && *other.CostUSD == 0 {
+			return
+		}
+		cost := *other.CostUSD
+		if u.CostUSD != nil {
+			cost += *u.CostUSD
+		}
+		// Usage snapshots may be projected into several groups. Never mutate
+		// a cost pointer shared with the original sample or another projection.
+		u.CostUSD = &cost
+	} else {
+		u.CostIncomplete = true
+	}
+}
+
+func AddChannelMonitorProbeUsage(total, sample *ChannelMonitorProbeUsage) *ChannelMonitorProbeUsage {
+	if total == nil {
+		total = &ChannelMonitorProbeUsage{Source: "probe"}
+	}
+	total.Add(sample)
+	return total
+}
+
+func redactChannelMonitorProbeUsage(usage *ChannelMonitorProbeUsage) *ChannelMonitorProbeUsage {
+	if usage == nil {
+		return nil
+	}
+	return &ChannelMonitorProbeUsage{Source: usage.Source, CostIncomplete: usage.CostIncomplete, UsageIncomplete: usage.UsageIncomplete}
+}
+
+type ChannelMonitorProbeAttempt struct {
+	AccountID      int64                     `json:"account_id,omitempty"`
+	Platform       string                    `json:"platform"`
+	RequestedModel string                    `json:"requested_model"`
+	UpstreamModel  string                    `json:"upstream_model"`
+	Usage          *ChannelMonitorProbeUsage `json:"usage"`
+}
 
 type ChannelMonitorV2CandyProbe struct {
 	GroupID         int64  `json:"group_id"`
@@ -31,21 +103,36 @@ func (p ChannelMonitorV2CandyProbe) key() string {
 }
 
 type ChannelMonitorV2CandyResult struct {
-	ID            int64     `json:"-"`
-	GroupID       int64     `json:"-"`
-	ConfigKey     string    `json:"-"`
-	CheckedAt     time.Time `json:"checked_at"`
-	Verdict       string    `json:"verdict"`
-	LatencyMs     int64     `json:"latency_ms"`
-	AnswerPreview string    `json:"answer_preview,omitempty"`
-	Reason        string    `json:"reason,omitempty"`
+	Source         string                       `json:"source"`
+	ID             int64                        `json:"-"`
+	GroupID        int64                        `json:"-"`
+	ConfigKey      string                       `json:"-"`
+	CheckedAt      time.Time                    `json:"checked_at"`
+	Verdict        string                       `json:"verdict"`
+	LatencyMs      int64                        `json:"latency_ms"`
+	AnswerPreview  string                       `json:"answer_preview,omitempty"`
+	Reason         string                       `json:"reason,omitempty"`
+	Platform       string                       `json:"platform,omitempty"`
+	AccountID      int64                        `json:"account_id,omitempty"`
+	RequestedModel string                       `json:"requested_model,omitempty"`
+	UpstreamModel  string                       `json:"upstream_model,omitempty"`
+	AttemptCount   int                          `json:"attempt_count"`
+	Usage          *ChannelMonitorProbeUsage    `json:"usage,omitempty"`
+	Attempts       []ChannelMonitorProbeAttempt `json:"attempts,omitempty"`
 }
 
 type ChannelMonitorV2CandyHistory struct {
+	GroupID         int64                         `json:"group_id"`
+	Platform        string                        `json:"platform,omitempty"`
 	Model           string                        `json:"model"`
 	ReasoningEffort string                        `json:"reasoning_effort"`
 	IntervalMinutes int                           `json:"interval_minutes"`
 	Results         []ChannelMonitorV2CandyResult `json:"results"`
+	Usage           *ChannelMonitorProbeUsage     `json:"usage,omitempty"`
+}
+
+type ChannelMonitorV2CandyMultiRepository interface {
+	CandyHistoryMany(context.Context, map[int64][]string, time.Time) ([]ChannelMonitorV2CandyResult, error)
 }
 
 type ChannelMonitorV2CandyRepository interface {
@@ -76,13 +163,12 @@ func normalizeChannelMonitorV2CandyProbes(probes []ChannelMonitorV2CandyProbe) e
 	if len(probes) > channelCandyMaxProbes {
 		return fmt.Errorf("%w: at most %d candy probes", ErrChannelMonitorV2InvalidConfig, channelCandyMaxProbes)
 	}
-	seen := map[int64]bool{}
+	seen := map[string]bool{}
 	for i := range probes {
 		p := &probes[i]
-		if p.GroupID <= 0 || seen[p.GroupID] {
-			return fmt.Errorf("%w: invalid or duplicate candy group", ErrChannelMonitorV2InvalidConfig)
+		if p.GroupID <= 0 {
+			return fmt.Errorf("%w: invalid candy group", ErrChannelMonitorV2InvalidConfig)
 		}
-		seen[p.GroupID] = true
 		p.Model = strings.TrimSpace(p.Model)
 		if p.Model == "" || len(p.Model) > 100 {
 			return fmt.Errorf("%w: candy model is required (maximum 100 bytes)", ErrChannelMonitorV2InvalidConfig)
@@ -94,6 +180,11 @@ func normalizeChannelMonitorV2CandyProbes(probes []ChannelMonitorV2CandyProbe) e
 		if p.ReasoningEffort == "" {
 			return fmt.Errorf("%w: invalid candy reasoning effort", ErrChannelMonitorV2InvalidConfig)
 		}
+		identity := fmt.Sprintf("%d:%s:%s", p.GroupID, p.Model, p.ReasoningEffort)
+		if seen[identity] {
+			return fmt.Errorf("%w: duplicate candy group/model/effort", ErrChannelMonitorV2InvalidConfig)
+		}
+		seen[identity] = true
 		if p.IntervalMinutes == 0 {
 			p.IntervalMinutes = 1
 		}
@@ -128,7 +219,7 @@ func (s *ChannelMonitorV2CandyService) RunDue(ctx context.Context, now time.Time
 	if err := s.repo.PruneCandyHistory(ctx, now); err != nil {
 		logger.LegacyPrintf("service.channel_monitor_v2", "candy retention failed: %v", err)
 	}
-	if s.settings == nil || !s.settings.GetChannelMonitorRuntime(ctx).PassiveAggregationAllowed() {
+	if s.settings == nil || !s.settings.GetChannelMonitorRuntime(ctx).QualityProbesAllowed() {
 		return
 	}
 	cfg, err := s.config.GetConfig(ctx)
@@ -163,7 +254,7 @@ func (s *ChannelMonitorV2CandyService) RunDue(ctx context.Context, now time.Time
 }
 
 func (s *ChannelMonitorV2CandyService) runOne(ctx context.Context, probe ChannelMonitorV2CandyProbe, cfg *ChannelMonitorV2Config, tick time.Time) {
-	if ctx.Err() != nil || !s.settings.GetChannelMonitorRuntime(ctx).PassiveAggregationAllowed() {
+	if ctx.Err() != nil || !s.settings.GetChannelMonitorRuntime(ctx).QualityProbesAllowed() {
 		return
 	}
 	group, err := s.groups.groups.GetByID(ctx, probe.GroupID)
@@ -189,7 +280,7 @@ func (s *ChannelMonitorV2CandyService) runOne(ctx context.Context, probe Channel
 	if id == 0 {
 		return
 	}
-	result := ChannelMonitorV2CandyResult{ID: id, GroupID: probe.GroupID, ConfigKey: probe.key(), CheckedAt: s.now(), Verdict: "error", Reason: "interrupted"}
+	result := ChannelMonitorV2CandyResult{ID: id, GroupID: probe.GroupID, ConfigKey: probe.key(), Source: "probe", CheckedAt: s.now(), Verdict: "error", Reason: "interrupted"}
 	defer func() {
 		if recover() != nil {
 			result.Verdict = "error"
@@ -206,6 +297,15 @@ func (s *ChannelMonitorV2CandyService) runOne(ctx context.Context, probe Channel
 	plan := &PelicanGroupTestPlan{GroupID: probe.GroupID, ModelID: probe.Model, PelicanConfig: &PelicanTestConfig{QuestionKind: "candy", Prompt: CandyPrompt, ReasoningEffort: probe.ReasoningEffort, ParallelCount: 1, ModelID: probe.Model}}
 	sample := s.groups.runSample(runCtx, plan, group)
 	result.LatencyMs = s.now().Sub(result.CheckedAt).Milliseconds()
+	result.RequestedModel = probe.Model
+	if sample != nil {
+		result.Platform = sample.Platform
+		result.AccountID = sample.AccountID
+		result.UpstreamModel = sample.UpstreamModel
+		result.AttemptCount = sample.AttemptCount
+		result.Usage = sample.Usage
+		result.Attempts = sample.ProbeAttempts
+	}
 	if runCtx.Err() != nil {
 		result.Reason = "timeout"
 		return
@@ -233,53 +333,113 @@ func (s *ChannelMonitorV2CandyService) runOne(ctx context.Context, probe Channel
 }
 
 func (s *ChannelMonitorV2CandyService) attachHistory(ctx context.Context, matrix *ChannelMonitorV2Matrix, cfg *ChannelMonitorV2Config, admin bool) error {
-	probes := map[int64]ChannelMonitorV2CandyProbe{}
-	for _, p := range cfg.CandyProbes {
-		if p.Enabled {
-			probes[p.GroupID] = p
+	probes := map[int64][]ChannelMonitorV2CandyProbe{}
+	for _, probe := range cfg.CandyProbes {
+		if probe.Enabled {
+			probes[probe.GroupID] = append(probes[probe.GroupID], probe)
 		}
 	}
-	configs := map[int64]string{}
+	groupPlatforms := map[int64]string{}
+	configs := map[int64][]string{}
 	for _, row := range matrix.Items {
-		if row.GroupID != nil {
-			if probe, ok := probes[*row.GroupID]; ok {
-				configs[*row.GroupID] = probe.key()
+		if row.GroupID == nil || len(probes[*row.GroupID]) == 0 {
+			continue
+		}
+		id := *row.GroupID
+		if _, loaded := groupPlatforms[id]; !loaded {
+			group, err := s.groups.groups.GetByID(ctx, id)
+			if err != nil || group == nil {
+				continue
+			}
+			groupPlatforms[id] = group.Platform
+		}
+		for _, probe := range probes[id] {
+			if candyProbeMatchesRow(probe, groupPlatforms[id], row) && !slices.Contains(configs[id], probe.key()) {
+				configs[id] = append(configs[id], probe.key())
 			}
 		}
 	}
 	if len(configs) == 0 {
 		return nil
 	}
-	// Only groups already admitted by the matrix's server-side scope are read.
-	history, err := s.repo.CandyHistory(ctx, configs, s.now().Add(-ChannelMonitorV2CandyRetention))
+	// Only groups and models already admitted by the matrix's server-side scope are read.
+	history, err := s.historyMany(ctx, configs, s.now().Add(-ChannelMonitorV2CandyRetention))
 	if err != nil {
 		return err
 	}
-	byGroup := map[int64][]ChannelMonitorV2CandyResult{}
-	for _, r := range history {
-		if p, ok := probes[r.GroupID]; !ok || p.key() != r.ConfigKey {
+	byConfig := map[int64]map[string][]ChannelMonitorV2CandyResult{}
+	for _, result := range history {
+		if !slices.Contains(configs[result.GroupID], result.ConfigKey) {
 			continue
 		}
-		if !admin {
-			r.AnswerPreview = ""
-			r.Reason = ""
+		if result.Platform == "" {
+			result.Platform = groupPlatforms[result.GroupID]
 		}
-		byGroup[r.GroupID] = append(byGroup[r.GroupID], r)
+		if byConfig[result.GroupID] == nil {
+			byConfig[result.GroupID] = map[string][]ChannelMonitorV2CandyResult{}
+		}
+		byConfig[result.GroupID][result.ConfigKey] = append(byConfig[result.GroupID][result.ConfigKey], result)
 	}
 	for i := range matrix.Items {
 		row := &matrix.Items[i]
+		row.Candy, row.CandyHistories = nil, nil
 		if row.GroupID == nil {
 			continue
 		}
-		p, ok := probes[*row.GroupID]
-		if !ok {
-			continue
+		id := *row.GroupID
+		for _, probe := range probes[id] {
+			if !candyProbeMatchesRow(probe, groupPlatforms[id], *row) {
+				continue
+			}
+			item := &ChannelMonitorV2CandyHistory{GroupID: id, Platform: row.Platform, Model: probe.Model, ReasoningEffort: probe.ReasoningEffort, IntervalMinutes: probe.IntervalMinutes, Results: []ChannelMonitorV2CandyResult{}}
+			for _, result := range byConfig[id][probe.key()] {
+				if row.Platform != "" && result.Platform != row.Platform {
+					continue
+				}
+				if result.RequestedModel != "" && result.RequestedModel != probe.Model {
+					continue
+				}
+				item.Usage = AddChannelMonitorProbeUsage(item.Usage, result.Usage)
+				if !admin {
+					result.AnswerPreview, result.Reason, result.UpstreamModel = "", "", ""
+					result.AccountID, result.AttemptCount, result.Attempts = 0, 0, nil
+					result.Usage = redactChannelMonitorProbeUsage(result.Usage)
+				}
+				item.Results = append(item.Results, result)
+			}
+			if !admin {
+				item.Usage = redactChannelMonitorProbeUsage(item.Usage)
+			}
+			row.CandyHistories = append(row.CandyHistories, item)
+			if row.Candy == nil {
+				row.Candy = item
+			}
 		}
-		results := byGroup[p.GroupID]
-		if results == nil {
-			results = []ChannelMonitorV2CandyResult{}
-		}
-		row.Candy = &ChannelMonitorV2CandyHistory{Model: p.Model, ReasoningEffort: p.ReasoningEffort, IntervalMinutes: p.IntervalMinutes, Results: results}
 	}
 	return nil
+}
+
+func candyProbeMatchesRow(probe ChannelMonitorV2CandyProbe, platform string, row ChannelMonitorV2MatrixRow) bool {
+	return (row.Model == "" || row.Model == probe.Model) && (row.Platform == "" || platform == PlatformComposite || row.Platform == platform)
+}
+
+func (s *ChannelMonitorV2CandyService) historyMany(ctx context.Context, configs map[int64][]string, since time.Time) ([]ChannelMonitorV2CandyResult, error) {
+	if repo, ok := s.repo.(ChannelMonitorV2CandyMultiRepository); ok {
+		return repo.CandyHistoryMany(ctx, configs, since)
+	}
+	var results []ChannelMonitorV2CandyResult
+	for group, keys := range configs {
+		for _, key := range keys {
+			items, err := s.repo.CandyHistory(ctx, map[int64]string{group: key}, since)
+			if err != nil {
+				return nil, err
+			}
+			for _, item := range items {
+				if item.GroupID == group && item.ConfigKey == key {
+					results = append(results, item)
+				}
+			}
+		}
+	}
+	return results, nil
 }

@@ -183,7 +183,7 @@ SELECT date_trunc('minute', ul.created_at), %s, COALESCE(ul.group_id, 0), %s,
 FROM usage_logs ul
 LEFT JOIN groups g ON g.id = ul.group_id
 LEFT JOIN accounts a ON a.id = ul.account_id
-WHERE ul.created_at >= $1 AND ul.created_at < $2
+WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.source = 'business'
 GROUP BY 1, 2, 3, 4`
 
 const channelMonitorV2UserMetricsSQL = `
@@ -206,7 +206,7 @@ SELECT date_trunc('minute', ul.created_at), %s, COALESCE(ul.group_id, 0), %s, ul
 FROM usage_logs ul
 LEFT JOIN groups g ON g.id = ul.group_id
 LEFT JOIN accounts a ON a.id = ul.account_id
-WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.user_id IS NOT NULL
+WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.source = 'business' AND ul.user_id IS NOT NULL
 GROUP BY 1, 2, 3, 4, 5`
 
 const channelMonitorV2HistogramSQL = `
@@ -220,7 +220,7 @@ LEFT JOIN groups g ON g.id = ul.group_id
 LEFT JOIN accounts a ON a.id = ul.account_id
 CROSS JOIN LATERAL (VALUES (0::bigint), (ul.user_id)) audience(user_id)
 CROSS JOIN LATERAL (VALUES ('ttft'::text, ul.first_token_ms), ('duration'::text, ul.duration_ms)) latency(metric, value_ms)
-WHERE ul.created_at >= $1 AND ul.created_at < $2
+WHERE ul.created_at >= $1 AND ul.created_at < $2 AND ul.source = 'business'
   AND audience.user_id IS NOT NULL AND latency.value_ms IS NOT NULL AND latency.value_ms >= 0
   AND ` + usageLogSuccessFilterUL + `
 GROUP BY 1, 2, 3, 4, 5, 6, 7`
@@ -245,7 +245,7 @@ WITH dedup AS (
   WITH candidate_ids AS MATERIALIZED (
     SELECT DISTINCT request_id
     FROM ops_error_logs
-    WHERE created_at >= $1 AND created_at < $2 AND NULLIF(request_id, '') IS NOT NULL
+    WHERE created_at >= $1 AND created_at < $2 AND source = 'business' AND NULLIF(request_id, '') IS NOT NULL
   )
   SELECT DISTINCT ON (COALESCE(NULLIF(current_error.request_id, ''), 'error:' || current_error.id::text))
     date_trunc('minute', current_error.created_at) AS bucket_start,
@@ -278,6 +278,7 @@ WITH dedup AS (
       )
     )
     AND NOT current_error.is_count_tokens
+    AND current_error.source = 'business'
     AND (COALESCE(current_error.status_code, 0) >= 400 OR current_error.error_type = 'cyber_policy')
   ORDER BY COALESCE(NULLIF(current_error.request_id, ''), 'error:' || current_error.id::text), current_error.created_at DESC, current_error.id DESC
 ), classified AS (

@@ -11,11 +11,7 @@
           {{ t('admin.channelMonitor.title') }}
         </h1>
         <p class="page-description mt-1.5 text-xs text-gray-500 dark:text-gray-400">
-          {{
-            isV1Mode
-              ? t('channelMonitorV2.admin.descriptionV1')
-              : t('channelMonitorV2.admin.descriptionV2')
-          }}
+          {{ t('channelMonitorV2.admin.description') }}
         </p>
         <div class="mt-4 border-t border-gray-100 pt-4 dark:border-dark-700">
           <div
@@ -41,7 +37,7 @@
               :aria-selected="adminMonitorTab === 'legacy'"
               @click="adminMonitorTab = 'legacy'"
             >
-              {{ isV1Mode ? t('channelMonitorV2.admin.tabV1Active') : t('channelMonitorV2.admin.tabV1History') }}
+              {{ t('channelMonitorV2.admin.tabV1Active') }}
             </button>
           </div>
         </div>
@@ -51,6 +47,7 @@
 
       <TablePageLayout v-else>
       <template #filters>
+        <p v-if="!isV1Mode" class="mb-3 text-sm text-amber-700 dark:text-amber-300">{{ t('channelMonitorV2.admin.probesPaused') }}</p>
         <MonitorFiltersBar
           v-model:search="searchQuery"
           v-model:provider="providerFilter"
@@ -105,6 +102,7 @@
               :row="row"
               :running="runningId === row.id"
               :duplicating="duplicatingIds.has(row.id)"
+              :can-run="isV1Mode"
               @run="handleRunNow"
               @duplicate="handleDuplicate"
               @edit="openEditDialog"

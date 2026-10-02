@@ -59,14 +59,37 @@ func TestChannelMonitorV2CandyPersistenceAndClaims(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, count, "replicas may only claim one sample for a group/slot")
+	otherModel := probe
+	otherModel.Model = "another-model"
+	otherClaim, err := repo.ClaimCandyProbe(ctx, otherModel, "another-key", now, updated.Version)
+	require.NoError(t, err)
+	require.NotZero(t, otherClaim, "another model in the same group can run independently")
+	highEffort := probe
+	highEffort.ReasoningEffort = "high"
+	highClaim, err := repo.ClaimCandyProbe(ctx, highEffort, "high-key", now, updated.Version)
+	require.NoError(t, err)
+	require.NotZero(t, highClaim, "another effort in the same group can run independently")
+	require.NoError(t, repo.FinishCandyProbe(ctx, service.ChannelMonitorV2CandyResult{ID: otherClaim, Verdict: "correct"}))
+	require.NoError(t, repo.FinishCandyProbe(ctx, service.ChannelMonitorV2CandyResult{ID: highClaim, Verdict: "incorrect"}))
 	next, err := repo.ClaimCandyProbe(ctx, probe, "test-key", now.Add(time.Minute), updated.Version)
 	require.NoError(t, err)
 	require.Zero(t, next, "an in-flight group cannot overlap another slot")
-	require.NoError(t, repo.FinishCandyProbe(ctx, service.ChannelMonitorV2CandyResult{ID: claimed, Verdict: "correct", AnswerPreview: "21个", LatencyMs: 123}))
+	cost := 0.03
+	usage := &service.ChannelMonitorProbeUsage{Source: "probe", RequestCount: 2, InputTokens: 100, OutputTokens: 50, ReasoningTokens: 20, CostUSD: &cost, CostIncomplete: true}
+	require.NoError(t, repo.FinishCandyProbe(ctx, service.ChannelMonitorV2CandyResult{ID: claimed, Verdict: "correct", AnswerPreview: "21个", LatencyMs: 123,
+		AccountID: 77, Platform: service.PlatformOpenAI, RequestedModel: probe.Model, UpstreamModel: "upstream-model", AttemptCount: 2, Usage: usage,
+		Attempts: []service.ChannelMonitorProbeAttempt{{AccountID: 77, Platform: service.PlatformOpenAI, RequestedModel: probe.Model, UpstreamModel: "upstream-model", Usage: usage}},
+	}))
 	items, err := repo.CandyHistory(ctx, map[int64]string{group.ID: "test-key"}, now.Add(-time.Hour))
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	require.Equal(t, "21个", items[0].AnswerPreview)
+	require.Equal(t, int64(77), items[0].AccountID)
+	require.Equal(t, "probe", items[0].Source)
+	require.Equal(t, "upstream-model", items[0].UpstreamModel)
+	require.Equal(t, 2, items[0].AttemptCount)
+	require.Equal(t, usage, items[0].Usage)
+	require.Len(t, items[0].Attempts, 1)
 	items, err = repo.CandyHistory(ctx, map[int64]string{other.ID: "test-key"}, now.Add(-time.Hour))
 	require.NoError(t, err)
 	require.Empty(t, items)
@@ -84,10 +107,10 @@ func TestChannelMonitorV2CandyPersistenceAndClaims(t *testing.T) {
 	denied, err := repo.ClaimCandyProbe(ctx, probe, "key", now.Add(2*time.Minute), updated.Version-1)
 	require.NoError(t, err)
 	require.Zero(t, denied, "obsolete config cannot issue probes")
-	_, err = integrationDB.ExecContext(ctx, "UPDATE channel_monitor_v2_candy_results SET checked_at=$2 WHERE group_id=$1", group.ID, now.Add(-25*time.Hour))
+	_, err = integrationDB.ExecContext(ctx, "UPDATE channel_monitor_v2_candy_results SET checked_at=$2 WHERE group_id=$1", group.ID, now.Add(-31*24*time.Hour))
 	require.NoError(t, err)
 	require.NoError(t, repo.PruneCandyHistory(ctx, now))
-	items, err = repo.CandyHistory(ctx, map[int64]string{group.ID: "test-key"}, now.Add(-48*time.Hour))
+	items, err = repo.CandyHistory(ctx, map[int64]string{group.ID: "test-key"}, now.Add(-32*24*time.Hour))
 	require.NoError(t, err)
 	require.Empty(t, items)
 	updated.Enabled = false
@@ -115,9 +138,10 @@ func TestChannelMonitorV2CandyLatest100PerActiveConfig(t *testing.T) {
 		require.NoError(t, err)
 	}
 	seed(group.ID, "active", 125, now)
+	seed(group.ID, "active-other-model", 110, now)
 	seed(group.ID, "obsolete", 110, now.Add(time.Minute))
 	seed(other.ID, "other-active", 3, now)
-	seed(other.ID, "other-active", 1, now.Add(-25*time.Hour))
+	seed(other.ID, "other-active", 1, now.Add(-31*24*time.Hour))
 	seed(excluded.ID, "active", 120, now)
 	_, err := integrationDB.ExecContext(ctx,
 		"INSERT INTO channel_monitor_v2_candy_results(group_id,config_key,model,reasoning_effort,slot,checked_at) VALUES($1,'active','synthetic-model','medium',$2,$2)", group.ID, now)
@@ -147,6 +171,16 @@ func TestChannelMonitorV2CandyLatest100PerActiveConfig(t *testing.T) {
 	for _, item := range byGroup[other.ID] {
 		require.Equal(t, "other-active", item.ConfigKey)
 	}
+	plural, err := repo.CandyHistoryMany(ctx, map[int64][]string{group.ID: {"active", "active-other-model"}}, now.Add(-service.ChannelMonitorV2CandyRetention))
+	require.NoError(t, err)
+	require.Len(t, plural, 200, "each active model retains its own 100 samples")
+	byConfig := map[string]int{}
+	for _, item := range plural {
+		byConfig[item.ConfigKey]++
+		require.Nil(t, item.Usage, "legacy records do not receive fabricated usage")
+	}
+	require.Equal(t, 100, byConfig["active"])
+	require.Equal(t, 100, byConfig["active-other-model"])
 	empty, err := repo.CandyHistory(ctx, map[int64]string{}, now.Add(-service.ChannelMonitorV2CandyRetention))
 	require.NoError(t, err)
 	require.Empty(t, empty)

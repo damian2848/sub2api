@@ -14779,6 +14779,8 @@ type ChannelMonitorMutation struct {
 	extra_models            *[]string
 	appendextra_models      []string
 	group_name              *string
+	group_id                *int64
+	addgroup_id             *int64
 	enabled                 *bool
 	interval_seconds        *int
 	addinterval_seconds     *int
@@ -15396,6 +15398,76 @@ func (m *ChannelMonitorMutation) ResetGroupName() {
 	delete(m.clearedFields, channelmonitor.FieldGroupName)
 }
 
+// SetGroupID sets the "group_id" field.
+func (m *ChannelMonitorMutation) SetGroupID(i int64) {
+	m.group_id = &i
+	m.addgroup_id = nil
+}
+
+// GroupID returns the value of the "group_id" field in the mutation.
+func (m *ChannelMonitorMutation) GroupID() (r int64, exists bool) {
+	v := m.group_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGroupID returns the old "group_id" field's value of the ChannelMonitor entity.
+// If the ChannelMonitor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChannelMonitorMutation) OldGroupID(ctx context.Context) (v *int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGroupID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGroupID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGroupID: %w", err)
+	}
+	return oldValue.GroupID, nil
+}
+
+// AddGroupID adds i to the "group_id" field.
+func (m *ChannelMonitorMutation) AddGroupID(i int64) {
+	if m.addgroup_id != nil {
+		*m.addgroup_id += i
+	} else {
+		m.addgroup_id = &i
+	}
+}
+
+// AddedGroupID returns the value that was added to the "group_id" field in this mutation.
+func (m *ChannelMonitorMutation) AddedGroupID() (r int64, exists bool) {
+	v := m.addgroup_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ClearGroupID clears the value of the "group_id" field.
+func (m *ChannelMonitorMutation) ClearGroupID() {
+	m.group_id = nil
+	m.addgroup_id = nil
+	m.clearedFields[channelmonitor.FieldGroupID] = struct{}{}
+}
+
+// GroupIDCleared returns if the "group_id" field was cleared in this mutation.
+func (m *ChannelMonitorMutation) GroupIDCleared() bool {
+	_, ok := m.clearedFields[channelmonitor.FieldGroupID]
+	return ok
+}
+
+// ResetGroupID resets all changes to the "group_id" field.
+func (m *ChannelMonitorMutation) ResetGroupID() {
+	m.group_id = nil
+	m.addgroup_id = nil
+	delete(m.clearedFields, channelmonitor.FieldGroupID)
+}
+
 // SetEnabled sets the "enabled" field.
 func (m *ChannelMonitorMutation) SetEnabled(b bool) {
 	m.enabled = &b
@@ -16001,7 +16073,7 @@ func (m *ChannelMonitorMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ChannelMonitorMutation) Fields() []string {
-	fields := make([]string, 0, 21)
+	fields := make([]string, 0, 22)
 	if m.created_at != nil {
 		fields = append(fields, channelmonitor.FieldCreatedAt)
 	}
@@ -16037,6 +16109,9 @@ func (m *ChannelMonitorMutation) Fields() []string {
 	}
 	if m.group_name != nil {
 		fields = append(fields, channelmonitor.FieldGroupName)
+	}
+	if m.group_id != nil {
+		fields = append(fields, channelmonitor.FieldGroupID)
 	}
 	if m.enabled != nil {
 		fields = append(fields, channelmonitor.FieldEnabled)
@@ -16097,6 +16172,8 @@ func (m *ChannelMonitorMutation) Field(name string) (ent.Value, bool) {
 		return m.ExtraModels()
 	case channelmonitor.FieldGroupName:
 		return m.GroupName()
+	case channelmonitor.FieldGroupID:
+		return m.GroupID()
 	case channelmonitor.FieldEnabled:
 		return m.Enabled()
 	case channelmonitor.FieldIntervalSeconds:
@@ -16148,6 +16225,8 @@ func (m *ChannelMonitorMutation) OldField(ctx context.Context, name string) (ent
 		return m.OldExtraModels(ctx)
 	case channelmonitor.FieldGroupName:
 		return m.OldGroupName(ctx)
+	case channelmonitor.FieldGroupID:
+		return m.OldGroupID(ctx)
 	case channelmonitor.FieldEnabled:
 		return m.OldEnabled(ctx)
 	case channelmonitor.FieldIntervalSeconds:
@@ -16259,6 +16338,13 @@ func (m *ChannelMonitorMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetGroupName(v)
 		return nil
+	case channelmonitor.FieldGroupID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGroupID(v)
+		return nil
 	case channelmonitor.FieldEnabled:
 		v, ok := value.(bool)
 		if !ok {
@@ -16333,6 +16419,9 @@ func (m *ChannelMonitorMutation) AddedFields() []string {
 	if m.addaccount_id != nil {
 		fields = append(fields, channelmonitor.FieldAccountID)
 	}
+	if m.addgroup_id != nil {
+		fields = append(fields, channelmonitor.FieldGroupID)
+	}
 	if m.addinterval_seconds != nil {
 		fields = append(fields, channelmonitor.FieldIntervalSeconds)
 	}
@@ -16352,6 +16441,8 @@ func (m *ChannelMonitorMutation) AddedField(name string) (ent.Value, bool) {
 	switch name {
 	case channelmonitor.FieldAccountID:
 		return m.AddedAccountID()
+	case channelmonitor.FieldGroupID:
+		return m.AddedGroupID()
 	case channelmonitor.FieldIntervalSeconds:
 		return m.AddedIntervalSeconds()
 	case channelmonitor.FieldJitterSeconds:
@@ -16373,6 +16464,13 @@ func (m *ChannelMonitorMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddAccountID(v)
+		return nil
+	case channelmonitor.FieldGroupID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddGroupID(v)
 		return nil
 	case channelmonitor.FieldIntervalSeconds:
 		v, ok := value.(int)
@@ -16409,6 +16507,9 @@ func (m *ChannelMonitorMutation) ClearedFields() []string {
 	if m.FieldCleared(channelmonitor.FieldGroupName) {
 		fields = append(fields, channelmonitor.FieldGroupName)
 	}
+	if m.FieldCleared(channelmonitor.FieldGroupID) {
+		fields = append(fields, channelmonitor.FieldGroupID)
+	}
 	if m.FieldCleared(channelmonitor.FieldLastCheckedAt) {
 		fields = append(fields, channelmonitor.FieldLastCheckedAt)
 	}
@@ -16437,6 +16538,9 @@ func (m *ChannelMonitorMutation) ClearField(name string) error {
 		return nil
 	case channelmonitor.FieldGroupName:
 		m.ClearGroupName()
+		return nil
+	case channelmonitor.FieldGroupID:
+		m.ClearGroupID()
 		return nil
 	case channelmonitor.FieldLastCheckedAt:
 		m.ClearLastCheckedAt()
@@ -16490,6 +16594,9 @@ func (m *ChannelMonitorMutation) ResetField(name string) error {
 		return nil
 	case channelmonitor.FieldGroupName:
 		m.ResetGroupName()
+		return nil
+	case channelmonitor.FieldGroupID:
+		m.ResetGroupID()
 		return nil
 	case channelmonitor.FieldEnabled:
 		m.ResetEnabled()
@@ -18079,6 +18186,8 @@ type ChannelMonitorHistoryMutation struct {
 	addping_latency_ms *int
 	message            *string
 	quota              **domain.MonitorQuotaSnapshot
+	metering           *map[string]interface{}
+	observation_scope  *map[string]interface{}
 	checked_at         *time.Time
 	clearedFields      map[string]struct{}
 	monitor            *int64
@@ -18532,6 +18641,104 @@ func (m *ChannelMonitorHistoryMutation) ResetQuota() {
 	delete(m.clearedFields, channelmonitorhistory.FieldQuota)
 }
 
+// SetMetering sets the "metering" field.
+func (m *ChannelMonitorHistoryMutation) SetMetering(value map[string]interface{}) {
+	m.metering = &value
+}
+
+// Metering returns the value of the "metering" field in the mutation.
+func (m *ChannelMonitorHistoryMutation) Metering() (r map[string]interface{}, exists bool) {
+	v := m.metering
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldMetering returns the old "metering" field's value of the ChannelMonitorHistory entity.
+// If the ChannelMonitorHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChannelMonitorHistoryMutation) OldMetering(ctx context.Context) (v map[string]interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldMetering is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldMetering requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldMetering: %w", err)
+	}
+	return oldValue.Metering, nil
+}
+
+// ClearMetering clears the value of the "metering" field.
+func (m *ChannelMonitorHistoryMutation) ClearMetering() {
+	m.metering = nil
+	m.clearedFields[channelmonitorhistory.FieldMetering] = struct{}{}
+}
+
+// MeteringCleared returns if the "metering" field was cleared in this mutation.
+func (m *ChannelMonitorHistoryMutation) MeteringCleared() bool {
+	_, ok := m.clearedFields[channelmonitorhistory.FieldMetering]
+	return ok
+}
+
+// ResetMetering resets all changes to the "metering" field.
+func (m *ChannelMonitorHistoryMutation) ResetMetering() {
+	m.metering = nil
+	delete(m.clearedFields, channelmonitorhistory.FieldMetering)
+}
+
+// SetObservationScope sets the "observation_scope" field.
+func (m *ChannelMonitorHistoryMutation) SetObservationScope(value map[string]interface{}) {
+	m.observation_scope = &value
+}
+
+// ObservationScope returns the value of the "observation_scope" field in the mutation.
+func (m *ChannelMonitorHistoryMutation) ObservationScope() (r map[string]interface{}, exists bool) {
+	v := m.observation_scope
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldObservationScope returns the old "observation_scope" field's value of the ChannelMonitorHistory entity.
+// If the ChannelMonitorHistory object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ChannelMonitorHistoryMutation) OldObservationScope(ctx context.Context) (v map[string]interface{}, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldObservationScope is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldObservationScope requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldObservationScope: %w", err)
+	}
+	return oldValue.ObservationScope, nil
+}
+
+// ClearObservationScope clears the value of the "observation_scope" field.
+func (m *ChannelMonitorHistoryMutation) ClearObservationScope() {
+	m.observation_scope = nil
+	m.clearedFields[channelmonitorhistory.FieldObservationScope] = struct{}{}
+}
+
+// ObservationScopeCleared returns if the "observation_scope" field was cleared in this mutation.
+func (m *ChannelMonitorHistoryMutation) ObservationScopeCleared() bool {
+	_, ok := m.clearedFields[channelmonitorhistory.FieldObservationScope]
+	return ok
+}
+
+// ResetObservationScope resets all changes to the "observation_scope" field.
+func (m *ChannelMonitorHistoryMutation) ResetObservationScope() {
+	m.observation_scope = nil
+	delete(m.clearedFields, channelmonitorhistory.FieldObservationScope)
+}
+
 // SetCheckedAt sets the "checked_at" field.
 func (m *ChannelMonitorHistoryMutation) SetCheckedAt(t time.Time) {
 	m.checked_at = &t
@@ -18629,7 +18836,7 @@ func (m *ChannelMonitorHistoryMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *ChannelMonitorHistoryMutation) Fields() []string {
-	fields := make([]string, 0, 8)
+	fields := make([]string, 0, 10)
 	if m.monitor != nil {
 		fields = append(fields, channelmonitorhistory.FieldMonitorID)
 	}
@@ -18650,6 +18857,12 @@ func (m *ChannelMonitorHistoryMutation) Fields() []string {
 	}
 	if m.quota != nil {
 		fields = append(fields, channelmonitorhistory.FieldQuota)
+	}
+	if m.metering != nil {
+		fields = append(fields, channelmonitorhistory.FieldMetering)
+	}
+	if m.observation_scope != nil {
+		fields = append(fields, channelmonitorhistory.FieldObservationScope)
 	}
 	if m.checked_at != nil {
 		fields = append(fields, channelmonitorhistory.FieldCheckedAt)
@@ -18676,6 +18889,10 @@ func (m *ChannelMonitorHistoryMutation) Field(name string) (ent.Value, bool) {
 		return m.Message()
 	case channelmonitorhistory.FieldQuota:
 		return m.Quota()
+	case channelmonitorhistory.FieldMetering:
+		return m.Metering()
+	case channelmonitorhistory.FieldObservationScope:
+		return m.ObservationScope()
 	case channelmonitorhistory.FieldCheckedAt:
 		return m.CheckedAt()
 	}
@@ -18701,6 +18918,10 @@ func (m *ChannelMonitorHistoryMutation) OldField(ctx context.Context, name strin
 		return m.OldMessage(ctx)
 	case channelmonitorhistory.FieldQuota:
 		return m.OldQuota(ctx)
+	case channelmonitorhistory.FieldMetering:
+		return m.OldMetering(ctx)
+	case channelmonitorhistory.FieldObservationScope:
+		return m.OldObservationScope(ctx)
 	case channelmonitorhistory.FieldCheckedAt:
 		return m.OldCheckedAt(ctx)
 	}
@@ -18760,6 +18981,20 @@ func (m *ChannelMonitorHistoryMutation) SetField(name string, value ent.Value) e
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetQuota(v)
+		return nil
+	case channelmonitorhistory.FieldMetering:
+		v, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetMetering(v)
+		return nil
+	case channelmonitorhistory.FieldObservationScope:
+		v, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetObservationScope(v)
 		return nil
 	case channelmonitorhistory.FieldCheckedAt:
 		v, ok := value.(time.Time)
@@ -18837,6 +19072,12 @@ func (m *ChannelMonitorHistoryMutation) ClearedFields() []string {
 	if m.FieldCleared(channelmonitorhistory.FieldQuota) {
 		fields = append(fields, channelmonitorhistory.FieldQuota)
 	}
+	if m.FieldCleared(channelmonitorhistory.FieldMetering) {
+		fields = append(fields, channelmonitorhistory.FieldMetering)
+	}
+	if m.FieldCleared(channelmonitorhistory.FieldObservationScope) {
+		fields = append(fields, channelmonitorhistory.FieldObservationScope)
+	}
 	return fields
 }
 
@@ -18862,6 +19103,12 @@ func (m *ChannelMonitorHistoryMutation) ClearField(name string) error {
 		return nil
 	case channelmonitorhistory.FieldQuota:
 		m.ClearQuota()
+		return nil
+	case channelmonitorhistory.FieldMetering:
+		m.ClearMetering()
+		return nil
+	case channelmonitorhistory.FieldObservationScope:
+		m.ClearObservationScope()
 		return nil
 	}
 	return fmt.Errorf("unknown ChannelMonitorHistory nullable field %s", name)
@@ -18891,6 +19138,12 @@ func (m *ChannelMonitorHistoryMutation) ResetField(name string) error {
 		return nil
 	case channelmonitorhistory.FieldQuota:
 		m.ResetQuota()
+		return nil
+	case channelmonitorhistory.FieldMetering:
+		m.ResetMetering()
+		return nil
+	case channelmonitorhistory.FieldObservationScope:
+		m.ResetObservationScope()
 		return nil
 	case channelmonitorhistory.FieldCheckedAt:
 		m.ResetCheckedAt()
@@ -44745,6 +44998,7 @@ type UsageLogMutation struct {
 	op                           Op
 	typ                          string
 	id                           *int64
+	source                       *string
 	request_id                   *string
 	model                        *string
 	requested_model              *string
@@ -45028,6 +45282,42 @@ func (m *UsageLogMutation) OldAccountID(ctx context.Context) (v int64, err error
 // ResetAccountID resets all changes to the "account_id" field.
 func (m *UsageLogMutation) ResetAccountID() {
 	m.account = nil
+}
+
+// SetSource sets the "source" field.
+func (m *UsageLogMutation) SetSource(s string) {
+	m.source = &s
+}
+
+// Source returns the value of the "source" field in the mutation.
+func (m *UsageLogMutation) Source() (r string, exists bool) {
+	v := m.source
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSource returns the old "source" field's value of the UsageLog entity.
+// If the UsageLog object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UsageLogMutation) OldSource(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSource is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSource requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSource: %w", err)
+	}
+	return oldValue.Source, nil
+}
+
+// ResetSource resets all changes to the "source" field.
+func (m *UsageLogMutation) ResetSource() {
+	m.source = nil
 }
 
 // SetRequestID sets the "request_id" field.
@@ -47494,7 +47784,7 @@ func (m *UsageLogMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *UsageLogMutation) Fields() []string {
-	fields := make([]string, 0, 47)
+	fields := make([]string, 0, 48)
 	if m.user != nil {
 		fields = append(fields, usagelog.FieldUserID)
 	}
@@ -47503,6 +47793,9 @@ func (m *UsageLogMutation) Fields() []string {
 	}
 	if m.account != nil {
 		fields = append(fields, usagelog.FieldAccountID)
+	}
+	if m.source != nil {
+		fields = append(fields, usagelog.FieldSource)
 	}
 	if m.request_id != nil {
 		fields = append(fields, usagelog.FieldRequestID)
@@ -47650,6 +47943,8 @@ func (m *UsageLogMutation) Field(name string) (ent.Value, bool) {
 		return m.APIKeyID()
 	case usagelog.FieldAccountID:
 		return m.AccountID()
+	case usagelog.FieldSource:
+		return m.Source()
 	case usagelog.FieldRequestID:
 		return m.RequestID()
 	case usagelog.FieldModel:
@@ -47753,6 +48048,8 @@ func (m *UsageLogMutation) OldField(ctx context.Context, name string) (ent.Value
 		return m.OldAPIKeyID(ctx)
 	case usagelog.FieldAccountID:
 		return m.OldAccountID(ctx)
+	case usagelog.FieldSource:
+		return m.OldSource(ctx)
 	case usagelog.FieldRequestID:
 		return m.OldRequestID(ctx)
 	case usagelog.FieldModel:
@@ -47870,6 +48167,13 @@ func (m *UsageLogMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetAccountID(v)
+		return nil
+	case usagelog.FieldSource:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSource(v)
 		return nil
 	case usagelog.FieldRequestID:
 		v, ok := value.(string)
@@ -48626,6 +48930,9 @@ func (m *UsageLogMutation) ResetField(name string) error {
 		return nil
 	case usagelog.FieldAccountID:
 		m.ResetAccountID()
+		return nil
+	case usagelog.FieldSource:
+		m.ResetSource()
 		return nil
 	case usagelog.FieldRequestID:
 		m.ResetRequestID()

@@ -26,7 +26,7 @@ type candyRepoFake struct {
 func (r *candyRepoFake) ClaimCandyProbe(_ context.Context, p ChannelMonitorV2CandyProbe, _ string, slot time.Time, version int) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	key := fmt.Sprint(p.GroupID, slot)
+	key := fmt.Sprint(p.GroupID, p.Model, p.ReasoningEffort, slot)
 	if r.claims == nil {
 		r.claims = map[string]int64{}
 	}
@@ -143,7 +143,7 @@ func TestChannelMonitorV2CandyHistoryScopeAndRedaction(t *testing.T) {
 	matrix := &ChannelMonitorV2Matrix{Items: []ChannelMonitorV2MatrixRow{{GroupID: &id}}}
 	require.NoError(t, s.attachHistory(context.Background(), matrix, &cfg, false))
 	require.Equal(t, map[int64]string{4: p.key()}, repo.historyConfigs)
-	require.Equal(t, groupTestNow.Add(-24*time.Hour), repo.historySince)
+	require.Equal(t, groupTestNow.Add(-ChannelMonitorV2CandyRetention), repo.historySince)
 	require.Len(t, matrix.Items[0].Candy.Results, 1)
 	encoded, err := json.Marshal(matrix)
 	require.NoError(t, err)
@@ -153,6 +153,155 @@ func TestChannelMonitorV2CandyHistoryScopeAndRedaction(t *testing.T) {
 	require.Equal(t, "private answer", matrix.Items[0].Candy.Results[0].AnswerPreview)
 	redactChannelMonitorV2PublicConfig(&cfg)
 	require.Nil(t, cfg.CandyProbes)
+}
+
+func TestChannelMonitorV2CandyMultipleModelsAndEfforts(t *testing.T) {
+	first := candyProbeFixture()
+	second, third := first, first
+	second.Model = "gpt-other"
+	third.ReasoningEffort = "high"
+	probes := []ChannelMonitorV2CandyProbe{first, second, third}
+	require.NoError(t, normalizeChannelMonitorV2CandyProbes(probes))
+	duplicate := first
+	duplicate.IntervalMinutes = 5
+	require.Error(t, normalizeChannelMonitorV2CandyProbes([]ChannelMonitorV2CandyProbe{first, duplicate}), "changing cadence does not create another probe identity")
+	repo := &candyRepoFake{channelMonitorV2RepoStub: channelMonitorV2RepoStub{config: candyConfigFixture()}}
+	repo.config.CandyProbes = probes
+	router := &candyRouterSpy{}
+	groups := &PelicanGroupTestService{groups: groupTestGroupsFake{4: {ID: 4, Platform: PlatformOpenAI, Status: StatusActive}}, router: router, now: time.Now,
+		runAccount: func(context.Context, int64, string, *PelicanTestConfig) (*ScheduledTestResult, error) {
+			return &ScheduledTestResult{Status: "success", ResponseText: "21"}, nil
+		}}
+	s := candyServiceFixture(repo, groups)
+	s.RunDue(context.Background(), groupTestNow)
+	require.Len(t, repo.results, 3)
+	s.RunDue(context.Background(), groupTestNow)
+	require.Len(t, repo.results, 3)
+	require.Len(t, router.groups, 3, "reading results and another tick never issue extra requests for claimed slots")
+}
+
+func TestChannelMonitorV2CandyRunsInHybridMode(t *testing.T) {
+	repo := &candyRepoFake{channelMonitorV2RepoStub: channelMonitorV2RepoStub{config: candyConfigFixture()}}
+	router := &candyRouterSpy{}
+	groups := &PelicanGroupTestService{groups: groupTestGroupsFake{4: {ID: 4, Platform: PlatformOpenAI, Status: StatusActive}}, router: router, now: time.Now,
+		runAccount: func(context.Context, int64, string, *PelicanTestConfig) (*ScheduledTestResult, error) {
+			return &ScheduledTestResult{Status: "success", ResponseText: "21"}, nil
+		}}
+	s := candyServiceFixture(repo, groups)
+	s.settings = channelMonitorV2RuntimeStub{rt: ChannelMonitorRuntime{Enabled: true, Mode: ChannelMonitorModeHybrid}}
+	s.RunDue(context.Background(), groupTestNow)
+	require.Len(t, repo.results, 1)
+	require.Equal(t, "correct", repo.results[0].Verdict)
+}
+
+func TestChannelMonitorV2CandyHistoryMatchesModelAndActualPlatform(t *testing.T) {
+	probe := candyProbeFixture()
+	other := probe
+	other.Model = "other-model"
+	cost := 0.04
+	repo := &candyRepoFake{history: []ChannelMonitorV2CandyResult{
+		{GroupID: 4, ConfigKey: probe.key(), Platform: PlatformOpenAI, RequestedModel: probe.Model, Verdict: "correct", AccountID: 77,
+			AnswerPreview: "private answer", UpstreamModel: "private alias", Attempts: []ChannelMonitorProbeAttempt{{AccountID: 88}},
+			Usage: &ChannelMonitorProbeUsage{Source: "probe", InputTokens: 100, OutputTokens: 20, CostUSD: &cost}},
+		{GroupID: 4, ConfigKey: probe.key(), Platform: PlatformAnthropic, RequestedModel: probe.Model, Verdict: "incorrect"},
+		{GroupID: 4, ConfigKey: other.key(), Platform: PlatformOpenAI, RequestedModel: other.Model, Verdict: "incorrect"},
+	}}
+	groups, _ := newGroupTestService(newGroupTestRepoFake(), &groupTestRouterFake{}, nil)
+	groups.groups = groupTestGroupsFake{4: {ID: 4, Platform: PlatformComposite, Status: StatusActive}}
+	s := candyServiceFixture(repo, groups)
+	cfg := candyConfigFixture()
+	cfg.CandyProbes = []ChannelMonitorV2CandyProbe{probe, other}
+	id := int64(4)
+	matrix := &ChannelMonitorV2Matrix{Items: []ChannelMonitorV2MatrixRow{
+		{GroupID: &id, Platform: PlatformOpenAI, Model: probe.Model},
+		{GroupID: &id, Platform: PlatformAnthropic, Model: probe.Model},
+		{GroupID: &id, Platform: PlatformOpenAI, Model: "unconfigured"},
+	}}
+	require.NoError(t, s.attachHistory(context.Background(), matrix, &cfg, false))
+	require.Len(t, matrix.Items[0].CandyHistories, 1)
+	require.Len(t, matrix.Items[0].Candy.Results, 1)
+	require.Equal(t, "correct", matrix.Items[0].Candy.Results[0].Verdict)
+	require.Zero(t, matrix.Items[0].Candy.Results[0].AccountID)
+	require.Empty(t, matrix.Items[0].Candy.Results[0].Attempts)
+	require.Empty(t, matrix.Items[0].Candy.Results[0].UpstreamModel)
+	require.Zero(t, matrix.Items[0].Candy.Usage.InputTokens)
+	require.Nil(t, matrix.Items[0].Candy.Usage.CostUSD)
+	require.Zero(t, matrix.Items[0].Candy.Results[0].Usage.InputTokens)
+	require.Nil(t, matrix.Items[0].Candy.Results[0].Usage.CostUSD)
+	require.False(t, matrix.Items[0].Candy.Usage.CostIncomplete, "redaction preserves completeness flags")
+	require.Equal(t, "incorrect", matrix.Items[1].Candy.Results[0].Verdict)
+	require.True(t, matrix.Items[1].Candy.Usage.CostIncomplete, "legacy unmetered history remains unknown")
+	require.Nil(t, matrix.Items[2].Candy)
+	require.Empty(t, matrix.Items[2].CandyHistories)
+	encoded, err := json.Marshal(matrix)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "private")
+	require.NotContains(t, string(encoded), "account_id")
+	require.NoError(t, s.attachHistory(context.Background(), matrix, &cfg, true))
+	require.Equal(t, int64(77), matrix.Items[0].Candy.Results[0].AccountID)
+	require.Equal(t, "private alias", matrix.Items[0].Candy.Results[0].UpstreamModel)
+	require.Equal(t, int64(100), matrix.Items[0].Candy.Usage.InputTokens)
+	require.Equal(t, cost, *matrix.Items[0].Candy.Usage.CostUSD)
+	require.Equal(t, int64(100), repo.history[0].Usage.InputTokens, "a public read cannot mutate the stored/admin snapshot")
+}
+
+func TestChannelMonitorV2CandyMeteringIncludesFailedAttempts(t *testing.T) {
+	repo := &candyRepoFake{channelMonitorV2RepoStub: channelMonitorV2RepoStub{config: candyConfigFixture()}}
+	first, second := account(77, "failed"), account(88, "answer")
+	first.Platform, second.Platform = PlatformOpenAI, PlatformOpenAI
+	router := &groupTestRouterFake{steps: []routeStep{{account: first}, {account: second}}}
+	groups, _ := newGroupTestService(newGroupTestRepoFake(), router, func(ctx context.Context, id int64, _ string, _ *PelicanTestConfig) (*ScheduledTestResult, error) {
+		usage := startPelicanTestUsage(ctx, "openai")
+		usage.read(`{"type":"response.completed","response":{"model":"claude-sonnet-4","usage":{"input_tokens":1000,"output_tokens":200,"input_tokens_details":{"cached_tokens":800},"output_tokens_details":{"reasoning_tokens":150}}}}`)
+		if id == first.ID {
+			return &ScheduledTestResult{Status: "failed", ErrorMessage: "upstream error"}, nil
+		}
+		return &ScheduledTestResult{Status: "success", ResponseText: "21"}, nil
+	})
+	groups.billing = newTestBillingService()
+	s := candyServiceFixture(repo, groups)
+	s.RunDue(context.Background(), groupTestNow)
+	require.Len(t, repo.results, 1)
+	result := repo.results[0]
+	require.Equal(t, "correct", result.Verdict)
+	require.Equal(t, second.ID, result.AccountID)
+	require.Equal(t, PlatformOpenAI, result.Platform)
+	require.Equal(t, "claude-sonnet-4", result.UpstreamModel)
+	require.Equal(t, 2, result.AttemptCount)
+	require.Len(t, result.Attempts, 2)
+	require.Equal(t, int64(2), result.Usage.RequestCount)
+	require.Equal(t, int64(400), result.Usage.InputTokens)
+	require.Equal(t, int64(400), result.Usage.OutputTokens)
+	require.Equal(t, int64(1600), result.Usage.CacheReadTokens)
+	require.Equal(t, int64(300), result.Usage.ReasoningTokens)
+	require.NotNil(t, result.Usage.CostUSD)
+	require.False(t, result.Usage.CostIncomplete)
+	require.False(t, result.Usage.UsageIncomplete)
+}
+
+func TestChannelMonitorProbeUsageAddsKnownConsumptionAndUnknownHistory(t *testing.T) {
+	cost := 0.5
+	sample := &ChannelMonitorProbeUsage{Source: "probe", RequestCount: 2, InputTokens: 30, OutputTokens: 12, CacheReadTokens: 10, CacheCreationTokens: 5, CacheCreation5mTokens: 2, CacheCreation1hTokens: 3, ReasoningTokens: 7, CostUSD: &cost}
+	total := AddChannelMonitorProbeUsage(nil, sample)
+	total = AddChannelMonitorProbeUsage(total, nil)
+	total = AddChannelMonitorProbeUsage(total, &ChannelMonitorProbeUsage{Source: "probe", InputTokens: 2, CostIncomplete: true, UsageIncomplete: true})
+	require.Equal(t, "probe", total.Source)
+	require.Equal(t, int64(32), total.InputTokens)
+	require.Equal(t, int64(12), total.OutputTokens)
+	require.Equal(t, int64(10), total.CacheReadTokens)
+	require.Equal(t, int64(5), total.CacheCreationTokens)
+	require.Equal(t, int64(2), total.CacheCreation5mTokens)
+	require.Equal(t, int64(3), total.CacheCreation1hTokens)
+	require.Equal(t, int64(7), total.ReasoningTokens)
+	require.Equal(t, 0.5, *total.CostUSD)
+	require.True(t, total.CostIncomplete)
+	require.True(t, total.UsageIncomplete)
+	require.Equal(t, 0.5, *sample.CostUSD)
+	unknown := AddChannelMonitorProbeUsage(nil, &ChannelMonitorProbeUsage{Source: "probe", RequestCount: 1, CostIncomplete: true})
+	unknown = AddChannelMonitorProbeUsage(unknown, &ChannelMonitorProbeUsage{Source: "probe", CostUSD: new(float64)})
+	require.Nil(t, unknown.CostUSD, "a skipped judge has no known charge to fill missing pricing")
+	unknown = AddChannelMonitorProbeUsage(unknown, &ChannelMonitorProbeUsage{Source: "probe", RequestCount: 1, CostUSD: new(float64)})
+	require.NotNil(t, unknown.CostUSD, "an explicitly priced zero-use request is recorded")
 }
 
 type candyRouterSpy struct {

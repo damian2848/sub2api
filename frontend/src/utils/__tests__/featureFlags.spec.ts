@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useAppStore } from '@/stores/app'
-import { FeatureFlags, isFeatureFlagEnabled, makeSidebarFlag, resolveFeatureFlag } from '@/utils/featureFlags'
+import { FeatureFlags, isFeatureFlagEnabled, makeSidebarFlag, resolveFeatureFlag, getChannelMonitorMode, isChannelMonitorV1Mode, isChannelMonitorV2Mode } from '@/utils/featureFlags'
 import type { PublicSettings } from '@/types'
 
 vi.mock('@/api/admin/system', () => ({
@@ -61,5 +61,22 @@ describe('resolveFeatureFlag', () => {
   it('backs isFeatureFlagEnabled with the same resolution', () => {
     useAppStore().cachedPublicSettings = { subscription_enabled: false } as PublicSettings
     expect(isFeatureFlagEnabled(FeatureFlags.subscription)).toBe(false)
+  })
+})
+
+describe('channel monitor capabilities', () => {
+  beforeEach(() => setActivePinia(createPinia()))
+  it.each([
+    ['v1', true, false], ['v2', false, true], ['hybrid', true, true],
+  ] as const)('resolves %s to independent active and passive capabilities', (mode, active, passive) => {
+    useAppStore().cachedPublicSettings = { channel_monitor_enabled: true, channel_monitor_mode: mode } as PublicSettings
+    expect(getChannelMonitorMode()).toBe(mode)
+    expect(isChannelMonitorV1Mode()).toBe(active)
+    expect(isChannelMonitorV2Mode()).toBe(passive)
+  })
+  it('stops both capabilities when the total switch is off', () => {
+    useAppStore().cachedPublicSettings = { channel_monitor_enabled: false, channel_monitor_mode: 'hybrid' } as PublicSettings
+    expect(isChannelMonitorV1Mode()).toBe(false)
+    expect(isChannelMonitorV2Mode()).toBe(false)
   })
 })

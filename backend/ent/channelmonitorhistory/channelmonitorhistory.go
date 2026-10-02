@@ -29,6 +29,10 @@ const (
 	FieldMessage = "message"
 	// FieldQuota holds the string denoting the quota field in the database.
 	FieldQuota = "quota"
+	// FieldMetering holds the string denoting the metering field in the database.
+	FieldMetering = "metering"
+	// FieldObservationScope holds the string denoting the observation_scope field in the database.
+	FieldObservationScope = "observation_scope"
 	// FieldCheckedAt holds the string denoting the checked_at field in the database.
 	FieldCheckedAt = "checked_at"
 	// EdgeMonitor holds the string denoting the monitor edge name in mutations.
@@ -54,6 +58,8 @@ var Columns = []string{
 	FieldPingLatencyMs,
 	FieldMessage,
 	FieldQuota,
+	FieldMetering,
+	FieldObservationScope,
 	FieldCheckedAt,
 }
 

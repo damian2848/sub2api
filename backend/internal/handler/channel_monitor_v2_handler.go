@@ -99,6 +99,27 @@ func (h *ChannelMonitorV2Handler) AdminMatrix(c *gin.Context)   { h.matrix(c, tr
 func (h *ChannelMonitorV2Handler) Users(c *gin.Context)         { h.users(c, false) }
 func (h *ChannelMonitorV2Handler) AdminUsers(c *gin.Context)    { h.users(c, true) }
 
+func (h *ChannelMonitorV2Handler) Observations(c *gin.Context)      { h.observations(c, false) }
+func (h *ChannelMonitorV2Handler) AdminObservations(c *gin.Context) { h.observations(c, true) }
+
+func (h *ChannelMonitorV2Handler) observations(c *gin.Context, admin bool) {
+	filter, ok := h.parseFilter(c)
+	if !ok || !h.scopeFilter(c, &filter, admin) {
+		return
+	}
+	groupBy, err := service.ParseChannelMonitorV2GroupBy(c.Query("group_by"))
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		return
+	}
+	result, err := h.service.Observations(c.Request.Context(), filter, groupBy, admin)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
 func (h *ChannelMonitorV2Handler) snapshot(c *gin.Context, admin bool) {
 	filter, ok := h.parseFilter(c)
 	if !ok {

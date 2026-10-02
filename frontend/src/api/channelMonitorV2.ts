@@ -163,6 +163,7 @@ export interface MonitorMatrixBucket {
 export interface MonitorMatrixRow {
   group_rate_multiplier?: number
   candy?: MonitorCandyHistory
+  candy_histories?: MonitorCandyHistory[]
   platform: string
   group_id?: number
   group_name?: string
@@ -180,13 +181,81 @@ export interface MonitorCandyProbe {
   interval_minutes: number
 }
 export interface MonitorCandyResult {
+  platform?: string
+  account_id?: number
+  requested_model?: string
+  upstream_model?: string
+  attempt_count?: number
+  usage?: ProbeUsage
   checked_at: string
   verdict: 'correct' | 'incorrect' | 'error'
   latency_ms: number
   answer_preview?: string
   reason?: string
 }
+
+export interface ProbeUsage {
+  source: 'probe'
+  request_count: number
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  cache_creation_5m_tokens: number
+  cache_creation_1h_tokens: number
+  reasoning_tokens: number
+  cost_usd?: number | null
+  cost_incomplete: boolean
+  usage_incomplete: boolean
+}
+export interface MonitorObservationPoint {
+  checked_at: string
+  verdict: string
+  latency_ms?: number
+  message?: string
+}
+export interface MonitorObservationRow {
+  id: string
+  type: 'connectivity' | 'quota' | 'candy' | 'state_probe' | 'quality'
+  name: string
+  platform: string
+  group_id?: number
+  group_name: string
+  model: string
+  enabled: boolean
+  interval_seconds: number
+  schedule?: string
+  verdict: string
+  checked_at?: string
+  latency_ms?: number
+  sample_count: number
+  passed_count: number
+  failed_count: number
+  inconclusive_count: number
+  usage: ProbeUsage
+  history: MonitorObservationPoint[]
+}
+export interface MonitorObservations {
+  range: MonitorRange
+  start: string
+  end: string
+  computed_at: string
+  group_by: MonitorMatrixGroupBy
+  items: MonitorObservationRow[]
+  summary: {
+    probe_count: number
+    passed_count: number
+    failed_count: number
+    inconclusive_count: number
+    usage: ProbeUsage
+  }
+  business_usage: MonitorMetric
+  total_tokens: number
+}
 export interface MonitorCandyHistory {
+  group_id?: number
+  platform?: string
+  usage?: ProbeUsage
   model: string
   reasoning_effort: string
   interval_minutes: number
@@ -284,6 +353,10 @@ export async function getErrors(filter: MonitorFilter, admin = false, signal?: A
 }
 export async function getUsers(filter: MonitorFilter, admin = false, signal?: AbortSignal) {
   const { data } = await apiClient.get<{ coverage: MonitorCoverage; items: MonitorUserRow[] }>(`${base(admin)}/users`, requestConfig(filter, signal))
+  return data
+}
+export async function getObservations(filter: MonitorFilter, admin = false, signal?: AbortSignal, groupBy: MonitorMatrixGroupBy = 'platform_group') {
+  const { data } = await apiClient.get<MonitorObservations>(`${base(admin)}/observations`, requestConfig(filter, signal, { group_by: groupBy }))
   return data
 }
 export async function getConfig() {

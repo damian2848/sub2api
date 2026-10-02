@@ -26,6 +26,7 @@ type pelicanTestUsage struct {
 	input       int
 	output      int
 	thoughts    int
+	reasoning   int
 	seen        bool
 	inputSeen   bool
 	outputSeen  bool
@@ -128,18 +129,21 @@ func (u *pelicanTestUsage) read(raw string) {
 		set("promptTokenCount", &u.input)
 		set("candidatesTokenCount", &u.output)
 		set("thoughtsTokenCount", &u.thoughts)
+		u.reasoning = u.thoughts
 		set("cachedContentTokenCount", &u.tokens.CacheReadTokens)
 	case "chat":
 		set("prompt_tokens", &u.input)
 		set("completion_tokens", &u.output)
 		set("prompt_tokens_details.cached_tokens", &u.tokens.CacheReadTokens)
 		set("prompt_cache_hit_tokens", &u.tokens.CacheReadTokens)
+		set("completion_tokens_details.reasoning_tokens", &u.reasoning)
 	default:
 		set("input_tokens", &u.input)
 		set("output_tokens", &u.output)
 		set("input_tokens_details.cached_tokens", &u.tokens.CacheReadTokens)
 		set("cache_read_input_tokens", &u.tokens.CacheReadTokens)
 		set("cache_creation_input_tokens", &u.tokens.CacheCreationTokens)
+		set("output_tokens_details.reasoning_tokens", &u.reasoning)
 	}
 	u.tokens.InputTokens = u.input
 	if u.protocol != "anthropic" {
@@ -147,6 +151,34 @@ func (u *pelicanTestUsage) read(raw string) {
 		u.tokens.InputTokens = max(0, u.input-u.tokens.CacheReadTokens-u.tokens.CacheCreationTokens)
 	}
 	u.tokens.OutputTokens = u.output + u.thoughts
+}
+
+func (c *pelicanTestUsageCollector) snapshot() *ChannelMonitorProbeUsage {
+	usage := &ChannelMonitorProbeUsage{Source: "probe", RequestCount: int64(len(c.requests)), UsageIncomplete: len(c.requests) == 0}
+	for _, request := range c.requests {
+		usage.InputTokens += int64(request.tokens.InputTokens)
+		usage.OutputTokens += int64(request.tokens.OutputTokens)
+		usage.CacheReadTokens += int64(request.tokens.CacheReadTokens)
+		usage.CacheCreationTokens += int64(request.tokens.CacheCreationTokens)
+		usage.CacheCreation5mTokens += int64(request.tokens.CacheCreation5mTokens)
+		usage.CacheCreation1hTokens += int64(request.tokens.CacheCreation1hTokens)
+		usage.ReasoningTokens += int64(request.reasoning)
+		usage.UsageIncomplete = usage.UsageIncomplete || !request.seen || !request.complete || !request.inputSeen || !request.outputSeen
+	}
+	return usage
+}
+
+func (c *pelicanTestUsageCollector) upstreamModel() string {
+	if len(c.requests) > 0 {
+		return c.requests[len(c.requests)-1].model
+	}
+	return c.model
+}
+
+func (c *pelicanTestUsageCollector) probeUsage(billing *BillingService, account *Account) ChannelMonitorProbeUsage {
+	usage := c.snapshot()
+	usage.CostUSD, usage.CostIncomplete = c.cost(billing, account)
+	return *usage
 }
 
 // Return a cost snapshot, not a debit. Use the account's upstream cost multiplier,
