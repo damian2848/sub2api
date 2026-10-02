@@ -99,6 +99,35 @@ function outputTypes(output) {
   return counts;
 }
 
+// What the page itself calls a tool call of Prism's own agent: a coarse kind, used for its progress line.
+export function toolProgressKind(call) {
+  const text = [call?.name, call?.call_type, call?.arguments_preview ?? '', call?.source ?? ''].join(' ').toLowerCase();
+  if (text.includes('apply_patch')) return 'edit';
+  if (/\brg\b|\bgrep\b|\bsearch\b/.test(text)) return 'search';
+  if (/\bls\b|\blist\b|\bfind\b|\bglob\b/.test(text)) return 'explore';
+  if (/\bcat\b|\bsed\b|\bhead\b|\btail\b|\bread\b/.test(text)) return 'read';
+  if (/\bexec\b|\brun\b|\bcommand\b|\bbash\b|\bshell\b/.test(text)) return 'command';
+  return 'other';
+}
+
+const plural = (count, noun) => `${count} ${noun}${count === 1 ? '' : 's'}`;
+// Progress lines for the tool calls seen so far, one per kind, in the order the page shows them.
+export function toolProgressLines(counts) {
+  const lines = [];
+  if (counts.explore) lines.push(`Explored ${plural(counts.explore, 'location')}`);
+  if (counts.search) lines.push('Searched');
+  if (counts.read) lines.push(`Read ${plural(counts.read, 'file')}`);
+  if (counts.edit) lines.push('Editing files');
+  if (counts.command) lines.push('Running a command');
+  if (!lines.length && counts.other) lines.push('Using a tool');
+  return lines;
+}
+
+// Streaming Responses clients get Prism's progress as reasoning summaries; keep each part and the total bounded.
+export const MAX_FORWARDED_PARTS = 64;
+export const MAX_FORWARDED_CHARS = 4000;
+const normalizedNote = text => text.replace(/\s+/g, ' ').trim();
+
 export function modelFromLabel(label) {
   const value = label.trim().replace(/\s+/g, ' ');
   const match = /^(\d+(?:\.\d+)?) (Sol|Terra|Luna|Astra)\b/.exec(value);
@@ -342,7 +371,8 @@ export class BrowserSession {
       own_polls: turn.ownPolls, own_poll_failed: turn.ownPollFailed, own_poll_errors: turn.ownPollErrorTotal || 0,
       prism_ms: turn.startedAt ? Math.round(performance.now() - turn.startedAt) : undefined,
       internal_tool_calls: turn.internalTools?.size || 0, internal_tool_names: [...(turn.internalToolNames || [])],
-      reasoning_summaries: turn.reasoningSummaries?.size || 0, output_types: outputTypes(payload.output),
+      reasoning_summaries: turn.reasoningSummaries?.size || 0, reasoning_forwarded: turn.notes?.forwarded || 0,
+      output_types: outputTypes(payload.output),
       exec_meta_shape: payloadShape(payload.codexExecMeta), debug_shape: payloadShape(payload.codexDebug) });
     if (data.response?.status !== 'success' && (payload.httpStatus === 413 || payload.reason === 'conversation_too_large')) {
       // Prism refused the size of the conversation. Every account would refuse it the same way, so it is the
@@ -374,6 +404,7 @@ export class BrowserSession {
   // reasoning summaries; the audit keeps only how many there were and the tool names.
   trackProgress(turn, progress) {
     if (!progress || typeof progress !== 'object') return;
+    this.forwardProgress(turn, progress);
     if (Array.isArray(progress.toolCalls)) {
       turn.internalTools ??= new Set();
       turn.internalToolNames ??= new Set();
@@ -390,6 +421,49 @@ export class BrowserSession {
       for (const summary of progress.reasoningSummaries.slice(0, 500)) {
         if (turn.reasoningSummaries.size < 1000) {
           turn.reasoningSummaries.add(`${summary?.line_index}:${typeof summary?.text === 'string' ? summary.text.length : ''}`);
+        }
+      }
+    }
+  }
+
+  // Hands Prism's new reasoning summaries and tool progress to the caller (request.onReasoning), once each.
+  // A failing callback never disturbs the turn.
+  forwardProgress(turn, progress) {
+    const emit = turn.request.onReasoning;
+    if (typeof emit !== 'function') return;
+    turn.notes ??= { seen: new Set(), toolKeys: new Set(), counts: {}, lines: new Set(), forwarded: 0 };
+    const notes = turn.notes;
+    const send = text => {
+      if (notes.forwarded >= MAX_FORWARDED_PARTS) return;
+      notes.forwarded += 1;
+      try { emit(text.length > MAX_FORWARDED_CHARS ? `${text.slice(0, MAX_FORWARDED_CHARS - 1)}…` : text); } catch { /* ignored */ }
+    };
+    if (Array.isArray(progress.reasoningSummaries)) {
+      for (const summary of progress.reasoningSummaries.slice(0, 500)) {
+        const text = typeof summary?.text === 'string' ? summary.text.trim() : '';
+        const key = normalizedNote(text);
+        if (!key || notes.seen.has(key)) continue;
+        notes.seen.add(key);
+        send(text);
+      }
+    }
+    if (Array.isArray(progress.toolCalls)) {
+      let changed = false;
+      for (const call of progress.toolCalls.slice(0, 500)) {
+        if (!call || typeof call !== 'object') continue;
+        const key = [call.line_index, call.call_id ?? '', call.name, call.call_type].join(':');
+        if (notes.toolKeys.has(key)) continue;
+        notes.toolKeys.add(key);
+        const kind = toolProgressKind(call);
+        notes.counts[kind] = (notes.counts[kind] || 0) + 1;
+        changed = true;
+      }
+      if (changed) {
+        // A line is sent once; a count that grew ("Explored 2 locations") is a new line.
+        for (const line of toolProgressLines(notes.counts)) {
+          if (notes.lines.has(line)) continue;
+          notes.lines.add(line);
+          send(`**${line}**`);
         }
       }
     }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { request as httpRequest } from 'node:http';
-import { createPrismServer } from '../src/server.mjs';
+import { createPrismServer, streamReasoningEnabled } from '../src/server.mjs';
 import { PrismError } from '../src/errors.mjs';
 
 const managementKey = 'm'.repeat(40);
@@ -395,4 +395,111 @@ test('a no-failover stream sends no headers or heartbeat while queued or retryin
   const response = await pending;
   assert.equal(response.status, 200);
   assert.match(await response.text(), /retried successfully/);
+});
+
+const reasoningStreamEvents = text => responseEvents(text).map(event => event.type);
+
+test('Prism progress reaches a streaming Responses client as a reasoning item before the answer', async t => {
+  const first = deferred();
+  const release = deferred();
+  t.after(() => release.resolve());
+  const { post } = await fixture(t, { async generate(_, request) {
+    request.onReasoning('**Planning the page**\nI will start with the layout.');
+    first.resolve();
+    await release.promise;
+    request.onReasoning('**Planning the page**\nI will start with the layout.');
+    request.onReasoning('**Running a command**');
+    return 'The final answer';
+  } });
+  const response = await post('/accounts/32/v1/responses', { ...body, stream: true });
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  let wire = '';
+  await first.promise;
+  while (!wire.includes('reasoning_summary_part.done')) wire += new TextDecoder().decode((await reader.read()).value);
+  assert.ok(!wire.includes('response.completed'), 'the reasoning arrives while Prism is still generating');
+  assert.ok(!wire.includes('event: response.output_text'), 'the answer is not part of it');
+  release.resolve();
+  for (;;) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    wire += new TextDecoder().decode(chunk.value);
+  }
+  const events = responseEvents(wire);
+  assert.deepEqual(events.map(event => event.type), [
+    'response.created', 'response.in_progress',
+    'response.output_item.added',
+    'response.reasoning_summary_part.added', 'response.reasoning_summary_text.delta', 'response.reasoning_summary_text.done',
+    'response.reasoning_summary_part.done',
+    'response.reasoning_summary_part.added', 'response.reasoning_summary_text.delta', 'response.reasoning_summary_text.done',
+    'response.reasoning_summary_part.done',
+    'response.output_item.done',
+    'response.output_item.added', 'response.content_part.added', 'response.output_text.delta', 'response.output_text.done',
+    'response.content_part.done', 'response.output_item.done', 'response.completed']);
+  assert.deepEqual(events.map(event => event.sequence_number), events.map((_, index) => index), 'one gapless sequence');
+  const reasoningItem = events[2].item;
+  assert.deepEqual([reasoningItem.type, reasoningItem.status, reasoningItem.summary, reasoningItem.id.startsWith('rs_prism_')],
+    ['reasoning', 'in_progress', [], true]);
+  const summaryEvents = events.filter(event => event.type.startsWith('response.reasoning_summary'));
+  assert.ok(summaryEvents.every(event => event.item_id === reasoningItem.id && event.output_index === 0));
+  assert.deepEqual([...new Set(summaryEvents.map(event => event.summary_index))], [0, 1], 'a repeated note is sent once');
+  assert.equal(events[4].delta, '**Planning the page**\nI will start with the layout.');
+  assert.equal(events[5].text, events[4].delta);
+  const done = events.find(event => event.type === 'response.output_item.done' && event.item.type === 'reasoning');
+  assert.equal(done.item.status, 'completed');
+  assert.deepEqual(done.item.summary.map(part => part.text), ['**Planning the page**\nI will start with the layout.', '**Running a command**']);
+  const message = events.find(event => event.type === 'response.output_item.added' && event.item.type === 'message');
+  assert.equal(message.output_index, 1, 'the answer follows the reasoning item');
+  const answerEvents = events.slice(12, 18);
+  assert.ok(answerEvents.every(event => event.output_index === 1), 'every answer event is at output 1');
+  const completed = events.at(-1).response;
+  assert.deepEqual(completed.output.map(item => item.type), ['reasoning', 'message']);
+  assert.equal(completed.output_text, 'The final answer');
+  assert.equal(completed.output[0].summary.length, 2);
+});
+
+test('without Prism progress the stream is exactly as before, and tool calls keep their order after the reasoning', async t => {
+  const plain = await fixture(t, { async generate() { return 'Just an answer'; } });
+  const plainEvents = reasoningStreamEvents(await (await plain.post('/accounts/32/v1/responses', { ...body, stream: true })).text());
+  assert.ok(!plainEvents.some(type => type.includes('reasoning')));
+  assert.equal(plainEvents.filter(type => type === 'response.output_item.added').length, 1);
+
+  const tools = await fixture(t, { async generate(_, request) { request.onReasoning('**Checking files**'); return toolReply; } });
+  const events = responseEvents(await (await tools.post('/accounts/32/v1/responses',
+    { ...body, tools: [execTool], stream: true })).text());
+  const added = events.filter(event => event.type === 'response.output_item.added').map(event => [event.output_index, event.item.type]);
+  assert.deepEqual(added, [[0, 'reasoning'], [1, 'function_call']]);
+  assert.deepEqual(events.at(-1).response.output.map(item => item.type), ['reasoning', 'function_call']);
+});
+
+test('reasoning is not offered to non-streaming or Chat requests, and PRISM_STREAM_REASONING=false turns it off', async t => {
+  const offered = [];
+  const note = async (_, request) => { offered.push(typeof request.onReasoning); request.onReasoning?.('**Note**'); return 'answer'; };
+  const on = await fixture(t, { generate: note });
+  assert.equal((await on.post('/accounts/32/v1/responses', body)).status, 200);
+  const chat = await on.post('/accounts/32/v1/chat/completions', { model: models[0], stream: true,
+    messages: [{ role: 'user', content: 'hi' }] });
+  assert.ok(!(await chat.text()).includes('reasoning_content'));
+  assert.deepEqual(offered, ['undefined', 'undefined']);
+
+  offered.length = 0;
+  const off = await fixture(t, { generate: note }, { streamReasoning: false });
+  const wire = await (await off.post('/accounts/32/v1/responses', { ...body, stream: true })).text();
+  assert.deepEqual(offered, ['undefined']);
+  assert.ok(!wire.includes('reasoning_summary') && !wire.includes('"type":"reasoning"'));
+  for (const [value, expected] of [[undefined, true], ['', true], ['true', true], ['false', false], ['0', false], [' OFF ', false]]) {
+    assert.equal(streamReasoningEnabled(value), expected, String(value));
+  }
+});
+
+test('a note that arrives after the answer writes nothing and does not break the next request', async t => {
+  let late;
+  const { post } = await fixture(t, { async generate(_, request) { late = request.onReasoning; return 'answer'; } });
+  const wire = await (await post('/accounts/32/v1/responses', { ...body, stream: true })).text();
+  assert.equal(responseEvents(wire).at(-1).type, 'response.completed');
+  late('**Too late**');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const after = await post('/accounts/32/v1/responses', { ...body, stream: true });
+  assert.equal(after.status, 200);
+  await after.text();
 });

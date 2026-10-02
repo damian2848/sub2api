@@ -52,9 +52,15 @@ export function readJSON(req, limit) {
   });
 }
 
+// PRISM_STREAM_REASONING=false stops forwarding Prism's progress notes as reasoning events.
+export function streamReasoningEnabled(value = process.env.PRISM_STREAM_REASONING) {
+  return !['false', '0', 'off'].includes(String(value ?? '').trim().toLowerCase());
+}
+
 export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024 * 1024, requestTimeout = 1800000,
   sessionTimeout = 30000, keepaliveMs = 10000, maxTextBytes, maxTranscriptChars,
-  maxAttachments, maxAttachmentBytes, maxTotalAttachmentBytes, promptCache = new PromptCache() }) {
+  maxAttachments, maxAttachmentBytes, maxTotalAttachmentBytes, promptCache = new PromptCache(),
+  streamReasoning = streamReasoningEnabled() }) {
   if (typeof managementKey !== 'string' || managementKey.length < 32) throw new Error('PRISM_MANAGEMENT_KEY must have at least 32 characters');
   const managementHash = createHash('sha256').update(managementKey).digest('hex');
   // Codex requests (tool schemas plus history) are large; management bodies are not.
@@ -132,6 +138,16 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
         }, keepaliveMs);
       })();
       if (request.stream) request.onAccepted = () => { if (!res.destroyed) openStream().catch(disconnect); };
+      // Prism reports reasoning summaries and tool progress while it works. Responses clients get them as a
+      // reasoning item, so a long generation is not silent. The answer itself still arrives with the result.
+      if (request.stream && request.family === 'responses' && streamReasoning) {
+        const sent = new Set();
+        request.onReasoning = text => {
+          if (res.destroyed || res.writableEnded || sent.has(text)) return;
+          sent.add(text);
+          openStream().then(() => streamWriter.reasoning(text)).catch(disconnect);
+        };
+      }
       aborted(controller.signal);
       const text = await manager.generate(source, request, controller.signal);
       aborted(controller.signal);

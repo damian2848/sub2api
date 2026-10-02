@@ -239,7 +239,26 @@ function streamFrames(request, identity) {
     choices: [{ index: 0, delta, finish_reason: finishReason }] })}\n\n`;
   const shell = request.family === 'chat' ? null : { id: identity.id, object: 'response', created_at: identity.created,
     status: 'in_progress', model: request.model, output: [], output_text: '', usage: null };
+  // Progress Prism reports while it works (reasoning summaries, tool progress) goes out as one reasoning
+  // item at output 0; the answer's items follow it. Codex shows it as the model's live thinking.
+  const reasoning = { id: `rs_prism_${randomBytes(12).toString('hex')}`, summaries: [] };
+  const reasoningItem = () => reasoning.summaries.length ? { id: reasoning.id, type: 'reasoning', status: 'completed',
+    summary: reasoning.summaries.map(text => ({ type: 'summary_text', text })) } : null;
   return {
+    // Registers one summary part right away (so finish() sees it) and returns the frames that announce it.
+    reasoning(text) {
+      const summaryIndex = reasoning.summaries.length;
+      reasoning.summaries.push(text);
+      const ids = { item_id: reasoning.id, output_index: 0, summary_index: summaryIndex };
+      return (function* () {
+        if (summaryIndex === 0) yield event('response.output_item.added', { output_index: 0,
+          item: { id: reasoning.id, type: 'reasoning', status: 'in_progress', summary: [] } });
+        yield event('response.reasoning_summary_part.added', { ...ids, part: { type: 'summary_text', text: '' } });
+        for (const delta of slices(text)) yield event('response.reasoning_summary_text.delta', { ...ids, delta });
+        yield event('response.reasoning_summary_text.done', { ...ids, text });
+        yield event('response.reasoning_summary_part.done', { ...ids, part: { type: 'summary_text', text } });
+      })();
+    },
     *begin() {
       if (request.family === 'chat') {
         yield chunk({ role: 'assistant', content: '' });
@@ -267,7 +286,11 @@ function streamFrames(request, identity) {
         yield 'data: [DONE]\n\n';
         return;
       }
-      for (const [outputIndex, item] of result.output.entries()) {
+      const thinking = reasoningItem();
+      if (thinking) yield event('response.output_item.done', { output_index: 0, item: thinking });
+      const offset = thinking ? 1 : 0;
+      for (const [position, item] of result.output.entries()) {
+        const outputIndex = position + offset;
         if (item.type === 'function_call') {
           yield event('response.output_item.added', { output_index: outputIndex, item: { ...item, status: 'in_progress', arguments: '' } });
           for (const delta of slices(item.arguments)) {
@@ -289,7 +312,7 @@ function streamFrames(request, identity) {
           yield event('response.output_item.done', { output_index: outputIndex, item });
         }
       }
-      yield event('response.completed', { response: result });
+      yield event('response.completed', { response: thinking ? { ...result, output: [thinking, ...result.output] } : result });
     },
     *error(error) {
       const output = publicError(error);
@@ -363,6 +386,11 @@ export function createStreamWriter(res, request, { signal, onDisconnect } = {}) 
     heartbeat() {
       if (pending || terminalRequested || ended) return Promise.resolve();
       return run(frames.heartbeat());
+    },
+    // One progress note from Prism as a reasoning summary part (Responses streams only).
+    reasoning(text) {
+      if (request.family === 'chat' || !started || terminalRequested || ended) return Promise.resolve();
+      return run(frames.reasoning(text));
     },
     finish(result) {
       if (terminalRequested || ended) return pending || Promise.resolve();

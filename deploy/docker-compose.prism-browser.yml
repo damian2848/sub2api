@@ -43,6 +43,9 @@ services:
       PRISM_TRANSIENT_RETRIES: "${PRISM_TRANSIENT_RETRIES:-1}"
       PRISM_TRANSIENT_RETRY_DELAY_SECONDS: "${PRISM_TRANSIENT_RETRY_DELAY_SECONDS:-4}"
       PRISM_TRANSIENT_RETRY_WAIT_SECONDS: "${PRISM_TRANSIENT_RETRY_WAIT_SECONDS:-15}"
+      # Prepare the next chat while idle; forward Prism's progress notes as reasoning events.
+      PRISM_PREWARM_CHAT: "${PRISM_PREWARM_CHAT:-true}"
+      PRISM_STREAM_REASONING: "${PRISM_STREAM_REASONING:-true}"
     volumes:
       - "${PRISM_BROWSER_DATA_DIR:-./prism-browser-data}:/data"
     # Local publication also supports a host-network Sub2API deployment.

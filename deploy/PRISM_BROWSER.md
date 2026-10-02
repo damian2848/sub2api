@@ -65,6 +65,8 @@ compose file and listed in `.env.prism-browser.example`):
 | `PRISM_TRANSIENT_RETRY_WAIT_SECONDS` | `15` | 0-120 | Longest wait for an idle worker to take the resubmission before the original error is returned. |
 | `PRISM_STATUS_POLL_MS` | `1000` | 0 or 250-10000 | After the page's first successful poll, poll independently at this interval. Failures back off to at most 8000 ms; only three consecutive failures stop independent polling. `0` leaves polling to the page. |
 | `PRISM_START_COOLDOWN_SECONDS` | `60` | 0-600 | Minimum pause after a refused start. Admission also waits for the next token. `0` disables this minimum, not token pacing. |
+| `PRISM_PREWARM_CHAT` | `true` | `true` / `false` | After a clean turn the worker opens the next chat tab, closes the older chat tabs and waits for the composer while idle, so the next request only fills it in. Each request used to open a tab that was never closed, so the page grew and preparing a request took 5-9 s after ~16 turns. `false` opens the chat per request. |
+| `PRISM_STREAM_REASONING` | `true` | `true` / `false` | Forward Prism's reasoning summaries and tool progress (see *Progress while Prism works*) to streaming Responses clients. `false` keeps the stream to heartbeats until the answer. |
 | `PRISM_PROMPT_CACHE_TTL_SECONDS` | `600` | 0-3600 | How long a processed prompt counts toward the estimated cache read (see *Usage is estimated*). `0` reports no cached tokens. |
 
 Invalid values stop the adapter at startup.
@@ -117,6 +119,26 @@ successful poll resets that streak. Only three consecutive failures stop our
 poller and leave completion to the page. Page polling errors remain nonfatal
 while our poller is healthy. `upstream_result.own_poll_errors` counts all failed
 independent polls in the turn, including failures before a recovered streak.
+
+### Progress while Prism works
+
+Prism returns the answer text only when a turn is finished; while it works, its status poll carries
+`codex_live_progress` with short reasoning summaries and the tool calls of Prism's own agent. For a
+streaming `/v1/responses` request the sidecar forwards both as one `reasoning` output item (output 0),
+in the lifecycle Codex needs to render streaming reasoning: `output_item.added`,
+`reasoning_summary_part.added`, `reasoning_summary_text.delta`/`.done`, `reasoning_summary_part.done`, then
+`output_item.done` before the answer's own items, which move to output 1 and later. The completed
+response lists the reasoning item first. Each distinct summary is sent once (as a part of its own);
+tool progress becomes a bold one-line part per kind ("Explored 2 locations", "Searched", "Read 1 file",
+"Editing files", "Running a command"), as the Prism page shows it. A part is at most 4000 characters and
+a request forwards at most 64 parts. Chat Completions and non-streaming requests are unchanged, and the
+audit counts the forwarded parts (`reasoning_forwarded`) without logging any text.
+
+Two consequences. The summaries are real client output, so a stream that has shown one cannot move to
+another account if Prism fails later; the client receives the failure and retries itself. And
+`first_token_ms` for such requests is the first summary, not the first character of the answer.
+The reasoning item has no `encrypted_content`; the sidecar ignores `reasoning` input items, and the
+gateway already replays them without their id for OAuth accounts.
 
 ### Automatic retry of Prism server errors
 

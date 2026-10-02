@@ -326,3 +326,75 @@ func TestPrismChatStreamPartialTerminalReadErrorDoesNotSucceed(t *testing.T) {
 	wire, _ := recorder.snapshot()
 	require.Equal(t, role, wire, "unfinished terminal events are not public")
 }
+
+const prismReasoningStreamHead = `event: response.output_item.added` + "\n" + `data: {"type":"response.output_item.added","sequence_number":2,"output_index":0,"item":{"id":"rs_prism_1","type":"reasoning","summary":[]}}` + "\n\n" +
+	`event: response.reasoning_summary_part.added` + "\n" + `data: {"type":"response.reasoning_summary_part.added","sequence_number":3,"item_id":"rs_prism_1","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":""}}` + "\n\n" +
+	`event: response.reasoning_summary_text.delta` + "\n" + `data: {"type":"response.reasoning_summary_text.delta","sequence_number":4,"item_id":"rs_prism_1","output_index":0,"summary_index":0,"delta":"**Planning the page**"}` + "\n\n"
+
+// A reasoning summary is real client output: it reaches the client while Prism is still generating, it is
+// Prism's first token, and a later failure is delivered in place instead of failing over to another account.
+func TestPrismHTTPStreamReasoningSummaryIsDeliveredBeforeTheAnswer(t *testing.T) {
+	for _, passthrough := range []bool{false, true} {
+		name := "native"
+		if passthrough {
+			name = "passthrough"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				svc, c, recorder := newPrismHTTPStreamTestContext()
+				pr, pw := io.Pipe()
+				defer pr.Close()
+				defer pw.Close()
+				finish := make(chan struct{})
+				go func() {
+					_, _ = io.WriteString(pw, prismStreamCreated+prismStreamInProgress+prismReasoningStreamHead)
+					<-finish
+					_, _ = io.WriteString(pw, `data: {"type":"response.reasoning_summary_text.done","sequence_number":5,"item_id":"rs_prism_1","output_index":0,"summary_index":0,"text":"**Planning the page**"}`+"\n\n"+
+						`data: {"type":"response.output_text.delta","sequence_number":6,"output_index":1,"delta":"answer"}`+"\n\n"+
+						`data: {"type":"response.completed","sequence_number":7,"response":{"id":"resp_prism_stream","usage":{"input_tokens":2,"output_tokens":1}}}`+"\n\n")
+					_ = pw.Close()
+				}()
+				resultCh := make(chan prismStreamTestResult, 1)
+				errCh := make(chan error, 1)
+				go func() {
+					result, err := runPrismHTTPStreamTest(svc, c, pr, passthrough)
+					resultCh <- result
+					errCh <- err
+				}()
+				synctest.Wait()
+				body, _ := recorder.snapshot()
+				require.Equal(t, prismStreamCreated+prismStreamInProgress+prismReasoningStreamHead, body,
+					"the lifecycle and the first reasoning summary are on the wire before the answer exists")
+				require.True(t, IsPrismStreamCommitted(c))
+				require.NotContains(t, body, "output_text")
+				close(finish)
+				require.NoError(t, <-errCh)
+				result := <-resultCh
+				require.Equal(t, "resp_prism_stream", result.responseID)
+				require.NotNil(t, result.firstTokenMs)
+				body, flushes := recorder.snapshot()
+				require.Equal(t, 1, strings.Count(body, "event: response.created"))
+				require.Equal(t, 1, strings.Count(body, "event: response.output_item.added"), "no duplicated or reordered events")
+				require.Contains(t, body, `"delta":"answer"`)
+				for _, flushed := range flushes {
+					require.True(t, strings.HasSuffix(flushed, "\n\n"), "flush must respect the SSE boundary")
+				}
+			})
+		})
+	}
+}
+
+func TestPrismHTTPStreamFailureAfterReasoningIsNotReplayedOnAnotherAccount(t *testing.T) {
+	for _, passthrough := range []bool{false, true} {
+		svc, c, recorder := newPrismHTTPStreamTestContext()
+		failure := `data: {"type":"response.failed","sequence_number":5,"response":{"id":"resp_prism_stream","status":"failed","error":{"code":"server_error","message":"native failure"}}}` + "\n\n"
+		_, err := runPrismHTTPStreamTest(svc, c, io.NopCloser(strings.NewReader(
+			prismStreamCreated+prismStreamInProgress+prismReasoningStreamHead+failure)), passthrough)
+		require.Error(t, err)
+		var failoverErr *UpstreamFailoverError
+		require.False(t, errors.As(err, &failoverErr), "the client already saw the reasoning, so the request cannot move to another account (passthrough=%t)", passthrough)
+		body, _ := recorder.snapshot()
+		require.Contains(t, body, "**Planning the page**")
+		require.True(t, strings.Contains(body, "response.failed") || strings.Contains(body, `"type":"error"`), body)
+	}
+}
