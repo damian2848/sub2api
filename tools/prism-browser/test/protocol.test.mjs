@@ -245,15 +245,15 @@ test('all other parameters are ignored, never rejected', () => {
 
 test('reasoning effort maps to Prism levels and never rejects', () => {
   const table = { none: 'low', minimal: 'low', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', HIGH: 'high', XHIGH: 'xhigh',
-    max: 'xhigh', extrahigh: 'xhigh', 'extra-high': 'xhigh', extra_high: 'xhigh', 'Extra-High': 'xhigh' };
+    max: 'xhigh', ultra: 'xhigh', ULTRA: 'xhigh', extrahigh: 'xhigh', 'extra-high': 'xhigh', extra_high: 'xhigh', 'Extra-High': 'xhigh' };
   for (const [given, expected] of Object.entries(table)) {
     assert.equal(mapEffort(given), expected, given);
     assert.equal(parse({ input: 'x', reasoning: { effort: given } }).effort, expected);
     assert.equal(parse({ messages: [{ role: 'user', content: 'x' }], reasoning_effort: given }, 'chat').effort, expected);
   }
-  for (const odd of [undefined, null, '', 'ultra', 5, {}, 'constructor', '__proto__']) assert.equal(mapEffort(odd), 'medium');
+  for (const odd of [undefined, null, '', 'turbo', 5, {}, 'constructor', '__proto__']) assert.equal(mapEffort(odd), 'medium');
   assert.equal(parse({ input: 'x' }).effort, 'medium');
-  assert.equal(parse({ input: 'x', reasoning: { effort: 'ultra' } }).effort, 'medium');
+  assert.equal(parse({ input: 'x', reasoning: { effort: 'turbo' } }).effort, 'medium');
   assert.equal(parse({ input: 'x', reasoning: 'high' }).effort, 'medium');
   assert.equal(parse({ messages: [{ role: 'user', content: 'x' }] }, 'chat').effort, 'medium');
 });

@@ -285,8 +285,8 @@ Accepted input:
   comes from Chat `reasoning_effort` or Responses `reasoning.effort`. Prism's
   UI offers four levels for every model and all four are passed through:
   `low`, `medium`, `high` and `xhigh` ("Extra High"). `none`/`minimal` run as
-  `low` (the lowest Prism has) and the gateway's `max` and the spellings
-  `extrahigh`, `extra-high` and `extra_high` run as `xhigh`; a missing or
+  `low` (the lowest Prism has) and the gateway's `max`, Codex's `ultra` and the
+  spellings `extrahigh`, `extra-high` and `extra_high` run as `xhigh`; a missing or
   unknown value runs as `medium` and is never an error.
 - All other parameters (`temperature`, `top_p`, `tool_choice`,
   `parallel_tool_calls`, `include`, `prompt_cache_key`, `text`, `store`,

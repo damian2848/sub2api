@@ -17,9 +17,10 @@ const MEDIA_PARTS = new Set(['input_image', 'image_url', 'input_file', 'input_au
 const SKIPPED_ITEMS = new Set(['reasoning', 'web_search_call', 'file_search_call', 'code_interpreter_call',
   'image_generation_call', 'compaction']);
 // Prism's UI offers four reasoning efforts for every model: low, medium, high and xhigh ("Extra High").
-// Levels below low collapse to low and the gateway's `max` to the highest level; nothing is lowered.
+// Levels below low collapse to low and the levels above xhigh (`max`, and Codex's `ultra`, which adds
+// task delegation on the client side) to the highest one Prism has; nothing is lowered.
 const efforts = new Map([['none', 'low'], ['minimal', 'low'], ['low', 'low'], ['medium', 'medium'], ['high', 'high'],
-  ['xhigh', 'xhigh'], ['extrahigh', 'xhigh'], ['extra-high', 'xhigh'], ['extra_high', 'xhigh'], ['max', 'xhigh']]);
+  ['xhigh', 'xhigh'], ['extrahigh', 'xhigh'], ['extra-high', 'xhigh'], ['extra_high', 'xhigh'], ['max', 'xhigh'], ['ultra', 'xhigh']]);
 
 function invalid(code, param) { throw new PrismError(code, 400, param); }
 function object(value, param) {
