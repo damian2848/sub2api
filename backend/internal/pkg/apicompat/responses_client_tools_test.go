@@ -663,6 +663,36 @@ func TestResponsesClientToolStreamRestorer_RestoresSeveralCustomCallsInOneRespon
 	}
 }
 
+// Codex folds progress notes under "worked for ..." by the channel (phase) of each assistant message,
+// so restoring the tool calls around a message must leave its phase alone.
+func TestResponsesClientToolStreamRestorer_KeepsMessagePhase(t *testing.T) {
+	restorer := NewResponsesClientToolStreamRestorer(ResponsesClientToolMapping{CustomTools: map[string]bool{"exec": true}})
+	for _, event := range []string{
+		`{"type":"response.output_item.added","sequence_number":3,"output_index":0,"item":{"type":"message","id":"m1","role":"assistant","status":"in_progress","phase":"commentary","content":[]}}`,
+		`{"type":"response.output_item.done","sequence_number":9,"output_index":0,"item":{"type":"message","id":"m1","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Writing the page.","annotations":[]}]}}`,
+	} {
+		restored, _, err := restorer.RestoreEvent([]byte(event))
+		require.NoError(t, err)
+		require.Len(t, restored, 1)
+		require.Equal(t, "commentary", gjson.GetBytes(restored[0], "item.phase").String())
+	}
+
+	terminal := []byte(`{"type":"response.completed","sequence_number":20,"response":{"id":"resp_1","output":[` +
+		`{"type":"message","id":"m1","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Writing the page.","annotations":[]}]},` +
+		`{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":"{\"input\":\"text(1)\"}","status":"completed"}]}}`)
+	restored, changed, err := restorer.RestoreEvent(terminal)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.Len(t, restored, 1)
+	require.Equal(t, "commentary", gjson.GetBytes(restored[0], "response.output.0.phase").String())
+	require.Equal(t, "custom_tool_call", gjson.GetBytes(restored[0], "response.output.1.type").String())
+	require.Equal(t, "text(1)", gjson.GetBytes(restored[0], "response.output.1.input").String())
+
+	final, _, err := restorer.RestoreEvent([]byte(`{"type":"response.completed","sequence_number":21,"response":{"output":[{"type":"message","id":"m2","role":"assistant","phase":"final_answer","content":[]}]}}`))
+	require.NoError(t, err)
+	require.Equal(t, "final_answer", gjson.GetBytes(final[0], "response.output.0.phase").String())
+}
+
 func TestResponsesClientToolStreamRestorer_ToolSearchAndFunction(t *testing.T) {
 	restorer := NewResponsesClientToolStreamRestorer(ResponsesClientToolMapping{ToolSearch: true})
 	search := restorer.Restore(ResponsesStreamEvent{Type: "response.output_item.added", SequenceNumber: 0, OutputIndex: 0, Item: &ResponsesOutput{Type: "function_call", ID: "s1", CallID: "c1", Name: "tool_search", Status: "in_progress"}})

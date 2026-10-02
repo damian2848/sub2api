@@ -765,6 +765,28 @@ test('Responses SSE with a note and several calls streams every item with its ow
   assert.deepEqual(events.at(-1).response.output.map(item => item.type), ['message', 'function_call', 'function_call']);
 });
 
+test('Responses message items carry the channel: commentary next to calls, final_answer otherwise', () => {
+  const request = parse({ input: 'go', tools: [execTool], stream: true });
+  const withCalls = resultBody(request, twoCalls);
+  assert.equal(withCalls.output[0].phase, 'commentary');
+  assert.ok(withCalls.output.slice(1).every(item => !('phase' in item)));
+  assert.equal(resultBody(request, 'All done.').output[0].phase, 'final_answer');
+  assert.equal(resultBody(parse({ input: 'hi' }), 'Hello').output[0].phase, 'final_answer');
+  // Streamed items keep the channel on added and done, so the client records it.
+  for (const [reply, phase] of [[twoCalls, 'commentary'], ['All done.', 'final_answer']]) {
+    const res = writableResponse();
+    writeCompletedStream(res, request, resultBody(request, reply));
+    const events = res.frames.filter(frame => frame.startsWith('event: ')).map(frame => JSON.parse(frame.split('\n')[1].slice(6)));
+    const messages = events.filter(event => event.item?.type === 'message');
+    assert.deepEqual(messages.map(event => [event.type, event.item.phase]),
+      [['response.output_item.added', phase], ['response.output_item.done', phase]]);
+    assert.equal(events.at(-1).response.output[0].phase, phase);
+  }
+  // Chat completions have no channel.
+  const chat = parse({ messages: [{ role: 'user', content: 'go' }], tools: [{ type: 'function', function: execTool }] }, 'chat');
+  assert.ok(!JSON.stringify(resultBody(chat, twoCalls)).includes('phase'));
+});
+
 test('Chat SSE streams the note, then one tool_calls chunk carrying every call with its index', () => {
   const request = parse({ messages: [{ role: 'user', content: 'go' }], tools: [{ type: 'function', function: execTool }], stream: true }, 'chat');
   const res = writableResponse();

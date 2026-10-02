@@ -178,8 +178,11 @@ export function resultBody(request, text, identity = resultIdentity(request)) {
         total_tokens: usage.total_tokens, estimation: usage.estimation } };
   }
   const output = [];
+  // `phase` is the channel Codex uses to fold progress notes under "worked for ..." and to show the
+  // final answer: a note that comes with tool calls is commentary, a reply without calls is the answer.
   if (message || !calls.length) output.push({ id: `msg_${randomUUID()}`, type: 'message', role: 'assistant',
-    status: 'completed', content: [{ type: 'output_text', text: message, annotations: [] }] });
+    status: 'completed', phase: calls.length ? 'commentary' : 'final_answer',
+    content: [{ type: 'output_text', text: message, annotations: [] }] });
   for (const call of calls) output.push({ id: `fc_${randomBytes(12).toString('hex')}`, type: 'function_call',
     call_id: call.id, name: call.name, arguments: call.arguments, status: 'completed',
     ...(call.namespace && call.namespace !== 'functions' ? { namespace: call.namespace } : {}) });

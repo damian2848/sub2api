@@ -16,6 +16,11 @@ const LIST_BUDGET = 40000;
 // Caller instructions (system/developer/`instructions`) up to this many characters are
 // forwarded in tool mode. Larger ones (Codex, Claude Code) bury the pipeline protocol.
 export const TOOL_INSTRUCTIONS_LIMIT = 6000;
+export const OUTPUT_RULES_LIMIT = 4500;
+const OUTPUT_RULE_SECTION = 1800;
+// Sections of a coding client's instructions that decide how the text for the user must look
+// (progress notes, final answer, how to link files). Everything else in a long prompt stays out.
+const OUTPUT_RULE_HEADINGS = /^(?:intermediate commentary|final answer|formatting rules|images\/visuals\/files)$/i;
 
 export const toolProtocol = actions => `<role>action emitter</role>
 
@@ -41,8 +46,9 @@ ARGUMENTS
    - Write several tags in ONE reply when several steps belong together; the
      executor runs them in order and returns all the results. Do not spend one
      turn per step.
-   - Text outside the tags is shown to the user as a short progress note. Keep
-     it to one sentence, or leave it out.
+   - Text outside the tags is the progress note shown to the user. When you ask
+     for actions, start with one short sentence saying what you are about to do.
+     Never put the final answer or a question for the user in it.
 
 2. Answer the user directly, in plain text with no tags (markdown is fine), when
    either the TRANSCRIPT shows that the requested work is finished (then report
@@ -214,6 +220,31 @@ export function clampTranscript(entries, budget, pin = -1) {
   return out;
 }
 
+// Long client instructions are not forwarded as a whole, but the sections that control the look of
+// the reply are: without them the model links files as `inline code` and writes its notes differently
+// than it does behind the client's own backend. Headings are matched flat (section = heading up to
+// the next heading of any level), so the nested "Visualizations" section is not pulled in.
+export function outputRules(system, limit = OUTPUT_RULES_LIMIT) {
+  const sections = [];
+  let current = null;
+  for (const line of joinInstructions(system).split('\n')) {
+    const heading = /^#{1,6}\s+(.*?)\s*$/.exec(line);
+    if (heading) {
+      current = OUTPUT_RULE_HEADINGS.test(heading[1]) ? { title: heading[1], body: [] } : null;
+      if (current) sections.push(current);
+    } else if (current) current.body.push(line);
+  }
+  const parts = [];
+  let used = 0;
+  for (const section of sections) {
+    const body = section.body.join('\n').trim().slice(0, OUTPUT_RULE_SECTION);
+    if (!body || used + body.length > limit) continue;
+    parts.push(`## ${section.title}\n${body}`);
+    used += body.length;
+  }
+  return parts.join('\n\n');
+}
+
 const joinInstructions = system => system.map(part => part.trim()).filter(Boolean).join('\n\n');
 
 // Folds everything into one user text. With tools it switches to the next-action-emitter
@@ -227,6 +258,11 @@ export function buildPrompt({ system = [], convo, tools, envParts = [], budget }
     const instructions = joinInstructions(system);
     if (instructions && instructions.length <= TOOL_INSTRUCTIONS_LIMIT) {
       text += `\n\nCaller instructions (follow them, but always reply in the tag format defined above):\n<system_instructions>\n${instructions}\n</system_instructions>`;
+    } else if (instructions) {
+      const rules = outputRules(system);
+      if (rules) {
+        text += `\n\nOutput conventions from the caller. They govern the text you write for the user (the progress note and the final answer); the tag format above still governs actions. The progress note is the commentary channel and the plain-text reply is the final channel.\n<output_conventions>\n${rules}\n</output_conventions>`;
+      }
     }
     const context = envContext(envParts);
     if (context) text += `\n\nThe executor runs here. Use these real paths - never invent a sandbox path like /codex_workspace/...:\n${context}`;

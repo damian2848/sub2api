@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_TOOL_CALLS, NOISE, TOOL_INSTRUCTIONS_LIMIT, buildPrompt, clampTranscript, collectTools, elide, envContext, isRawInputSchema,
-  looseJSON, parseDone, parseReply, parseToolCall, rawInput, rawInputFrom, stripFence, toolProtocol, toolReminder } from '../src/emulation.mjs';
+import { MAX_TOOL_CALLS, NOISE, OUTPUT_RULES_LIMIT, TOOL_INSTRUCTIONS_LIMIT, buildPrompt, clampTranscript, collectTools, elide, envContext, isRawInputSchema,
+  looseJSON, outputRules, parseDone, parseReply, parseToolCall, rawInput, rawInputFrom, stripFence, toolProtocol, toolReminder } from '../src/emulation.mjs';
 
 test('collectTools keeps plain functions, walks namespaces, skips custom, web_search and MCP tools', () => {
   const tools = collectTools([
@@ -282,4 +282,46 @@ test('a plain-text reply is the final answer, whatever it contains', () => {
   assert.deepEqual(parseReply(answer, toolSpecs()), { calls: [], text: answer });
   assert.deepEqual(parseReply('', toolSpecs()), { calls: [], text: '' });
   assert.deepEqual(parseReply(undefined, toolSpecs()), { calls: [], text: '' });
+});
+
+// ---- output conventions taken from long client instructions ----
+const longInstructions = [
+  '# Personality\nBe warm.\n\n# Working with the user\nTwo channels.\n\n## Intermediate commentary\nStart with a note in the `commentary` channel.\nDo NOT put a final response in the commentary channel.\n\n',
+  '## Final answer\nFocus on the most important information.\n\n### Formatting rules\n- When referencing a real local file, prefer a clickable markdown link like [app.py](/abs/path/app.py:12).\n- Do not wrap markdown links in backticks.\n\n',
+  '### Visualizations\nUse a chart when it helps.\n\n# Rules for getting work done\nRun the tests.\n',
+  `<app-context>\n# Codex desktop context\n### Images/Visuals/Files\n- When referencing code or workspace files in responses, always use full absolute file paths.\n- Return web URLs as Markdown links.\n### Automations\n- Search for automation_update first.\n</app-context>`,
+  'filler '.repeat(2000)].join('');
+
+test('outputRules keeps only the sections that control the look of the reply', () => {
+  const rules = outputRules([longInstructions]);
+  assert.match(rules, /^## Intermediate commentary\nStart with a note in the `commentary` channel\./);
+  assert.match(rules, /## Final answer\nFocus on the most important information\./);
+  assert.match(rules, /## Formatting rules\n- When referencing a real local file, prefer a clickable markdown link like \[app\.py\]/);
+  assert.match(rules, /## Images\/Visuals\/Files\n- When referencing code or workspace files in responses, always use full absolute file paths\./);
+  for (const left of ['Be warm', 'Run the tests', 'Use a chart', 'automation_update', 'filler']) assert.ok(!rules.includes(left), left);
+  assert.ok(rules.length <= OUTPUT_RULES_LIMIT);
+  assert.equal(outputRules(['no headings here', '# Other\ntext']), '');
+  assert.equal(outputRules([]), '');
+  // Each section is capped and the total honours the limit.
+  const big = `## Formatting rules\n${'a'.repeat(5000)}\n## Final answer\nshort`;
+  assert.equal(outputRules([big]).length, '## Formatting rules\n'.length + 1800 + '\n\n## Final answer\nshort'.length);
+  assert.ok(!outputRules([big], 1000).includes('Formatting rules'), 'a section that does not fit is skipped, later ones still fit');
+  assert.match(outputRules([big], 1000), /## Final answer\nshort/);
+});
+
+test('buildPrompt forwards the output conventions, not the whole prompt, when client instructions are long', () => {
+  const tools = [{ name: 'exec', params: {}, desc: 'Run', raw: true }];
+  const convo = [{ kind: 'user', text: 'make a page' }];
+  const prompt = buildPrompt({ system: [longInstructions], convo, tools, budget: 1000 });
+  assert.match(prompt, /Output conventions from the caller\./);
+  assert.match(prompt, /<output_conventions>\n## Intermediate commentary/);
+  assert.match(prompt, /prefer a clickable markdown link like \[app\.py\]\(\/abs\/path\/app\.py:12\)/);
+  assert.ok(prompt.indexOf('<output_conventions>') > prompt.indexOf('<role>action emitter</role>'));
+  assert.ok(prompt.indexOf('</output_conventions>') < prompt.indexOf('TASK:'));
+  for (const left of ['Be warm', 'Run the tests', 'filler', 'Caller instructions']) assert.ok(!prompt.includes(left), left);
+  // Short instructions are still forwarded whole, and long ones without such sections add nothing.
+  assert.match(buildPrompt({ system: ['Be brief.'], convo, tools, budget: 1000 }), /<system_instructions>\nBe brief\.\n<\/system_instructions>/);
+  assert.ok(!buildPrompt({ system: ['x'.repeat(TOOL_INSTRUCTIONS_LIMIT + 1)], convo, tools, budget: 1000 }).includes('output_conventions'));
+  // Without tools the instructions keep their existing handling.
+  assert.ok(!buildPrompt({ system: [longInstructions], convo, tools: [], budget: 1000 }).includes('output_conventions'));
 });
