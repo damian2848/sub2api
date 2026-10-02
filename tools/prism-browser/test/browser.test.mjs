@@ -619,7 +619,8 @@ function statusRequest(body) {
 async function pollingTurn(answer, { pollMs = 5 } = {}) {
   const setup = await activeTurn();
   const { driver, turn, start } = setup;
-  Object.assign(turn, { ownBodies: new Set(), ownPolls: 0, ownPolling: false, ownPollFailed: false, statusTemplate: null,
+  Object.assign(turn, { ownBodies: new Set(), ownPolls: 0, ownPolling: false, ownPollFailed: false,
+    ownPollErrors: 0, ownPollErrorTotal: 0, statusTemplate: null,
     completedBy: null });
   driver.statusPollMs = pollMs;
   const sent = [];
@@ -651,16 +652,60 @@ test('after the page polls once, our polls copy its body, carry the newest state
       ['unified', 'current-request', 'state-own-1']]);
 });
 
-test('a failed poll of ours ends our polling without failing the turn; the page still finishes it', async () => {
+test('three consecutive failed own polls stop only our polling and the page still finishes the turn', async () => {
   const { driver, turn, outcomes, sent } = await pollingTurn(() => [{ error: 'busy' }, 503]);
   await driver.observe(response(statusRequest({ request_id: 'current-request', turn_state: 'state-0' }), running));
   await settle();
   assert.equal(turn.ownPollFailed, true);
-  assert.equal(sent.length, 1);
+  assert.equal(sent.length, 3);
+  assert.equal(turn.ownPollErrors, 3);
+  assert.equal(turn.ownPollErrorTotal, 3);
   assert.deepEqual(outcomes, []);
   await driver.observe(response(statusRequest({ request_id: 'current-request', turn_state: 'state-0' }), completed));
   assert.deepEqual(outcomes, [{ text: 'READY' }]);
   assert.equal(turn.completedBy, 'page_poll');
+});
+
+test('two 503s recover, a success resets the failure streak, and the audit counts all failures', async () => {
+  const { driver, turn, outcomes, sent } = await pollingTurn((body, index) =>
+    index === 0 || index === 1 || index === 3 ? [{ error: 'busy' }, 503] : [index === 4 ? completed : running]);
+  const audits = [];
+  driver.audit = (event, fields) => audits.push({ event, ...fields });
+  await driver.observe(response(statusRequest({ request_id: 'current-request', turn_state: 'state-0' }), running));
+  await settle();
+  assert.deepEqual(outcomes, [{ text: 'READY' }]);
+  assert.equal(sent.length, 5);
+  assert.equal(turn.completedBy, 'own_poll');
+  assert.equal(turn.ownPollErrors, 0);
+  assert.equal(turn.ownPollFailed, false);
+  assert.equal(audits.find(item => item.event === 'upstream_result').own_poll_errors, 3);
+});
+
+test('consecutive own-poll failures exponentially increase the next interval', async () => {
+  const times = [];
+  const { driver, turn, outcomes } = await pollingTurn((body, index) => {
+    times.push(performance.now());
+    return index < 2 ? [{ error: 'busy' }, 503] : [completed];
+  }, { pollMs: 8 });
+  await driver.observe(response(statusRequest({ request_id: 'current-request', turn_state: 'state-0' }), running));
+  await settle();
+  assert.equal(turn.completedBy, 'own_poll');
+  assert.deepEqual(outcomes, [{ text: 'READY' }]);
+  assert.ok(times[1] - times[0] >= 14);
+  assert.ok(times[2] - times[1] >= 30);
+});
+
+test('own-poll request exceptions retry three times before handing polling back to the page', async () => {
+  const { driver, turn, outcomes } = await pollingTurn(() => assert.fail('fetch throws'));
+  let attempts = 0;
+  driver.page.evaluate = async () => { attempts += 1; throw new Error('connection reset'); };
+  await driver.observe(response(statusRequest({ request_id: 'current-request', turn_state: 'state-0' }), running));
+  await settle();
+  assert.equal(attempts, 3);
+  assert.equal(turn.ownPollErrors, 3);
+  assert.equal(turn.ownPollFailed, true);
+  await driver.observe(response(statusRequest({ request_id: 'current-request', turn_state: 'state-0' }), completed));
+  assert.deepEqual(outcomes, [{ text: 'READY' }]);
 });
 
 test('while our polls are healthy a failed page poll is ignored; without them it fails the turn as before', async () => {

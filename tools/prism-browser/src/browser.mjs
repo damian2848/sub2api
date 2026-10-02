@@ -228,12 +228,8 @@ export class BrowserSession {
     if (isStart) {
       this.audit('upstream_start_actual_input', { input_roles: (sent?.input || []).map(item => item.role) });
     }
-    // Our own status polls run next to the page's. A failed poll of ours only ends our polling; while
-    // ours are healthy, a failed page poll is not fatal either. Prism reports real failures inside a
-    // 200 response, and the other poller still sees the terminal state.
     const own = !isStart && Boolean(turn.ownBodies?.has(request.postData?.()));
     if (!response.ok() && !isStart && (own || (turn.ownPolling && !turn.ownPollFailed))) {
-      if (own) turn.ownPollFailed = true;
       this.audit('status_poll_http_error', { status: response.status(), own });
       return;
     }
@@ -248,12 +244,13 @@ export class BrowserSession {
     }
     let data;
     try { data = await response.json(); } catch (error) {
-      if (own) { turn.ownPollFailed = true; return; }
+      if (own) return;
       throw error;
     }
     if (!matchesTurn()) return;
     if (data.request_id && turn.requestId && data.request_id !== turn.requestId) return;
     if (data.conversation_id && data.conversation_id !== turn.conversationId) return;
+    if (own) turn.ownPollErrors = 0;
     if (data.request_id) turn.requestId = data.request_id;
     if (data.turn_state) turn.turnState = data.turn_state;
     if (data.conversation_id) turn.conversationId = data.conversation_id;
@@ -279,7 +276,7 @@ export class BrowserSession {
       payload_http_status: Number.isInteger(payload.httpStatus) && payload.httpStatus >= 100 && payload.httpStatus <= 599
         ? payload.httpStatus : undefined,
       resubmission_requested: resubmissionRequested, completed_by: turn.completedBy,
-      own_polls: turn.ownPolls, own_poll_failed: turn.ownPollFailed,
+      own_polls: turn.ownPolls, own_poll_failed: turn.ownPollFailed, own_poll_errors: turn.ownPollErrorTotal || 0,
       exec_meta_shape: payloadShape(payload.codexExecMeta), debug_shape: payloadShape(payload.codexDebug) });
     if (data.response?.status !== 'success' && isStart && resubmissionRequested) {
       // Refused at the start itself ("please submit prompt again"): Prism's start allowance for the
@@ -491,7 +488,8 @@ export class BrowserSession {
     const page = this.page;
     // onText is reserved for verified cumulative assistant text; pending progress is not that text.
     const turn = { request, signal, onText, started: false, submitAllowed: false,
-      ownBodies: new Set(), ownPolls: 0, ownPolling: false, ownPollFailed: false, statusTemplate: null, completedBy: null };
+      ownBodies: new Set(), ownPolls: 0, ownPolling: false, ownPollFailed: false,
+      ownPollErrors: 0, ownPollErrorTotal: 0, statusTemplate: null, completedBy: null };
     const checkCurrent = () => {
       aborted(signal);
       if (this.turn !== turn || this.page !== page || !page || page.isClosed?.()) {
@@ -550,8 +548,6 @@ export class BrowserSession {
     }
   }
 
-  // Polls status from the official page (its fetch carries the page's own verification) with the
-  // newest turn_state, one request at a time, until the turn ends or a poll of ours fails.
   async pollStatus(turn) {
     const page = this.page;
     turn.ownPolling = true;
@@ -566,12 +562,20 @@ export class BrowserSession {
         try {
           const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
             signal: AbortSignal.timeout(30000) });
-          await response.text();
-          return response.ok;
+          const text = await response.text();
+          if (!response.ok) return false;
+          JSON.parse(text);
+          return true;
         } catch { return false; }
       }, { path: STATUS_PATH, body }).catch(() => false);
-      if (!ok) turn.ownPollFailed = true;
-      const wait = this.statusPollMs - (Date.now() - begun);
+      if (ok) turn.ownPollErrors = 0;
+      else {
+        turn.ownPollErrors = (turn.ownPollErrors || 0) + 1;
+        turn.ownPollErrorTotal = (turn.ownPollErrorTotal || 0) + 1;
+        if (turn.ownPollErrors >= 3) turn.ownPollFailed = true;
+      }
+      const wait = turn.ownPollErrors > 0 ? Math.min(8000, this.statusPollMs * 2 ** turn.ownPollErrors)
+        : this.statusPollMs - (Date.now() - begun);
       if (wait > 0 && live()) await new Promise(resolve => setTimeout(resolve, wait));
     }
   }
