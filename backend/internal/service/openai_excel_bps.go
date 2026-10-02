@@ -114,6 +114,9 @@ func (s *OpenAIGatewayService) excelBPSImageRelayForSettings(settings ExcelBPSIm
 			dataDir = "./data"
 		}
 		s.excelBPSImages, err = basispoints.NewImageRelay(settings.BaseURL, filepath.Join(dataDir, "bps-images"))
+		if err == nil && s.settingService.Serverless != nil {
+			s.excelBPSImages.SetURLDecorator(s.settingService.Serverless.ImageOwnerURL)
+		}
 	}
 	if err == nil {
 		err = s.excelBPSImages.Configure(settings.BaseURL, settings.Limits)
