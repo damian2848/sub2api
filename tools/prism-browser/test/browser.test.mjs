@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { runInNewContext } from 'node:vm';
 import { BrowserSession, FALLBACK_MODEL, STATUS_PATH, catalogCollapsed, catalogFromConfig, modelFromLabel, probeModel,
   statusPollInterval } from '../src/browser.mjs';
 import { PrismError, publicError } from '../src/errors.mjs';
@@ -727,6 +728,52 @@ test('while our polls are healthy a failed page poll is ignored; without them it
   assert.equal(off.turn.ownPolls, 0);
   await off.driver.observe(response(statusRequest({ request_id: 'current-request', turn_state: 'state-0' }), { error: 'x' }, 503));
   assert.deepEqual(off.outcomes, [{ error: 'prism_upstream_http_error' }]);
+});
+
+test('independent polling runs the official page fetch with current state and a bounded request signal', async () => {
+  const { driver, turn } = await pollingTurn(() => assert.fail('the page-context fetch supplies the result'));
+  turn.statusTemplate = { request_id: 'old-request', turn_state: 'old-state', diff_format: 'unified' };
+  const requests = [];
+  const timeouts = [];
+  const signal = { pageContext: true };
+  const scope = {
+    AbortSignal: { timeout(ms) { timeouts.push(ms); return signal; } },
+    async fetch(path, options) {
+      requests.push({ path, options });
+      return { ok: true, async text() { turn.completed = true; return JSON.stringify(running); } };
+    },
+  };
+  let evaluations = 0;
+  driver.page = { isClosed: () => false, async evaluate(work, args) {
+    evaluations += 1;
+    return runInNewContext(`(${work.toString()})`, scope)(args);
+  } };
+  await driver.pollStatus(turn);
+  assert.equal(evaluations, 1);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].path, STATUS_PATH);
+  assert.equal(requests[0].options.method, 'POST');
+  assert.deepEqual({ ...requests[0].options.headers }, { 'Content-Type': 'application/json' });
+  assert.deepEqual(JSON.parse(requests[0].options.body), {
+    request_id: turn.requestId, turn_state: turn.turnState, diff_format: 'unified',
+  });
+  assert.equal(requests[0].options.signal, signal);
+  assert.deepEqual(timeouts, [30000]);
+  assert.equal(turn.ownPollErrors, 0);
+  assert.equal(turn.ownPollFailed, false);
+});
+
+test('page polling errors remain nonfatal during our recoverable failure streak', async () => {
+  const { driver, turn, outcomes } = await pollingTurn(() => assert.fail('no independent fetch is started'));
+  Object.assign(turn, { ownPolling: true, ownPollErrors: 2, ownPollErrorTotal: 2 });
+  const failedPagePoll = () => response(statusRequest({ request_id: turn.requestId, turn_state: 'stale' }), { error: 'busy' }, 503);
+  await driver.observe(failedPagePoll());
+  assert.deepEqual(outcomes, []);
+  assert.equal(turn.ownPollFailed, false);
+  assert.equal(turn.ownPollErrors, 2);
+  Object.assign(turn, { ownPollErrors: 3, ownPollFailed: true });
+  await driver.observe(failedPagePoll());
+  assert.deepEqual(outcomes, [{ error: 'prism_upstream_http_error' }]);
 });
 
 test('PRISM_STATUS_POLL_MS accepts 0 or 250-10000 and falls back to 1000', () => {

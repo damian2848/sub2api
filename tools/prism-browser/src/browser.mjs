@@ -228,6 +228,9 @@ export class BrowserSession {
     if (isStart) {
       this.audit('upstream_start_actual_input', { input_roles: (sent?.input || []).map(item => item.role) });
     }
+    // Our status polls run alongside the page's. Only three consecutive own-poll failures stop ours;
+    // while ours are healthy, a failed page poll is not fatal either. Real turn failures arrive in
+    // a 200 response, and either poller can still observe that terminal state.
     const own = !isStart && Boolean(turn.ownBodies?.has(request.postData?.()));
     if (!response.ok() && !isStart && (own || (turn.ownPolling && !turn.ownPollFailed))) {
       this.audit('status_poll_http_error', { status: response.status(), own });
@@ -548,6 +551,9 @@ export class BrowserSession {
     }
   }
 
+  // Use the official page's fetch so polling carries its own session and verification; a Node-side
+  // request would bypass that page context. Keep the latest turn_state and one request in flight,
+  // retry transient failures, and leave polling to the page after three consecutive failures.
   async pollStatus(turn) {
     const page = this.page;
     turn.ownPolling = true;
