@@ -31,21 +31,6 @@
         <p class="input-hint">{{ t('priorityScheduling.modelAliasesHint') }}</p>
       </div>
 
-      <div
-        v-if="account.platform === 'openai' && account.type === 'oauth' && !isSparkShadow"
-        class="rounded-lg border border-gray-200 p-3 dark:border-dark-600"
-        data-testid="openai-prism-browser-oauth-settings"
-      >
-        <label class="flex items-center gap-2 text-sm">
-          <input v-model="prismBrowserEnabled" type="checkbox" data-testid="openai-prism-browser-oauth-toggle" />
-          <span>{{ t('admin.accounts.openai.prismBrowser') }}</span>
-        </label>
-        <p class="input-hint">{{ t('admin.accounts.openai.prismBrowserDesc') }}</p>
-        <p v-if="prismBrowserEnabled" class="mt-2 text-xs text-primary-600 dark:text-primary-400">
-          {{ t('admin.accounts.openai.prismBrowserManagedEndpoint') }}
-        </p>
-      </div>
-
       <!-- API Key fields (only for apikey type) -->
       <div v-if="account.type === 'apikey' && !isManagedPrism" class="space-y-4">
         <div
@@ -3665,7 +3650,6 @@ function selectOpenAIProviderPreset(preset: OpenAIProviderPreset) {
   modelMappings.value = []
   allowedModels.value = []
 }
-const prismBrowserEnabled = ref(false)
 
 // ── 国产供应商（Kimi / Zhipu / DeepSeek）account_mode / api_protocol 编辑 ──
 // account_mode 决定额度/余额监控路径，api_protocol 决定转发端点与格式；
@@ -4555,7 +4539,6 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   excelBPSIgnoreEncryptedContent.value = false
   excelBPSAutoMoveOn403.value = false
   excelBPS403TargetGroupID.value = ''
-  prismBrowserEnabled.value = false
   copilotSDKEnabled.value = false
   openaiPassthroughEnabled.value = false
   openaiFlattenNamespacesEnabled.value = false
@@ -4576,7 +4559,6 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
   webSearchEmulationMode.value = 'default'
   if (newAccount.platform === 'openai' && (newAccount.type === 'oauth' || newAccount.type === 'setup-token' || newAccount.type === 'apikey')) {
-    prismBrowserEnabled.value = newAccount.type === 'oauth' && extra?.openai_prism_browser === true
     excelBPSEnabled.value = newAccount.type === 'oauth' && extra?.openai_excel_bps === true
     excelBPSMode.value = extra?.openai_excel_bps_config_mode === 'defaults' ? 'defaults' : 'initial'
     excelBPSAllModels.value = excelBPSEnabled.value && !Object.prototype.hasOwnProperty.call(extra ?? {}, 'openai_excel_bps_models')
@@ -6223,10 +6205,6 @@ const handleSubmit = async () => {
         delete newExtra.openai_compact_mode
       } else {
         newExtra.openai_compact_mode = openAICompactMode.value
-      }
-      if (props.account.type === 'oauth') {
-        if (prismBrowserEnabled.value) newExtra.openai_prism_browser = true
-        else delete newExtra.openai_prism_browser
       }
 		if (props.account.type === 'apikey') {
         if (!openAITextGenerationCapabilityEnabled.value || openAIResponsesMode.value === 'auto') {
