@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BrowserSession, FALLBACK_MODEL, catalogCollapsed, catalogFromConfig, modelFromLabel, probeModel } from '../src/browser.mjs';
+import { BrowserSession, FALLBACK_MODEL, STATUS_PATH, catalogCollapsed, catalogFromConfig, modelFromLabel, probeModel,
+  statusPollInterval } from '../src/browser.mjs';
 import { PrismError, publicError } from '../src/errors.mjs';
 
 function route(body, path = '/api/llm/response_with_tools_start') {
@@ -601,4 +602,90 @@ test('payloadShape logs structure and counters, never text', async () => {
   assert.ok(!shape.join(' ').includes('secret'));
   assert.deepEqual(payloadShape(undefined), [': undefined']);
   assert.ok(payloadShape(Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`k${i}`, i]))).length <= 80);
+});
+
+// ---- our own status polls next to the page's ----
+function statusRequest(body) {
+  const text = JSON.stringify(body);
+  return { url: () => `https://prism.openai.com${STATUS_PATH}`, method: () => 'POST', postDataJSON: () => JSON.parse(text),
+    postData: () => text };
+}
+
+// A turn with poll state, a fake page whose fetch is answered by `answer(body, index)`, and the
+// page's own first status poll already observed.
+async function pollingTurn(answer, { pollMs = 5 } = {}) {
+  const setup = await activeTurn();
+  const { driver, turn, start } = setup;
+  Object.assign(turn, { ownBodies: new Set(), ownPolls: 0, ownPolling: false, ownPollFailed: false, statusTemplate: null,
+    completedBy: null });
+  driver.statusPollMs = pollMs;
+  const sent = [];
+  driver.page = { isClosed: () => false, async evaluate(_, { path, body }) {
+    assert.equal(path, STATUS_PATH);
+    sent.push(JSON.parse(body));
+    const [data, status = 200] = answer(JSON.parse(body), sent.length - 1);
+    await driver.observe(response(statusRequest(JSON.parse(body)), data, status));
+    return status >= 200 && status < 300;
+  } };
+  await driver.observe(response(start.request(), { ...running, turn_state: 'state-0' }));
+  return { ...setup, sent };
+}
+
+const settle = () => new Promise(resolve => setTimeout(resolve, 60));
+
+test('after the page polls once, our polls copy its body, carry the newest state and can finish the turn', async () => {
+  const { driver, turn, outcomes, sent } = await pollingTurn((body, index) =>
+    [index < 2 ? { ...running, turn_state: `state-own-${index}` } : completed]);
+  assert.equal(turn.ownPolling, false, 'nothing is polled before the page has polled once');
+  await driver.observe(response(statusRequest({ diff_format: 'unified', request_id: 'current-request', turn_state: 'state-0' }),
+    { ...running, turn_state: 'state-page-1' }));
+  await settle();
+  assert.deepEqual(outcomes, [{ text: 'READY' }]);
+  assert.equal(turn.completedBy, 'own_poll');
+  assert.equal(turn.ownPolls, 3);
+  assert.deepEqual(sent.map(body => [body.diff_format, body.request_id, body.turn_state]),
+    [['unified', 'current-request', 'state-page-1'], ['unified', 'current-request', 'state-own-0'],
+      ['unified', 'current-request', 'state-own-1']]);
+});
+
+test('a failed poll of ours ends our polling without failing the turn; the page still finishes it', async () => {
+  const { driver, turn, outcomes, sent } = await pollingTurn(() => [{ error: 'busy' }, 503]);
+  await driver.observe(response(statusRequest({ request_id: 'current-request', turn_state: 'state-0' }), running));
+  await settle();
+  assert.equal(turn.ownPollFailed, true);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(outcomes, []);
+  await driver.observe(response(statusRequest({ request_id: 'current-request', turn_state: 'state-0' }), completed));
+  assert.deepEqual(outcomes, [{ text: 'READY' }]);
+  assert.equal(turn.completedBy, 'page_poll');
+});
+
+test('while our polls are healthy a failed page poll is ignored; without them it fails the turn as before', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const healthy = await pollingTurn((body, index) => [index === 0 ? running : completed]);
+  healthy.driver.page.evaluate = async (_, { body }) => { await gate; healthy.sent.push(JSON.parse(body));
+    await healthy.driver.observe(response(statusRequest(JSON.parse(body)), completed)); return true; };
+  await healthy.driver.observe(response(statusRequest({ request_id: 'current-request', turn_state: 'state-0' }), running));
+  await healthy.driver.observe(response(statusRequest({ request_id: 'current-request', turn_state: 'stale' }), { error: 'x' }, 503));
+  assert.deepEqual(healthy.outcomes, []);
+  release();
+  await settle();
+  assert.deepEqual(healthy.outcomes, [{ text: 'READY' }]);
+
+  const off = await pollingTurn(() => assert.fail('no own polls when disabled'), { pollMs: 0 });
+  await off.driver.observe(response(statusRequest({ request_id: 'current-request', turn_state: 'state-0' }), running));
+  await settle();
+  assert.equal(off.turn.ownPolls, 0);
+  await off.driver.observe(response(statusRequest({ request_id: 'current-request', turn_state: 'state-0' }), { error: 'x' }, 503));
+  assert.deepEqual(off.outcomes, [{ error: 'prism_upstream_http_error' }]);
+});
+
+test('PRISM_STATUS_POLL_MS accepts 0 or 250-10000 and falls back to 1000', () => {
+  assert.equal(statusPollInterval(undefined), 1000);
+  assert.equal(statusPollInterval(''), 1000);
+  assert.equal(statusPollInterval('0'), 0);
+  assert.equal(statusPollInterval('250'), 250);
+  assert.equal(statusPollInterval('10000'), 10000);
+  for (const bad of ['100', '10001', 'abc', '1.5']) assert.equal(statusPollInterval(bad), 1000, bad);
 });

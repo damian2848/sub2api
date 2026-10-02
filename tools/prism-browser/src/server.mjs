@@ -158,6 +158,9 @@ export async function main() {
     transientRetries: integer('PRISM_TRANSIENT_RETRIES', 1, 0, 1),
     transientRetryDelayMs: integer('PRISM_TRANSIENT_RETRY_DELAY_SECONDS', 4, 0, 60) * 1000,
     transientRetryWaitMs: integer('PRISM_TRANSIENT_RETRY_WAIT_SECONDS', 15, 0, 120) * 1000 });
+  // Read by each browser session; validated here so a bad value stops startup. 0 or 250-10000.
+  const statusPollMs = integer('PRISM_STATUS_POLL_MS', 1000, 0, 10000);
+  if (statusPollMs > 0 && statusPollMs < 250) throw new Error('invalid PRISM_STATUS_POLL_MS');
   await manager.init();
   const server = createPrismServer({ manager, managementKey: process.env.PRISM_MANAGEMENT_KEY,
     bodyLimit: integer('PRISM_BODY_LIMIT', 8 * 1024 * 1024, 4096, 32 * 1024 * 1024),

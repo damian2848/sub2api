@@ -45,6 +45,12 @@ export function payloadShape(value, path = '', out = [], depth = 0) {
   return out;
 }
 
+export const STATUS_PATH = '/api/llm/response_with_tools_status';
+export function statusPollInterval(value = process.env.PRISM_STATUS_POLL_MS) {
+  const parsed = value === undefined || value === '' ? 1000 : Number(value);
+  return Number.isInteger(parsed) && (parsed === 0 || (parsed >= 250 && parsed <= 10000)) ? parsed : 1000;
+}
+
 export function modelFromLabel(label) {
   const value = label.trim().replace(/\s+/g, ' ');
   const match = /^(\d+(?:\.\d+)?) (Sol|Terra|Luna|Astra)\b/.exec(value);
@@ -68,6 +74,8 @@ export class BrowserSession {
     this.reserveProject = null;
     this.source = source;
     this.worker = worker;
+    // The official page polls status every 3.4-4 s; we poll every statusPollMs as well (0: page only).
+    this.statusPollMs = statusPollInterval();
   }
 
   audit(event, details) {
@@ -207,6 +215,15 @@ export class BrowserSession {
     if (isStart) {
       this.audit('upstream_start_actual_input', { input_roles: (sent?.input || []).map(item => item.role) });
     }
+    // Our own status polls run next to the page's. A failed poll of ours only ends our polling; while
+    // ours are healthy, a failed page poll is not fatal either. Prism reports real failures inside a
+    // 200 response, and the other poller still sees the terminal state.
+    const own = !isStart && Boolean(turn.ownBodies?.has(request.postData?.()));
+    if (!response.ok() && !isStart && (own || (turn.ownPolling && !turn.ownPollFailed))) {
+      if (own) turn.ownPollFailed = true;
+      this.audit('status_poll_http_error', { status: response.status(), own });
+      return;
+    }
     if (!response.ok()) {
       const status = response.status();
       this.audit('upstream_http_error', { status });
@@ -216,15 +233,25 @@ export class BrowserSession {
       error.transient = Number.isInteger(status) && status >= 500 && status <= 599;
       return turn.reject(error);
     }
-    const data = await response.json();
+    let data;
+    try { data = await response.json(); } catch (error) {
+      if (own) { turn.ownPollFailed = true; return; }
+      throw error;
+    }
     if (!matchesTurn()) return;
     if (data.request_id && turn.requestId && data.request_id !== turn.requestId) return;
     if (data.conversation_id && data.conversation_id !== turn.conversationId) return;
     if (data.request_id) turn.requestId = data.request_id;
     if (data.turn_state) turn.turnState = data.turn_state;
     if (data.conversation_id) turn.conversationId = data.conversation_id;
+    if (!isStart && !own && !turn.statusTemplate && sent && typeof sent === 'object') {
+      // The page's first good poll gives the exact body shape (diff_format etc.); ours copy it.
+      turn.statusTemplate = sent;
+      if (this.statusPollMs > 0 && turn.ownBodies) this.pollStatus(turn).catch(() => { turn.ownPollFailed = true; });
+    }
     if (!['completed', 'error', 'failed'].includes(data.status)) return;
     turn.completed = true;
+    turn.completedBy = isStart ? 'start' : own ? 'own_poll' : 'page_poll';
     const payload = data.response?.payload || {};
     const resubmissionRequested = data.status === 'completed' && data.response?.status === 'error' &&
       payload.httpStatus === 403 && payload.reason === 'unknown' && payload.message ===
@@ -234,7 +261,8 @@ export class BrowserSession {
       failure_code: /^[a-z_]{1,100}$/.test(payload.reason || '') ? payload.reason : undefined,
       payload_http_status: Number.isInteger(payload.httpStatus) && payload.httpStatus >= 100 && payload.httpStatus <= 599
         ? payload.httpStatus : undefined,
-      resubmission_requested: resubmissionRequested,
+      resubmission_requested: resubmissionRequested, completed_by: turn.completedBy,
+      own_polls: turn.ownPolls, own_poll_failed: turn.ownPollFailed,
       exec_meta_shape: payloadShape(payload.codexExecMeta), debug_shape: payloadShape(payload.codexDebug) });
     if (data.response?.status !== 'success') {
       const error = new PrismError('prism_generation_failed');
@@ -440,7 +468,8 @@ export class BrowserSession {
     if (this.turn) throw new PrismError('account_busy', 409);
     const page = this.page;
     // onText is reserved for verified cumulative assistant text; pending progress is not that text.
-    const turn = { request, signal, onText, started: false, submitAllowed: false };
+    const turn = { request, signal, onText, started: false, submitAllowed: false,
+      ownBodies: new Set(), ownPolls: 0, ownPolling: false, ownPollFailed: false, statusTemplate: null, completedBy: null };
     const checkCurrent = () => {
       aborted(signal);
       if (this.turn !== turn || this.page !== page || !page || page.isClosed?.()) {
@@ -488,6 +517,32 @@ export class BrowserSession {
       throw error instanceof PrismError ? error : new PrismError(`browser_ui_${stage}_failed`);
     } finally {
       if (this.turn === turn) this.turn = null;
+    }
+  }
+
+  // Polls status from the official page (its fetch carries the page's own verification) with the
+  // newest turn_state, one request at a time, until the turn ends or a poll of ours fails.
+  async pollStatus(turn) {
+    const page = this.page;
+    turn.ownPolling = true;
+    const live = () => this.turn === turn && !turn.completed && !turn.ownPollFailed && !turn.signal?.aborted &&
+      this.page === page && page && !page.isClosed?.();
+    while (live()) {
+      const begun = Date.now();
+      const body = JSON.stringify({ ...turn.statusTemplate, request_id: turn.requestId, turn_state: turn.turnState });
+      turn.ownBodies.add(body);
+      turn.ownPolls += 1;
+      const ok = await page.evaluate(async ({ path, body }) => {
+        try {
+          const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body,
+            signal: AbortSignal.timeout(30000) });
+          await response.text();
+          return response.ok;
+        } catch { return false; }
+      }, { path: STATUS_PATH, body }).catch(() => false);
+      if (!ok) turn.ownPollFailed = true;
+      const wait = this.statusPollMs - (Date.now() - begun);
+      if (wait > 0 && live()) await new Promise(resolve => setTimeout(resolve, wait));
     }
   }
 

@@ -55,6 +55,7 @@ compose file and listed in `.env.prism-browser.example`):
 | `PRISM_TRANSIENT_RETRIES` | `1` | 0-1 | Automatic resubmissions of a request that failed because Prism's own servers returned an HTTP 5xx. `0` turns it off. |
 | `PRISM_TRANSIENT_RETRY_DELAY_SECONDS` | `4` | 0-60 | Pause before the resubmission, so an overloaded Prism has a moment. |
 | `PRISM_TRANSIENT_RETRY_WAIT_SECONDS` | `15` | 0-120 | Longest wait for an idle worker to take the resubmission before the original error is returned. |
+| `PRISM_STATUS_POLL_MS` | `1000` | 0 or 250-10000 | After the official page has polled a turn's status once, the sidecar also polls it at this interval from the same page (the page alone polls every 3.4-4 s), so a finished answer is seen sooner. A failed poll of ours only stops our polling; `0` leaves polling to the page. |
 | `PRISM_PROMPT_CACHE_TTL_SECONDS` | `600` | 0-3600 | How long a processed prompt counts toward the estimated cache read (see *Usage is estimated*). `0` reports no cached tokens. |
 
 Invalid values stop the adapter at startup.
