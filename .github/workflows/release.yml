@@ -334,6 +334,32 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "$RELEASE_TAG" reauth-output/*.tar.gz --repo "$GITHUB_REPOSITORY"
+      # The optional Prism browser service is built by users from source, so ship that source with the
+      # compose file, env example and guide at exactly the released revision. Skipped for revisions that
+      # do not contain it and for the simple release.
+      - name: Package the Prism browser service
+        if: ${{ env.SIMPLE_RELEASE != 'true' }}
+        run: |
+          set -euo pipefail
+          paths=()
+          for path in tools/prism-browser deploy/docker-compose.prism-browser.yml deploy/.env.prism-browser.example deploy/PRISM_BROWSER.md; do
+            if git cat-file -e "$RELEASE_SHA:$path" 2>/dev/null; then paths+=("$path"); fi
+          done
+          if ! git cat-file -e "$RELEASE_SHA:tools/prism-browser/Dockerfile" 2>/dev/null; then
+            echo "This revision has no Prism browser service; nothing to package."
+            exit 0
+          fi
+          name="prism-browser_${RELEASE_VERSION}"
+          rm -rf prism-output && mkdir -p "prism-output/$name"
+          git archive "$RELEASE_SHA" -- "${paths[@]}" | tar -x -C "prism-output/$name"
+          tar -C prism-output -czf "prism-output/${name}.tar.gz" "$name"
+          (cd prism-output && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" && rm -rf "$name")
+          ls -l prism-output
+      - name: Publish the Prism browser service package
+        if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && hashFiles('prism-output/*.tar.gz') != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$RELEASE_TAG" prism-output/*.tar.gz prism-output/*.tar.gz.sha256 --repo "$GITHUB_REPOSITORY"
       - name: Upload dry-run checksums and metadata
         if: ${{ env.DRY_RUN == 'true' }}
         uses: actions/upload-artifact@v7
@@ -343,6 +369,7 @@ jobs:
             dist/checksums.txt
             dist/artifacts.json
             dist/metadata.json
+            prism-output/*
           if-no-files-found: error
           retention-days: 3
 

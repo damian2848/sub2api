@@ -208,6 +208,13 @@ release:
     **Manual download:**
     Download the appropriate archive for your platform from the assets below.
 
+    **Verify a download:**
+    ```bash
+    sha256sum -c checksums.txt --ignore-missing
+    ```
+
+    **Prism browser service (optional):** download `prism-browser_{{ .Version }}.tar.gz` (its `.sha256` is next to it) from the assets below, unpack it and follow `deploy/PRISM_BROWSER.md`. It holds the service source, the compose file and the env example for exactly this release.
+
     **K3s gateway upgrade (on each existing single-node host):**
     ```bash
     curl -fsSL https://raw.githubusercontent.com/{{ .Env.GITHUB_REPO_OWNER }}/{{ .Env.GITHUB_REPO_NAME }}/{{ .Tag }}/deploy/upgrade-k3s.sh | sudo bash -s -- --version {{ .Tag }}
