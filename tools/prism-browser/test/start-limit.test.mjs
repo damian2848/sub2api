@@ -246,7 +246,7 @@ test('legacy settings derive a four-token burst and a 16.25 second refill', () =
   assert.equal(options.refillMs, 16250);
   assert.equal(options.refillMinMs, 16250);
   assert.equal(options.refillMaxMs, 90000);
-  assert.equal(options.maxWaitMs, 15000);
+  assert.equal(options.maxWaitMs, 16250);
   assert.equal(nativeStartSettings({ PRISM_ACCOUNT_START_LIMIT: '0' }).burst, 0);
   const explicit = nativeStartSettings({ PRISM_ACCOUNT_START_LIMIT: '4', PRISM_START_BURST: '3',
     PRISM_START_REFILL_SECONDS: '65', PRISM_START_REFILL_MIN_SECONDS: '30' });
@@ -277,6 +277,31 @@ test('rejections clear tokens and increase the refill interval while four accept
   assert.equal(limiter.status().tokens, 2);
   assert.equal(events.filter(item => item.event === 'start_bucket_rejected').length, 3);
   assert.equal(events[0].event, 'start_bucket_adjusted');
+});
+
+test('unset or blank max wait covers one initial refill while explicit overrides remain authoritative', () => {
+  for (const refillSeconds of [1, 15, 16.25, 60, 90]) {
+    const env = { PRISM_START_BURST: '1', PRISM_START_REFILL_SECONDS: String(refillSeconds) };
+    for (const value of [undefined, '']) {
+      assert.equal(nativeStartSettings({ ...env, PRISM_START_MAX_WAIT_SECONDS: value }).maxWaitMs,
+        Math.max(15000, refillSeconds * 1000));
+    }
+    assert.equal(nativeStartSettings({ ...env, PRISM_START_MAX_WAIT_SECONDS: '7' }).maxWaitMs, 7000);
+    assert.equal(nativeStartSettings({ ...env, PRISM_START_MAX_WAIT_SECONDS: '0' }).maxWaitMs, 0);
+  }
+});
+
+test('the default wait admits the first available request after the bucket empties', async t => {
+  for (const settings of [nativeStartSettings({ PRISM_ACCOUNT_START_LIMIT: '4', PRISM_START_WINDOW_SECONDS: '65' }),
+    { burst: 1, refillMs: 60000 }]) {
+    const { limiter, scheduler } = fixture(t, settings);
+    assert.equal(limiter.maxWaitMs, Math.max(15000, limiter.refillMs));
+    for (let count = 0; count < limiter.burst; count += 1) await limiter.acquire();
+    const waiting = limiter.acquire(undefined, { failover: 'available' });
+    assert.equal(limiter.jobs.length, 1);
+    scheduler.advance(limiter.refillMs);
+    assert.equal(await waiting, limiter.refillMs);
+  }
 });
 
 test('available fails fast with the exact wait while none queues until a token exists', async t => {

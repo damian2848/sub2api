@@ -573,7 +573,8 @@ test('exclusive queue operations form a barrier while independent ready jobs can
 
 test('a start Prism refuses cools the whole source: no retry, and waiting or new requests are handed back at once', async t => {
   const calls = [];
-  const { manager, log } = await fixture(t, { generate: ({ slot, request: value }) => {
+  const { manager, log } = await fixture(t, { startLimiterFactory: () => new NativeStartLimiter({ maxWaitMs: 15000 }),
+    generate: ({ slot, request: value }) => {
     calls.push({ slot, marker: value.marker });
     if (value.marker === 'refused') throw new PrismError('prism_start_rejected', 429);
     return `reply:${value.marker}`;
