@@ -107,10 +107,17 @@ func (s *OpenAIGatewayService) ProbeOpenAICodexState(ctx context.Context, accoun
 func (s *OpenAIGatewayService) probeOpenAICodexState(ctx context.Context, account *Account, model string, ignoreBPS bool) *OpenAICodexStateProbeResult {
 	started := time.Now()
 	result := &OpenAICodexStateProbeResult{Verdict: OpenAICodexStateInconclusive, StartedAt: started}
-	collector := &pelicanTestUsageCollector{model: model}
+	collector := &pelicanTestUsageCollector{model: model, requestedModel: model, role: "state_probe", runID: uuid.NewString(), logicalRequestID: uuid.NewString()}
 	ctx = context.WithValue(ctx, pelicanTestUsageKey{}, collector)
 	result.Scope = accountObservationScope(account)
 	defer func() {
+		facts := collector.facts(s.billingService, account)
+		finalizeProbeFacts(facts)
+		recorder, _ := ctx.Value(probeRequestFactRecorderContextKey{}).(ProbeRequestFactRecorder)
+		if recorder == nil {
+			recorder = s.probeRequestFactRecorder
+		}
+		saveProbeFacts(recorder, facts)
 		usage := collector.probeUsage(s.billingService, account)
 		result.Usage = &usage
 		result.FinishedAt = time.Now()
@@ -131,6 +138,7 @@ func (s *OpenAIGatewayService) probeOpenAICodexState(ctx context.Context, accoun
 		upstreamModel = normalizeOpenAIModelForUpstream(account, account.GetMappedModel(requested))
 	}
 	result.Model = upstreamModel
+	collector.model, collector.requestedModel = upstreamModel, requested
 
 	if reason := openAICodexStateProbeUnsupportedReason(account, requested, ignoreBPS); reason != "" {
 		result.fail(OpenAICodexStateFailureUnsupported, reason, "")
@@ -265,7 +273,6 @@ func openAICodexStateProbeUnsupportedReason(account *Account, requestedModel str
 // lite 形态（292/332 长度的票）上没有验证。每发用新的 session_id，也与验证时一致。
 func (s *OpenAIGatewayService) fireOpenAICodexStateShot(ctx context.Context, account *Account, token, model, proxy, turnState, cookie string) (openAICodexStateShot, error) {
 	var out openAICodexStateShot
-	usage := startPelicanTestUsage(ctx, "responses")
 	shotCtx, cancel := context.WithTimeout(ctx, openAICodexStateProbeShotTimeout)
 	defer cancel()
 
@@ -294,7 +301,7 @@ func (s *OpenAIGatewayService) fireOpenAICodexStateShot(ctx context.Context, acc
 		req.Header.Set("Cookie", cookie)
 	}
 
-	resp, err := s.httpUpstream.Do(req, proxy, account.ID, account.Concurrency)
+	resp, err := observeProbeHTTPRequest(req, func() (*http.Response, error) { return s.httpUpstream.Do(req, proxy, account.ID, account.Concurrency) })
 	if err != nil {
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
@@ -329,11 +336,6 @@ func (s *OpenAIGatewayService) fireOpenAICodexStateShot(ctx context.Context, acc
 		return out, nil
 	}
 	out.model = openAICodexStateStreamModel(data)
-	for _, payload := range openAICodexStateStreamEvents(data) {
-		if usage != nil {
-			usage.read(string(payload))
-		}
-	}
 	if out.streamErr = validateCodexProbeResponse(data); out.streamErr != nil {
 		out.detail = openAICodexStateDetail(openAICodexStateStreamErrorPayload(data))
 	}
@@ -478,6 +480,7 @@ func (s *AccountTestService) probeOpenAICodexState(ctx context.Context, accountI
 		return nil, ErrOpenAICodexStateProbeBusy
 	}
 	defer release()
+	ctx = context.WithValue(ctx, probeRequestFactRecorderContextKey{}, s.probeRequestFactRecorder)
 	return s.openaiGatewayService.probeOpenAICodexState(ctx, account, model, ignoreBPS), nil
 }
 

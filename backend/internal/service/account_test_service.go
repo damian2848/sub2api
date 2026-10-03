@@ -139,6 +139,7 @@ func normalizeGrokAccountTestMode(mode string) string {
 // AccountTestService handles account testing operations
 type AccountTestService struct {
 	probeRecorder             ChannelMonitorProbeRecorder
+	probeRequestFactRecorder  ProbeRequestFactRecorder
 	accountRepo               AccountRepository
 	geminiTokenProvider       *GeminiTokenProvider
 	claudeTokenProvider       *ClaudeTokenProvider
@@ -161,6 +162,10 @@ type AccountTestService struct {
 	// grokWSDialer is optional; realtime account tests use the default OpenAI-style
 	// WS dialer when nil (supports proxy + coder/websocket handshake).
 	grokWSDialer openAIWSClientDialer
+}
+
+func (s *AccountTestService) SetProbeRequestFactRecorder(recorder ProbeRequestFactRecorder) {
+	s.probeRequestFactRecorder = recorder
 }
 
 func (s *AccountTestService) SetProbeRecorder(recorder ChannelMonitorProbeRecorder) {
@@ -282,7 +287,7 @@ func NewAccountTestService(
 		claudeTokenProvider:       claudeTokenProvider,
 		grokTokenProvider:         grokTokenProvider,
 		antigravityGatewayService: antigravityGatewayService,
-		httpUpstream:              httpUpstream,
+		httpUpstream:              observeProbeHTTPUpstream(httpUpstream),
 		cfg:                       cfg,
 		tlsFPProfileService:       tlsFPProfileService,
 	}
@@ -374,6 +379,20 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Account not found")
+	}
+	if account != nil && pelicanUsageFromContext(ctx) == nil {
+		collector := &pelicanTestUsageCollector{model: account.GetMappedModel(modelID), requestedModel: modelID, role: "account_check", runID: uuid.NewString(), logicalRequestID: uuid.NewString()}
+		ctx = context.WithValue(ctx, pelicanTestUsageKey{}, collector)
+		c.Request = c.Request.WithContext(ctx)
+		defer func() {
+			var billing *BillingService
+			if s.openaiGatewayService != nil {
+				billing = s.openaiGatewayService.billingService
+			}
+			facts := collector.facts(billing, account)
+			finalizeProbeFacts(facts)
+			saveProbeFacts(s.probeRequestFactRecorder, facts)
+		}()
 	}
 	if options, ok := pelicanTestOptionsFromContext(ctx); ok {
 		if options.testChannel == "bps" {

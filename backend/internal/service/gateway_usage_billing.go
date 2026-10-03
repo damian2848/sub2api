@@ -1207,6 +1207,7 @@ func (s *GatewayService) buildRecordUsageLog(
 		)
 	}
 	usageLog := &UsageLog{
+		APISuccess:               gatewayRequestOutcome(!result.streamReadIncomplete),
 		Source:                   ChannelMonitorRequestSource(ctx),
 		UserID:                   user.ID,
 		APIKeyID:                 apiKey.ID,

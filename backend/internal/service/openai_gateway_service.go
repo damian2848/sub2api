@@ -455,11 +455,12 @@ var ErrNoAvailableCompactAccounts = errors.New("no available accounts support /r
 
 // OpenAIGatewayService handles OpenAI API gateway operations
 type OpenAIGatewayService struct {
-	priorityScheduling      prioritySchedulingState
-	excelBPSRecoveryMu      sync.Mutex
-	excelBPSRecoveryCancel  context.CancelFunc
-	excelBPSRecoveryDone    chan struct{}
-	excelBPSRecoveryStopped bool
+	probeRequestFactRecorder ProbeRequestFactRecorder
+	priorityScheduling       prioritySchedulingState
+	excelBPSRecoveryMu       sync.Mutex
+	excelBPSRecoveryCancel   context.CancelFunc
+	excelBPSRecoveryDone     chan struct{}
+	excelBPSRecoveryStopped  bool
 
 	excelBPSWarmMu         sync.Mutex
 	excelBPSWarmCancel     context.CancelFunc
@@ -624,7 +625,7 @@ func NewOpenAIGatewayService(
 			nil,
 			"service.openai_gateway",
 		),
-		httpUpstream:          httpUpstream,
+		httpUpstream:          observeProbeHTTPUpstream(httpUpstream),
 		deferredService:       deferredService,
 		openAITokenProvider:   openAITokenProvider,
 		grokTokenProvider:     grokTokenProvider,
@@ -1365,4 +1366,12 @@ func (s *OpenAIGatewayService) ensurePrismSession(ctx context.Context, account *
 		return err
 	}
 	return newPrismSessionUnavailableError(err)
+}
+
+// SetProbeRequestFactRecorder connects internal generation diagnostics without
+// inserting customer usage logs or invoking customer billing.
+func (s *OpenAIGatewayService) SetProbeRequestFactRecorder(recorder ProbeRequestFactRecorder) {
+	if s != nil {
+		s.probeRequestFactRecorder = recorder
+	}
 }

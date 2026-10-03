@@ -99,6 +99,7 @@ func TestUsageLogRepositoryCreateSyncRequestTypeAndLegacyFields(t *testing.T) {
 			sqlmock.AnyArg(),              // billing_tier
 			sqlmock.AnyArg(),              // billing_mode
 			sqlmock.AnyArg(),              // account_stats_cost
+			sqlmock.AnyArg(),              // api_success
 			service.RequestSourceBusiness, // source
 			sqlmock.AnyArg(),              // upstream_request_id
 			sqlmock.AnyArg(),              // session_id
@@ -195,6 +196,7 @@ func TestUsageLogRepositoryCreate_PersistsServiceTier(t *testing.T) {
 			sqlmock.AnyArg(),              // billing_tier
 			sqlmock.AnyArg(),              // billing_mode
 			sqlmock.AnyArg(),              // account_stats_cost
+			sqlmock.AnyArg(),              // api_success
 			service.RequestSourceBusiness, // source
 			sqlmock.AnyArg(),              // upstream_request_id
 			sqlmock.AnyArg(),              // session_id
@@ -959,6 +961,7 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{},
 			sql.NullString{},
 			sql.NullFloat64{},
+			sql.NullBool{},                // api_success
 			service.RequestSourceBusiness, // source
 			sql.NullString{},              // upstream_request_id
 			sql.NullString{},
@@ -1040,6 +1043,7 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{},              // billing_tier
 			sql.NullString{},              // billing_mode
 			sql.NullFloat64{},             // account_stats_cost
+			sql.NullBool{},                // api_success
 			service.RequestSourceBusiness, // source
 			sql.NullString{},              // upstream_request_id
 			sql.NullString{},              // session_id
@@ -1104,6 +1108,7 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{},              // billing_tier
 			sql.NullString{},              // billing_mode
 			sql.NullFloat64{},             // account_stats_cost
+			sql.NullBool{},                // api_success
 			service.RequestSourceBusiness, // source
 			sql.NullString{},              // upstream_request_id
 			sql.NullString{},              // session_id
@@ -1169,6 +1174,7 @@ func TestScanUsageLogRequestTypeAndLegacyFallback(t *testing.T) {
 			sql.NullString{},              // billing_tier
 			sql.NullString{},              // billing_mode
 			sql.NullFloat64{},             // account_stats_cost
+			sql.NullBool{},                // api_success
 			service.RequestSourceBusiness, // source
 			sql.NullString{},              // upstream_request_id
 			sql.NullString{},              // session_id

@@ -8,7 +8,8 @@ export default {
         "showAnalytics": "详细数据",
         "passive": "真实请求 + 主动探测 · 渠道可用性",
         "activeProbe": "主动探测",
-        "availabilityHint": "优先使用真实请求；无调用时，使用仍有效的主动探测结果。未执行、已停用或过期的探测不计入。",
+        "healthHint": "综合健康结合 API 错误率、首 Token 和缓存表现；不等于下方单独展示的 API 可用率。",
+        "availabilityHint": "业务与主动探测的真实生成请求统一统计；质量答错、额度查询和 HEAD 连通检查不作为 API 失败或成功。没有请求的时段保持未知。",
         "groupRate": "分组倍率 {value}x",
         "cache": "缓存率",
         "availability": "可用率",
@@ -76,7 +77,10 @@ export default {
     ignored: '忽略',
     currentUser: '当前用户',
     ranges: { '90m': '90m', '24h': '24h', '7d': '7d', '30d': '30d' },
+    users: { businessScope: '用户排行仅统计业务请求；无论来源筛选如何，均不计入系统探测。' },
+    sources: { all: '全部请求', business: '业务请求', probe: '主动探测', mixed: '业务 + 探测' },
     filters: {
+      source: '来源',
       platform: '平台', allPlatforms: '全部', group: '分组', allGroups: '全部', model: '模型', allModels: '全部',
       empty: '暂无可选项', selectedCount: '{count} 项', labelValue: '{label}：{value}'
     },
@@ -195,7 +199,7 @@ export default {
     },
     observations: {
       title: '探测与质量结果', target: '目标', kind: '检测类型', status: '最近结果', lastChecked: '检测时间', usage: '检测用量', history: '历史',
-      businessUsage: '业务流量', probeUsage: '检测流量', totalTokens: '合计 Token', cost: '检测费用', partial: '记录不完整',
+      requestUsage: '渠道请求（去重）', businessUsage: '业务流量', probeUsage: '任务消耗快照（不叠加）', totalTokens: '去重渠道 Token', cost: '检测费用', partial: '记录不完整',
       requestsTokens: '{requests} 次请求 · {tokens} Token', summary: '{passed} 次通过 · {failed} 次异常 · {inconclusive} 次结论不足',
       samples: '{count} 次检测', cadence: '每 {seconds} 秒', paused: '已暂停', empty: '当前范围暂无探测或质量检测记录',
       boundGroup: '关联分组', externalTarget: '外部目标（无分组绑定）',

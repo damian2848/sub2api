@@ -147,7 +147,7 @@ func TestChannelMonitorQualityArchiveSurvivesPruningAndPlanDeletion(t *testing.T
 	require.Empty(t, observations)
 }
 
-func TestChannelMonitorBusinessAggregationExcludesProbes(t *testing.T) {
+func TestChannelMonitorRequestAggregationIncludesProbesAndKeepsBusinessLeaderboard(t *testing.T) {
 	ctx := context.Background()
 	group := mustCreateGroup(t, integrationEntClient, &service.Group{Name: "monitor-business-source", Platform: service.PlatformOpenAI})
 	user := mustCreateUser(t, integrationEntClient, &service.User{})
@@ -168,6 +168,10 @@ func TestChannelMonitorBusinessAggregationExcludesProbes(t *testing.T) {
 	for _, source := range []string{service.RequestSourceBusiness, service.RequestSourceProbe} {
 		_, err := usageRepo.Create(ctx, &service.UsageLog{UserID: user.ID, APIKeyID: key.ID, AccountID: account.ID, GroupID: &group.ID, RequestID: source + "-usage", Model: "source-model", InputTokens: 10, OutputTokens: 5, FirstTokenMs: &firstToken, DurationMs: &duration, TotalCost: 0.2, ActualCost: 0.2, Source: source, CreatedAt: now})
 		require.NoError(t, err)
+		if source == service.RequestSourceProbe {
+			_, err = integrationDB.ExecContext(ctx, `UPDATE usage_logs SET first_token_ms=NULL WHERE group_id=$1 AND source='probe'`, group.ID)
+			require.NoError(t, err)
+		}
 		_, err = integrationDB.ExecContext(ctx, `INSERT INTO ops_error_logs(request_id,user_id,group_id,account_id,platform,model,error_phase,error_type,status_code,source,created_at) VALUES($1,$2,$3,$4,'openai','source-model','upstream','internal',500,$5,$6)`, source+"-error", user.ID, group.ID, account.ID, source, now)
 		require.NoError(t, err)
 	}
@@ -175,14 +179,163 @@ func TestChannelMonitorBusinessAggregationExcludesProbes(t *testing.T) {
 	require.NoError(t, repo.RecomputeRange(ctx, now, now.Add(time.Minute)))
 	var success, failed, input, output int64
 	require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT COALESCE(sum(success_requests),0),COALESCE(sum(error_requests),0),COALESCE(sum(input_tokens),0),COALESCE(sum(output_tokens),0) FROM channel_monitor_v2_metrics_1m WHERE group_id=$1`, group.ID).Scan(&success, &failed, &input, &output))
-	require.Equal(t, int64(1), success)
-	require.Equal(t, int64(1), failed)
-	require.Equal(t, int64(10), input)
-	require.Equal(t, int64(5), output)
+	require.Equal(t, int64(2), success)
+	require.Equal(t, int64(2), failed)
+	require.Equal(t, int64(20), input)
+	require.Equal(t, int64(10), output)
+	var userSuccess, userErrors int64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT COALESCE(sum(success_requests),0),COALESCE(sum(error_requests),0) FROM channel_monitor_v2_user_metrics_1m WHERE group_id=$1`, group.ID).Scan(&userSuccess, &userErrors))
+	require.Equal(t, int64(1), userSuccess)
+	require.Equal(t, int64(1), userErrors)
+	for _, source := range []string{"business", "probe"} {
+		require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT COALESCE(sum(success_requests),0),COALESCE(sum(error_requests),0) FROM channel_monitor_v2_metrics_1m WHERE group_id=$1 AND source=$2`, group.ID, source).Scan(&success, &failed))
+		require.Equal(t, int64(1), success)
+		require.Equal(t, int64(1), failed)
+	}
 	var latencySamples int64
 	require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT COALESCE(sum(sample_count),0) FROM channel_monitor_v2_latency_histograms_1m WHERE group_id=$1 AND user_id=0 AND metric='ttft'`, group.ID).Scan(&latencySamples))
-	require.Equal(t, int64(1), latencySamples, "probe latency must not skew business latency")
+	require.Equal(t, int64(1), latencySamples, "non-streaming probe missing TTFT remains absent")
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT COALESCE(sum(sample_count),0) FROM channel_monitor_v2_latency_histograms_1m WHERE group_id=$1 AND user_id=0 AND metric='duration'`, group.ID).Scan(&latencySamples))
+	require.Equal(t, int64(2), latencySamples, "both real source durations feed the same histogram")
+	// Recompute is an idempotent rewrite, not an extra accounting event.
+	require.NoError(t, repo.RecomputeRange(ctx, now, now.Add(time.Minute)))
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT COALESCE(sum(success_requests),0),COALESCE(sum(error_requests),0) FROM channel_monitor_v2_metrics_1m WHERE group_id=$1`, group.ID).Scan(&success, &failed))
+	require.Equal(t, int64(2), success)
+	require.Equal(t, int64(2), failed)
 	var persistedCost float64
 	require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT sum(actual_cost) FROM usage_logs WHERE group_id=$1`, group.ID).Scan(&persistedCost))
 	require.InDelta(t, 0.4, persistedCost, 0.000001, "source separation must not alter persisted billing amounts")
+}
+
+func TestChannelMonitorDirectProbeLogicalAccountingAndIncompleteUsage(t *testing.T) {
+	ctx := context.Background()
+	group := mustCreateGroup(t, integrationEntClient, &service.Group{Name: "monitor-direct-probe-source", Platform: service.PlatformOpenAI})
+	account := mustCreateAccount(t, integrationEntClient, &service.Account{Name: "monitor-direct-source", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey})
+	t.Cleanup(func() {
+		_, _ = integrationDB.ExecContext(ctx, `DELETE FROM probe_request_facts WHERE account_id=$1`, account.ID)
+		for _, table := range []string{"channel_monitor_v2_latency_histograms_rollup", "channel_monitor_v2_error_metrics_rollup", "channel_monitor_v2_user_metrics_rollup", "channel_monitor_v2_metrics_rollup", "channel_monitor_v2_latency_histograms_1m", "channel_monitor_v2_error_metrics_1m", "channel_monitor_v2_user_metrics_1m", "channel_monitor_v2_metrics_1m"} {
+			_, _ = integrationDB.ExecContext(ctx, "DELETE FROM "+table+" WHERE group_id=$1", group.ID)
+		}
+		_ = integrationEntClient.Account.DeleteOneID(account.ID).Exec(ctx)
+		_ = integrationEntClient.Group.DeleteOneID(group.ID).Exec(ctx)
+	})
+	now := time.Now().UTC().Truncate(time.Minute).Add(-2 * time.Minute)
+	prefix := "direct-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	two, four, one, three, firstToken := int64(2), int64(4), int64(1), int64(3), int64(20)
+	status500, status200, status429 := 500, 200, 429
+	httpError := "http"
+	base := service.ProbeRequestFact{RunID: prefix, Role: "generation", Platform: "openai", GroupID: &group.ID, AccountID: account.ID, Protocol: "responses", RequestedModel: "direct-model", UpstreamModel: "direct-model", DurationMs: 100}
+	attempt := func(logical string, n int, start time.Time, final, success bool) service.ProbeRequestFact {
+		f := base
+		f.LogicalRequestID = prefix + logical
+		f.AttemptID = f.LogicalRequestID + "-" + strconv.Itoa(n)
+		f.AttemptNumber, f.StartedAt, f.FinishedAt = n, start, start.Add(100*time.Millisecond)
+		f.IsFinal, f.APISuccess = final, success
+		return f
+	}
+	first := attempt("retry", 1, now, false, false)
+	first.HTTPStatus, first.ErrorKind = &status500, &httpError
+	first.InputTokens, first.OutputTokens, first.UsageComplete = &two, &one, true
+	final := attempt("retry", 2, now.Add(2*time.Second), true, true)
+	final.HTTPStatus, final.InputTokens, final.OutputTokens = &status200, &four, &three
+	final.FirstTokenMs, final.UsageComplete, final.CostComplete = &firstToken, true, true
+	failed := attempt("failed", 1, now.Add(4*time.Second), true, false)
+	failed.HTTPStatus, failed.ErrorKind = &status429, &httpError
+	judge := attempt("judge", 1, now.Add(5*time.Second), true, true)
+	judge.Role, judge.InputTokens = "quality_judge", &four
+	accountCheck := attempt("account", 1, now.Add(6*time.Second), true, true)
+	accountCheck.Role, accountCheck.GroupID, accountCheck.InputTokens = "account_check", nil, &four
+	repo := NewChannelMonitorV2Repository(integrationDB).(*channelMonitorV2Repository)
+	facts := []service.ProbeRequestFact{first, final, failed, judge, accountCheck}
+	require.NoError(t, repo.RecordProbeRequestFacts(ctx, facts))
+	require.NoError(t, repo.RecordProbeRequestFacts(ctx, facts), "stable attempt IDs make recording idempotent")
+	for i := 0; i < 2; i++ {
+		require.NoError(t, repo.RecomputeRange(ctx, now, now.Add(time.Minute)))
+		var success, errors, attempts, input, output, missingUsage, missingCost, ttftCount, durationCount int64
+		require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT SUM(success_requests),SUM(error_requests),SUM(upstream_attempt_count),SUM(input_tokens),SUM(output_tokens),SUM(usage_incomplete_requests),SUM(cost_incomplete_requests),SUM(ttft_count),SUM(duration_count) FROM channel_monitor_v2_metrics_1m WHERE group_id=$1 AND source='probe'`, group.ID).Scan(&success, &errors, &attempts, &input, &output, &missingUsage, &missingCost, &ttftCount, &durationCount))
+		require.Equal(t, int64(1), success, "retry succeeds once, irrespective of answer correctness")
+		require.Equal(t, int64(1), errors, "only final failures affect logical availability")
+		require.Equal(t, int64(3), attempts, "all physical generation calls retain upstream consumption")
+		require.Equal(t, int64(6), input, "retry consumption included; judge/account-only excluded")
+		require.Equal(t, int64(4), output)
+		require.Equal(t, int64(1), missingUsage)
+		require.Equal(t, int64(2), missingCost, "incomplete prior attempt remains visible after final success")
+		require.Equal(t, int64(1), ttftCount)
+		require.Equal(t, int64(1), durationCount)
+		var histogramCount, histogramBound int64
+		require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT SUM(sample_count),MAX(upper_bound_ms) FROM channel_monitor_v2_latency_histograms_1m WHERE group_id=$1 AND metric='ttft' AND user_id=0`, group.ID).Scan(&histogramCount, &histogramBound))
+		require.Equal(t, int64(1), histogramCount)
+		require.Equal(t, int64(3000), histogramBound, "real TTFT includes the time spent on prior retry")
+		var category string
+		require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT error_category FROM channel_monitor_v2_error_metrics_1m WHERE group_id=$1`, group.ID).Scan(&category))
+		require.Equal(t, "rate_or_capacity", category)
+		var userRows, billingRows int
+		require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_monitor_v2_user_metrics_1m WHERE group_id=$1`, group.ID).Scan(&userRows))
+		require.Zero(t, userRows)
+		require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_logs WHERE group_id=$1`, group.ID).Scan(&billingRows))
+		require.Zero(t, billingRows, "non-billing ledger must not synthesize customer usage/debits")
+	}
+}
+
+func TestChannelMonitorZeroPricedCompletionAndChargedFailureAreNotBillingProxies(t *testing.T) {
+	ctx := context.Background()
+	group := mustCreateGroup(t, integrationEntClient, &service.Group{Name: "monitor-observed-api-outcome", Platform: service.PlatformOpenAI})
+	user := mustCreateUser(t, integrationEntClient, &service.User{})
+	key := mustCreateApiKey(t, integrationEntClient, &service.APIKey{UserID: user.ID, Key: "monitor-outcome-" + strconv.FormatInt(time.Now().UnixNano(), 10), Name: "monitor-outcome"})
+	account := mustCreateAccount(t, integrationEntClient, &service.Account{Name: "monitor-outcome", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey})
+	t.Cleanup(func() {
+		_, _ = integrationDB.ExecContext(ctx, `DELETE FROM ops_error_logs WHERE group_id=$1`, group.ID)
+		for _, table := range []string{"channel_monitor_v2_latency_histograms_rollup", "channel_monitor_v2_error_metrics_rollup", "channel_monitor_v2_user_metrics_rollup", "channel_monitor_v2_metrics_rollup", "channel_monitor_v2_latency_histograms_1m", "channel_monitor_v2_error_metrics_1m", "channel_monitor_v2_user_metrics_1m", "channel_monitor_v2_metrics_1m"} {
+			_, _ = integrationDB.ExecContext(ctx, "DELETE FROM "+table+" WHERE group_id=$1", group.ID)
+		}
+		_ = integrationEntClient.User.DeleteOneID(user.ID).Exec(ctx)
+		_ = integrationEntClient.Account.DeleteOneID(account.ID).Exec(ctx)
+		_ = integrationEntClient.Group.DeleteOneID(group.ID).Exec(ctx)
+	})
+	now := time.Now().UTC().Truncate(time.Minute).Add(-2 * time.Minute)
+	usageRepo := NewUsageLogRepository(integrationEntClient, integrationDB)
+	duration, firstToken := 150, 20
+	for _, row := range []struct {
+		id      string
+		cost    float64
+		input   int
+		outcome any
+		source  string
+	}{{"free-completed", 0, 0, true, "probe"}, {"charged-failed", 1, 7, false, "probe"}, {"legacy-charged-failed", 1, 9, nil, "probe"}, {"completed-but-client-disconnected", 0, 0, true, "probe"}, {"probe-failure-no-ops", 1, 3, false, "probe"}, {"business-free-completed", 0, 0, true, "business"}, {"business-failure-no-ops", 1, 5, false, "business"}, {"legacy-unknown-zero", 0, 0, nil, "probe"}} {
+		usage := &service.UsageLog{UserID: user.ID, APIKeyID: key.ID, AccountID: account.ID, GroupID: &group.ID, RequestID: row.id, Model: "outcome-model", InputTokens: row.input, ActualCost: row.cost, TotalCost: row.cost, Source: row.source, DurationMs: &duration, CreatedAt: now}
+		if row.id == "probe-failure-no-ops" {
+			usage.Stream = true
+		}
+		if row.cost > 0 {
+			usage.FirstTokenMs = &firstToken
+		}
+		_, err := usageRepo.Create(ctx, usage)
+		require.NoError(t, err)
+		_, err = integrationDB.ExecContext(ctx, `UPDATE usage_logs SET api_success=$1 WHERE request_id=$2 AND group_id=$3`, row.outcome, row.id, group.ID)
+		require.NoError(t, err)
+		if (row.cost > 0 && row.id != "probe-failure-no-ops" && row.id != "business-failure-no-ops") || row.id == "completed-but-client-disconnected" {
+			status := 500
+			if row.id == "completed-but-client-disconnected" {
+				status = 499
+			}
+			_, err = integrationDB.ExecContext(ctx, `INSERT INTO ops_error_logs(request_id,user_id,group_id,account_id,platform,model,error_phase,error_type,error_owner,status_code,upstream_status_code,source,created_at) VALUES($1,$2,$3,$4,'openai','outcome-model','upstream','upstream','provider',$6,NULLIF($6,499),'probe',$5)`, row.id, user.ID, group.ID, account.ID, now, status)
+			require.NoError(t, err)
+		}
+	}
+	repo := NewChannelMonitorV2Repository(integrationDB).(*channelMonitorV2Repository)
+	require.NoError(t, repo.RecomputeRange(ctx, now, now.Add(time.Minute)))
+	var success, errors, input, ttft, durations int64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT SUM(success_requests),SUM(error_requests),SUM(input_tokens),SUM(ttft_count),SUM(duration_count) FROM channel_monitor_v2_metrics_1m WHERE group_id=$1`, group.ID).Scan(&success, &errors, &input, &ttft, &durations))
+	require.Equal(t, int64(2), success, "completed zero-priced zero-token business and probe requests are still real successes")
+	require.Equal(t, int64(5), errors, "detailed telemetry failure does not erase explicit failed logical requests")
+	require.Equal(t, int64(24), input, "charged partial failures retain their actual upstream consumption")
+	require.Zero(t, ttft, "performance success histogram does not manufacture samples from failed partials")
+	require.Equal(t, int64(2), durations)
+	var userSuccess, userErrors int64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT SUM(success_requests),SUM(error_requests) FROM channel_monitor_v2_user_metrics_1m WHERE group_id=$1`, group.ID).Scan(&userSuccess, &userErrors))
+	require.Equal(t, int64(1), userSuccess, "business-only leaderboard includes actual free successes")
+	require.Equal(t, int64(1), userErrors, "priced business failure is not also a success")
+	var billingCost float64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, `SELECT SUM(actual_cost) FROM usage_logs WHERE group_id=$1`, group.ID).Scan(&billingCost))
+	require.InDelta(t, 4, billingCost, 1e-9, "outcome accounting never alters existing charges")
 }

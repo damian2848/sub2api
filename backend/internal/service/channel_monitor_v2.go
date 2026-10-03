@@ -74,7 +74,13 @@ var ChannelMonitorV2ErrorCategories = []string{
 	"other",
 }
 
+// ChannelMonitorV2AccountingVersion identifies the aggregate semantics; upgrades
+// restart bounded historical recomputation rather than mixing old rollups.
+const ChannelMonitorV2AccountingVersion = 2
+
 type ChannelMonitorV2Filter struct {
+	// Source is all (or empty), business, or probe for actual API requests.
+	Source    string
 	Range     string
 	Platforms []string
 	GroupIDs  []int64
@@ -91,34 +97,39 @@ type ChannelMonitorV2Filter struct {
 
 type ChannelMonitorV2Metric struct {
 	HasSamples bool `json:"has_samples"`
-	// Probe signals supplement availability only; HasSamples and all business
-	// volume, latency, cache and error fields retain their business-only meaning.
-	ProbeSampleCount         int64                   `json:"probe_sample_count"`
-	ProbePassedCount         int64                   `json:"probe_passed_count"`
-	ProbeFailedCount         int64                   `json:"probe_failed_count"`
-	ProbeInconclusiveCount   int64                   `json:"probe_inconclusive_count"`
-	ProbeAvailability        *float64                `json:"probe_availability,omitempty"`
-	ProbeCheckedAt           *time.Time              `json:"probe_checked_at,omitempty"`
-	AvailabilitySource       string                  `json:"availability_source,omitempty"`
-	SuccessRequests          int64                   `json:"success_requests"`
-	ErrorRequests            int64                   `json:"error_requests"`
-	RequestCount             int64                   `json:"request_count"`
-	InputTokens              int64                   `json:"input_tokens"`
-	OutputTokens             int64                   `json:"output_tokens"`
-	CacheCreationTokens      int64                   `json:"cache_creation_tokens"`
-	CacheReadTokens          int64                   `json:"cache_read_tokens"`
-	TokenCount               int64                   `json:"token_count"`
-	RPM                      float64                 `json:"rpm"`
-	TPM                      float64                 `json:"tpm"`
-	ErrorRate                float64                 `json:"error_rate"`
-	SuccessRate              float64                 `json:"success_rate"`
-	CacheRate                float64                 `json:"cache_rate"`
-	CacheRateNumerator       int64                   `json:"cache_rate_numerator"`
-	CacheRateDenominator     int64                   `json:"cache_rate_denominator"`
-	TTFT                     ChannelMonitorV2Latency `json:"ttft"`
-	Duration                 ChannelMonitorV2Latency `json:"duration"`
-	UpstreamAffectedRequests *int64                  `json:"upstream_affected_requests,omitempty"`
-	UpstreamAttemptCount     *int64                  `json:"upstream_attempt_count,omitempty"`
+	// HasSamples describes real generation requests from business and probe
+	// sources. Task observation counts below are diagnostic metadata only;
+	// quality verdicts do not supply transport availability.
+	ProbeSampleCount            int64                   `json:"probe_sample_count"`
+	ProbePassedCount            int64                   `json:"probe_passed_count"`
+	ProbeFailedCount            int64                   `json:"probe_failed_count"`
+	ProbeInconclusiveCount      int64                   `json:"probe_inconclusive_count"`
+	ProbeAvailability           *float64                `json:"probe_availability,omitempty"`
+	ProbeCheckedAt              *time.Time              `json:"probe_checked_at,omitempty"`
+	AvailabilitySource          string                  `json:"availability_source,omitempty"`
+	SuccessRequests             int64                   `json:"success_requests"`
+	ErrorRequests               int64                   `json:"error_requests"`
+	RequestCount                int64                   `json:"request_count"`
+	BusinessRequestCount        int64                   `json:"business_request_count"`
+	ProbeRequestCount           int64                   `json:"probe_request_count"`
+	UsageIncompleteRequestCount int64                   `json:"usage_incomplete_request_count"`
+	CostIncompleteRequestCount  int64                   `json:"cost_incomplete_request_count"`
+	InputTokens                 int64                   `json:"input_tokens"`
+	OutputTokens                int64                   `json:"output_tokens"`
+	CacheCreationTokens         int64                   `json:"cache_creation_tokens"`
+	CacheReadTokens             int64                   `json:"cache_read_tokens"`
+	TokenCount                  int64                   `json:"token_count"`
+	RPM                         float64                 `json:"rpm"`
+	TPM                         float64                 `json:"tpm"`
+	ErrorRate                   float64                 `json:"error_rate"`
+	SuccessRate                 float64                 `json:"success_rate"`
+	CacheRate                   float64                 `json:"cache_rate"`
+	CacheRateNumerator          int64                   `json:"cache_rate_numerator"`
+	CacheRateDenominator        int64                   `json:"cache_rate_denominator"`
+	TTFT                        ChannelMonitorV2Latency `json:"ttft"`
+	Duration                    ChannelMonitorV2Latency `json:"duration"`
+	UpstreamAffectedRequests    *int64                  `json:"upstream_affected_requests,omitempty"`
+	UpstreamAttemptCount        *int64                  `json:"upstream_attempt_count,omitempty"`
 }
 
 type ChannelMonitorV2Latency struct {
@@ -203,6 +214,7 @@ type ChannelMonitorV2Bootstrap struct {
 
 // ChannelMonitorV2AggregationWatermark is the durable aggregator cursor state.
 type ChannelMonitorV2AggregationWatermark struct {
+	AccountingVersion  int
 	UsageCoverageStart time.Time
 	ErrorCoverageStart time.Time
 	DataThrough        time.Time
@@ -706,6 +718,10 @@ func redactChannelMonitorV2Metric(m *ChannelMonitorV2Metric, hideThroughput bool
 	m.SuccessRequests = 0
 	m.ErrorRequests = 0
 	m.RequestCount = 0
+	m.BusinessRequestCount = 0
+	m.ProbeRequestCount = 0
+	m.UsageIncompleteRequestCount = 0
+	m.CostIncompleteRequestCount = 0
 	m.InputTokens = 0
 	m.OutputTokens = 0
 	m.CacheCreationTokens = 0

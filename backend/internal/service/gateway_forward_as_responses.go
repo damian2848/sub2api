@@ -203,6 +203,9 @@ func (s *GatewayService) ForwardAsResponses(
 		result, handleErr = s.handleResponsesBufferedStreamingResponse(resp, c, originalModel, mappedModel, reasoningEffort, startTime, clientToolMapping)
 	}
 
+	if result != nil && handleErr != nil {
+		result.streamReadIncomplete = true
+	}
 	return result, handleErr
 }
 

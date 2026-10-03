@@ -270,28 +270,7 @@ func (s *ChannelMonitorV2Aggregator) runOnce() {
 	s.mu.Lock()
 	chunk := s.backfillChunk
 	s.mu.Unlock()
-	if chunk <= 0 {
-		chunk = channelMonitorV2BackfillChunkInit
-	}
-	maxChunk := channelMonitorV2MaxChunkForDepth(now, end)
-	if chunk > maxChunk {
-		chunk = maxChunk
-	}
-	if chunk < channelMonitorV2MinBackfillChunk {
-		chunk = channelMonitorV2MinBackfillChunk
-	}
-	start := end.Add(-chunk)
-	// Once bootstrap reaches historical data, keep chunks on day boundaries so
-	// daily rollups never depend on 1m rows from two independently pruned chunks.
-	if end.Before(now.Add(-7 * 24 * time.Hour)) {
-		aligned := end.Add(-chunk).Truncate(24 * time.Hour)
-		if aligned.Before(end) {
-			start = aligned
-		}
-	}
-	if start.Before(retentionCutoff) {
-		start = retentionCutoff
-	}
+	start := channelMonitorV2BackfillStart(now, end, chunk)
 	if !start.Before(end) {
 		return
 	}
@@ -302,6 +281,26 @@ func (s *ChannelMonitorV2Aggregator) runOnce() {
 		return
 	}
 	s.recordBackfillSuccess(start, time.Since(started), now)
+}
+
+// Historical chunks stay within their adaptive ceiling even across midnight.
+// Repository retention defers pruning during bootstrap, so rebuilding daily
+// rollups never requires expanding a small chunk to a whole UTC day.
+func channelMonitorV2BackfillStart(now, end time.Time, chunk time.Duration) time.Time {
+	if chunk <= 0 {
+		chunk = channelMonitorV2BackfillChunkInit
+	}
+	if ceiling := channelMonitorV2MaxChunkForDepth(now, end); chunk > ceiling {
+		chunk = ceiling
+	}
+	if chunk < channelMonitorV2MinBackfillChunk {
+		chunk = channelMonitorV2MinBackfillChunk
+	}
+	start := end.Add(-chunk)
+	if cutoff := now.Add(-channelMonitorV2RetentionMax); start.Before(cutoff) {
+		start = cutoff
+	}
+	return start
 }
 
 // channelMonitorV2MaxChunkForDepth returns the hard ceiling for a historical
@@ -396,7 +395,7 @@ func (s *ChannelMonitorV2Aggregator) ensureCursor(ctx context.Context, now time.
 	if s.cursorLoaded {
 		return nil
 	}
-	if wm != nil {
+	if wm != nil && wm.AccountingVersion == ChannelMonitorV2AccountingVersion {
 		if !wm.BackfillCursor.IsZero() {
 			s.backfillAt = wm.BackfillCursor.UTC().Truncate(time.Minute)
 		}

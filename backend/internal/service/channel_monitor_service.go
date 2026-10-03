@@ -162,6 +162,13 @@ func (s *ChannelMonitorService) Create(ctx context.Context, p ChannelMonitorCrea
 		return nil, err
 	}
 	checkMode := defaultCheckMode(p.CheckMode)
+	if err := s.validateProbeRoute(ctx, &ChannelMonitor{
+		Provider: p.Provider, APIMode: p.APIMode, Endpoint: p.Endpoint,
+		APIKey: strings.TrimSpace(p.APIKey), ExtraHeaders: p.ExtraHeaders,
+		CheckMode: checkMode, GroupID: p.GroupID,
+	}); err != nil {
+		return nil, err
+	}
 	encrypted, err := s.encryptor.Encrypt(p.APIKey)
 	if err != nil {
 		return nil, fmt.Errorf("encrypt api key: %w", err)
@@ -440,8 +447,10 @@ func (s *ChannelMonitorService) Update(ctx context.Context, id int64, p ChannelM
 	if err := applyMonitorUpdate(existing, p); err != nil {
 		return nil, err
 	}
-	if err := s.validateMonitorGroup(ctx, existing.Provider, existing.GroupID); err != nil {
-		return nil, err
+	if !isChannelMonitorDisableOnlyUpdate(p) {
+		if err := s.validateMonitorGroup(ctx, existing.Provider, existing.GroupID); err != nil {
+			return nil, err
+		}
 	}
 
 	newPlainAPIKey, apiKeyUpdated, err := s.applyAPIKeyUpdate(existing, p.APIKey)
@@ -453,6 +462,11 @@ func (s *ChannelMonitorService) Update(ctx context.Context, id int64, p ChannelM
 	}
 	if p.Provider != nil || p.CheckMode != nil || p.AccountID != nil {
 		if err := s.revalidateLinkedAccount(ctx, existing); err != nil {
+			return nil, err
+		}
+	}
+	if !isChannelMonitorDisableOnlyUpdate(p) {
+		if err := s.validateStoredProbeRoute(ctx, existing, newPlainAPIKey, apiKeyUpdated); err != nil {
 			return nil, err
 		}
 	}
@@ -624,6 +638,11 @@ func (s *ChannelMonitorService) RunCheck(ctx context.Context, id int64) ([]*Chec
 	checkMode := defaultCheckMode(m.CheckMode)
 	if checkMode != MonitorCheckModeQuota && m.APIKeyDecryptFailed {
 		return nil, ErrChannelMonitorAPIKeyDecryptFailed
+	}
+	// Read the current binding for every execution: a previously valid monitor
+	// must stop before sending traffic when its key is rebound to another group.
+	if err := s.validateProbeRoute(ctx, m); err != nil {
+		return nil, err
 	}
 	ctx = WithChannelMonitorProbeSigner(ctx, s.encryptor)
 

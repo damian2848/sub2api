@@ -85,3 +85,26 @@ func TestChannelMonitorV2ScopeFilterLeavesAdminUnrestricted(t *testing.T) {
 	require.Nil(t, filter.AllowedGroupIDs)
 	require.Empty(t, authorizer.calls)
 }
+
+func TestChannelMonitorV2RequestSourceFilter(t *testing.T) {
+	for _, tc := range []struct {
+		input, expected string
+		valid           bool
+	}{
+		{"", "", true}, {"all", "", true}, {"business", "business", true}, {"probe", "probe", true}, {"invalid", "", false},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/?range=90m&source="+tc.input, nil)
+			h := NewChannelMonitorV2Handler(service.NewChannelMonitorV2Service(nil), nil)
+			filter, valid := h.parseFilter(c)
+			require.Equal(t, tc.valid, valid)
+			if valid {
+				require.Equal(t, tc.expected, filter.Source)
+			} else {
+				require.Equal(t, http.StatusBadRequest, recorder.Code)
+			}
+		})
+	}
+}

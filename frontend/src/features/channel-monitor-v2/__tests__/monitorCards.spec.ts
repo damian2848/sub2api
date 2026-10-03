@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CANDY_HISTORY_LIMIT, candyDisplayState, candyHistorySlots, effectiveAvailability, hasAvailabilitySamples, hasMonitorSamples, monitorCardTimeline, monitorRefreshSeconds } from '../monitorCards'
+import { CANDY_HISTORY_LIMIT, candyDisplayState, candyHistorySlots, effectiveAvailability, hasAvailabilitySamples, hasMonitorSamples, monitorAvailabilitySource, monitorCardTimeline, monitorRefreshSeconds } from '../monitorCards'
 import type { MonitorCandyHistory, MonitorCoverage, MonitorMatrixRow, MonitorMetric } from '@/api/channelMonitorV2'
 
 describe('monitor card data semantics', () => {
@@ -34,11 +34,11 @@ describe('monitor card data semantics', () => {
     expect(hasMonitorSamples({ request_count: 0, has_samples: true } as MonitorMetric)).toBe(true)
     expect(hasMonitorSamples({ request_count: 3 } as MonitorMetric)).toBe(true)
   })
-  it('uses explicit probe availability without pretending there was business traffic', () => {
+  it('does not use task verdict summaries as API availability', () => {
     for (const availability of [0, 0.75, 1]) {
       const metric = { request_count: 0, has_samples: false, error_rate: 0, probe_sample_count: 0, probe_availability: availability, availability_source: 'probe' } as MonitorMetric
-      expect(effectiveAvailability(metric)).toBe(availability)
-      expect(hasAvailabilitySamples(metric)).toBe(true)
+      expect(effectiveAvailability(metric)).toBeNull()
+      expect(hasAvailabilitySamples(metric)).toBe(false)
       expect(hasMonitorSamples(metric)).toBe(false)
     }
   })
@@ -89,4 +89,14 @@ describe('monitor card data semantics', () => {
     history.results[0].checked_at = '2026-09-28T00:55:00Z'
     expect(candyDisplayState(history, now)).toBe('stale')
   })
+})
+
+it.each(['probe', 'mixed', 'business'] as const)('uses real request buckets and retains %s source without inventing TTFT', source => {
+ const metric = { has_samples: true, request_count: 0, availability_source: source, error_rate: 0.25, ttft: { p50_ms: null } } as MonitorMetric
+ expect(effectiveAvailability(metric)).toBe(0.75)
+ expect(monitorAvailabilitySource(metric)).toBe(source)
+ const row = { buckets: [{ bucket_start: '2026-09-28T00:06:00Z', metrics: metric, health: { overall: 'warning' } }] } as MonitorMatrixRow
+ const bars = monitorCardTimeline(row, { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage)
+ expect(bars.filter(bar => bar.observed)).toHaveLength(1)
+ expect(bars[1].buckets[0].metrics.ttft.p50_ms).toBeNull()
 })

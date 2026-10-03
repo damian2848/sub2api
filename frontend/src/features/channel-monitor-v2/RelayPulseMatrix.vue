@@ -62,7 +62,7 @@
             </div>
             <strong class="summary-value bg-white text-xs font-medium tabular-nums text-gray-600 dark:bg-dark-800 dark:text-gray-300">
               {{ successRate(entry.row.metrics) }}
-              <small v-if="!hasMonitorSamples(entry.row.metrics) && hasAvailabilitySamples(entry.row.metrics)" class="block text-[10px] text-gray-400">{{ t('channelMonitorV2.cards.activeProbe') }}</small>
+              <small v-if="monitorAvailabilitySource(entry.row.metrics)" class="block text-[10px] text-gray-400">{{ t('channelMonitorV2.sources.' + monitorAvailabilitySource(entry.row.metrics)) }}</small>
             </strong>
             <strong
               class="summary-value bg-white text-xs font-medium tabular-nums text-gray-600 dark:bg-dark-800 dark:text-gray-300"
@@ -188,7 +188,7 @@ import {
   healthModeScore,
   healthScoreClass,
 } from '@/features/channel-monitor-v2/monitorFormat'
-import { effectiveAvailability, hasAvailabilitySamples, hasMonitorSamples } from './monitorCards'
+import { effectiveAvailability, hasMonitorSamples, monitorAvailabilitySource } from './monitorCards'
 import {
   applyWheelZoom,
   clientXRatio,

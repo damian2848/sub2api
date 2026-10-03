@@ -40,19 +40,19 @@ async function mountView(metric: MonitorMetric) {
 
 describe('channel status availability', () => {
   it.each([1, 0.75, 0])('shows probe availability %s in the card summary, analytics KPI and model table', async (rate) => {
-    const metric = { ...emptyMetric(), probe_availability: rate, availability_source: 'probe' as const }
+    const metric = { ...emptyMetric(), has_samples: true, error_rate: 1 - rate, availability_source: 'probe' as const }
     const expected = rate === 0 ? '0.00%' : `${(rate * 100).toFixed(1)}%`
     const wrapper = await mountView(metric)
     expect(wrapper.text()).toContain(expected)
-    expect(wrapper.text()).toContain('channelMonitorV2.cards.activeProbe')
+    expect(wrapper.text()).toContain('channelMonitorV2.sources.probe')
     await wrapper.get('[data-testid="monitor-layout-toggle"]').trigger('click')
     await flushPromises()
     const cells = wrapper.findAllComponents(MetricCell)
     expect(cells[0].props('value')).toBe(expected)
-    expect(cells[0].props('detail')).toBe('channelMonitorV2.cards.activeProbe')
-    expect(cells[2].props('value')).toBe('—')
+    expect(cells[0].props('detail')).toContain('channelMonitorV2.sources.probe')
+    expect(cells[2].props('value')).toBe('0.00%')
     expect(wrapper.get('tbody tr td:nth-child(2)').text()).toContain(expected)
-    expect(wrapper.get('tbody tr td:nth-child(2)').text()).toContain('channelMonitorV2.cards.activeProbe')
+    expect(wrapper.get('tbody tr td:nth-child(2)').text()).toContain('channelMonitorV2.sources.probe')
     expect(showError).not.toHaveBeenCalled()
   })
 
@@ -74,10 +74,27 @@ describe('channel status availability', () => {
   it('prefers privacy-redacted business samples over probe results', async () => {
     const wrapper = await mountView({ ...emptyMetric(), has_samples: true, error_rate: 0.2, probe_availability: 1, availability_source: 'business' })
     expect(wrapper.text()).toContain('80.0%')
-    expect(wrapper.text()).not.toContain('channelMonitorV2.cards.activeProbe')
+    expect(wrapper.text()).toContain('80.0% · channelMonitorV2.sources.business')
     await wrapper.get('[data-testid="monitor-layout-toggle"]').trigger('click')
     await flushPromises()
     expect(wrapper.findAllComponents(MetricCell)[0].props('value')).toBe('80.0%')
     expect(wrapper.get('tbody tr td:nth-child(2)').text()).toContain('80.0%')
   })
+})
+
+it('reloads channel metrics with source filtering while defaulting to all requests', async () => {
+ const wrapper = await mountView(emptyMetric())
+ expect(api.getSnapshot.mock.calls.at(-1)?.[0].source).toBe('all')
+ await wrapper.get('[data-testid="monitor-request-source"]').setValue('probe')
+ await flushPromises()
+ expect(api.getSnapshot.mock.calls.at(-1)?.[0].source).toBe('probe')
+ expect(api.getMatrix.mock.calls.at(-1)?.[0].source).toBe('probe')
+})
+
+it('does not trust legacy observation-derived rates without actual request samples', async () => {
+ const wrapper = await mountView({ ...emptyMetric(), probe_availability: 1, availability_source: 'probe' })
+ expect(wrapper.text()).not.toContain('100.0%')
+ await wrapper.get('[data-testid="monitor-layout-toggle"]').trigger('click')
+ await flushPromises()
+ expect(wrapper.findAllComponents(MetricCell)[0].props('value')).toBe('—')
 })

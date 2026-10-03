@@ -21,7 +21,7 @@
                 <span v-if="row.group_rate_multiplier != null" class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-gray-500 dark:bg-dark-700 dark:text-gray-400">{{ t('channelMonitorV2.cards.groupRate', { value: row.group_rate_multiplier.toFixed(2) }) }}</span>
               </div>
             </div>
-            <span class="shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold" :class="healthBadge[row.health.overall]">{{ t(`channelMonitorV2.cards.health.${row.health.overall}`) }}</span>
+            <span class="shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold" :class="healthBadge[row.health.overall]" :title="t('channelMonitorV2.cards.healthHint')">{{ t(`channelMonitorV2.cards.health.${row.health.overall}`) }}</span>
           </header>
 
           <dl class="mt-5 grid grid-cols-3 gap-2">
@@ -109,7 +109,7 @@ import type { MonitorCandyResult, MonitorCoverage, MonitorMatrixBucket, MonitorM
 import ProviderIcon from '@/components/user/monitor/ProviderIcon.vue'
 import { useChannelMonitorFormat } from '@/composables/useChannelMonitorFormat'
 import { formatMonitorMs, formatMonitorPercent } from './monitorFormat'
-import { CANDY_HISTORY_LIMIT, candyDisplayState, candyHistorySlots, effectiveAvailability, hasMonitorSamples, monitorCardTimeline, monitorCandyHistories } from './monitorCards'
+import { CANDY_HISTORY_LIMIT, candyDisplayState, candyHistorySlots, effectiveAvailability, hasMonitorSamples, monitorAvailabilitySource, monitorCardTimeline, monitorCandyHistories } from './monitorCards'
 
 const props = defineProps<{ items: MonitorMatrixRow[]; coverage?: MonitorCoverage; countdown: number; loading: boolean; now: number }>()
 const { t, locale } = useI18n()
@@ -206,7 +206,7 @@ function metrics(row: MonitorMatrixRow) {
   const availability = effectiveAvailability(row.metrics)
   return [
     { name: t('channelMonitorV2.cards.cache'), value: sampled ? formatMonitorPercent(row.metrics.cache_rate) : '—', color: 'text-gray-800 dark:text-gray-100' },
-    { name: t('channelMonitorV2.cards.availability'), title: t('channelMonitorV2.cards.availabilityHint'), value: availability == null ? '—' : formatMonitorPercent(availability), source: !sampled && availability != null ? t('channelMonitorV2.cards.activeProbe') : undefined, color: availability != null && row.health.error_rate === 'healthy' ? 'text-emerald-600 dark:text-emerald-300' : 'text-gray-800 dark:text-gray-100' },
+    { name: t('channelMonitorV2.cards.availability'), title: t('channelMonitorV2.cards.availabilityHint'), value: availability == null ? '—' : formatMonitorPercent(availability), source: monitorAvailabilitySource(row.metrics) ? t('channelMonitorV2.sources.' + monitorAvailabilitySource(row.metrics)) : undefined, color: availability != null && row.health.error_rate === 'healthy' ? 'text-emerald-600 dark:text-emerald-300' : 'text-gray-800 dark:text-gray-100' },
     { name: t('channelMonitorV2.cards.ttft'), title: t('channelMonitorV2.metrics.ttftP50'), value: formatMonitorMs(row.metrics.ttft.p50_ms), color: 'text-gray-800 dark:text-gray-100' }
   ]
 }

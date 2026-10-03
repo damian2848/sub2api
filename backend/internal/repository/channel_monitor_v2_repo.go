@@ -110,11 +110,12 @@ func (r *channelMonitorV2Repository) UpdateConfig(ctx context.Context, cfg servi
 }
 
 type channelMonitorV2Fact struct {
-	BucketStart, Platform, GroupName, Model             string
+	BucketStart, Platform, GroupName, Model, Source     string
 	GroupID                                             int64
 	Success, Errors, UpstreamAffected, UpstreamAttempts int64
 	Input, Output, CacheCreation, CacheRead             int64
 	TTFTSum, TTFTCount, DurationSum, DurationCount      int64
+	UsageIncomplete, CostIncomplete                     int64
 }
 
 type channelMonitorV2Histogram struct {
@@ -760,16 +761,19 @@ func (r *channelMonitorV2Repository) GetErrors(ctx context.Context, filter servi
 }
 
 func (r *channelMonitorV2Repository) loadErrorDetails(ctx context.Context, filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config) (map[string][]service.ChannelMonitorV2ErrorDetail, error) {
+	errorPlatform := `lower(CASE WHEN g.platform = 'composite' THEN COALESCE(NULLIF(TRIM(a.platform), ''), NULLIF(NULLIF(lower(TRIM(current_error.platform)), ''), 'composite'), 'unknown') ELSE COALESCE(NULLIF(TRIM(current_error.platform), ''), 'unknown') END)`
 	conditions := []string{
 		"current_error.created_at >= $1",
 		"current_error.created_at < $2",
-		"current_error.source = 'business'",
+		"current_error.source IN ('business', 'probe')",
 		"NOT current_error.is_count_tokens",
 		"(COALESCE(current_error.status_code, 0) >= 400 OR current_error.error_type = 'cyber_policy')",
 		`(NULLIF(current_error.request_id, '') IS NULL OR NOT EXISTS (
 				SELECT 1 FROM ops_error_logs newer
 				WHERE newer.request_id = current_error.request_id
-				  AND newer.source = 'business'
+				  AND newer.source = current_error.source
+				  AND newer.created_at >= $1 - INTERVAL '90 minutes'
+				  AND newer.created_at < $2
 				  AND NOT newer.is_count_tokens
 				  AND (COALESCE(newer.status_code, 0) >= 400 OR newer.error_type = 'cyber_policy')
 				  AND (newer.created_at, newer.id) > (current_error.created_at, current_error.id)
@@ -782,7 +786,7 @@ func (r *channelMonitorV2Repository) loadErrorDetails(ctx context.Context, filte
 	}
 	if len(platforms) > 0 {
 		args = append(args, pq.Array(platforms))
-		conditions = append(conditions, fmt.Sprintf("lower(COALESCE(NULLIF(TRIM(current_error.platform), ''), 'unknown')) = ANY($%d)", len(args)))
+		conditions = append(conditions, fmt.Sprintf("%s = ANY($%d)", errorPlatform, len(args)))
 	} else {
 		conditions = append(conditions, "FALSE")
 	}
@@ -793,8 +797,12 @@ func (r *channelMonitorV2Repository) loadErrorDetails(ctx context.Context, filte
 		args = append(args, pq.Array(groups))
 		conditions = append(conditions, fmt.Sprintf("COALESCE(current_error.group_id, 0) = ANY($%d)", len(args)))
 	}
+	if filter.Source == "business" || filter.Source == "probe" {
+		args = append(args, filter.Source)
+		conditions = append(conditions, fmt.Sprintf("current_error.source = $%d", len(args)))
+	}
 	query := `SELECT
-			lower(COALESCE(NULLIF(TRIM(current_error.platform), ''), 'unknown')) AS platform,
+			` + errorPlatform + ` AS platform,
 			COALESCE(current_error.group_id, 0) AS group_id,
 			COALESCE(NULLIF(TRIM(current_error.requested_model), ''), NULLIF(TRIM(current_error.model), ''), 'unknown') AS model,
 			COALESCE(current_error.error_type, '') AS error_type,
@@ -805,6 +813,8 @@ func (r *channelMonitorV2Repository) loadErrorDetails(ctx context.Context, filte
 			LEFT(COALESCE(NULLIF(current_error.upstream_error_message, ''), NULLIF(current_error.error_message, ''), NULLIF(current_error.upstream_error_detail, ''), NULLIF(current_error.error_body, ''), current_error.error_type, ''), 600) AS message,
 			COUNT(*) AS count
 		FROM ops_error_logs current_error
+		LEFT JOIN groups g ON g.id = current_error.group_id
+		LEFT JOIN accounts a ON a.id = current_error.account_id
 		WHERE ` + strings.Join(conditions, " AND ") + `
 		GROUP BY 1,2,3,4,5,6,7,8,9
 		ORDER BY count DESC
@@ -847,7 +857,21 @@ func (r *channelMonitorV2Repository) loadErrorDetails(ctx context.Context, filte
 			Count:              count,
 		})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := r.appendGatewayUsageFailureDetails(ctx, filter, cfg, out); err != nil {
+		return nil, err
+	}
+	if filter.Source != "business" {
+		if err := r.appendDirectProbeErrorDetails(ctx, filter, cfg, out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func sanitizeChannelMonitorV2ErrorDetail(message string) string {
@@ -874,8 +898,11 @@ func (r *channelMonitorV2Repository) GetUsers(ctx context.Context, filter servic
 		return nil, err
 	}
 	effectiveFilter := channelMonitorV2CommonCoverageFilter(filter, *coverage)
+	effectiveFilter.Source = "business"
 	filter = effectiveFilter
-	where, args, _ := channelMonitorV2WhereWithRollup(filter, cfg, "m")
+	userFilter := filter
+	userFilter.Source = ""
+	where, args, _ := channelMonitorV2WhereWithRollup(userFilter, cfg, "m")
 	query := `SELECT m.user_id,COALESCE(u.email,''),COALESCE(u.username,''),m.platform,m.model,
 	SUM(m.success_requests),SUM(m.error_requests),SUM(m.input_tokens),SUM(m.output_tokens),SUM(m.cache_creation_tokens),SUM(m.cache_read_tokens),SUM(m.ttft_sum_ms),SUM(m.ttft_count),SUM(m.duration_sum_ms),SUM(m.duration_count)
 	FROM ` + channelMonitorV2UserMetricsTable(filter) + ` m LEFT JOIN users u ON u.id=m.user_id ` + where + ` GROUP BY m.user_id,u.email,u.username,m.platform,m.model`
@@ -890,7 +917,7 @@ func (r *channelMonitorV2Repository) GetUsers(ctx context.Context, filter servic
 	for rows.Next() {
 		var uid int64
 		var email, username string
-		var f channelMonitorV2Fact
+		f := channelMonitorV2Fact{Source: "business"}
 		if err := rows.Scan(&uid, &email, &username, &f.Platform, &f.Model, &f.Success, &f.Errors, &f.Input, &f.Output, &f.CacheCreation, &f.CacheRead, &f.TTFTSum, &f.TTFTCount, &f.DurationSum, &f.DurationCount); err != nil {
 			return nil, err
 		}
@@ -959,7 +986,7 @@ func (r *channelMonitorV2Repository) GetUsers(ctx context.Context, filter servic
 func (r *channelMonitorV2Repository) loadFacts(ctx context.Context, filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, byBucket bool) ([]channelMonitorV2Fact, error) {
 	where, args, bucketSeconds := channelMonitorV2WhereWithRollup(filter, cfg, "m")
 	bucketExpr := "MIN(m.bucket_start)"
-	group := "m.platform,m.group_id,g.name,m.model"
+	group := "m.platform,m.group_id,g.name,m.model,m.source"
 	if byBucket {
 		if bucketSeconds > 0 {
 			bucketExpr = "m.bucket_start"
@@ -971,7 +998,7 @@ func (r *channelMonitorV2Repository) loadFacts(ctx context.Context, filter servi
 			group = bucketExpr + "," + group
 		}
 	}
-	query := `SELECT ` + bucketExpr + `,m.platform,m.group_id,COALESCE(g.name,''),m.model,SUM(m.success_requests),SUM(m.error_requests),SUM(m.upstream_affected_requests),SUM(m.upstream_attempt_count),SUM(m.input_tokens),SUM(m.output_tokens),SUM(m.cache_creation_tokens),SUM(m.cache_read_tokens),SUM(m.ttft_sum_ms),SUM(m.ttft_count),SUM(m.duration_sum_ms),SUM(m.duration_count) FROM ` + channelMonitorV2MetricsTable(filter) + ` m LEFT JOIN groups g ON g.id=NULLIF(m.group_id,0) ` + where + ` GROUP BY ` + group
+	query := `SELECT ` + bucketExpr + `,m.platform,m.group_id,COALESCE(g.name,''),m.model,m.source,SUM(m.success_requests),SUM(m.error_requests),SUM(m.upstream_affected_requests),SUM(m.upstream_attempt_count),SUM(m.input_tokens),SUM(m.output_tokens),SUM(m.cache_creation_tokens),SUM(m.cache_read_tokens),SUM(m.ttft_sum_ms),SUM(m.ttft_count),SUM(m.duration_sum_ms),SUM(m.duration_count),SUM(m.usage_incomplete_requests),SUM(m.cost_incomplete_requests) FROM ` + channelMonitorV2MetricsTable(filter) + ` m LEFT JOIN groups g ON g.id=NULLIF(m.group_id,0) ` + where + ` GROUP BY ` + group
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -981,7 +1008,7 @@ func (r *channelMonitorV2Repository) loadFacts(ctx context.Context, filter servi
 	for rows.Next() {
 		var bucket time.Time
 		var f channelMonitorV2Fact
-		if err := rows.Scan(&bucket, &f.Platform, &f.GroupID, &f.GroupName, &f.Model, &f.Success, &f.Errors, &f.UpstreamAffected, &f.UpstreamAttempts, &f.Input, &f.Output, &f.CacheCreation, &f.CacheRead, &f.TTFTSum, &f.TTFTCount, &f.DurationSum, &f.DurationCount); err != nil {
+		if err := rows.Scan(&bucket, &f.Platform, &f.GroupID, &f.GroupName, &f.Model, &f.Source, &f.Success, &f.Errors, &f.UpstreamAffected, &f.UpstreamAttempts, &f.Input, &f.Output, &f.CacheCreation, &f.CacheRead, &f.TTFTSum, &f.TTFTCount, &f.DurationSum, &f.DurationCount, &f.UsageIncomplete, &f.CostIncomplete); err != nil {
 			return nil, err
 		}
 		f.BucketStart = bucket.UTC().Format(time.RFC3339Nano)
@@ -991,6 +1018,9 @@ func (r *channelMonitorV2Repository) loadFacts(ctx context.Context, filter servi
 }
 
 func (r *channelMonitorV2Repository) loadHistograms(ctx context.Context, filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, userID int64, byBucket bool) ([]channelMonitorV2Histogram, error) {
+	if userID != 0 {
+		filter.Source = "business"
+	}
 	where, args, bucketSeconds := channelMonitorV2WhereWithRollup(filter, cfg, "h")
 	if userID < 0 {
 		where += " AND h.user_id > 0"
@@ -1033,16 +1063,20 @@ func (r *channelMonitorV2Repository) loadHistograms(ctx context.Context, filter 
 
 func (r *channelMonitorV2Repository) GetAggregationWatermark(ctx context.Context) (*service.ChannelMonitorV2AggregationWatermark, error) {
 	var usageStart, errorStart, dataThrough, computed, backfill sql.NullTime
+	var version int
 	err := r.db.QueryRowContext(ctx, `
-		SELECT usage_coverage_start, error_coverage_start, data_through, last_successful_at, backfill_cursor
-		FROM channel_monitor_v2_watermarks WHERE id = 1`).Scan(&usageStart, &errorStart, &dataThrough, &computed, &backfill)
+		SELECT usage_coverage_start, error_coverage_start, data_through, last_successful_at, backfill_cursor, accounting_version
+		FROM channel_monitor_v2_watermarks WHERE id = 1`).Scan(&usageStart, &errorStart, &dataThrough, &computed, &backfill, &version)
 	if err == sql.ErrNoRows {
 		return &service.ChannelMonitorV2AggregationWatermark{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	out := &service.ChannelMonitorV2AggregationWatermark{HasData: dataThrough.Valid}
+	if version != service.ChannelMonitorV2AccountingVersion {
+		return &service.ChannelMonitorV2AggregationWatermark{AccountingVersion: version}, nil
+	}
+	out := &service.ChannelMonitorV2AggregationWatermark{AccountingVersion: version, HasData: dataThrough.Valid}
 	if usageStart.Valid {
 		out.UsageCoverageStart = usageStart.Time.UTC()
 	}
@@ -1202,6 +1236,10 @@ func channelMonitorV2Where(filter service.ChannelMonitorV2Filter, cfg service.Ch
 	// (group_id 0) are kept.
 	conditions = append(conditions, fmt.Sprintf(
 		"(COALESCE(%[1]s.group_id, 0) = 0 OR EXISTS (SELECT 1 FROM groups live_group WHERE live_group.id = %[1]s.group_id AND live_group.deleted_at IS NULL))", alias))
+	if filter.Source == "business" || filter.Source == "probe" {
+		args = append(args, filter.Source)
+		conditions = append(conditions, fmt.Sprintf("%s.source = $%d", alias, len(args)))
+	}
 	return "WHERE " + strings.Join(conditions, " AND "), args
 }
 
@@ -1315,6 +1353,8 @@ func shiftSQLPlaceholders(query string, offset int) string {
 }
 
 type metricAccumulator struct {
+	usageIncomplete, costIncomplete                                                                                                              int64
+	businessRequests, probeRequests                                                                                                              int64
 	success, errors, upstreamAffected, upstreamAttempts, input, output, cacheCreation, cacheRead, ttftSum, ttftCount, durationSum, durationCount int64
 	hist                                                                                                                                         map[string]map[int64]int64
 }
@@ -1323,6 +1363,13 @@ func newMetricAccumulator() *metricAccumulator {
 	return &metricAccumulator{hist: map[string]map[int64]int64{"ttft": {}, "duration": {}}}
 }
 func (a *metricAccumulator) addFact(f channelMonitorV2Fact) {
+	a.usageIncomplete += f.UsageIncomplete
+	a.costIncomplete += f.CostIncomplete
+	if f.Source == "probe" {
+		a.probeRequests += f.Success + f.Errors
+	} else {
+		a.businessRequests += f.Success + f.Errors
+	}
 	a.success += f.Success
 	a.errors += f.Errors
 	a.upstreamAffected += f.UpstreamAffected
@@ -1350,6 +1397,25 @@ func (a *metricAccumulator) metric(minutes float64, admin bool) service.ChannelM
 		minutes = 1
 	}
 	m := service.ChannelMonitorV2Metric{SuccessRequests: a.success, ErrorRequests: a.errors, RequestCount: requests, InputTokens: a.input, OutputTokens: a.output, CacheCreationTokens: a.cacheCreation, CacheReadTokens: a.cacheRead, TokenCount: tokens, RPM: float64(requests) / minutes, TPM: float64(tokens) / minutes, CacheRateNumerator: a.cacheRead, CacheRateDenominator: denom, TTFT: latencyMetric(a.ttftSum, a.ttftCount, a.hist["ttft"]), Duration: latencyMetric(a.durationSum, a.durationCount, a.hist["duration"])}
+	m.UsageIncompleteRequestCount = a.usageIncomplete
+	m.CostIncompleteRequestCount = a.costIncomplete
+	m.HasSamples = requests > 0
+	m.BusinessRequestCount = a.businessRequests
+	m.ProbeRequestCount = a.probeRequests
+	// Older in-memory callers that set aggregate counters directly are business.
+	if requests > 0 && a.businessRequests+a.probeRequests == 0 {
+		m.BusinessRequestCount = requests
+	}
+	switch {
+	case m.BusinessRequestCount > 0 && m.ProbeRequestCount > 0:
+		m.AvailabilitySource = "mixed"
+	case m.ProbeRequestCount > 0:
+		m.AvailabilitySource = "probe"
+	case m.BusinessRequestCount > 0:
+		m.AvailabilitySource = "business"
+	default:
+		m.AvailabilitySource = "unknown"
+	}
 	if requests > 0 {
 		m.ErrorRate = float64(a.errors) / float64(requests)
 		m.SuccessRate = float64(a.success) / float64(requests)
@@ -1579,4 +1645,119 @@ func (r *channelMonitorV2Repository) loadIgnoredErrorCountsByMatrixKey(
 		byDimBucket[key][bucketKey] += count
 	}
 	return byDimBucket, byDim, rows.Err()
+}
+
+func (r *channelMonitorV2Repository) appendDirectProbeErrorDetails(ctx context.Context, filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, out map[string][]service.ChannelMonitorV2ErrorDetail) error {
+	conditions := []string{"p.started_at >= $1", "p.started_at < $2", "p.role = 'generation'", "p.group_id > 0", "p.is_final", "NOT p.api_success"}
+	args := []any{filter.Start, filter.End}
+	platforms := channelMonitorV2EnabledPlatforms(cfg)
+	if len(filter.Platforms) > 0 {
+		platforms = intersectStrings(platforms, filter.Platforms)
+	}
+	if len(platforms) == 0 {
+		return nil
+	}
+	args = append(args, pq.Array(platforms))
+	conditions = append(conditions, fmt.Sprintf("lower(p.platform) = ANY($%d)", len(args)))
+	groups, empty := channelMonitorV2ScopedGroupIDs(filter, cfg)
+	if empty {
+		return nil
+	}
+	if len(groups) > 0 {
+		args = append(args, pq.Array(groups))
+		conditions = append(conditions, fmt.Sprintf("p.group_id = ANY($%d)", len(args)))
+	}
+	conditions = append(conditions, "EXISTS (SELECT 1 FROM groups live_group WHERE live_group.id = p.group_id AND live_group.deleted_at IS NULL)")
+	rows, err := r.db.QueryContext(ctx, `SELECT lower(p.platform),
+		COALESCE(NULLIF(TRIM(p.requested_model), ''), 'unknown'),
+		COALESCE(p.http_status, 0), COALESCE(p.error_kind, ''),
+		`+channelMonitorV2DirectProbeErrorCategorySQL+`, COUNT(*)
+		FROM probe_request_facts p WHERE `+strings.Join(conditions, " AND ")+`
+		GROUP BY 1,2,3,4,5 ORDER BY COUNT(*) DESC LIMIT 400`, args...)
+	if err != nil {
+		return fmt.Errorf("load internal probe error details: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var platform, model, kind, category string
+		var status int
+		var count int64
+		if err := rows.Scan(&platform, &model, &status, &kind, &category, &count); err != nil {
+			return err
+		}
+		if !channelMonitorV2ModelSelected(filter, cfg, platform, model) || len(out[category]) >= 5 {
+			continue
+		}
+		message := "Internal generation probe API request failed"
+		if kind != "" {
+			message += " (" + kind + ")"
+		}
+		if status > 0 {
+			message += fmt.Sprintf("; upstream HTTP %d", status)
+		}
+		out[category] = append(out[category], service.ChannelMonitorV2ErrorDetail{
+			Platform: platform, Model: channelMonitorV2DisplayModel(cfg, platform, model),
+			ErrorType: kind, StatusCode: status, UpstreamStatusCode: status,
+			Message: sanitizeChannelMonitorV2ErrorDetail(message), Count: count,
+		})
+	}
+	return rows.Err()
+}
+
+// Explicit completion failures remain visible even when asynchronous ops error
+// telemetry was dropped. Do not invent HTTP statuses or expose usage credentials.
+func (r *channelMonitorV2Repository) appendGatewayUsageFailureDetails(ctx context.Context, filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config, out map[string][]service.ChannelMonitorV2ErrorDetail) error {
+	conditions := []string{"ul.created_at >= $1", "ul.created_at < $2", "ul.api_success = FALSE", "ul.source IN ('business','probe')", "COALESCE(ul.request_type, 0) NOT IN (4, 6)", "NOT " + channelMonitorV2HasFinalOpsErrorSQL}
+	args := []any{filter.Start, filter.End}
+	platforms := channelMonitorV2EnabledPlatforms(cfg)
+	if len(filter.Platforms) > 0 {
+		platforms = intersectStrings(platforms, filter.Platforms)
+	}
+	if len(platforms) == 0 {
+		return nil
+	}
+	args = append(args, pq.Array(platforms))
+	conditions = append(conditions, fmt.Sprintf("%s = ANY($%d)", channelMonitorV2PlatformSQL, len(args)))
+	groups, empty := channelMonitorV2ScopedGroupIDs(filter, cfg)
+	if empty {
+		return nil
+	}
+	if len(groups) > 0 {
+		args = append(args, pq.Array(groups))
+		conditions = append(conditions, fmt.Sprintf("COALESCE(ul.group_id, 0) = ANY($%d)", len(args)))
+	}
+	if filter.Source == "business" || filter.Source == "probe" {
+		args = append(args, filter.Source)
+		conditions = append(conditions, fmt.Sprintf("ul.source = $%d", len(args)))
+	}
+	conditions = append(conditions, "(COALESCE(ul.group_id,0)=0 OR EXISTS (SELECT 1 FROM groups live_group WHERE live_group.id=ul.group_id AND live_group.deleted_at IS NULL))")
+	query := `WITH failures AS (
+		SELECT DISTINCT ON (ul.source, COALESCE(NULLIF(ul.request_id,''),'usage:'||ul.id::text))
+		` + channelMonitorV2PlatformSQL + ` AS platform, ` + channelMonitorV2ModelSQL + ` AS model,
+		` + channelMonitorV2GatewayFailureCategorySQL + ` AS category
+		FROM usage_logs ul LEFT JOIN groups g ON g.id=ul.group_id LEFT JOIN accounts a ON a.id=ul.account_id
+		WHERE ` + strings.Join(conditions, " AND ") + `
+		ORDER BY ul.source, COALESCE(NULLIF(ul.request_id,''),'usage:'||ul.id::text), ul.created_at DESC, ul.id DESC
+	)
+	SELECT platform,model,category,COUNT(*) FROM failures GROUP BY 1,2,3 ORDER BY COUNT(*) DESC LIMIT 400`
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("load gateway completion failure details: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var platform, model, category string
+		var count int64
+		if err := rows.Scan(&platform, &model, &category, &count); err != nil {
+			return err
+		}
+		if !channelMonitorV2ModelSelected(filter, cfg, platform, model) || len(out[category]) >= 5 {
+			continue
+		}
+		out[category] = append(out[category], service.ChannelMonitorV2ErrorDetail{
+			Platform: platform, Model: channelMonitorV2DisplayModel(cfg, platform, model),
+			ErrorType: "api_incomplete", Message: "Gateway API request did not complete; detailed error telemetry unavailable", Count: count,
+		})
+	}
+	return rows.Err()
 }

@@ -57,7 +57,7 @@ func newAvailabilityProbeFixture() (*ChannelMonitorV2Service, *availabilityProbe
 	return svc, repo, ChannelMonitorV2Filter{Start: now.Add(-90 * time.Minute), End: now.Add(time.Minute), Bucket: 5 * time.Minute}
 }
 
-func TestChannelMonitorV2ProbeAvailabilityWithoutBusiness(t *testing.T) {
+func TestChannelMonitorV2ObservationVerdictsNeverManufactureRequestAvailability(t *testing.T) {
 	for _, tt := range []struct {
 		name                  string
 		passed, failed, other int64
@@ -77,14 +77,13 @@ func TestChannelMonitorV2ProbeAvailabilityWithoutBusiness(t *testing.T) {
 			probe.PassedCount, probe.FailedCount, probe.InconclusiveCount = tt.passed, tt.failed, tt.other
 			snapshot, err := svc.Snapshot(context.Background(), filter, true)
 			require.NoError(t, err)
-			require.Equal(t, "probe", snapshot.Metrics.AvailabilitySource)
-			require.NotNil(t, snapshot.Metrics.ProbeAvailability)
-			require.InDelta(t, tt.availability, *snapshot.Metrics.ProbeAvailability, 1e-9)
+			require.Equal(t, "unknown", snapshot.Metrics.AvailabilitySource)
+			require.Nil(t, snapshot.Metrics.ProbeAvailability)
 			require.Equal(t, probe.SampleCount, snapshot.Metrics.ProbeSampleCount, "multi-group probes count once in the snapshot")
-			require.Equal(t, tt.health, snapshot.Health.Overall)
+			require.Equal(t, "unknown", snapshot.Health.Overall)
 			require.Equal(t, "unknown", snapshot.Health.TTFT)
 			require.Equal(t, "unknown", snapshot.Health.Cache)
-			require.EqualValues(t, 1, snapshot.Health.MinimumSample)
+			require.Equal(t, DefaultChannelMonitorV2HealthThresholds().MinimumSample, snapshot.Health.MinimumSample)
 			require.Equal(t, probe.CheckedAt, snapshot.Metrics.ProbeCheckedAt)
 			require.False(t, snapshot.Metrics.HasSamples)
 			require.Zero(t, snapshot.Metrics.RequestCount)
@@ -154,7 +153,7 @@ func TestChannelMonitorV2ProbeRuntimeModes(t *testing.T) {
 				snapshot, err := svc.Snapshot(context.Background(), filter, true)
 				require.NoError(t, err)
 				allowed := mode == ChannelMonitorModeHybrid || (kind == "connectivity" || kind == "quota") == (mode == ChannelMonitorModeV1)
-				require.Equal(t, allowed, snapshot.Metrics.ProbeAvailability != nil)
+				require.Equal(t, allowed, snapshot.Metrics.ProbeSampleCount > 0)
 			})
 		}
 	}
@@ -197,7 +196,7 @@ func TestChannelMonitorV2ProbeBusinessPriorityAndPublicPrivacy(t *testing.T) {
 	admin, err := svc.Snapshot(context.Background(), filter, true)
 	require.NoError(t, err)
 	require.Equal(t, "business", admin.Metrics.AvailabilitySource)
-	require.EqualValues(t, 0, *admin.Metrics.ProbeAvailability)
+	require.Nil(t, admin.Metrics.ProbeAvailability)
 	require.Equal(t, business.RequestCount, admin.Metrics.RequestCount)
 	require.Equal(t, business.ErrorRate, admin.Metrics.ErrorRate)
 	require.Equal(t, business.TokenCount, admin.Metrics.TokenCount)
@@ -216,13 +215,12 @@ func TestChannelMonitorV2ProbeBusinessPriorityAndPublicPrivacy(t *testing.T) {
 	repo.snap.Metrics, repo.snap.Health = ChannelMonitorV2Metric{}, ChannelMonitorV2HealthFor(ChannelMonitorV2Metric{})
 	public, err = svc.Snapshot(context.Background(), filter, false)
 	require.NoError(t, err)
-	require.Equal(t, "probe", public.Metrics.AvailabilitySource)
-	require.NotNil(t, public.Metrics.ProbeAvailability)
-	require.EqualValues(t, 0, *public.Metrics.ProbeAvailability)
+	require.Equal(t, "unknown", public.Metrics.AvailabilitySource)
+	require.Nil(t, public.Metrics.ProbeAvailability)
 	require.Equal(t, repo.rows[0].CheckedAt, public.Metrics.ProbeCheckedAt)
 	require.False(t, public.Metrics.HasSamples)
 	require.Zero(t, public.Metrics.ProbeFailedCount)
-	require.Equal(t, "critical", public.Health.Overall)
+	require.Equal(t, "unknown", public.Health.Overall)
 }
 
 func TestChannelMonitorV2ProbeOnlyDimensionsAndDeduplication(t *testing.T) {
@@ -246,7 +244,7 @@ func TestChannelMonitorV2ProbeOnlyDimensionsAndDeduplication(t *testing.T) {
 			}
 			for _, row := range matrix.Items {
 				require.EqualValues(t, 1, row.Metrics.ProbeSampleCount)
-				require.Equal(t, "healthy", row.Health.Overall)
+				require.Equal(t, "unknown", row.Health.Overall)
 				require.Empty(t, row.Buckets)
 				if grouped {
 					require.NotNil(t, row.GroupID)
@@ -262,14 +260,14 @@ func TestChannelMonitorV2ProbeOnlyDimensionsAndDeduplication(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, public.Items, 1)
 	require.EqualValues(t, 7, *public.Items[0].GroupID)
-	require.EqualValues(t, 1, *public.Items[0].Metrics.ProbeAvailability)
+	require.Nil(t, public.Items[0].Metrics.ProbeAvailability)
 	require.Zero(t, public.Items[0].Metrics.ProbeSampleCount)
 	require.Zero(t, public.Items[0].Metrics.ProbePassedCount)
 
 	publicModels, err := svc.Models(context.Background(), filter, false)
 	require.NoError(t, err)
 	require.Len(t, publicModels.Items, 1)
-	require.EqualValues(t, 1, *publicModels.Items[0].Metrics.ProbeAvailability)
+	require.Nil(t, publicModels.Items[0].Metrics.ProbeAvailability)
 	require.Zero(t, publicModels.Items[0].Metrics.ProbeSampleCount)
 	for i := range repo.rows {
 		repo.rows[i].Scope.GroupIDs = nil
@@ -311,7 +309,7 @@ func TestChannelMonitorV2ProbeAvailabilityFiltering(t *testing.T) {
 			}
 			snapshot, err := svc.Snapshot(context.Background(), filter, false)
 			require.NoError(t, err)
-			require.Equal(t, want, snapshot.Metrics.ProbeAvailability != nil)
+			require.Nil(t, snapshot.Metrics.ProbeAvailability)
 			models, err := svc.Models(context.Background(), filter, false)
 			require.NoError(t, err)
 			require.Equal(t, want, len(models.Items) > 0)
@@ -330,7 +328,7 @@ func TestChannelMonitorV2ProbesMergeExistingRows(t *testing.T) {
 	models, err := svc.Models(context.Background(), filter, true)
 	require.NoError(t, err)
 	require.Len(t, models.Items, 1)
-	require.Equal(t, "healthy", models.Items[0].Health.Overall)
+	require.Equal(t, "unknown", models.Items[0].Health.Overall)
 	matrix, err := svc.Matrix(context.Background(), filter, ChannelMonitorV2GroupByPlatformGroup, true)
 	require.NoError(t, err)
 	require.Len(t, matrix.Items, 2)
@@ -354,10 +352,41 @@ func TestChannelMonitorV2ExpiredProbeClearsPreviousHealth(t *testing.T) {
 	metric := ChannelMonitorV2Metric{}
 	health := ChannelMonitorV2Health{}
 	(channelMonitorProbeAvailability{samples: 1, passed: 1}).apply(&metric, &health, DefaultChannelMonitorV2HealthThresholds())
-	require.Equal(t, "healthy", health.Overall)
+	require.Equal(t, "unknown", health.Overall)
 	(channelMonitorProbeAvailability{}).apply(&metric, &health, DefaultChannelMonitorV2HealthThresholds())
 	require.Equal(t, "unknown", health.Overall)
 	require.Nil(t, health.Score)
 	require.Nil(t, metric.ProbeAvailability)
 	require.Equal(t, "unknown", metric.AvailabilitySource)
+}
+
+func TestChannelMonitorV2ObservationMetadataPreservesUnifiedRequestSource(t *testing.T) {
+	for _, source := range []string{"business", "probe", "mixed"} {
+		metric := ChannelMonitorV2Metric{HasSamples: true, RequestCount: 10, AvailabilitySource: source}
+		health := ChannelMonitorV2HealthFor(metric)
+		before := health
+		(channelMonitorProbeAvailability{samples: 99, failed: 99}).apply(&metric, &health, DefaultChannelMonitorV2HealthThresholds())
+		require.Equal(t, source, metric.AvailabilitySource)
+		require.EqualValues(t, 10, metric.RequestCount)
+		require.Equal(t, before, health)
+		require.Nil(t, metric.ProbeAvailability)
+	}
+	svc, repo, filter := newAvailabilityProbeFixture()
+	filter.Source = "business"
+	snapshot, err := svc.Snapshot(context.Background(), filter, true)
+	require.NoError(t, err)
+	require.Zero(t, snapshot.Metrics.ProbeSampleCount)
+	require.NotEmpty(t, repo.rows)
+}
+
+func TestChannelMonitorV2RedactionKeepsRealProbeSamplesButNoSourceVolumes(t *testing.T) {
+	metric := ChannelMonitorV2Metric{HasSamples: true, RequestCount: 12, BusinessRequestCount: 2, ProbeRequestCount: 10, UsageIncompleteRequestCount: 3, CostIncompleteRequestCount: 4, AvailabilitySource: "mixed", ErrorRate: 0.25}
+	redactChannelMonitorV2Metric(&metric, true)
+	require.True(t, metric.HasSamples)
+	require.Equal(t, "mixed", metric.AvailabilitySource)
+	require.Equal(t, 0.25, metric.ErrorRate)
+	require.Zero(t, metric.BusinessRequestCount)
+	require.Zero(t, metric.ProbeRequestCount)
+	require.Zero(t, metric.UsageIncompleteRequestCount)
+	require.Zero(t, metric.CostIncompleteRequestCount)
 }

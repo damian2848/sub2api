@@ -150,6 +150,14 @@
           >
             {{ t('channelMonitorV2.clearFilters') }}
           </button>
+          <label class="flex shrink-0 items-center gap-1.5 text-xs text-gray-500">
+            <span>{{ t('channelMonitorV2.filters.source') }}</span>
+            <select v-model="filter.source" class="input !w-auto !py-1 text-xs" data-testid="monitor-request-source">
+              <option value="all">{{ t('channelMonitorV2.sources.all') }}</option>
+              <option value="business">{{ t('channelMonitorV2.sources.business') }}</option>
+              <option value="probe">{{ t('channelMonitorV2.sources.probe') }}</option>
+            </select>
+          </label>
 
           <template v-if="analytics">
           <span class="mx-0.5 hidden h-5 w-px shrink-0 bg-gray-200 dark:bg-dark-700 md:block" aria-hidden="true"></span>
@@ -204,7 +212,7 @@
           </template>
           <template v-else>
             <span class="col-span-2 text-xs text-gray-500 dark:text-gray-400 sm:ml-3 sm:shrink-0">{{ t('channelMonitorV2.cards.passive') }}</span>
-            <span v-if="snapshot && hasAvailabilitySamples(snapshot.metrics)" class="ml-auto hidden text-xs text-gray-500 dark:text-gray-400 md:inline">{{ t('channelMonitorV2.cards.availability') }} {{ formatAvailability(snapshot.metrics) }}<template v-if="!hasMonitorSamples(snapshot.metrics)"> · {{ t('channelMonitorV2.cards.activeProbe') }}</template><template v-else> · {{ t('channelMonitorV2.cards.cache') }} {{ formatPercent(snapshot.metrics.cache_rate) }}</template></span>
+            <span v-if="snapshot && hasAvailabilitySamples(snapshot.metrics)" class="ml-auto hidden text-xs text-gray-500 dark:text-gray-400 md:inline">{{ t('channelMonitorV2.cards.availability') }} {{ formatAvailability(snapshot.metrics) }}<template v-if="monitorAvailabilitySource(snapshot.metrics)"> · {{ t('channelMonitorV2.sources.' + monitorAvailabilitySource(snapshot.metrics)) }}</template><template v-if="hasMonitorSamples(snapshot.metrics)"> · {{ t('channelMonitorV2.cards.cache') }} {{ formatPercent(snapshot.metrics.cache_rate) }}</template></span>
           </template>
         </div>
       </section>
@@ -404,6 +412,7 @@
           </div>
 
           <div v-else class="table-container border-0">
+            <p class="mb-3 text-xs text-gray-500">{{ t('channelMonitorV2.users.businessScope') }}</p>
             <table class="table monitor-table min-w-[640px]">
               <thead>
                 <tr>
@@ -489,7 +498,7 @@ import Select from '@/components/common/Select.vue'
 import FilterMultiSelect from '@/features/channel-monitor-v2/FilterMultiSelect.vue'
 import MonitorStatusCards from '@/features/channel-monitor-v2/MonitorStatusCards.vue'
 import MonitorObservationsPanel from '@/features/channel-monitor-v2/MonitorObservationsPanel.vue'
-import { effectiveAvailability, hasAvailabilitySamples, hasMonitorSamples } from '@/features/channel-monitor-v2/monitorCards'
+import { effectiveAvailability, hasAvailabilitySamples, hasMonitorSamples, monitorAvailabilitySource } from '@/features/channel-monitor-v2/monitorCards'
 import MetricCell from '@/features/channel-monitor-v2/MetricCell.vue'
 import MonitorRankBadge from '@/features/channel-monitor-v2/MonitorRankBadge.vue'
 import MonitorTrendChart from '@/features/channel-monitor-v2/MonitorTrendChart.vue'
@@ -510,6 +519,7 @@ import type {
   MonitorMetric,
   MonitorModelRow,
   MonitorRange,
+  MonitorRequestSource,
   MonitorSnapshot,
   MonitorObservations,
   MonitorUserRow,
@@ -579,6 +589,7 @@ const healthModeOptions = computed(() => [
 
 const filter = ref<MonitorFilter>({
   range: parseRange(route.query.range),
+  source: parseSource(route.query.source),
   platforms: csv(route.query.platform),
   groupIds: csv(route.query.group).map(Number).filter(Boolean),
   models: csv(route.query.model),
@@ -603,7 +614,7 @@ let sequence = 0
 let autoRefreshTimer: number | null = null
 
 const hasDimensionFilter = computed(
-  () => filter.value.platforms.length + filter.value.groupIds.length + filter.value.models.length > 0
+  () => filter.value.platforms.length + filter.value.groupIds.length + filter.value.models.length > 0 || filter.value.source !== 'all'
 )
 // Full platform catalog (never pruned). Groups/models cascade by selected platforms
 // so choosing a platform narrows the other pickers without collapsing platforms.
@@ -719,6 +730,9 @@ function parseHealthMode(value: unknown): HealthMode {
   const allowed: HealthMode[] = ['overall', 'success', 'ttft', 'cache']
   return allowed.includes(value as HealthMode) ? (value as HealthMode) : 'overall'
 }
+function parseSource(value: unknown): MonitorRequestSource {
+  return value === 'business' || value === 'probe' ? value : 'all'
+}
 function parseTrendView(value: unknown): TrendView {
   return value === 'line' ? 'line' : 'pulse'
 }
@@ -726,6 +740,7 @@ function syncQuery() {
   void router.replace({
     query: {
       range: filter.value.range,
+      source: filter.value.source !== 'all' ? filter.value.source : undefined,
       platform: filter.value.platforms.join(',') || undefined,
       group: filter.value.groupIds.join(',') || undefined,
       model: filter.value.models.join(',') || undefined,
@@ -839,6 +854,7 @@ function clearDimensions() {
   // Replace arrays so deep watch always fires and metrics reload full window.
   filter.value = {
     ...filter.value,
+    source: 'all',
     platforms: [],
     groupIds: [],
     models: [],
@@ -885,8 +901,10 @@ function formatAvailability(metric: MonitorMetric) {
   return availability == null ? '—' : formatPercent(availability)
 }
 function availabilityDetail(metric: MonitorMetric) {
-  if (hasMonitorSamples(metric)) return t('channelMonitorV2.metrics.errorRateValue', { value: formatPercent(metric.error_rate) })
-  return hasAvailabilitySamples(metric) ? t('channelMonitorV2.cards.activeProbe') : t('channelMonitorV2.cards.health.unknown')
+  if (!hasMonitorSamples(metric)) return t('channelMonitorV2.cards.health.unknown')
+  const detail = t('channelMonitorV2.metrics.errorRateValue', { value: formatPercent(metric.error_rate) })
+  const source = monitorAvailabilitySource(metric)
+  return source ? detail + ' · ' + t('channelMonitorV2.sources.' + source) : detail
 }
 function formatMs(value: number | null) {
   return formatMonitorMs(value)

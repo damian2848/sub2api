@@ -83,7 +83,7 @@ function metrics(requestCount: number): MonitorMetric {
 
 describe('RelayPulseMatrix', () => {
   it.each([true, false])('uses probe availability with or without visible throughput (%s), leaving missing history empty', (showThroughput) => {
-    const probeMetric = { ...metrics(0), has_samples: false, rpm: 0, tpm: 0, probe_availability: 0.9, availability_source: 'probe' as const }
+    const probeMetric = { ...metrics(0), has_samples: true, rpm: 0, tpm: 0, error_rate: 0.1, availability_source: 'probe' as const }
     const wrapper = mount(RelayPulseMatrix, {
       props: {
         rows: [{ platform: 'openai', group_id: 7, metrics: probeMetric, health, buckets: [] }],
@@ -92,7 +92,7 @@ describe('RelayPulseMatrix', () => {
       },
     })
     expect(wrapper.text()).toContain('90.0%')
-    expect(wrapper.text()).toContain('channelMonitorV2.cards.activeProbe')
+    expect(wrapper.text()).toContain('channelMonitorV2.sources.probe')
     expect(wrapper.get('.status-dot').classes()).toContain('health-score5')
     expect(wrapper.findAll('.pulse-cell').every(cell => cell.classes().includes('health-unknown'))).toBe(true)
     wrapper.unmount()

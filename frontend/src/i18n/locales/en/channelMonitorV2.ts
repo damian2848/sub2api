@@ -8,7 +8,8 @@ export default {
         "showAnalytics": "Detailed data",
         "passive": "Real requests + active probes · channel availability",
         "activeProbe": "Active probes",
-        "availabilityHint": "Uses real requests first, falling back to fresh active probe results when there is no traffic. Pending, disabled or expired probes are excluded.",
+        "healthHint": "Composite health includes API errors, TTFT and cache performance. It is not the API availability rate shown below.",
+        "availabilityHint": "Actual generation requests include business traffic and active probes. Answer quality, quota checks and HEAD pings are not API outcomes. Unobserved periods remain unknown.",
         "groupRate": "Group rate {value}x",
         "cache": "Cache rate",
         "availability": "Availability",
@@ -76,7 +77,10 @@ export default {
     ignored: 'Ignored',
     currentUser: 'Current user',
     ranges: { '90m': '90m', '24h': '24h', '7d': '7d', '30d': '30d' },
+    users: { businessScope: 'User rankings include business requests only; system probes are excluded regardless of the source filter.' },
+    sources: { all: 'All requests', business: 'Business requests', probe: 'Active probes', mixed: 'Business + probes' },
     filters: {
+      source: 'Source',
       platform: 'Platform', allPlatforms: 'All', group: 'Group', allGroups: 'All', model: 'Model', allModels: 'All',
       empty: 'No options', selectedCount: '{count}', labelValue: '{label}: {value}'
     },
@@ -200,7 +204,7 @@ export default {
     },
     observations: {
       title: 'Probe and quality results', target: 'Target', kind: 'Check type', status: 'Latest result', lastChecked: 'Checked at', usage: 'Probe usage', history: 'History',
-      businessUsage: 'Business traffic', probeUsage: 'Probe traffic', totalTokens: 'Combined tokens', cost: 'Probe cost', partial: 'Incomplete records',
+      requestUsage: 'Channel requests (deduplicated)', businessUsage: 'Business traffic', probeUsage: 'Task metering (not added again)', totalTokens: 'Deduplicated channel tokens', cost: 'Probe cost', partial: 'Incomplete records',
       requestsTokens: '{requests} requests · {tokens} tokens', summary: '{passed} passed · {failed} failed · {inconclusive} inconclusive',
       samples: '{count} checks', cadence: 'Every {seconds}s', paused: 'Paused', empty: 'No probe or quality records in this range',
       boundGroup: 'Linked group', externalTarget: 'External target (no group)',

@@ -305,6 +305,10 @@ func ProvideAccountTestService(
 	if recorder, ok := monitorRepo.(ChannelMonitorProbeRecorder); ok {
 		service.SetProbeRecorder(recorder)
 	}
+	if recorder, ok := monitorRepo.(ProbeRequestFactRecorder); ok {
+		service.SetProbeRequestFactRecorder(recorder)
+		openAIGatewayService.SetProbeRequestFactRecorder(recorder)
+	}
 	return service
 }
 

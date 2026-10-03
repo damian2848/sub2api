@@ -11,6 +11,7 @@ import (
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/google/uuid"
 )
 
 // Pelican group tests ask a group the Pelican question on a schedule. For every sample
@@ -149,13 +150,14 @@ type pelicanGroupTestGroups interface {
 }
 
 type PelicanGroupTestService struct {
-	repo       PelicanGroupTestRepository
-	groups     pelicanGroupTestGroups
-	router     pelicanGroupRouter
-	runAccount func(ctx context.Context, accountID int64, model string, cfg *PelicanTestConfig) (*ScheduledTestResult, error)
-	showcase   *PelicanShowcaseService
-	billing    *BillingService
-	now        func() time.Time
+	repo                     PelicanGroupTestRepository
+	groups                   pelicanGroupTestGroups
+	router                   pelicanGroupRouter
+	runAccount               func(ctx context.Context, accountID int64, model string, cfg *PelicanTestConfig) (*ScheduledTestResult, error)
+	showcase                 *PelicanShowcaseService
+	billing                  *BillingService
+	probeRequestFactRecorder ProbeRequestFactRecorder
+	now                      func() time.Time
 	// runs tracks background runs so tests can wait for them.
 	runs sync.WaitGroup
 }
@@ -170,14 +172,19 @@ func NewPelicanGroupTestService(
 	showcase *PelicanShowcaseService,
 	billing *BillingService,
 ) *PelicanGroupTestService {
+	var recorder ProbeRequestFactRecorder
+	if accountTest != nil {
+		recorder = accountTest.probeRequestFactRecorder
+	}
 	return &PelicanGroupTestService{
-		repo:       repo,
-		groups:     groupRepo,
-		router:     &gatewayPelicanGroupRouter{gateway: gateway, openai: openai, concurrency: concurrency, slotWait: pelicanGroupTestSlotWait},
-		runAccount: accountTest.RunPelicanBackground,
-		showcase:   showcase,
-		billing:    billing,
-		now:        time.Now,
+		repo:                     repo,
+		groups:                   groupRepo,
+		router:                   &gatewayPelicanGroupRouter{gateway: gateway, openai: openai, concurrency: concurrency, slotWait: pelicanGroupTestSlotWait},
+		runAccount:               accountTest.RunPelicanBackground,
+		showcase:                 showcase,
+		billing:                  billing,
+		probeRequestFactRecorder: recorder,
+		now:                      time.Now,
 	}
 }
 
@@ -420,6 +427,12 @@ func (s *PelicanGroupTestService) runSamples(ctx context.Context, plan *PelicanG
 // in its own goroutine outside Gin's recovery, so a panic becomes a failed result.
 func (s *PelicanGroupTestService) runSample(ctx context.Context, plan *PelicanGroupTestPlan, group *Group) (result *PelicanGroupTestResult) {
 	started := s.now()
+	runID, logicalID := uuid.NewString(), uuid.NewString()
+	var facts []ProbeRequestFact
+	defer func() {
+		finalizeProbeFacts(facts)
+		saveProbeFacts(s.probeRequestFactRecorder, facts)
+	}()
 	var costUSD float64
 	priced, attempted, incomplete := false, false, false
 	probeUsage := &ChannelMonitorProbeUsage{Source: "probe"}
@@ -463,10 +476,11 @@ func (s *PelicanGroupTestService) runSample(ctx context.Context, plan *PelicanGr
 		var sample *ScheduledTestResult
 		attempted = true
 		platform = route.account.Platform
-		usage := &pelicanTestUsageCollector{model: route.account.GetMappedModel(route.model)}
+		usage := &pelicanTestUsageCollector{model: route.account.GetMappedModel(route.model), requestedModel: plan.ModelID, runID: runID, logicalRequestID: logicalID, role: "generation", groupID: &group.ID}
 		func() {
 			defer route.release()
 			defer func() {
+				facts = append(facts, usage.facts(s.billing, route.account)...)
 				cost, partial := usage.cost(s.billing, route.account)
 				snapshot := usage.snapshot()
 				snapshot.CostUSD, snapshot.CostIncomplete = cost, partial

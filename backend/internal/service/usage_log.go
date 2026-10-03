@@ -108,7 +108,10 @@ type UsageLog struct {
 	AccountID int64
 	RequestID string
 	Source    string
-	Model     string
+	// APISuccess records the actual completed API outcome independently from
+	// price or billing. Nil preserves unknown outcomes on legacy rows.
+	APISuccess *bool
+	Model      string
 	// RequestedModel is the client-requested model name recorded for stable user/admin display.
 	// Empty should be treated as Model for backward compatibility with historical rows.
 	RequestedModel string

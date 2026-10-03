@@ -211,6 +211,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	}
 	defer releaseHarvest()
 
+	probeDialStarted := time.Now()
 	lease, err := s.getOpenAIWSConnPool().Acquire(acquireCtx, openAIWSAcquireRequest{
 		Account: account,
 		WSURL:   wsURL,
@@ -275,6 +276,23 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		ProxyURL:        proxyURL,
 	})
 	if err != nil {
+		var probeDialErr *openAIWSDialError
+		if errors.As(err, &probeDialErr) {
+			u := beginProbeStreamAttempt(ctx, mappedModel)
+			if u != nil {
+				u.startedAt = probeDialStarted
+				u.httpStatus = nil
+				if probeDialErr.StatusCode > 0 {
+					status := probeDialErr.StatusCode
+					u.httpStatus = &status
+				}
+				kind := "transport"
+				if probeDialErr.StatusCode >= 400 {
+					kind = "http"
+				}
+				finishProbeStreamAttempt(u, err, kind)
+			}
+		}
 		if IsOpenAITurnAdmissionError(err) {
 			return nil, err
 		}
@@ -428,7 +446,10 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	if err := s.acquireOpenAIRPMForSend(ctx, account); err != nil {
 		return nil, err
 	}
+	probeAttempt := beginProbeStreamAttempt(ctx, mappedModel)
+	defer finishProbeStreamAttempt(probeAttempt, nil, "stream")
 	if err := lease.WriteJSONWithContextTimeout(ctx, payload, s.openAIWSWriteTimeout()); err != nil {
+		finishProbeStreamAttempt(probeAttempt, err, "transport")
 		lease.MarkBroken()
 		logOpenAIWSModeInfo(
 			"write_request_fail account_id=%d conn_id=%s cause=%s payload_bytes=%d",
@@ -642,6 +663,11 @@ readLoop:
 			}
 		}
 		markClientRequestCanceled()
+		if readErr == nil {
+			probeAttempt.read(string(message))
+		} else {
+			finishProbeStreamAttempt(probeAttempt, readErr, "stream")
+		}
 		if readErr == nil && !json.Valid(message) {
 			eventType, _, _ := parseOpenAIWSEventEnvelope(message)
 			if eventType == "" {

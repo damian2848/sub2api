@@ -3,9 +3,12 @@ package service
 import (
 	"context"
 	"math"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
 
@@ -14,23 +17,35 @@ import (
 type pelicanTestUsageKey struct{}
 
 type pelicanTestUsageCollector struct {
-	model    string
-	requests []*pelicanTestUsage
+	activeHTTPRequests            map[*http.Request]bool
+	model                         string
+	requestedModel                string
+	runID, logicalRequestID, role string
+	groupID                       *int64
+	account                       *Account
+	recorder                      ProbeRequestFactRecorder
+	requests                      []*pelicanTestUsage
 }
 
 type pelicanTestUsage struct {
-	protocol    string
-	model       string
-	serviceTier string
-	tokens      UsageTokens
-	input       int
-	output      int
-	thoughts    int
-	reasoning   int
-	seen        bool
-	inputSeen   bool
-	outputSeen  bool
-	complete    bool
+	attemptID                          string
+	startedAt, finishedAt              time.Time
+	httpStatus                         *int
+	errorKind                          *string
+	firstTokenMs                       *int64
+	apiFailed, networkAttempt, canTTFT bool
+	protocol                           string
+	model                              string
+	serviceTier                        string
+	tokens                             UsageTokens
+	input                              int
+	output                             int
+	thoughts                           int
+	reasoning                          int
+	seen                               bool
+	inputSeen                          bool
+	outputSeen                         bool
+	complete                           bool
 }
 
 func startPelicanTestStream(c *gin.Context, protocol string) *pelicanTestUsage {
@@ -41,7 +56,19 @@ func startPelicanTestStream(c *gin.Context, protocol string) *pelicanTestUsage {
 }
 
 func recordPelicanTestSSE(ctx context.Context, protocol, model string, body []byte) {
-	u := startPelicanTestUsage(ctx, protocol)
+	var u *pelicanTestUsage
+	// Buffered adapters already passed through the transport observation. Reuse
+	// that completed attempt instead of charging its cumulative usage twice.
+	if collector := pelicanUsageFromContext(ctx); collector != nil && len(collector.requests) > 0 {
+		latest := collector.requests[len(collector.requests)-1]
+		if latest.networkAttempt {
+			u = latest
+			u.protocol = protocol
+		}
+	}
+	if u == nil {
+		u = startPelicanTestUsage(ctx, protocol)
+	}
 	if u == nil {
 		return
 	}
@@ -63,7 +90,16 @@ func startPelicanTestUsage(ctx context.Context, protocol string) *pelicanTestUsa
 	if collector == nil {
 		return nil
 	}
-	u := &pelicanTestUsage{protocol: protocol, model: collector.model}
+	// HTTP observations start before the network call, so the response parser
+	// enriches that same attempt rather than inventing a second request.
+	if n := len(collector.requests); n > 0 {
+		latest := collector.requests[n-1]
+		if latest.networkAttempt && latest.finishedAt.IsZero() {
+			latest.protocol = protocol
+			return latest
+		}
+	}
+	u := &pelicanTestUsage{protocol: protocol, model: collector.model, attemptID: uuid.NewString(), startedAt: time.Now()}
 	collector.requests = append(collector.requests, u)
 	return u
 }
@@ -74,6 +110,22 @@ func (u *pelicanTestUsage) read(raw string) {
 	}
 	data := gjson.Parse(raw)
 	eventType := data.Get("type").String()
+	if eventType == "error" || eventType == "response.failed" || eventType == "response.incomplete" || pelicanHasAPIError(data.Get("error")) || pelicanHasAPIError(data.Get("response.error")) {
+		u.apiFailed = true
+	}
+	if u.canTTFT && u.firstTokenMs == nil && pelicanUsageHasOutput(data, u.protocol) {
+		ms := nonnegativeProbeDuration(time.Since(u.startedAt).Milliseconds())
+		u.firstTokenMs = &ms
+	}
+	if raw == "[DONE]" && (u.protocol == "chat" || u.protocol == "gemini") {
+		u.complete = true
+	}
+	if u.protocol == "anthropic" && data.Get("stop_reason").String() != "" {
+		u.complete = true
+	}
+	if data.Get("status").String() == "completed" {
+		u.complete = true
+	}
 	if eventType == "message_stop" || eventType == "response.completed" || eventType == "response.done" || eventType == "response.failed" || eventType == "response.incomplete" {
 		u.complete = true
 	}
@@ -197,7 +249,11 @@ func (c *pelicanTestUsageCollector) cost(billing *BillingService, account *Accou
 			incomplete = true
 			continue
 		}
-		amount := cost.TotalCost * account.CostMultiplier()
+		multiplier := 1.0
+		if account != nil {
+			multiplier = account.CostMultiplier()
+		}
+		amount := cost.TotalCost * multiplier
 		if math.IsNaN(amount) || math.IsInf(amount, 0) || amount < 0 {
 			incomplete = true
 			continue
@@ -210,4 +266,111 @@ func (c *pelicanTestUsageCollector) cost(billing *BillingService, account *Accou
 		return nil, true
 	}
 	return &total, incomplete
+}
+
+// Only actual output establishes TTFT; role/usage/headers and terminal events do
+// not. Non-streaming readers never enable canTTFT.
+func pelicanUsageHasOutput(data gjson.Result, protocol string) bool {
+	if response := data.Get("response"); response.IsObject() {
+		data = response
+	}
+	switch protocol {
+	case "anthropic":
+		return data.Get("type").String() == "content_block_delta" && (data.Get("delta.text").String() != "" || data.Get("delta.thinking").String() != "" || data.Get("delta.partial_json").String() != "")
+	case "chat":
+		for _, choice := range data.Get("choices").Array() {
+			if choice.Get("delta.content").String() != "" || choice.Get("message.content").String() != "" {
+				return true
+			}
+		}
+	case "gemini":
+		for _, candidate := range data.Get("candidates").Array() {
+			for _, part := range candidate.Get("content.parts").Array() {
+				if part.Get("text").String() != "" || part.Get("inlineData.data").String() != "" {
+					return true
+				}
+			}
+		}
+	default:
+		return strings.HasPrefix(data.Get("type").String(), "response.") && strings.HasSuffix(data.Get("type").String(), ".delta") && data.Get("delta").String() != ""
+	}
+	return false
+}
+
+func (c *pelicanTestUsageCollector) facts(billing *BillingService, account *Account) []ProbeRequestFact {
+	facts := make([]ProbeRequestFact, 0, len(c.requests))
+	if c.runID == "" {
+		c.runID = uuid.NewString()
+	}
+	if c.logicalRequestID == "" {
+		c.logicalRequestID = uuid.NewString()
+	}
+	role := c.role
+	if role == "" {
+		role = "account_check"
+	}
+	for _, u := range c.requests {
+		if !u.networkAttempt || account == nil {
+			continue
+		}
+		finished := u.finishedAt
+		if finished.IsZero() {
+			finished = time.Now()
+		}
+		usageComplete := u.seen && u.complete && u.inputSeen && u.outputSeen
+		cost, partial := (&pelicanTestUsageCollector{requests: []*pelicanTestUsage{u}}).cost(billing, account)
+		f := ProbeRequestFact{
+			RunID: c.runID, LogicalRequestID: c.logicalRequestID, AttemptID: u.attemptID,
+			Role: role, Platform: strings.ToLower(account.Platform), GroupID: c.groupID, AccountID: account.ID,
+			Protocol: u.protocol, RequestedModel: c.requestedModel, UpstreamModel: u.model,
+			StartedAt: u.startedAt, FinishedAt: finished, DurationMs: nonnegativeProbeDuration(finished.Sub(u.startedAt).Milliseconds()),
+			FirstTokenMs: u.firstTokenMs, HTTPStatus: u.httpStatus,
+			APISuccess: u.errorKind == nil && !u.apiFailed && u.complete,
+			ErrorKind:  u.errorKind, UsageComplete: usageComplete, UpstreamCostUSD: cost, CostComplete: !partial,
+		}
+		if f.RequestedModel == "" {
+			f.RequestedModel = c.model
+			if f.RequestedModel == "" {
+				f.RequestedModel = u.model
+			}
+		}
+		if f.ErrorKind == nil && !f.APISuccess {
+			kind := "stream"
+			f.ErrorKind = &kind
+		}
+		// Missing usage remains NULL, not a fabricated zero.
+		if u.inputSeen {
+			n := int64(u.tokens.InputTokens)
+			f.InputTokens = &n
+		}
+		if u.outputSeen {
+			n := int64(u.tokens.OutputTokens)
+			f.OutputTokens = &n
+		}
+		if u.seen {
+			n := int64(u.tokens.CacheReadTokens)
+			f.CacheReadTokens = &n
+			n = int64(u.tokens.CacheCreationTokens)
+			f.CacheCreationTokens = &n
+			n = int64(u.tokens.CacheCreation5mTokens)
+			f.CacheCreation5mTokens = &n
+			n = int64(u.tokens.CacheCreation1hTokens)
+			f.CacheCreation1hTokens = &n
+			n = int64(u.reasoning)
+			f.ReasoningTokens = &n
+		}
+		facts = append(facts, f)
+	}
+	return facts
+}
+
+func nonnegativeProbeDuration(ms int64) int64 {
+	if ms < 0 {
+		return 0
+	}
+	return ms
+}
+
+func pelicanHasAPIError(value gjson.Result) bool {
+	return value.Exists() && value.Type != gjson.Null
 }

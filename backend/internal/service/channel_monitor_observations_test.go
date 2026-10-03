@@ -12,11 +12,26 @@ import (
 
 type monitorObservationsRepoFake struct {
 	channelMonitorV2RepoStub
-	rows []ChannelMonitorObservation
+	rows          []ChannelMonitorObservation
+	requestMetric *ChannelMonitorV2Metric
+	filters       []ChannelMonitorV2Filter
 }
 
 func (r *monitorObservationsRepoFake) ListMonitorObservations(context.Context, ChannelMonitorV2Filter) ([]ChannelMonitorObservation, error) {
 	return append([]ChannelMonitorObservation{}, r.rows...), nil
+}
+
+func (r *monitorObservationsRepoFake) GetSnapshot(_ context.Context, filter ChannelMonitorV2Filter, cfg ChannelMonitorV2Config, _ bool) (*ChannelMonitorV2Snapshot, error) {
+	r.filters = append(r.filters, filter)
+	if r.requestMetric == nil {
+		return nil, nil
+	}
+	metric := *r.requestMetric
+	if filter.Source == "business" {
+		metric.RequestCount = metric.BusinessRequestCount
+		metric.TokenCount = 40
+	}
+	return &ChannelMonitorV2Snapshot{Config: cfg, Metrics: metric, Health: ChannelMonitorV2HealthFor(metric)}, nil
 }
 
 func TestChannelMonitorObservationsScopePrivacyAndTotals(t *testing.T) {
@@ -40,7 +55,7 @@ func TestChannelMonitorObservationsScopePrivacyAndTotals(t *testing.T) {
 	require.Len(t, admin.Items, 1, "multiple memberships must not multiply platform totals")
 	require.Equal(t, int64(12), admin.Summary.ProbeCount)
 	require.Equal(t, int64(12), admin.Items[0].SampleCount)
-	require.Equal(t, int64(150), admin.TotalTokens, "reasoning is a subset of output")
+	require.Zero(t, admin.TotalTokens, "observation metering alone is not deduplicated channel request traffic")
 	require.Equal(t, int64(100), admin.Items[0].Usage.InputTokens)
 	require.Equal(t, "private upstream failure", admin.Items[0].History[0].Message)
 }
@@ -55,7 +70,7 @@ func TestChannelMonitorObservationsCountEveryModelOnce(t *testing.T) {
 	require.Len(t, result.Items, 1)
 	require.Equal(t, int64(5), result.Summary.ProbeCount)
 	require.Equal(t, int64(5), result.Items[0].SampleCount)
-	require.Equal(t, int64(30), result.TotalTokens)
+	require.Zero(t, result.TotalTokens, "task summaries must not be added to request facts")
 }
 
 func TestChannelMonitorObservationsOtherModelFilter(t *testing.T) {
@@ -112,4 +127,19 @@ func TestChannelMonitorActiveDimensionsRespectGroupPermissions(t *testing.T) {
 	require.Equal(t, "probe-only", dims.Models[0].Value)
 	require.Len(t, dims.Groups, 1)
 	require.Equal(t, int64(7), dims.Groups[0].ID)
+}
+
+func TestChannelMonitorObservationsDeduplicatesGatewayAndTaskMetering(t *testing.T) {
+	repo := &monitorObservationsRepoFake{
+		channelMonitorV2RepoStub: channelMonitorV2RepoStub{config: ChannelMonitorV2Config{Platforms: []ChannelMonitorV2PlatformConfig{{Platform: PlatformOpenAI, Enabled: true}}}},
+		requestMetric:            &ChannelMonitorV2Metric{HasSamples: true, RequestCount: 3, BusinessRequestCount: 1, ProbeRequestCount: 2, TokenCount: 150, AvailabilitySource: "mixed"},
+		rows:                     []ChannelMonitorObservation{{ID: "probe", Type: "connectivity", Platform: PlatformOpenAI, SampleCount: 2, Usage: ChannelMonitorProbeUsage{RequestCount: 2, InputTokens: 100, OutputTokens: 10}, Scope: ChannelMonitorObservationScope{GroupIDs: []int64{7}}}},
+	}
+	result, err := NewChannelMonitorV2Service(repo).Observations(context.Background(), ChannelMonitorV2Filter{}, ChannelMonitorV2GroupByPlatform, true)
+	require.NoError(t, err)
+	require.EqualValues(t, 150, result.TotalTokens)
+	require.EqualValues(t, 3, result.RequestUsage.RequestCount)
+	require.EqualValues(t, 1, result.BusinessUsage.RequestCount)
+	require.EqualValues(t, 40, result.BusinessUsage.TokenCount)
+	require.Equal(t, "business", repo.filters[len(repo.filters)-1].Source)
 }

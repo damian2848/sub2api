@@ -46,17 +46,18 @@ it('does not show zero traffic as 100 percent availability or invent candy recor
   wrapper.unmount()
 })
 
-it.each([1, 0.75, 0])('shows probe-only availability %s with its source, without cache or traffic history', (availability) => {
-  const row = { platform: 'openai', group_id: 7, group_name: 'Probe only', metrics: { has_samples: false, request_count: 0, cache_rate: 0, error_rate: 0, probe_availability: availability, probe_sample_count: 0, availability_source: 'probe', ttft: { p50_ms: null } }, health: { overall: availability === 1 ? 'healthy' : 'critical', error_rate: availability === 1 ? 'healthy' : 'critical' }, buckets: [] } as unknown as MonitorMatrixRow
+it.each([1, 0.75, 0])('shows real probe request availability %s and observed timeline with missing TTFT', (availability) => {
+  const metrics = { has_samples: true, request_count: 0, cache_rate: 0.2, error_rate: 1 - availability, probe_sample_count: 0, availability_source: 'probe', ttft: { p50_ms: null } }
+  const row = { platform: 'openai', group_id: 7, group_name: 'Probe only', metrics, health: { overall: 'healthy', error_rate: 'healthy' }, buckets: [{ bucket_start: '2026-09-28T00:06:00Z', metrics, health: { overall: 'healthy' } }] } as unknown as MonitorMatrixRow
   const coverage = { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage
   const wrapper = mount(MonitorStatusCards, { props: { items: [row], coverage, countdown: 32, loading: false, now: Date.now() }, global: { stubs: { ProviderIcon: true } } })
-  expect(wrapper.get('[data-testid="availability-source"]').text()).toBe('channelMonitorV2.cards.activeProbe')
+  expect(wrapper.get('[data-testid="availability-source"]').text()).toBe('channelMonitorV2.sources.probe')
   const values = wrapper.findAll('dl > div')
-  expect(values[0].get('dd').text()).toBe('—')
+  expect(values[0].get('dd').text()).toBe('20.0%')
   expect(values[1].get('dd').text()).toBe(availability === 0 ? '0.00%' : `${(availability * 100).toFixed(1)}%`)
   expect(values[2].get('dd').text()).toBe('-')
   expect(wrapper.findAll('[data-testid="traffic-history-bar"]')).toHaveLength(18)
-  expect(wrapper.findAll('[data-testid="traffic-history-bar"]').every(bar => bar.classes().includes('bg-gray-300'))).toBe(true)
+  expect(wrapper.findAll('[data-testid="traffic-history-bar"]').filter(bar => bar.classes().includes('bg-emerald-400'))).toHaveLength(1)
   wrapper.unmount()
 })
 

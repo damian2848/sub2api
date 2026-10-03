@@ -685,6 +685,7 @@ func partialStreamUsageResult(c *gin.Context, resp *http.Response, streamResult 
 		return nil
 	}
 	return &ForwardResult{
+		streamReadIncomplete:          true,
 		RequestID:                     resp.Header.Get("x-request-id"),
 		UpstreamHeaders:               resp.Header,
 		Usage:                         *streamResult.usage,

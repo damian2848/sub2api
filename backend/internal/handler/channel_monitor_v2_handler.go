@@ -248,6 +248,16 @@ func (h *ChannelMonitorV2Handler) parseFilter(c *gin.Context) (service.ChannelMo
 		response.BadRequest(c, err.Error())
 		return service.ChannelMonitorV2Filter{}, false
 	}
+	source := strings.ToLower(strings.TrimSpace(c.Query("source")))
+	switch source {
+	case "", "all":
+		filter.Source = ""
+	case "business", "probe":
+		filter.Source = source
+	default:
+		response.BadRequest(c, "invalid source: expected all, business or probe")
+		return service.ChannelMonitorV2Filter{}, false
+	}
 	return filter, true
 }
 

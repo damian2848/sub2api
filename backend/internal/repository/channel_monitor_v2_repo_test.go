@@ -498,3 +498,142 @@ func TestChannelMonitorV2CatalogFilterClearsMultiSelectDimensions(t *testing.T) 
 	require.Equal(t, []int64{3, 4}, configuredChannelMonitorV2GroupIDs(catalog, cfg))
 	require.Equal(t, []int64{3}, configuredChannelMonitorV2GroupIDs(filter, cfg))
 }
+
+func TestChannelMonitorV2ActualRequestSourcesPreservedAndLeaderboardBusinessOnly(t *testing.T) {
+	require.Contains(t, channelMonitorV2UsageMetricsSQL, "ul.source IN ('business', 'probe')")
+	require.Contains(t, channelMonitorV2UsageMetricsSQL, "model, source, success_requests")
+	require.Contains(t, channelMonitorV2ErrorAggregationSQL, "current_error.source IN ('business', 'probe')")
+	require.Contains(t, channelMonitorV2ErrorAggregationSQL, "current_error.source, COALESCE(NULLIF(current_error.request_id")
+	require.Contains(t, channelMonitorV2ErrorAggregationSQL, "WHERE user_id IS NOT NULL AND source = 'business'")
+	require.Contains(t, channelMonitorV2UserMetricsSQL, "ul.source = 'business'")
+	require.Contains(t, channelMonitorV2HistogramSQL, "audience.user_id = 0 OR ul.source = 'business'")
+	for _, query := range []string{channelMonitorV2MetricsRollupSQL, channelMonitorV2ErrorRollupSQL, channelMonitorV2HistogramRollupSQL} {
+		require.Contains(t, query, "platform, group_id, model, source")
+	}
+	require.NotContains(t, channelMonitorV2UsageMetricsSQL, "channel_monitor_history")
+	require.NotContains(t, channelMonitorV2DirectProbeMetricsSQL, "usage_logs")
+}
+
+func TestChannelMonitorV2SourceFilterAppliesAcrossFactTypes(t *testing.T) {
+	cfg := service.ChannelMonitorV2Config{Platforms: []service.ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true}}}
+	for _, source := range []string{"business", "probe"} {
+		for _, alias := range []string{"m", "h", "e"} {
+			where, args := channelMonitorV2Where(service.ChannelMonitorV2Filter{Source: source}, cfg, alias)
+			require.Contains(t, where, alias+".source = $4")
+			require.Equal(t, source, args[3])
+		}
+	}
+	where, args := channelMonitorV2Where(service.ChannelMonitorV2Filter{Source: "all"}, cfg, "m")
+	require.NotContains(t, where, "m.source =")
+	require.Len(t, args, 3)
+}
+
+func TestChannelMonitorV2ProbeOnlyAndMixedRequestsHaveRealMetrics(t *testing.T) {
+	probe := newMetricAccumulator()
+	probe.addFact(channelMonitorV2Fact{Source: "probe", Success: 2, Errors: 1, Input: 100, Output: 10, DurationSum: 1200, DurationCount: 2, UsageIncomplete: 1, CostIncomplete: 2})
+	probe.addHistogram(channelMonitorV2Histogram{Metric: "duration", UpperBound: 500, Count: 1})
+	probe.addHistogram(channelMonitorV2Histogram{Metric: "duration", UpperBound: 1000, Count: 1})
+	metric := probe.metric(5, true)
+	require.True(t, metric.HasSamples)
+	require.Equal(t, "probe", metric.AvailabilitySource)
+	require.Equal(t, int64(3), metric.RequestCount)
+	require.Zero(t, metric.BusinessRequestCount)
+	require.Equal(t, int64(3), metric.ProbeRequestCount)
+	require.Equal(t, int64(110), metric.TokenCount)
+	require.InDelta(t, 2.0/3, metric.SuccessRate, 1e-9)
+	require.InDelta(t, 0.6, metric.RPM, 1e-9)
+	require.Equal(t, int64(1), metric.UsageIncompleteRequestCount)
+	require.Equal(t, int64(2), metric.CostIncompleteRequestCount)
+	require.Nil(t, metric.TTFT.P50Ms, "non-stream duration is never a TTFT substitute")
+	require.Nil(t, metric.TTFT.AvgMs)
+	require.Equal(t, int64(500), *metric.Duration.P50Ms)
+
+	probe.addFact(channelMonitorV2Fact{Source: "business", Success: 1, Input: 20, Output: 5, DurationSum: 100, DurationCount: 1, TTFTSum: 50, TTFTCount: 1})
+	probe.addHistogram(channelMonitorV2Histogram{Metric: "duration", UpperBound: 100, Count: 1})
+	probe.addHistogram(channelMonitorV2Histogram{Metric: "ttft", UpperBound: 50, Count: 1})
+	mixed := probe.metric(5, false)
+	require.Equal(t, "mixed", mixed.AvailabilitySource)
+	require.Equal(t, int64(4), mixed.RequestCount)
+	require.Equal(t, int64(1), mixed.BusinessRequestCount)
+	require.Equal(t, int64(3), mixed.ProbeRequestCount)
+	require.InDelta(t, .75, mixed.SuccessRate, 1e-9)
+	require.Equal(t, int64(500), *mixed.Duration.P50Ms, "merge histogram samples, not source P50 averages")
+	require.Equal(t, int64(50), *mixed.TTFT.P50Ms)
+}
+
+func TestChannelMonitorV2LoadFactsIncludesSourceDimension(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	now := time.Now().UTC().Truncate(time.Minute)
+	filter := service.ChannelMonitorV2Filter{Source: "probe", Start: now.Add(-time.Hour), End: now, Bucket: time.Minute}
+	cfg := service.ChannelMonitorV2Config{Platforms: []service.ChannelMonitorV2PlatformConfig{{Platform: "openai", Enabled: true}}}
+	mock.ExpectQuery(`SELECT MIN\(m.bucket_start\).*m.model,m.source.*GROUP BY m.platform,m.group_id,g.name,m.model,m.source`).
+		WithArgs(filter.Start, filter.End, pq.Array([]string{"openai"}), "probe").
+		WillReturnRows(sqlmock.NewRows([]string{"bucket", "platform", "group_id", "group_name", "model", "source", "success", "errors", "affected", "attempts", "input", "output", "cache_create", "cache_read", "ttft_sum", "ttft_count", "duration_sum", "duration_count", "usage_missing", "cost_missing"}).
+			AddRow(now.Add(-time.Minute), "openai", 3, "group", "model", "probe", 1, 1, 1, 3, 10, 5, 0, 0, 0, 0, 200, 1, 1, 1))
+	facts, err := (&channelMonitorV2Repository{db: db}).loadFacts(context.Background(), filter, cfg, false)
+	require.NoError(t, err)
+	require.Len(t, facts, 1)
+	require.Equal(t, "probe", facts[0].Source)
+	require.Equal(t, int64(1), facts[0].UsageIncomplete)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestChannelMonitorV2WatermarkRejectsStaleAccountingVersion(t *testing.T) {
+	for _, version := range []int{1, service.ChannelMonitorV2AccountingVersion} {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		now := time.Now().UTC().Truncate(time.Minute)
+		mock.ExpectQuery(`SELECT usage_coverage_start, error_coverage_start, data_through, last_successful_at, backfill_cursor, accounting_version`).
+			WillReturnRows(sqlmock.NewRows([]string{"usage", "error", "through", "computed", "cursor", "version"}).AddRow(now.Add(-90*24*time.Hour), now.Add(-90*24*time.Hour), now, now, now.Add(-90*24*time.Hour), version))
+		wm, err := (&channelMonitorV2Repository{db: db}).GetAggregationWatermark(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, version, wm.AccountingVersion)
+		if version == service.ChannelMonitorV2AccountingVersion {
+			require.True(t, wm.HasData)
+			require.Equal(t, now, wm.DataThrough)
+		} else {
+			require.False(t, wm.HasData)
+			require.True(t, wm.BackfillCursor.IsZero())
+		}
+		require.NoError(t, mock.ExpectationsWereMet())
+		_ = db.Close()
+	}
+}
+
+func TestChannelMonitorV2DirectProbeLogicalOutcomeAndPhysicalAccounting(t *testing.T) {
+	require.Contains(t, channelMonitorV2DirectProbeMetricsSQL, "COUNT(*) FILTER (WHERE is_final AND api_success)")
+	require.Contains(t, channelMonitorV2DirectProbeMetricsSQL, "COUNT(*) FILTER (WHERE is_final AND NOT api_success)")
+	require.Contains(t, channelMonitorV2DirectProbeMetricsSQL, "COUNT(*) FILTER (WHERE is_final AND NOT api_success), COUNT(*)")
+	require.Contains(t, channelMonitorV2DirectProbeMetricsSQL, "SUM(input_tokens)")
+	require.Contains(t, channelMonitorV2DirectProbeMetricsSQL, "NOT missing.usage_complete")
+	require.Contains(t, channelMonitorV2DirectProbeRowsSQL, "p.role = 'generation' AND p.group_id > 0")
+	require.Contains(t, channelMonitorV2DirectProbeRowsSQL, "p.first_token_ms IS NOT NULL")
+	require.Contains(t, channelMonitorV2DirectProbeRowsSQL, "INTERVAL '90 minutes'")
+	require.Contains(t, channelMonitorV2DirectProbeHistogramSQL, "p.is_final AND p.api_success")
+	require.Contains(t, channelMonitorV2DirectProbeErrorsSQL, "p.is_final AND NOT p.api_success")
+	require.NotContains(t, channelMonitorV2DirectProbeErrorsSQL, "verdict")
+}
+
+func TestChannelMonitorV2SuccessUsesObservedOutcomeNotBilling(t *testing.T) {
+	require.Contains(t, channelMonitorV2APISuccessFilterUL, "COALESCE(ul.api_success, ul.actual_cost > 0) AND NOT EXISTS")
+	require.Contains(t, channelMonitorV2UsageMetricsSQL, "COALESCE(ul.api_success, ul.actual_cost > 0) AND NOT EXISTS")
+	require.Contains(t, channelMonitorV2HistogramSQL, "COALESCE(ul.api_success, ul.actual_cost > 0) AND NOT EXISTS")
+	require.Contains(t, channelMonitorV2UserMetricsSQL, "ul.api_success")
+	require.Contains(t, channelMonitorV2UserMetricsSQL, "ul.source = 'business'")
+}
+
+func TestChannelMonitorV2MarkedFailuresHaveDedupedTelemetryFallback(t *testing.T) {
+	require.Contains(t, channelMonitorV2ErrorAggregationSQL, "usage_failures AS")
+	require.Contains(t, channelMonitorV2ErrorAggregationSQL, "ul.api_success = FALSE")
+	require.Contains(t, channelMonitorV2ErrorAggregationSQL, "AND NOT "+channelMonitorV2HasFinalOpsErrorSQL)
+	require.Contains(t, channelMonitorV2GatewayFailureCategorySQL, "transport_or_stream")
+	require.NotContains(t, channelMonitorV2ErrorAggregationSQL, "COALESCE(ul.api_success, FALSE)")
+}
+
+func TestChannelMonitorV2ProbeRetentionIsBoundedAndKeepsLogicalRuns(t *testing.T) {
+	require.Contains(t, channelMonitorV2ProbeRetentionPruneSQL, "LIMIT 1000")
+	require.Contains(t, channelMonitorV2ProbeRetentionPruneSQL, "old_attempt.logical_request_id = old_runs.logical_request_id")
+	require.Contains(t, channelMonitorV2ProbeRetentionPruneSQL, "retained_attempt.finished_at >= $1")
+}

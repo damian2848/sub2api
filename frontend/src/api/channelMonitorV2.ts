@@ -1,5 +1,6 @@
 import { apiClient } from './client'
 
+export type MonitorRequestSource = 'all' | 'business' | 'probe'
 export type MonitorRange = '90m' | '24h' | '7d' | '30d'
 export type HealthState = 'unknown' | 'healthy' | 'warning' | 'critical'
 /** Fine-grained score band for multi-stop green→yellow→red gradients (score0..score10). */
@@ -20,6 +21,7 @@ export type MonitorMatrixGroupBy = 'platform' | 'platform_group' | 'platform_mod
 
 export interface MonitorFilter {
   range: MonitorRange
+  source?: MonitorRequestSource
   platforms: string[]
   groupIds: number[]
   models: string[]
@@ -41,7 +43,11 @@ export interface MonitorMetric {
   probe_inconclusive_count?: number
   probe_availability?: number | null
   probe_checked_at?: string
-  availability_source?: 'business' | 'probe' | 'unknown'
+  availability_source?: 'business' | 'probe' | 'mixed' | 'unknown'
+  business_request_count?: number
+  probe_request_count?: number
+  usage_incomplete_request_count?: number
+  cost_incomplete_request_count?: number
   success_requests: number
   error_requests: number
   request_count: number
@@ -257,6 +263,7 @@ export interface MonitorObservations {
     usage: ProbeUsage
   }
   business_usage: MonitorMetric
+  request_usage?: MonitorMetric
   total_tokens: number
 }
 export interface MonitorCandyHistory {
@@ -312,6 +319,7 @@ export interface MonitorUserRow {
 function params(filter: MonitorFilter) {
   return {
     range: filter.range,
+    source: filter.source && filter.source !== 'all' ? filter.source : undefined,
     platform: filter.platforms.length ? filter.platforms : undefined,
     group_id: filter.groupIds.length ? filter.groupIds : undefined,
     model: filter.models.length ? filter.models : undefined,

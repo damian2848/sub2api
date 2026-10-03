@@ -39,7 +39,7 @@ type channelMonitorAvailabilityProbe struct {
 
 func (s *ChannelMonitorV2Service) loadAvailabilityProbes(ctx context.Context, filter ChannelMonitorV2Filter, cfg *ChannelMonitorV2Config, admin bool) ([]channelMonitorAvailabilityProbe, error) {
 	repo, ok := s.repo.(ChannelMonitorObservationRepository)
-	if !ok || s.settings == nil {
+	if !ok || s.settings == nil || filter.Source == "business" {
 		return nil, nil
 	}
 	runtime := s.settings.GetChannelMonitorRuntime(ctx)
@@ -136,29 +136,26 @@ func (p channelMonitorProbeAvailability) apply(metric *ChannelMonitorV2Metric, h
 	metric.ProbeSampleCount, metric.ProbePassedCount = p.samples, p.passed
 	metric.ProbeFailedCount, metric.ProbeInconclusiveCount = p.failed, p.inconclusive
 	metric.ProbeCheckedAt = p.checkedAt
+	// Task verdicts (including wrong answers, quota checks and HEAD pings) are
+	// diagnostic metadata, not generation-request outcomes. Availability and
+	// health come exclusively from deduplicated gateway/direct request facts.
+	// In particular, legacy observations may have a declared group that differs
+	// from the API key's actual route and must never create a false success.
 	metric.ProbeAvailability = nil
-	if decisive := p.passed + p.failed; decisive > 0 {
-		availability := float64(p.passed) / float64(decisive)
-		metric.ProbeAvailability = &availability
+	if !metric.HasSamples && metric.RequestCount == 0 {
+		metric.AvailabilitySource = "unknown"
+		*health = ChannelMonitorV2HealthForWithThresholds(ChannelMonitorV2Metric{}, thresholds)
+	} else if metric.AvailabilitySource == "" || metric.AvailabilitySource == "unknown" {
+		// Compatibility with repositories that omit the source discriminator.
+		switch {
+		case metric.BusinessRequestCount > 0 && metric.ProbeRequestCount > 0:
+			metric.AvailabilitySource = "mixed"
+		case metric.ProbeRequestCount > 0:
+			metric.AvailabilitySource = "probe"
+		default:
+			metric.AvailabilitySource = "business"
+		}
 	}
-	metric.AvailabilitySource = "unknown"
-	if metric.HasSamples || metric.RequestCount > 0 {
-		metric.AvailabilitySource = "business"
-		return
-	}
-	*health = ChannelMonitorV2HealthForWithThresholds(ChannelMonitorV2Metric{}, thresholds)
-	if metric.ProbeAvailability == nil {
-		return
-	}
-	metric.AvailabilitySource = "probe"
-	// Probes are sparse by design. A decisive execution is sufficient, without
-	// manufacturing business requests to satisfy the passive minimum sample.
-	health.MinimumSample = 1
-	errorRate := float64(p.failed) / float64(p.passed+p.failed)
-	score := errorRateScore(errorRate, health.Thresholds.CriticalErrorRate)
-	health.ErrorRate = healthBand(errorRate, health.Thresholds.WarningErrorRate, health.Thresholds.CriticalErrorRate)
-	health.ErrorRateScore, health.Score = &score, &score
-	health.Overall = scoreBand(score)
 }
 
 type channelMonitorProbeDimension struct {

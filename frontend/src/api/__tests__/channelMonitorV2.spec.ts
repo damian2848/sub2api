@@ -28,6 +28,7 @@ describe('channel monitor V2 query serialization', () => {
     expect(get).toHaveBeenCalledWith('/admin/channel-monitor-v2/matrix', expect.objectContaining({
       params: {
         range: '24h',
+        source: undefined,
         platform: ['openai'],
         group_id: [7],
         model: undefined,
@@ -40,8 +41,14 @@ describe('channel monitor V2 query serialization', () => {
     const post = vi.spyOn(apiClient, 'post')
     await getObservations({ range: '7d', platforms: ['openai'], groupIds: [7, 9], models: ['gpt-test'] }, false, undefined, 'platform_group_model')
     expect(get).toHaveBeenCalledWith('/channel-monitor-v2/observations', expect.objectContaining({ params: {
-      range: '7d', platform: ['openai'], group_id: [7, 9], model: ['gpt-test'], group_by: 'platform_group_model',
+      range: '7d', source: undefined, platform: ['openai'], group_id: [7, 9], model: ['gpt-test'], group_by: 'platform_group_model',
     } }))
     expect(post).not.toHaveBeenCalled()
   })
+})
+
+it.each(['business', 'probe'] as const)('forwards the %s source filter to the unified endpoint', async source => {
+ const get = vi.spyOn(apiClient, 'get').mockResolvedValue({ data: { items: [] } })
+ await getMatrix({ range: '90m', source, platforms: [], groupIds: [], models: [] }, 'platform_group', false)
+ expect(get).toHaveBeenCalledWith('/channel-monitor-v2/matrix', expect.objectContaining({ params: expect.objectContaining({ source }) }))
 })

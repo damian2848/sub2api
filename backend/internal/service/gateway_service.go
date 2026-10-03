@@ -614,7 +614,9 @@ type AudioUsage struct {
 }
 
 type ForwardResult struct {
-	RequestID string
+	// Charged partial streams are real consumed usage, not successful API calls.
+	streamReadIncomplete bool
+	RequestID            string
 	// UpstreamHeaders 是直接上游的响应头，用于按账户配置解析上游请求标识。
 	UpstreamHeaders http.Header
 	Usage           ClaudeUsage

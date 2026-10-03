@@ -6,8 +6,9 @@
     </div>
     <div v-if="data" class="mb-5 grid gap-4 border-y border-gray-200 py-4 dark:border-dark-700 sm:grid-cols-3">
       <div>
-        <p class="text-xs text-gray-500">{{ t('channelMonitorV2.observations.businessUsage') }}</p>
-        <p class="mt-1 text-sm font-medium tabular-nums">{{ t('channelMonitorV2.observations.requestsTokens', { requests: exactBusiness ? count(data.business_usage.request_count) : '-', tokens: exactBusiness ? count(data.business_usage.token_count) : '-' }) }}</p>
+        <p class="text-xs text-gray-500">{{ t('channelMonitorV2.observations.requestUsage') }}</p>
+        <p class="mt-1 text-sm font-medium tabular-nums">{{ t('channelMonitorV2.observations.requestsTokens', { requests: exactBusiness ? count((data.request_usage || data.business_usage).request_count) : '-', tokens: exactBusiness ? count((data.request_usage || data.business_usage).token_count) : '-' }) }}</p>
+        <p v-if="exactBusiness && data.request_usage?.usage_incomplete_request_count" class="mt-1 text-xs text-amber-600">{{ t('channelMonitorV2.observations.partial') }}</p>
       </div>
       <div>
         <p class="text-xs text-gray-500">{{ t('channelMonitorV2.observations.probeUsage') }}</p>
@@ -16,7 +17,7 @@
       </div>
       <div>
         <p class="text-xs text-gray-500">{{ t('channelMonitorV2.observations.totalTokens') }}</p>
-        <p class="mt-1 text-sm font-medium tabular-nums">{{ exactBusiness && showUsage ? count(data.total_tokens) : '-' }}</p>
+        <p class="mt-1 text-sm font-medium tabular-nums">{{ exactBusiness ? count(data.total_tokens) : '-' }}</p>
         <p class="mt-1 text-xs text-gray-500">{{ t('channelMonitorV2.observations.summary', { passed: count(data.summary.passed_count), failed: count(data.summary.failed_count), inconclusive: count(data.summary.inconclusive_count) }) }}</p>
       </div>
     </div>

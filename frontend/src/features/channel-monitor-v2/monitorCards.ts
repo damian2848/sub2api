@@ -11,11 +11,16 @@ export function hasMonitorSamples(metric: MonitorMetric): boolean {
   return metric.has_samples === true || metric.request_count > 0
 }
 
-// Business availability takes precedence. Probe counts may be redacted, so the
-// explicit rate (including zero) is the signal, never a zero error-rate default.
+// Availability comes only from actual generation request facts, regardless of
+// source. Task/quality verdicts must not manufacture transport successes.
 export function effectiveAvailability(metric: MonitorMetric): number | null {
-  const value = hasMonitorSamples(metric) ? 1 - metric.error_rate : metric.probe_availability
+  const value = hasMonitorSamples(metric) ? 1 - metric.error_rate : null
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1 ? value : null
+}
+
+export function monitorAvailabilitySource(metric: MonitorMetric): 'business' | 'probe' | 'mixed' | null {
+  const source = metric.availability_source
+  return hasMonitorSamples(metric) && (source === 'business' || source === 'probe' || source === 'mixed') ? source : null
 }
 
 export function hasAvailabilitySamples(metric: MonitorMetric): boolean {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // The provider/model is supplied by the operator, never inferred from a model name.
@@ -40,15 +41,19 @@ type qualityJudgeSlots interface {
 }
 
 type QualityJudgeService struct {
-	accounts qualityJudgeAccounts
-	groups   qualityJudgeGroups
-	slots    qualityJudgeSlots
-	request  func(context.Context, int64, string, string) (string, error)
-	billing  *BillingService
+	accounts     qualityJudgeAccounts
+	groups       qualityJudgeGroups
+	slots        qualityJudgeSlots
+	request      func(context.Context, int64, string, string) (string, error)
+	billing      *BillingService
+	factRecorder ProbeRequestFactRecorder
 }
 
 func NewQualityJudgeService(accounts AccountRepository, groups GroupRepository, slots *ConcurrencyService, tests *AccountTestService) *QualityJudgeService {
 	service := &QualityJudgeService{accounts: accounts, groups: groups, slots: slots, request: tests.runQualityJudgeRequest}
+	if tests != nil {
+		service.factRecorder = tests.probeRequestFactRecorder
+	}
 	if tests != nil && tests.openaiGatewayService != nil {
 		service.billing = tests.openaiGatewayService.billingService
 	}
@@ -87,6 +92,9 @@ func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cf
 	prompt := qualityJudgePrompt(cfg, answer)
 	result.Reason = "judge_no_available_account"
 	attempts := 0
+	runID, logicalID := uuid.NewString(), uuid.NewString()
+	var facts []ProbeRequestFact
+	defer func() { finalizeProbeFacts(facts); saveProbeFacts(s.factRecorder, facts) }()
 	for i := range accounts {
 		account := &accounts[i]
 		// The tested account must not grade its own response, even in the same group.
@@ -110,8 +118,9 @@ func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cf
 				defer slot.ReleaseFunc()
 			}
 			// Judge requests own their collector so the caller can add them exactly once.
-			collector := &pelicanTestUsageCollector{model: account.GetMappedModel(judge.ModelID)}
+			collector := &pelicanTestUsageCollector{model: account.GetMappedModel(judge.ModelID), requestedModel: judge.ModelID, runID: runID, logicalRequestID: logicalID, role: "quality_judge", groupID: &judge.GroupID}
 			defer func() {
+				facts = append(facts, collector.facts(s.billing, account)...)
 				usage := collector.probeUsage(s.billing, account)
 				result.Usage.Add(&usage)
 			}()

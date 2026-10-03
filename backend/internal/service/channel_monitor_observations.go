@@ -66,6 +66,7 @@ type ChannelMonitorObservations struct {
 	Items         []ChannelMonitorObservation      `json:"items"`
 	Summary       ChannelMonitorObservationSummary `json:"summary"`
 	BusinessUsage ChannelMonitorV2Metric           `json:"business_usage"`
+	RequestUsage  ChannelMonitorV2Metric           `json:"request_usage"`
 	TotalTokens   int64                            `json:"total_tokens"`
 }
 
@@ -196,15 +197,26 @@ func (s *ChannelMonitorV2Service) Observations(ctx context.Context, filter Chann
 		}
 	}
 	result.Items = groupMonitorObservations(result.Items, groupBy)
+	// Totals use the same deduplicated request facts as the main timeline, not
+	// task metering summaries (a local probe is already in gateway usage logs).
 	snapshot, err := s.Snapshot(ctx, filter, admin)
 	if err != nil {
 		return nil, err
 	}
 	if snapshot != nil {
-		result.BusinessUsage = snapshot.Metrics
+		result.RequestUsage = snapshot.Metrics
+	}
+	businessFilter := filter
+	businessFilter.Source = "business"
+	business, err := s.Snapshot(ctx, businessFilter, admin)
+	if err != nil {
+		return nil, err
+	}
+	if business != nil {
+		result.BusinessUsage = business.Metrics
 	}
 	result.Summary.Usage.Source = "probe"
-	result.TotalTokens = result.BusinessUsage.TokenCount + result.Summary.Usage.InputTokens + result.Summary.Usage.OutputTokens + result.Summary.Usage.CacheReadTokens + result.Summary.Usage.CacheCreationTokens
+	result.TotalTokens = result.RequestUsage.TokenCount
 	if !admin {
 		result.Summary.Usage = ChannelMonitorProbeUsage{Source: "probe", UsageIncomplete: true, CostIncomplete: true}
 		result.TotalTokens = 0

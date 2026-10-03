@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -396,18 +397,27 @@ func extractOpenAIResponsesText(respBytes []byte) string {
 // mergeHeaders 把用户自定义 headers 合并到 adapter 默认 headers 上。
 // 用户值覆盖默认；命中黑名单（hop-by-hop / 由 http.Client 自管的）的 key 静默丢弃。
 func mergeHeaders(base map[string]string, opts *CheckOptions) map[string]string {
-	if opts == nil || len(opts.ExtraHeaders) == 0 {
-		return base
-	}
-	out := make(map[string]string, len(base)+len(opts.ExtraHeaders))
+	out := make(map[string]string, len(base))
 	for k, v := range base {
-		out[k] = v
+		out[http.CanonicalHeaderKey(k)] = v
 	}
-	for k, v := range opts.ExtraHeaders {
+	if opts == nil {
+		return out
+	}
+	// HTTP header names are case-insensitive. Keep a single canonical entry so
+	// a lowercase Authorization override cannot race the adapter's default
+	// when postRawJSON later ranges the map. Sorting also makes old persisted
+	// headers with duplicate casing deterministic.
+	keys := make([]string, 0, len(opts.ExtraHeaders))
+	for k := range opts.ExtraHeaders {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
 		if IsForbiddenHeaderName(k) {
 			continue
 		}
-		out[k] = v
+		out[http.CanonicalHeaderKey(k)] = opts.ExtraHeaders[k]
 	}
 	return out
 }
