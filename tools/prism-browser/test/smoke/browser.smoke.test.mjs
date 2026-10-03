@@ -119,6 +119,25 @@ for (const mode of modes) test(`${mode.name}: native Enter submits verified inpu
   assert.ok(polls.every(poll => poll.body.diff_format === 'mock-native'));
 });
 
+// The resident-refusal diagnosis compares the header NAMES of the editor page's accepted status poll with
+// what the resident fetch sets. That capture must work in real Chromium on both interception paths.
+for (const mode of modes) test(`${mode.name}: the editor status poll's header names are captured without any value`, {timeout:30000}, async t => {
+  const session = await sessionFor(t, {options:mode.options});
+  const index = fixture.records.length;
+  fixture.enqueue({text:'header capture answer', polls:2});
+  let captured;
+  const original = session.observe.bind(session);
+  session.observe = async response => { await original(response); captured ??= session.turn?.nativeStatusHeaderNames; };
+  assert.equal(await session.generate(request()), 'header capture answer');
+  assert.ok(Array.isArray(captured) && captured.length > 0, 'no header names captured from the native status poll');
+  assert.ok(captured.includes('content-type'), 'the editor poll carries content-type');
+  assert.ok(captured.every(name => /^[a-z0-9-]{1,64}$/.test(name)));
+  assert.equal(JSON.stringify(captured).includes('offline-native-proof'), false, 'a header value must never be kept');
+  // The names it captured really are the ones the mock server saw on a native status poll.
+  const seen = recordsSince(index, statusPath).find(poll => poll.headers['content-type'])?.headers ?? {};
+  for (const name of ['content-type']) assert.ok(name in seen);
+});
+
 for (const mode of modes) test(`${mode.name}: real request guards reject project/history mismatch, unrelated mutations and unapproved upload`, {timeout:30000}, async t => {
   const session = await sessionFor(t, {options:mode.options});
   const index = fixture.records.length;
@@ -254,9 +273,14 @@ test('account-bound multiplex releases both UI pages, isolates resident polls an
   assert.notEqual(firstProject, secondProject);
   assert.notEqual(first.context, second.context);
   assert.notEqual(multiplex.context, first.context);
-  assert.equal(new URL(multiplex.page.url()).pathname, '/auth/session');
-  assert.equal(await multiplex.page.locator('textarea').count(), 0, 'resident page must not mount the editor');
+  // The resident page loads the real site so Prism's own script wraps window.fetch (a bare JSON document is
+  // refused with 403); it must still never open an editor tab, so there is no composer to type into.
+  assert.equal(new URL(multiplex.page.url()).pathname, '/');
+  assert.equal(await multiplex.page.evaluate(() => window.fetch !== window.__prismOriginalFetch), true, 'resident fetch must be the official wrapper');
   const index = fixture.records.length;
+  // The mock home page renders a composer on load (the real editor does too), so what matters is that the
+  // resident page never submits anything: nothing may start a model turn before this test asks for one.
+  assert.equal(recordsSince(index - 0, startPath).length, 0, 'the resident page must never submit a prompt');
   fixture.enqueue({hold:true, text:'cancelled scope should never return'});
   const controller = new AbortController();
   const one = first.generate(request({input:[{role:'user', content:[{type:'input_text', text:'multiplex first input'}]}]}), controller.signal);
@@ -308,6 +332,32 @@ test('account-bound multiplex releases both UI pages, isolates resident polls an
   assert.equal(await second.generate(request()), 'new isolated scope after resident turn');
   assert.equal(second.page, null);
   assert.equal(multiplex.isAlive(), true);
+});
+
+test('the resident poller is never refused for a missing verification proof', {timeout:30000}, async t => {
+  const multiplex = new AccountPageMultiplexer({pollMs:250});
+  t.after(() => multiplex.close());
+  const session = await sessionFor(t, {create:true, options:{multiplex:true, multiplexer:multiplex}, worker:0});
+  const before = fixture.unverified.length;
+  fixture.enqueue({text:'resident answer', polls:4});
+  assert.equal(await session.generate(request()), 'resident answer');
+  assert.equal(fixture.unverified.length, before, 'a model API call reached Prism without the verification proof');
+  const polls = fixture.records.filter(record => record.path === statusPath && record.headers['openai-sentinel-token']);
+  assert.ok(polls.length >= 3, 'the resident poller did not carry the verification proof');
+});
+
+test('a resident page whose official fetch wrapper never appears fails closed instead of polling bare', {timeout:60000}, async t => {
+  const multiplex = new AccountPageMultiplexer({pollMs:250});
+  t.after(() => multiplex.close());
+  const browserHandle = browser;
+  // A context whose scripts are blocked can never get the wrapper: registration must reject, not fall back.
+  const context = await browserHandle.newContext({locale:'en-US'});
+  await context.route('**/assets/**', route => route.abort());
+  const original = browserHandle.newContext.bind(browserHandle);
+  browserHandle.newContext = async () => context;
+  t.after(() => { browserHandle.newContext = original; return context.close(); });
+  await assert.rejects(multiplex.register(browserHandle, {access_token:FAKE_TOKEN}, 'mock-prism-user'), error => error.code === 'poll_carrier_unavailable');
+  assert.equal(multiplex.isAlive(), false);
 });
 
 test('separate account multiplexers keep resident cookies/identity distinct and reject cross-account registration', {timeout:30000}, async t => {

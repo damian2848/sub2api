@@ -32,6 +32,17 @@ const scriptTemplate = `(() => {
   window.mockPrism = { projectId: new URLSearchParams(location.search).get('u'), previousResponseId: null,
     projectOverride: null, nativeModel: 'gpt-5.6-sol', pending: new Map(), tabs: 0 };
   const state = window.mockPrism;
+  // The official page wraps window.fetch: it attaches the Sentinel proof to model API calls. The native
+  // editor sends its own proof explicitly below; a request made with the UNWRAPPED fetch carries none.
+  window.__prismOriginalFetch = window.fetch;
+  window.SentinelSDK = { token: async () => 'offline-native-proof' };
+  window.fetch = async (input, init = {}) => {
+    const url = typeof input === 'string' ? input : input.url;
+    if (url.includes('/api/llm/') && !(init.headers && (init.headers['OpenAI-Sentinel-Token'] || init.headers['openai-sentinel-token']))) {
+      init = { ...init, headers: { ...(init.headers || {}), 'OpenAI-Sentinel-Token': await window.SentinelSDK.token() } };
+    }
+    return window.__prismOriginalFetch.call(window, input, init);
+  };
   const post = async (path, body, headers = {}) => {
     const response = await fetch(path, {method: 'POST',
       headers: {'Content-Type':'application/json', ...headers}, body: JSON.stringify(body)});
@@ -131,6 +142,7 @@ export async function createMockPrism() {
   const turns = new Map();
   const projects = new Set();
   const blockedConnections = [];
+  const unverified = [];
   const sockets = new Set();
   let auth = {user:{id:USER_ID, email:USER_EMAIL, is_anonymous:false}};
   let assetHits = 0;
@@ -159,6 +171,11 @@ export async function createMockPrism() {
       if (url.pathname.endsWith('/heartbeat')) return json(response, 200, {status:'healthy'});
       if (url.pathname === '/api/project-files/upload') {
         return json(response, 200, {project_path:'/prism-uploads/' + decodeURIComponent(request.headers['x-prism-file-name'])});
+      }
+      if (url.pathname.startsWith('/api/llm/') && !request.headers['openai-sentinel-token']) {
+        unverified.push({path:url.pathname, method:request.method});
+        response.writeHead(403, {'Content-Type':'text/html'});
+        return response.end('<html>Request verification failed</html>');
       }
       if (url.pathname === '/api/llm/response_with_tools_start') {
         const scenario = scenarios.shift() || {};
@@ -219,7 +236,7 @@ export async function createMockPrism() {
   });
   const proxyPort = await listen(proxy);
   return {
-    records, turns, projects, blockedConnections,
+    records, turns, projects, blockedConnections, unverified,
     proxyURL:`http://127.0.0.1:${proxyPort}`,
     enqueue(scenario = {}) {scenarios.push({...scenario});},
     setAuth(value) {auth = value;},

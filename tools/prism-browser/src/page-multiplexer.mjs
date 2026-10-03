@@ -36,8 +36,17 @@ export class AccountPageMultiplexer {
       try {
         await context.addCookies([this.cookie(credentials.access_token)]);
         const page = await context.newPage();
-        // A JSON document establishes the authenticated origin without mounting the editor/app.
-        await page.goto(`${this.origin}/auth/session`, { waitUntil: 'domcontentloaded', timeout: 25000 });
+        // Prism refuses model API calls (403, no error code) that were not made by ITS OWN page script: the
+        // editor wraps window.fetch and attaches the Sentinel proof. A bare JSON document such as
+        // /auth/session has no wrapper, so a poll from it is refused. Load the real site instead and wait
+        // until the official wrapper and Sentinel SDK are in place; the resident page is never used for
+        // anything else, so it never opens an editor tab or submits a prompt.
+        await page.addInitScript(() => { window.__prismOriginalFetch = window.fetch; });
+        await page.goto(`${this.origin}/`, { waitUntil: 'domcontentloaded', timeout: 25000 });
+        try {
+          await page.waitForFunction(() => Boolean(window.__prismOriginalFetch) && window.fetch !== window.__prismOriginalFetch
+            && window.SentinelSDK && typeof window.SentinelSDK.token === 'function', undefined, { timeout: 30000 });
+        } catch { throw new PrismError('poll_carrier_unavailable', 503); }
         if (this.closed) throw new PrismError('browser_session_closed', 503);
         this.context = context; this.page = page; this.identity = identity;
         page.on('crash', () => this.close().catch(() => {}));
@@ -66,7 +75,7 @@ export class AccountPageMultiplexer {
     this.healthProbe = (async () => {
       const result = await this.page.evaluate(async () => {
         try {
-          const response = await fetch('/auth/session', { cache: 'no-store', signal: AbortSignal.timeout(15000) });
+          const response = await window.fetch('/auth/session', { cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(15000) });
           const data = await response.json();
           return { ok: response.ok, status: response.status, id: data.user?.id, anonymous: data.user?.is_anonymous };
         } catch { return { ok: false, status: 0 }; }
@@ -124,16 +133,20 @@ export class AccountPageMultiplexer {
     if (!this.isAlive()) throw new PrismError('browser_session_closed', 503);
     return this.page.evaluate(async ({ path, body, timeoutMs }) => {
       try {
-        const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body, signal: AbortSignal.timeout(timeoutMs) });
+        // window.fetch is the official wrapper (see register); it adds the verification Prism requires.
+        const response = await window.fetch(path, { method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(timeoutMs) });
         return { status: response.status, text: await response.text() };
       } catch { return { status: 0, text: '' }; }
     }, { path, body, timeoutMs });
   }
+  // The headers the resident fetch above sets itself. The browser adds its own (host, cookie, user-agent,
+  // sec-fetch-*, ...) to both pages alike, so only the page script's explicit headers can differ.
+  static RESIDENT_SET_HEADERS = ['content-type'];
   // Why did the resident page get refused? The editor page's own poll is accepted for the same turn,
   // so the difference matters. Only fixed, non-secret facts are recorded: the status, Prism's error
   // code (never its message or body), and which cookie NAMES the resident context holds.
-  async diagnoseRefusal(path, result) {
+  async diagnoseRefusal(path, result, turn) {
     let code;
     try {
       const parsed = JSON.parse(result.text);
@@ -143,8 +156,17 @@ export class AccountPageMultiplexer {
     let cookies;
     try { cookies = (await this.context?.cookies?.(this.origin) ?? []).map(item => item.name).filter(name => /^[A-Za-z0-9_.-]{1,64}$/.test(name)).sort(); }
     catch {}
+    // What the editor page's accepted poll carried that the resident fetch does not set itself. The
+    // browser-managed headers are common to both, so a name listed here is a candidate for the refusal.
+    const native = Array.isArray(turn?.nativeStatusHeaderNames) ? turn.nativeStatusHeaderNames : undefined;
+    const browserManaged = new Set(['host', 'connection', 'content-length', 'accept-encoding', 'accept-language', 'user-agent',
+      'cookie', 'origin', 'referer', 'accept', 'priority', 'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform',
+      'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest']);
+    const editorOnly = native?.filter(name => !AccountPageMultiplexer.RESIDENT_SET_HEADERS.includes(name) && !browserManaged.has(name));
     this.onAudit('resident_poll_refused', { path: path.split('?')[0], status: result.status, code,
-      resident_cookie_names: cookies, resident_url_origin: this.page?.url?.().startsWith(this.origin) ? 'same_origin' : 'other' });
+      resident_cookie_names: cookies, resident_url_origin: this.page?.url?.().startsWith(this.origin) ? 'same_origin' : 'other',
+      editor_poll_header_names: native, editor_only_header_names: editorOnly,
+      resident_set_header_names: AccountPageMultiplexer.RESIDENT_SET_HEADERS });
   }
   async poll(session, turn) {
     const job = this.jobs.get(turn);
@@ -160,7 +182,7 @@ export class AccountPageMultiplexer {
       if (result.status >= 200 && result.status < 300) { try { JSON.parse(result.text); valid = true; } catch {} }
       if (!valid) {
         turn.ownPollErrors += 1; turn.ownPollErrorTotal += 1;
-        if (!turn.refusalDiagnosed) { turn.refusalDiagnosed = true; await this.diagnoseRefusal('/api/llm/response_with_tools_status', result).catch(() => {}); }
+        if (!turn.refusalDiagnosed) { turn.refusalDiagnosed = true; await this.diagnoseRefusal('/api/llm/response_with_tools_status', result, turn).catch(() => {}); }
         if ([401, 403].includes(result.status) || turn.ownPollErrors >= 3) {
           turn.ownPollFailed = true;
           const error = new PrismError([401, 403].includes(result.status) ? 'session_expired' : 'prism_upstream_http_error',

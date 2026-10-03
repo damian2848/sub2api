@@ -406,6 +406,7 @@ export class BrowserSession {
     if (!isStart && !own && !turn.statusTemplate && sent && typeof sent === 'object') {
       // The page's first good poll gives the exact body shape (diff_format etc.); ours copy it.
       turn.statusTemplate = sent;
+      turn.nativeStatusHeaderNames = headerNames(request);
       if (this.multiplex) {
         if (!terminal) await this.detachSubmissionPage(turn);
       } else if (this.statusPollMs > 0 && turn.ownBodies) this.pollStatus(turn).catch(() => { turn.ownPollFailed = true; });
@@ -975,6 +976,17 @@ export class BrowserSession {
 
   isAlive() { return Boolean(this.context && ((this.page && !this.page.isClosed()) ||
     (this.multiplex && this.multiplexer?.isAlive()))); }
+}
+
+// Names (never values) of the headers a request carried. Used only to explain why the resident poller
+// is refused where the editor page's own poll for the same turn is accepted. Authorization-style
+// values must never reach a log, so only the names survive; unusable names are dropped.
+export function headerNames(request) {
+  let headers;
+  try { headers = request?.headers?.(); } catch { return undefined; }
+  if (!headers || typeof headers !== 'object') return undefined;
+  return Object.keys(headers).map(name => String(name).toLowerCase())
+    .filter(name => /^[a-z0-9-]{1,64}$/.test(name)).sort();
 }
 
 export async function launchBrowser() {

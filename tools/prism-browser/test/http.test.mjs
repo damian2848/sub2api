@@ -658,3 +658,36 @@ test('without project isolation scope headers are ignored and the estimate stays
   // Malformed scope headers are not rejected when isolation is off.
   assert.ok(await cached({ 'X-Prism-Key-Scope': 'not-a-hash', 'X-Prism-Session-Scope': 'x' }) >= 1024);
 });
+
+test('a history with more attachments than the limit is served: only the newest are uploaded, older ones are marked', async t => {
+  let seen;
+  const { post } = await fixture(t, { async generate(_, request) { seen = request; return 'ok'; } }, { maxAttachments: 2 });
+  const file = value => ({ type: 'input_file', filename: 'note.txt', file_data: Buffer.from(value).toString('base64') });
+  const turn = (label, value) => ({ role: 'user', content: [{ type: 'input_text', text: label }, file(value)] });
+  const response = await post('/accounts/32/v1/responses', { model: models[0], input: [
+    turn('one', 'first'), { role: 'assistant', content: [{ type: 'output_text', text: 'seen' }] },
+    turn('two', 'second'), { role: 'assistant', content: [{ type: 'output_text', text: 'seen' }] },
+    turn('three', 'third'), { role: 'assistant', content: [{ type: 'output_text', text: 'seen' }] },
+    { role: 'user', content: [{ type: 'input_text', text: 'summarise' }] }] });
+  assert.equal(response.status, 200);
+  assert.equal(seen.attachments.length, 2);
+  assert.deepEqual(seen.attachments.map(item => item.data.toString()), ['second', 'third']);
+  const prompt = seen.input[0].content[0].text;
+  assert.match(prompt, /\[Earlier file omitted\]/);
+  assert.match(prompt, /\[Attachment 1\]/);
+  assert.match(prompt, /\[Attachment 2\]/);
+});
+
+test('the total attachment byte limit still applies to the attachments that are kept', async t => {
+  let calls = 0;
+  const { post } = await fixture(t, { async generate() { calls++; return 'unexpected'; } },
+    { maxAttachments: 2, maxAttachmentBytes: 8, maxTotalAttachmentBytes: 10 });
+  const file = value => ({ type: 'input_file', filename: 'note.txt', file_data: Buffer.from(value).toString('base64') });
+  const response = await post('/accounts/32/v1/responses', { model: models[0], input: [
+    { role: 'user', content: [{ type: 'input_text', text: 'old' }, file('x'.repeat(8))] },
+    { role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] },
+    { role: 'user', content: [{ type: 'input_text', text: 'new' }, file('y'.repeat(8)), file('z'.repeat(8))] }] });
+  assert.equal(response.status, 400);
+  assert.equal((await response.json()).error.code, 'attachments_too_large');
+  assert.equal(calls, 0);
+});

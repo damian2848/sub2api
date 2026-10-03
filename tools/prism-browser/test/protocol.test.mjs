@@ -972,3 +972,74 @@ test('both API result families enforce policy before shaping any partial result'
     assert.equal(family === 'chat' ? plain.choices[0].message.content : plain.output_text, one);
   }
 });
+
+// ---- Attachments beyond the per-request limit: newest are kept, older ones become a visible placeholder ----
+const tinyPng = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j4e8AAAAASUVORK5CYII=';
+const pic = n => ({ type: 'input_image', image_url: `data:image/png;base64,${tinyPng}`, detail: `pic-${n}` });
+const userWith = (text, ...parts) => ({ role: 'user', content: [{ type: 'input_text', text }, ...parts] });
+const limited = (body, maxAttachments, family = 'responses') => parseRequest({ model: models[0], ...body }, family, models, { maxAttachments });
+
+test('a history with more images than the limit keeps the newest and marks the older ones, never failing', () => {
+  const input = [];
+  for (let n = 1; n <= 5; n += 1) { input.push(userWith(`turn ${n}`, pic(n))); input.push(message('assistant', `answer ${n}`)); }
+  input.push(message('user', 'what did you see?'));
+  const request = limited({ input }, 3);
+  assert.equal(request.attachments.length, 3, 'only the newest three are uploaded');
+  assert.deepEqual(request.attachments.map(item => item.marker), ['[Attachment 1]', '[Attachment 2]', '[Attachment 3]']);
+  const prompt = text(request);
+  assert.equal((prompt.match(/\[Earlier image omitted\]/g) || []).length, 2, 'the two oldest become placeholders');
+  assert.match(prompt, /turn 1:?\s*\n?\[Earlier image omitted\]/);
+  assert.match(prompt, /turn 3:?\s*\n?\[Attachment 1\]/);
+  assert.match(prompt, /turn 5:?\s*\n?\[Attachment 3\]/);
+  assert.ok(prompt.indexOf('turn 1') < prompt.indexOf('[Attachment 1]'), 'order is preserved');
+});
+
+test('exactly at the limit nothing is folded', () => {
+  const input = [userWith('a', pic(1)), message('assistant', 'ok'), userWith('b', pic(2), pic(3))];
+  const request = limited({ input }, 3);
+  assert.equal(request.attachments.length, 3);
+  assert.ok(!text(request).includes('omitted'));
+});
+
+test('the current request still fails when its own attachments exceed the limit', () => {
+  const input = [userWith('old', pic(1)), message('assistant', 'ok'), userWith('now', pic(2), pic(3), pic(4))];
+  assert.throws(() => limited({ input }, 2), error => error.code === 'too_many_attachments' && error.status === 400);
+  // without any history the behaviour is unchanged
+  assert.throws(() => limited({ input: [userWith('only', pic(1), pic(2), pic(3))] }, 2), error => error.code === 'too_many_attachments');
+});
+
+test('an old attachment that is no longer valid cannot break a request once it is folded away', () => {
+  const broken = { type: 'input_image', image_url: 'data:image/png;base64,AAAA' };
+  const input = [userWith('stale', broken), message('assistant', 'ok'), userWith('b', pic(2)), message('assistant', 'ok'), userWith('c', pic(3))];
+  const request = limited({ input }, 2);
+  assert.equal(request.attachments.length, 2);
+  assert.match(text(request), /\[Earlier image omitted\]/);
+  // but a broken attachment that is still within the kept window is rejected as before
+  assert.throws(() => limited({ input: [userWith('x', broken)] }, 2), error => error.code === 'invalid_attachment_data');
+});
+
+test('files and tool-output images count too, and the placeholder names the kind', () => {
+  const file = { type: 'input_file', filename: 'a.txt', file_data: Buffer.from('hello').toString('base64') };
+  const input = [
+    userWith('first file', file),
+    { type: 'function_call_output', call_id: 'c', output: [{ type: 'input_text', text: 'shot' }, pic(1)] },
+    userWith('second', pic(2)),
+  ];
+  const request = limited({ tools: [execTool], input }, 2);
+  assert.equal(request.attachments.length, 2);
+  assert.match(text(request), /\[Earlier file omitted\]/);
+  assert.ok(!text(request).includes('[Earlier image omitted]'));
+});
+
+test('the chat-completions family folds old images the same way', () => {
+  const messages = [];
+  for (let n = 1; n <= 4; n += 1) messages.push({ role: 'user', content: [{ type: 'text', text: `m${n}` }, { type: 'image_url', image_url: { url: `data:image/png;base64,${tinyPng}` } }] });
+  const request = limited({ messages }, 2, 'chat');
+  assert.equal(request.attachments.length, 2);
+  assert.equal((text(request).match(/\[Earlier image omitted\]/g) || []).length, 2);
+});
+
+test('audio is still rejected even when it sits in a part that would be folded', () => {
+  const input = [userWith('a', { type: 'input_audio', input_audio: { data: 'AAAA', format: 'wav' } }), userWith('b', pic(1)), userWith('c', pic(2))];
+  assert.throws(() => limited({ input }, 1), error => error.code === 'image_input_not_supported');
+});

@@ -27,7 +27,7 @@ test('account submission admission is serial, cancelled waiters do not hold its 
 
 test('shared resident registration is single-flight and rejects other account identity', async () => {
   let contexts = 0; let closes = 0;
-  const page = { goto: async () => {}, isClosed: () => false, on() {} };
+  const page = { goto: async () => {}, addInitScript: async () => {}, waitForFunction: async () => {}, isClosed: () => false, on() {} };
   const browser = { newContext: async () => { contexts += 1; return { addCookies: async () => {}, newPage: async () => page, close: async () => { closes += 1; } }; } };
   const mux = new AccountPageMultiplexer();
   await Promise.all([mux.register(browser, { access_token: 'token' }, 'account-a'), mux.register(browser, { access_token: 'token' }, 'account-a')]);
@@ -121,7 +121,7 @@ test('resident stop failure closes only the affected submission context', async 
 
 function authenticationBrowser({ identity = 'fixture-user', evaluate } = {}) {
   let contexts = 0;
-  const page = { route: async () => {}, on() {}, goto: async () => {}, isClosed: () => false,
+  const page = { route: async () => {}, on() {}, goto: async () => {}, addInitScript: async () => {}, waitForFunction: async () => {}, isClosed: () => false,
     evaluate: evaluate || (async () => ({ signedIn: true, actualUserId: identity, emailMatches: true, idMatches: true })) };
   return { get contexts() { return contexts; }, on() {}, close: async () => {},
     newContext: async () => { contexts += 1; return { addCookies: async () => {}, newPage: async () => page, close: async () => {} }; } };
@@ -198,7 +198,8 @@ test('a refused resident poll records only status, error code and cookie names, 
   const refused = audits.filter(item => item.event === 'resident_poll_refused');
   assert.equal(refused.length, 1);
   assert.deepEqual(refused[0], { event: 'resident_poll_refused', path: '/api/llm/response_with_tools_status', status: 401,
-    code: 'unauthorized', resident_cookie_names: ['_dd_s', 'prism_oai_access_token'], resident_url_origin: 'same_origin' });
+    code: 'unauthorized', resident_cookie_names: ['_dd_s', 'prism_oai_access_token'], resident_url_origin: 'same_origin',
+    editor_poll_header_names: undefined, editor_only_header_names: undefined, resident_set_header_names: ['content-type'] });
   assert.equal(JSON.stringify(audits).includes('SECRET'), false, 'neither a token value nor an upstream message may be logged');
 });
 
@@ -213,4 +214,74 @@ test('a resident refusal diagnosis never breaks the poll when cookies cannot be 
   assert.equal(audits[0].code, undefined);
   assert.equal(audits[0].resident_cookie_names, undefined);
   assert.equal(audits[0].resident_url_origin, 'other');
+});
+
+test('headerNames keeps only validated lower-case names and never a value', async () => {
+  const { headerNames } = await import('../src/browser.mjs');
+  const request = { headers: () => ({ 'OpenAI-Sentinel-Token': 'SECRET-PROOF', Authorization: 'Bearer SECRET', 'x-prism-device': 'dev', 'bad name!': 'x', '': 'y' }) };
+  const names = headerNames(request);
+  assert.deepEqual(names, ['authorization', 'openai-sentinel-token', 'x-prism-device']);
+  assert.equal(JSON.stringify(names).includes('SECRET'), false);
+  assert.equal(headerNames({}), undefined);
+  assert.equal(headerNames({ headers: () => { throw new Error('closed'); } }), undefined);
+  assert.equal(headerNames(undefined), undefined);
+});
+
+test('a resident refusal reports which header names only the editor poll carried', async () => {
+  const audits = [];
+  const mux = new AccountPageMultiplexer({ pollMs: 250, onAudit: (event, fields) => audits.push({ event, ...fields }) });
+  mux.context = { cookies: async () => [{ name: 'prism_session_token', value: 'SECRET' }] };
+  mux.page = { isClosed: () => false, url: () => 'https://prism.openai.com/auth/session',
+    evaluate: async () => ({ status: 403, text: '<html>blocked</html>' }) };
+  const driver = new BrowserSession({}, () => {}, 'account', 0, { multiplex: true, multiplexer: mux });
+  const turn = { started: true, requestId: 'one', conversationId: 'c', turnState: 's', statusTemplate: { diff_format: 'dense' }, request,
+    // What the editor page's accepted poll carried: browser-managed headers, the one the resident also sets,
+    // and two page-script headers the resident fetch does not set.
+    nativeStatusHeaderNames: ['accept', 'content-type', 'cookie', 'openai-sentinel-token', 'user-agent', 'x-prism-device-id'],
+    ownBodies: new Set(), ownPolls: 0, ownPollErrors: 0, ownPollErrorTotal: 0, reject() {} };
+  driver.turn = turn;
+  mux.startPolling(driver, turn);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const event = audits.find(item => item.event === 'resident_poll_refused');
+  assert.equal(event.status, 403);
+  assert.deepEqual(event.editor_poll_header_names, ['accept', 'content-type', 'cookie', 'openai-sentinel-token', 'user-agent', 'x-prism-device-id']);
+  assert.deepEqual(event.editor_only_header_names, ['openai-sentinel-token', 'x-prism-device-id']);
+  assert.deepEqual(event.resident_set_header_names, ['content-type']);
+  assert.equal(JSON.stringify(audits).includes('SECRET'), false);
+});
+
+test('without a captured editor poll the refusal still records the resident side', async () => {
+  const audits = [];
+  const mux = new AccountPageMultiplexer({ onAudit: (event, fields) => audits.push({ event, ...fields }) });
+  mux.context = { cookies: async () => [] }; mux.page = { isClosed: () => false, url: () => '' };
+  await mux.diagnoseRefusal('/api/llm/response_with_tools_status', { status: 403, text: '' }, {});
+  assert.equal(audits[0].editor_poll_header_names, undefined);
+  assert.equal(audits[0].editor_only_header_names, undefined);
+  assert.deepEqual(audits[0].resident_set_header_names, ['content-type']);
+});
+
+test('a resident page that never gets the official fetch wrapper is rejected, never used for polling', async () => {
+  let closed = 0; let evaluated = 0;
+  const page = { goto: async () => {}, addInitScript: async () => {}, isClosed: () => false, on() {},
+    waitForFunction: async () => { throw new Error('timeout'); }, evaluate: async () => { evaluated += 1; } };
+  const browser = { newContext: async () => ({ addCookies: async () => {}, newPage: async () => page, close: async () => { closed += 1; } }) };
+  const mux = new AccountPageMultiplexer();
+  await assert.rejects(mux.register(browser, { access_token: 'token' }, 'account-a'), error => error.code === 'poll_carrier_unavailable' && error.status === 503);
+  assert.equal(closed, 1, 'the unusable context must be closed');
+  assert.equal(mux.isAlive(), false);
+  assert.equal(mux.identity, null);
+  assert.equal(evaluated, 0);
+  await mux.close();
+});
+
+test('the resident page loads the real site, not a bare JSON document', async () => {
+  const visited = []; let initScript = null;
+  const page = { goto: async url => { visited.push(url); }, addInitScript: async fn => { initScript = String(fn); }, waitForFunction: async () => {},
+    isClosed: () => false, on() {} };
+  const browser = { newContext: async () => ({ addCookies: async () => {}, newPage: async () => page, close: async () => {} }) };
+  const mux = new AccountPageMultiplexer({ origin: 'https://prism.openai.com' });
+  await mux.register(browser, { access_token: 'token' }, 'account-a');
+  assert.deepEqual(visited, ['https://prism.openai.com/']);
+  assert.match(initScript, /__prismOriginalFetch/);
+  await mux.close();
 });

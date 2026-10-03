@@ -40,6 +40,16 @@ function partText(part, param, state) {
   if (!part || typeof part !== 'object') invalid('unsupported_content_type', param);
   if (part.type === 'input_audio') invalid('image_input_not_supported', param);
   if (MEDIA_PARTS.has(part.type)) {
+    // First pass (state.counting): only note where the media is. Second pass: the newest `keep` are decoded
+    // and uploaded, older ones become an explicit placeholder in the transcript.
+    if (part.type === 'input_audio') invalid('image_input_not_supported', param);
+    if (state.counting) {
+      state.mediaTotal += 1;
+      state.mediaByMessage.set(state.message, (state.mediaByMessage.get(state.message) ?? 0) + 1);
+      return '\n[attachment]\n';
+    }
+    state.mediaSeen += 1;
+    if (state.mediaSeen <= state.mediaOmit) return `\n${part.type === 'input_file' || part.type === 'file' ? OMITTED_FILE : OMITTED_IMAGE}\n`;
     if (state.attachments.length >= state.limits.maxAttachments) invalid('too_many_attachments', param);
     const attachment = normalizeAttachment(part, param, state.limits);
     state.attachmentBytes += attachment.data?.length ?? 0;
@@ -56,6 +66,7 @@ function partText(part, param, state) {
 }
 
 function contentText(content, param, state) {
+  state.message += 1;
   if (content === null || content === undefined) return '';
   if (typeof content === 'string') return content;
   return (Array.isArray(content) ? content : [content]).map((part, index) => partText(part, `${param}.${index}`, state)).join('');
@@ -63,11 +74,12 @@ function contentText(content, param, state) {
 
 // Tool output: a string, text parts, or arbitrary JSON (serialised as is).
 function outputText(output, param, state) {
+  state.message += 1;
   if (output === null || output === undefined) return '';
   if (typeof output === 'string') return output;
   const parts = Array.isArray(output) ? output : [output];
   const typed = value => value && typeof value === 'object';
-  if (parts.some(part => typed(part) && MEDIA_PARTS.has(part.type))) return contentText(parts, param, state);
+  if (parts.some(part => typed(part) && MEDIA_PARTS.has(part.type))) { state.message -= 1; return contentText(parts, param, state); }
   if (parts.every(part => typed(part) && TEXT_PARTS.has(part.type) && typeof part.text === 'string')) return parts.map(part => part.text).join('');
   return JSON.stringify(output);
 }
@@ -85,13 +97,33 @@ function addMessage(state, role, text, param) {
   else invalid('unsupported_message_role', `${param}.role`);
 }
 
-function conversationState(limits) {
-  return { system: [], convo: [], env: [], linkInputs: [], items: [], attachments: [], attachmentBytes: 0, limits };
+// Attachments are uploaded to Prism one by one, so a request can carry only `maxAttachments` of them. A long
+// Codex conversation resends every earlier image with each turn, so a history holding more than the limit
+// would make the whole conversation unusable. The newest attachments are kept; older ones stay in the
+// transcript as an explicit placeholder (nothing is dropped silently). Media that `lastTurnStart` marks as
+// part of the current request must always fit: if those alone exceed the limit the request is refused.
+const OMITTED_IMAGE = '[Earlier image omitted]';
+const OMITTED_FILE = '[Earlier file omitted]';
+
+function conversationState(limits, { counting = false, mediaOmit = 0 } = {}) {
+  return { system: [], convo: [], env: [], linkInputs: [], items: [], attachments: [], attachmentBytes: 0, limits,
+    counting, mediaTotal: 0, mediaSeen: 0, mediaOmit, message: 0, mediaByMessage: new Map() };
 }
 
-function chatConversation(body, limits) {
+// Reads the conversation twice only when it holds more media than can be uploaded. The media of the LAST
+// message that has any (the current request) is never folded away: if it alone exceeds the limit the request
+// is refused with too_many_attachments, exactly as before. Earlier messages give way first.
+function readConversation(read, body, limits) {
+  const first = read(body, conversationState(limits, { counting: true }));
+  const overflow = first.mediaTotal - limits.maxAttachments;
+  if (overflow <= 0) return read(body, conversationState(limits));
+  const current = first.mediaByMessage.size ? first.mediaByMessage.get(Math.max(...first.mediaByMessage.keys())) : 0;
+  if (current > limits.maxAttachments) return read(body, conversationState(limits));
+  return read(body, conversationState(limits, { mediaOmit: overflow }));
+}
+
+function chatConversation(body, state) {
   if (!Array.isArray(body.messages) || !body.messages.length) invalid('messages_required', 'messages');
-  const state = conversationState(limits);
   body.messages.forEach((message, index) => {
     const param = `messages.${index}`;
     object(message, param);
@@ -111,8 +143,7 @@ function chatConversation(body, limits) {
   return state;
 }
 
-function responsesConversation(body, limits) {
-  const state = conversationState(limits);
+function responsesConversation(body, state) {
   if (typeof body.instructions === 'string' && body.instructions.trim()) {
     state.system.push(body.instructions);
     state.env.push(body.instructions);
@@ -172,7 +203,7 @@ export function parseRequest(body, family, models, limits = {}) {
   const chat = family === 'chat';
   const param = chat ? 'messages' : 'input';
   const mediaLimits = attachmentLimits(typeof limits === 'number' ? {} : limits);
-  const state = chat ? chatConversation(body, mediaLimits) : responsesConversation(body, mediaLimits);
+  const state = readConversation(chat ? chatConversation : responsesConversation, body, mediaLimits);
   if (!state.convo.length && !state.system.length) invalid('empty_input', param);
   const specs = collectTools(body.tools, state.items);
   const toolPolicy = normalizeToolPolicy(body, family, specs);

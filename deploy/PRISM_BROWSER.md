@@ -45,7 +45,7 @@ compose file and listed in `.env.prism-browser.example`):
 | --- | --- | --- | --- |
 | `PRISM_REQUEST_TIMEOUT` | `1800` (30 min) | 30-3600 | Seconds for one bootstrap or generation. Prism returns the whole answer only when it is finished, and long outputs at `xhigh` effort (for example a full HTML animation) can take many minutes. The reverse proxy in front of Sub2API must allow at least as long a read timeout. |
 | `PRISM_BODY_LIMIT` | `8388608` (8 MiB) | 4096-33554432 (32 MiB) | Largest request body in bytes. Codex requests with tool schemas and history often exceed 512 KiB. Management requests stay limited to 128 KiB. |
-| `PRISM_MAX_ATTACHMENTS` | `8` | 1-32 | Attachment parts per request, including history and tool outputs. |
+| `PRISM_MAX_ATTACHMENTS` | `8` | 1-32 | Attachments uploaded per request. When a long conversation's history holds more, the newest are uploaded and older ones stay in the transcript as `[Earlier image omitted]` / `[Earlier file omitted]`; only the current message's own attachments over the limit are refused (`too_many_attachments`). |
 | `PRISM_MAX_ATTACHMENT_BYTES` | `10485760` (10 MiB) | 1-33554432 | Decoded bytes per attachment. Inline base64 also counts toward the HTTP body limit. |
 | `PRISM_MAX_TOTAL_ATTACHMENT_BYTES` | `20971520` (20 MiB) | 1-67108864 | Total decoded attachment bytes per request. |
 | `PRISM_MAX_TRANSCRIPT_CHARS` | `32000` | 1000-1000000 | Characters of earlier conversation kept per request; older entries are replaced by a note. The final user message is never cut. |
@@ -644,6 +644,18 @@ its submission lease; the resident polls multiple in-flight turns concurrently.
 A later turn lazily creates an editor page in the same isolated context.
 Accounts do not share cookies or pollers. A cancellation/stop targets its own
 request ID and cannot close another turn's resident poller.
+
+**The resident page loads the real Prism site, not a bare JSON document.** Prism refuses model API
+calls (HTTP 403 with no error code) that were not made by its own page script, which wraps
+`window.fetch` and attaches the Sentinel verification. A resident page opened on `/auth/session` has no
+wrapper, so every poll from it was refused and the turn failed with `session_expired` (observed in
+production with the earlier release). The resident page now opens the site root, waits until the official
+fetch wrapper and the Sentinel SDK are present, and polls with `window.fetch`. If they never appear,
+registration fails with `poll_carrier_unavailable` (503) and no bare poll is ever made. The resident page
+never opens an editor tab and never submits a prompt. It consumes more memory than the old JSON page;
+measure it before relying on it. If a poll is still refused, one `resident_poll_refused` audit event per
+turn records the status, Prism's error code, the cookie names and the header names the editor page's own
+accepted poll carried (names only, never a value).
 
 Authenticated same-identity `/auth/session` health checks (30 seconds) keep
 idle detached workers healthy; successful matching status polls also refresh
