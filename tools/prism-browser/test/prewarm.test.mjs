@@ -99,6 +99,19 @@ test('a clean turn prepares the next chat while idle and the next request submit
   }
 });
 
+test('initialization exposes its first empty chat as the first prepared request', async () => {
+  const { driver } = session();
+  driver.page.waitForResponse = () => Promise.resolve({ ok: () => true,
+    async json() { return { uuid: projectId }; } });
+  driver.loadPage = async () => { driver.projectId = projectId; driver.syncSeen = true; driver.lastHeartbeat = 1; };
+  driver.catalog = async () => new Map([['gpt-5.6-sol', '5.6 Sol']]);
+  await driver.initialize(null, async () => {});
+  driver.page.calls.length = 0;
+  assert.equal(await driver.generate(request()), 'READY');
+  assert.deepEqual(driver.page.calls.slice(0, 3), ['check_composer', 'fill', 'submit']);
+  assert.equal(driver.page.calls.includes('new_chat'), true, 'only the idle follow-up preparation opens a new chat');
+});
+
 test('a prepared chat from an earlier page load, too old, or no longer empty is not used', async () => {
   const stale = [
     driver => { driver.pageGeneration += 1; },

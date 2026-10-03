@@ -23,9 +23,22 @@ func setPrismIsolationHeaders(c *gin.Context, account *Account, headers http.Hea
 	if account == nil || !account.IsManagedPrismAccount() {
 		return
 	}
+	// Monitor probes do not carry a downstream API-key identity, but they run
+	// repeatedly against the same managed account. Give each account's probe a
+	// private, stable scope so its verified project and prepared chat can be
+	// reused between probes. The probe marker is set only by the authenticated
+	// and signed monitor-origin middleware; ordinary key-less requests still get
+	// a fresh project per request below.
+	if c != nil && c.Request != nil && account.PrismSourceAccountID() > 0 &&
+		ChannelMonitorRequestSource(c.Request.Context()) == RequestSourceProbe {
+		accountID := strconv.FormatInt(account.PrismSourceAccountID(), 10)
+		headers.Set("X-Prism-Key-Scope", prismScopeDigest("prism-probe:v1:"+accountID))
+		headers.Set("X-Prism-Session-Scope", prismScopeDigest("prism-probe-session:v1:"+accountID))
+		return
+	}
 	id := getAPIKeyIDFromContext(c)
 	if id <= 0 {
-		return // probes and missing auth contexts get a fresh project per request
+		return // missing-auth requests get a fresh project per request
 	}
 	key := strconv.FormatInt(id, 10)
 	headers.Set("X-Prism-Key-Scope", prismScopeDigest("prism-key:v1:"+key))

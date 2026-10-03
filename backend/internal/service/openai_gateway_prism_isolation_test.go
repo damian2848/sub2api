@@ -3,6 +3,7 @@
 package service
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -67,6 +68,44 @@ func TestPrismProjectScopeRequiresExplicitConversation(t *testing.T) {
 	header := make(http.Header)
 	setPrismIsolationHeaders(c, h.account, header, []byte(`{"messages":[]}`))
 	require.Equal(t, prismScopeDigest("prism-session:v1:10:original-session"), header.Get("X-Prism-Session-Scope"))
+}
+
+func prismProbeIsolationContext() *gin.Context {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), monitorProbeOriginKey{}, RequestSourceProbe))
+	return c
+}
+
+func TestPrismProjectScopeUsesStablePrivateScopeForVerifiedProbe(t *testing.T) {
+	h := newPrismGatewayHarness(t, nil, nil)
+	one, repeat, two := make(http.Header), make(http.Header), make(http.Header)
+	setPrismIsolationHeaders(prismProbeIsolationContext(), h.account, one)
+	setPrismIsolationHeaders(prismProbeIsolationContext(), h.account, repeat)
+	other := *h.account
+	other.Extra = map[string]any{
+		"provider_preset": PrismProviderPreset, PrismSourceAccountKey: int64(33),
+	}
+	setPrismIsolationHeaders(prismProbeIsolationContext(), &other, two)
+
+	require.Equal(t, prismScopeDigest("prism-probe:v1:32"), one.Get("X-Prism-Key-Scope"))
+	require.Equal(t, prismScopeDigest("prism-probe-session:v1:32"), one.Get("X-Prism-Session-Scope"))
+	require.Equal(t, one, repeat)
+	require.NotEqual(t, one.Get("X-Prism-Key-Scope"), two.Get("X-Prism-Key-Scope"))
+	require.NotEqual(t, one.Get("X-Prism-Session-Scope"), two.Get("X-Prism-Session-Scope"))
+}
+
+func TestPrismProjectScopeDoesNotTrustUnverifiedProbeMarker(t *testing.T) {
+	h := newPrismGatewayHarness(t, nil, nil)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	// A caller-controlled header cannot establish the probe context; without a
+	// signed middleware marker this remains the ordinary key-less path.
+	c.Request.Header.Set(ChannelMonitorProbeOriginHeader, "forged")
+	header := make(http.Header)
+	setPrismIsolationHeaders(c, h.account, header, []byte(`{"input":"hello"}`))
+	require.Empty(t, header.Get("X-Prism-Key-Scope"))
+	require.Empty(t, header.Get("X-Prism-Session-Scope"))
 }
 
 func TestPrismProjectScopeRejectsWrongTypedSessionFields(t *testing.T) {

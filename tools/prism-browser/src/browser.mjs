@@ -530,6 +530,10 @@ export class BrowserSession {
     let releasePreparation;
     if (this.multiplex) releasePreparation = await this.multiplexer.acquireSubmission(signal);
     const preparationAt = performance.now();
+    // A newly created project always starts on the blank chat rendered by ?n=1.
+    // A reload may restore a project chat with prior history, so it must still
+    // open a fresh chat in generate() unless the page was created above.
+    const freshProjectChat = !projectId;
     let page;
     try {
       await interruptible(async () => {
@@ -584,6 +588,11 @@ export class BrowserSession {
           checkCurrent();
           if (!response.ok() || data.uuid !== this.projectId) throw new PrismError('project_creation_failed');
         }
+        // A new project URL (`?n=1`) renders Prism's first, empty chat tab.
+        // The composer wait below makes that tab ready for the first request;
+        // only a fresh project is marked as prepared after catalog loading.
+        // Reloaded projects still open a fresh chat in generate() because their
+        // initial tab may restore conversation history.
         await this.composer(checkCurrent);
         checkCurrent();
         const deadline = Date.now() + 120000;
@@ -597,6 +606,11 @@ export class BrowserSession {
         checkCurrent();
         this.labels = labels;
         if (!this.labels.size) throw new PrismError('model_catalog_unavailable');
+        if (freshProjectChat && this.prewarm && this.page === page) {
+          // Keep the same shape as schedulePrepare() so the first request takes
+          // the existing initialized tab without another New chat click.
+          this.preparing = Promise.resolve({ page, generation: this.pageGeneration, at: Date.now() });
+        }
       }, signal, () => this.contextEpoch === epoch ? this.close() : undefined);
       return [...this.labels.keys()];
     } finally {

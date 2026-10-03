@@ -260,7 +260,8 @@ approach follows the free-astra project (MIT; see
 `tools/prism-browser/THIRD_PARTY_NOTICES.md`).
 A normal UI send produces the SDK's authenticated request; only its input is
 replaced with that single message. Official identity, sandbox metadata and
-Sentinel proof are preserved. Each call uses a new chat tab; the native start's
+Sentinel proof are preserved. A newly initialized project reuses its first empty chat for the first request; later requests use the prewarmed next chat, while a project reload still opens a fresh chat to avoid carrying history.
+The native start's
 `metadata.model` and `reasoning_effort` are set to the requested catalog model
 and one of Prism's four efforts (low, medium, high, xhigh), because the UI's own controls can still be on
 their loading defaults. The readiness probe uses `gpt-5.6-sol` when the catalog
@@ -564,6 +565,8 @@ reuse. It does not infer a session from user prompt text, common prefixes,
 generic `metadata.user_id`, or a compatibility cache key the gateway generated
 after protocol conversion. Missing either identifier means a fresh project for
 every request.
+
+Trusted channel-monitor probes use a private, stable scope derived from the managed Prism source account. Repeated probes can reuse their prepared project and chat, so health checks avoid project creation on every request and reduce contention with user turns. The scope is set only after the signed monitor-origin check; ordinary key-less requests remain fresh and never inherit the probe project.
 
 - Header session IDs, caller `prompt_cache_key`, Responses/WS
   `client_metadata.session_id/thread_id`, and Claude Code's explicit embedded

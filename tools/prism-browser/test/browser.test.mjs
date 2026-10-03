@@ -277,6 +277,39 @@ test('late catalog data cannot restore labels after initialization is closed', a
   assert.equal(driver.isAlive(), false);
 });
 
+test('successful initialization keeps its fresh composer for the first request', async () => {
+  const project = '01234567-89ab-4cde-8123-0123456789ab';
+  const page = { isClosed: () => false, waitForResponse: () => Promise.resolve({ ok: () => true,
+    async json() { return { uuid: project }; } }) };
+  const driver = new BrowserSession({}, () => {}, 'init-prewarm', 0, { prewarm: true });
+  driver.context = { async close() {} };
+  driver.page = page;
+  driver.loadPage = async () => { driver.projectId = project; driver.syncSeen = true; driver.lastHeartbeat = 1; };
+  driver.composer = async () => ({});
+  driver.catalog = async () => new Map([['gpt-5.6-sol', '5.6 Sol']]);
+  await driver.initialize(null, async () => {});
+  const prepared = await driver.preparing;
+  assert.deepEqual(prepared, { page, generation: 1, at: prepared.at });
+
+  const reloaded = new BrowserSession({}, () => {}, 'init-reloaded', 0, { prewarm: true });
+  reloaded.context = { async close() {} };
+  reloaded.page = page;
+  reloaded.loadPage = async () => { reloaded.projectId = project; reloaded.syncSeen = true; reloaded.lastHeartbeat = 1; };
+  reloaded.composer = async () => ({});
+  reloaded.catalog = async () => new Map([['gpt-5.6-sol', '5.6 Sol']]);
+  await reloaded.initialize(project, async () => {});
+  assert.equal(reloaded.preparing, null, 'reloaded projects may restore history and must open a fresh chat');
+
+  const cold = new BrowserSession({}, () => {}, 'init-no-prewarm', 0, { prewarm: false });
+  cold.context = { async close() {} };
+  cold.page = page;
+  cold.loadPage = async () => { cold.projectId = project; cold.syncSeen = true; cold.lastHeartbeat = 1; };
+  cold.composer = async () => ({});
+  cold.catalog = async () => new Map([['gpt-5.6-sol', '5.6 Sol']]);
+  await cold.initialize(null, async () => {});
+  assert.equal(cold.preparing, null, 'PRISM_PREWARM_CHAT=false keeps the existing per-request behavior');
+});
+
 test('cancellation destroys the context and stale UI work cannot submit or clear a replacement turn', async () => {
   for (const blockedStage of ['new_chat', 'composer', 'selection', 'fill']) {
     const driver = new BrowserSession({}, () => {});
