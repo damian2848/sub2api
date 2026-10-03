@@ -45,7 +45,8 @@ echo "running  v${current_version} @ ${current_revision:0:12}  (rollback baselin
 scp -q -o IPQoS=none "$here/deploy_remote.py" "$here/rollout_base.py" "${HOST}:${REMOTE_DIR}/v${version}/"
 
 args=(--version "$version" --revision "$revision" --expect-version "$current_version" --expect-revision "$current_revision" "$mode")
-args+=("${extra[@]}")
+# An empty array is "unbound" under `set -u` in the bash 3.2 that ships with macOS, hence the guard.
+if [ "${#extra[@]}" -gt 0 ]; then args+=("${extra[@]}"); fi
 if [ "$mode" = --execute ]; then
   # Detached on the host so a dropped connection cannot stop it mid-cutover; progress is read back.
   log="${REMOTE_DIR}/v${version}/rollout.out"; err="${REMOTE_DIR}/v${version}/rollout.err"

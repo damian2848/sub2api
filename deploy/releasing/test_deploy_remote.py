@@ -207,7 +207,8 @@ class ReleaseParameterTests(unittest.TestCase):
                 if args[0] == 'curl':
                     name = args[-1].rsplit('/', 1)[1]
                     out = Path(args[args.index('--output') + 1])
-                    out.write_bytes({'checksums.txt': f'{main_sha}  sub2api_{version}_linux_amd64.tar.gz\n{prism_sha}  prism-browser_{version}.tar.gz\n'.encode(),
+                    # Same layout as a real release: checksums.txt lists the platform binaries only.
+                    out.write_bytes({'checksums.txt': f'{main_sha}  sub2api_{version}_linux_amd64.tar.gz\n{"c" * 64}  sub2api_{version}_darwin_arm64.tar.gz\n'.encode(),
                                      f'sub2api_{version}_linux_amd64.tar.gz': archive.read_bytes(),
                                      f'prism-browser_{version}.tar.gz': prism.read_bytes(),
                                      f'prism-browser_{version}.tar.gz.sha256': f'{prism_sha}  prism-browser_{version}.tar.gz\n'.encode()}[name])
@@ -218,6 +219,29 @@ class ReleaseParameterTests(unittest.TestCase):
                 self.assertEqual(len(paths), 4)
                 with self.assertRaises(RuntimeError):  # the tag does not point at the revision that was approved
                     d.download_release(version, 'b' * 40, Path(root) / 'stage2')
+
+    def test_prism_package_is_verified_by_its_own_sha256_not_checksums_txt(self):
+        version, revision = '9.9.9', 'a' * 40
+        with tempfile.TemporaryDirectory(dir=OUT) as root:
+            fake = Path(root) / 'sub2api'
+            fake.write_text('#!/bin/sh\necho "Sub2API 9.9.9 (commit: ' + revision + ', built: x)"\n'); fake.chmod(0o755)
+            main = Path(root) / 'main.tar.gz'
+            with tarfile.open(main, 'w:gz') as t: t.add(fake, arcname='sub2api')
+            prism = Path(root) / 'prism.tar.gz'
+            with tarfile.open(prism, 'w:gz') as t: t.add(fake, arcname='p/x')
+            sha = {'main': d.file_sha(main), 'prism': d.file_sha(prism)}
+            served = {'checksums.txt': f'{sha["main"]}  sub2api_{version}_linux_amd64.tar.gz\n'.encode(),  # no prism entry
+                      f'sub2api_{version}_linux_amd64.tar.gz': main.read_bytes(), f'prism-browser_{version}.tar.gz': prism.read_bytes(),
+                      f'prism-browser_{version}.tar.gz.sha256': f'{sha["prism"]}  prism-browser_{version}.tar.gz\n'.encode()}
+            def fake_run(args, **kw):
+                if args[0] == 'curl':
+                    Path(args[args.index('--output') + 1]).write_bytes(served[args[-1].rsplit('/', 1)[1]]); return b''
+                return subprocess.run(args, capture_output=True, check=True).stdout
+            with patch.object(d, 'run', fake_run):
+                self.assertEqual(len(d.download_release(version, revision, Path(root) / 'ok')), 4)
+                served[f'prism-browser_{version}.tar.gz.sha256'] = f'{"0" * 64}  prism-browser_{version}.tar.gz\n'.encode()
+                with self.assertRaises(RuntimeError):  # a wrong .sha256 must still be caught
+                    d.download_release(version, revision, Path(root) / 'bad')
 
     def test_download_rejects_a_tampered_archive(self):
         version, revision = '9.9.9', 'a' * 40

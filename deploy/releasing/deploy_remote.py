@@ -682,8 +682,9 @@ def download_release(version, revision, stage):
              '--max-time', '900', '--output', str(target), base_url + name], timeout=950)
         paths[name] = target
     sums = paths['checksums.txt']
-    for name in names[1:3]:
-        require(file_sha(paths[name]) == checksum_entry(sums, name), f'Published checksum mismatch: {name}')
+    # checksums.txt lists the platform binaries only; the Prism package is covered by its own .sha256 file.
+    main_name = names[1]
+    require(file_sha(paths[main_name]) == checksum_entry(sums, main_name), f'Published checksum mismatch: {main_name}')
     prism_sum = paths[names[3]].read_text().split()
     require(prism_sum == [file_sha(paths[names[2]]), names[2]], 'Prism package checksum file does not match its archive')
     # The tag must point at the revision the operator names, or this is not the release they approved.
