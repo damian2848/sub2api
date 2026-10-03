@@ -1,7 +1,7 @@
 import { flushPromises, shallowMount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ref } from 'vue'
-import type { MonitorMetric } from '@/api/channelMonitorV2'
+import type { MonitorHealth, MonitorMetric } from '@/api/channelMonitorV2'
 import MetricCell from '@/features/channel-monitor-v2/MetricCell.vue'
 import ChannelStatusV2View from '../ChannelStatusV2View.vue'
 
@@ -15,7 +15,7 @@ vi.mock('vue-router', () => ({ useRoute: () => ({ query: {} }), useRouter: () =>
 vi.mock('vue-i18n', async (importOriginal) => ({ ...await importOriginal<typeof import('vue-i18n')>(), useI18n: () => ({ locale: ref('en'), t: (key: string) => key, te: () => false }) }))
 
 const coverage = { requested_start: '2026-10-03T00:00:00Z', requested_end: '2026-10-03T01:30:00Z', coverage_start: '2026-10-03T00:00:00Z', data_through: '2026-10-03T01:30:00Z', computed_at: '2026-10-03T01:30:00Z', aggregation_lag_seconds: 0, coverage_complete: true, bucket_seconds: 300 }
-const health = { overall: 'unknown', error_rate: 'unknown', ttft: 'unknown', cache: 'unknown', minimum_sample: 50 }
+const health: MonitorHealth = { overall: 'unknown', error_rate: 'unknown', ttft: 'unknown', cache: 'unknown', minimum_sample: 50 }
 const emptyMetric = (): MonitorMetric => ({ has_samples: false, request_count: 0, success_requests: 0, error_requests: 0, token_count: 0, rpm: 0, tpm: 0, error_rate: 0, cache_rate: 0, cache_rate_numerator: 0, cache_rate_denominator: 0, ttft: { sample_count: 0, p50_ms: null, p95_ms: null, avg_ms: null }, duration: { sample_count: 0, p50_ms: null, p95_ms: null, avg_ms: null } })
 const mounted: ReturnType<typeof shallowMount>[] = []
 
@@ -29,8 +29,8 @@ beforeEach(() => {
 })
 afterEach(() => { for (const wrapper of mounted.splice(0)) wrapper.unmount() })
 
-async function mountView(metric: MonitorMetric) {
-  api.getSnapshot.mockResolvedValue({ metrics: metric, health, coverage, config: { refresh_interval_seconds: 60, platforms: [] }, trend: [] })
+async function mountView(metric: MonitorMetric, snapshotHealth: MonitorHealth = health) {
+  api.getSnapshot.mockResolvedValue({ metrics: metric, health: snapshotHealth, coverage, config: { refresh_interval_seconds: 60, platforms: [] }, trend: [] })
   api.getModels.mockResolvedValue({ items: [{ platform: 'openai', model: 'probe-only', metrics: metric, health }] })
   const wrapper = shallowMount(ChannelStatusV2View, { global: { stubs: { AppLayout: { template: '<div><slot /></div>' }, MetricCell: false } } })
   mounted.push(wrapper)
@@ -97,4 +97,13 @@ it('does not trust legacy observation-derived rates without actual request sampl
  await wrapper.get('[data-testid="monitor-layout-toggle"]').trigger('click')
  await flushPromises()
  expect(wrapper.findAllComponents(MetricCell)[0].props('value')).toBe('—')
+})
+
+it('does not substitute API overall health for an omitted cache verdict', async () => {
+ const wrapper = await mountView({ ...emptyMetric(), has_samples: true }, { ...health, overall: 'critical', cache: undefined })
+ await wrapper.get('[data-testid="monitor-layout-toggle"]').trigger('click')
+ await flushPromises()
+ const cacheCell = wrapper.findAllComponents(MetricCell)[2]
+ expect(cacheCell.props('state')).toBe('unknown')
+ expect(cacheCell.props('title')).toBe('channelMonitorV2.cards.cacheHint')
 })

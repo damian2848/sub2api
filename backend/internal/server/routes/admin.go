@@ -634,6 +634,8 @@ func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 			adminSettings.GET("/prism", h.Admin.Prism.GetConfiguration)
 			adminSettings.PUT("/prism", h.Admin.Prism.UpdateConfiguration)
 			adminSettings.DELETE("/prism", h.Admin.Prism.ResetConfiguration)
+			adminSettings.GET("/prism/restart", h.Admin.Prism.GetRestartStatus)
+			adminSettings.POST("/prism/restart", h.Admin.Prism.Restart)
 		}
 		adminSettings.POST("/test-smtp", h.Admin.Setting.TestSMTPConnection)
 		adminSettings.POST("/send-test-email", h.Admin.Setting.SendTestEmail)

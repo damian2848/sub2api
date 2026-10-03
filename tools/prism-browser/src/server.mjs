@@ -11,6 +11,7 @@ import { nativeStartSettings } from './start-limit.mjs';
 import { ProjectRegistry, requestProjectScope } from './projects.mjs';
 import { ResourceGuard, RuntimeMetrics } from './resources.mjs';
 import { CONFIGURATION_BODY_LIMIT, PrismConfigurationStore } from './configuration.mjs';
+import { connectRestartSupervisor, PrismRestartController, RESTART_BODY_LIMIT, RESTART_EXIT_CODE } from './restart.mjs';
 
 function bearer(req) {
   const value = req.headers.authorization;
@@ -26,7 +27,28 @@ function send(res, status, value, retryAfterSeconds) {
   res.end(body);
 }
 
-export function readJSON(req, limit) {
+// JSON.parse alone discards duplicate object keys. Security-sensitive restart
+// requests additionally reject them, including escaped spellings, at all depths.
+function rejectDuplicateJSONKeys(text) {
+  const tokens = /\s*("(?:[^"\\\x00-\x1f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*"|true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|[{}[\],:])/gy;
+  const stack = [];
+  let match;
+  while ((match = tokens.exec(text))) {
+    const token = match[1];
+    if (token === '{') stack.push({ keys: new Set(), nextKey: true });
+    else if (token === '[') stack.push(null);
+    else if (token === '}' || token === ']') stack.pop();
+    else if (token === ',' && stack.at(-1)) stack.at(-1).nextKey = true;
+    else if (token.startsWith('"') && stack.at(-1)?.nextKey) {
+      const context = stack.at(-1), key = JSON.parse(token);
+      if (context.keys.has(key)) throw new PrismError('invalid_json', 400);
+      context.keys.add(key); context.nextKey = false;
+    }
+    if (stack.length > 32) throw new PrismError('invalid_json', 400);
+  }
+}
+
+export function readJSON(req, limit, strict = false) {
   if (req.headers['content-encoding']) throw new PrismError('content_encoding_not_supported', 415);
   if (req.headers['content-type'] && !/^application\/json(?:\s*;|$)/i.test(req.headers['content-type'])) {
     throw new PrismError('content_type_must_be_json', 415);
@@ -48,7 +70,12 @@ export function readJSON(req, limit) {
     };
     const onEnd = () => {
       cleanup();
-      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); }
+      try {
+        const text = Buffer.concat(chunks).toString('utf8') || '{}';
+        const value = JSON.parse(text);
+        if (strict) rejectDuplicateJSONKeys(text);
+        resolve(value);
+      }
       catch { reject(new PrismError('invalid_json', 400)); }
     };
     req.on('data', onData); req.on('end', onEnd); req.on('error', onError); req.on('aborted', onAbort);
@@ -63,12 +90,13 @@ export function streamReasoningEnabled(value = process.env.PRISM_STREAM_REASONIN
 export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024 * 1024, requestTimeout = 1800000,
   sessionTimeout = 30000, keepaliveMs = 10000, maxTextBytes, maxTranscriptChars,
   maxAttachments, maxAttachmentBytes, maxTotalAttachmentBytes, promptCache = new PromptCache(),
-  streamReasoning = streamReasoningEnabled(), projectIsolation = false, configuration }) {
+  streamReasoning = streamReasoningEnabled(), projectIsolation = false, configuration, restart }) {
   if (typeof managementKey !== 'string' || managementKey.length < 32) throw new Error('PRISM_MANAGEMENT_KEY must have at least 32 characters');
   const managementHash = createHash('sha256').update(managementKey).digest('hex');
   // Codex requests (tool schemas plus history) are large; management bodies are not.
   const managementLimit = Math.min(bodyLimit, 128 * 1024);
   const mediaLimits = attachmentLimits({ maxAttachments, maxAttachmentBytes, maxTotalAttachmentBytes });
+  restart ||= new PrismRestartController({ configuration });
   const server = createServer(async (req, res) => {
     const controller = new AbortController();
     let timer;
@@ -86,6 +114,16 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
         if (!keyMatches(bearer(req), managementHash)) throw new PrismError('invalid_management_key', 401);
         return send(res, 200, await manager.resources?.() || { available: false });
       }
+      if (url.pathname === '/internal/restart') {
+        if (!keyMatches(bearer(req), managementHash)) throw new PrismError('invalid_management_key', 401);
+        if (req.method === 'GET') return send(res, 200, restart.snapshot());
+        if (req.method === 'POST') {
+          const status = await restart.accept(await readJSON(req, Math.min(managementLimit, RESTART_BODY_LIMIT), true));
+          restart.afterResponse(res);
+          return send(res, 202, status);
+        }
+        throw new PrismError('method_not_allowed', 405);
+      }
       if (url.pathname === '/internal/config') {
         if (!keyMatches(bearer(req), managementHash)) throw new PrismError('invalid_management_key', 401);
         if (!configuration) throw new PrismError('prism_configuration_unavailable', 503);
@@ -94,6 +132,9 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
           await configuration.put(await readJSON(req, Math.min(managementLimit, CONFIGURATION_BODY_LIMIT))));
         if (req.method === 'DELETE') return send(res, 200, await configuration.reset());
         throw new PrismError('method_not_allowed', 405);
+      }
+      if (restart.pending) {
+        const error = new PrismError('prism_restarting', 503); error.retryAfterSeconds = 3; throw error;
       }
       const internal = /^\/internal\/accounts\/([1-9][0-9]{0,18})\/(session|bootstrap|status)$/.exec(url.pathname);
       const user = /^\/accounts\/([1-9][0-9]{0,18})\/v1\/(models|responses|chat\/completions)$/.exec(url.pathname);
@@ -201,6 +242,12 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
 }
 
 export async function main() {
+  // Install this before the IPC hello and any asynchronous configuration/pool
+  // initialization. A worker must never finish booting after its supervisor is
+  // gone, even if capability was acknowledged just before the disconnect.
+  let shutdown = async () => { process.exit(1); };
+  process.once('disconnect', () => { void shutdown(); });
+  const supervisor = await connectRestartSupervisor();
   const integer = (name, fallback, min, max) => {
     const value = Number(process.env[name] || fallback);
     if (!Number.isInteger(value) || value < min || value > max) throw new Error(`invalid ${name}`);
@@ -235,7 +282,9 @@ export async function main() {
   const statusPollMs = integer('PRISM_STATUS_POLL_MS', 1000, 0, 10000);
   if (statusPollMs > 0 && statusPollMs < 250) throw new Error('invalid PRISM_STATUS_POLL_MS');
   await manager.init();
-  const server = createPrismServer({ manager, managementKey: process.env.PRISM_MANAGEMENT_KEY,
+  const restart = new PrismRestartController({ configuration,
+    prepareRestart: supervisor?.prepareRestart, onRestart: supervisor ? () => { void shutdown(true); } : undefined });
+  const server = createPrismServer({ manager, managementKey: process.env.PRISM_MANAGEMENT_KEY, restart,
     bodyLimit: integer('PRISM_BODY_LIMIT', 8 * 1024 * 1024, 4096, 32 * 1024 * 1024),
     maxAttachments: integer('PRISM_MAX_ATTACHMENTS', 8, 1, 32),
     maxAttachmentBytes: integer('PRISM_MAX_ATTACHMENT_BYTES', 10 * 1024 * 1024, 1, 32 * 1024 * 1024),
@@ -249,20 +298,29 @@ export async function main() {
   await new Promise(resolve => server.listen(port, process.env.PRISM_HOST || '0.0.0.0', resolve));
   console.log(JSON.stringify({ event: 'listening', port }));
   let closing = false;
-  const shutdown = async () => {
+  shutdown = async (restarting = false) => {
     if (closing) return;
     closing = true;
-    const deadline = setTimeout(() => process.exit(1), 10000);
+    const exitCode = restarting ? RESTART_EXIT_CODE : 0;
+    // process.exit also runs Playwright's synchronous browser-tree cleanup.
+    // A stuck browser must not leave this worker accepting traffic indefinitely.
+    const deadline = setTimeout(() => process.exit(restarting ? RESTART_EXIT_CODE : 1), 10000);
     const stopped = new Promise(resolve => server.close(resolve));
-    await manager.close();
+    try { await manager.close(); }
+    catch { console.error(JSON.stringify({ event: 'shutdown_cleanup_failed' })); }
     server.closeAllConnections();
     await stopped;
     clearTimeout(deadline);
+    process.exit(exitCode);
   };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', () => { void shutdown(); });
+  process.on('SIGINT', () => { void shutdown(); });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main().catch(() => { console.error(JSON.stringify({ event: 'startup_failed' })); process.exitCode = 1; });
+  main().catch(() => {
+    // The supervised IPC channel stays referenced during startup. A failed
+    // initialization must exit, not leave the supervisor waiting forever.
+    process.stderr.write(JSON.stringify({ event: 'startup_failed' }) + '\n', () => process.exit(1));
+  });
 }

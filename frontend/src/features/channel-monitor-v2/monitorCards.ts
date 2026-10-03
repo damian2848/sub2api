@@ -64,6 +64,8 @@ export function monitorCardTimeline(row: MonitorMatrixRow, coverage: MonitorCove
     // Keep the original bucket metrics: redacted counts cannot weight rates,
     // and bucket medians cannot be combined into a time-window P50.
     bar.buckets.push(bucket)
+    // Overall is the server's API error/TTFT verdict. Cache remains separate,
+    // and insufficient samples must remain unknown even when observed rates exist.
     if (severity[bucket.health.overall] > severity[bar.state]) bar.state = bucket.health.overall
   }
   for (const bar of bars) bar.buckets.sort((a, b) => Date.parse(a.bucket_start) - Date.parse(b.bucket_start))

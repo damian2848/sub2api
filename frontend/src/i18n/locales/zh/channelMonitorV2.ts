@@ -3,27 +3,30 @@ export default {
   channelMonitorV2: {
     "cards": {
         "bucketDetails": "时段内采样详情",
-        "sampleDetails": "{time} · 可用率 {availability} · 缓存率 {cache} · 首 Token P50 {ttft}",
+        "sampleDetails": "{time} · API 健康 {health} · 可用率 {availability} · 缓存率 {cache}（{cacheState}） · 首 Token P50 {ttft}",
         "showCards": "卡片视图",
         "showAnalytics": "详细数据",
         "passive": "真实请求 + 主动探测 · 渠道可用性",
         "activeProbe": "主动探测",
-        "healthHint": "综合健康结合 API 错误率、首 Token 和缓存表现；不等于下方单独展示的 API 可用率。",
+        "apiHealth": "API 健康",
+        "healthHint": "API 健康仅结合错误率与首 Token；缓存表现单独评价，不影响 API 健康色。请求样本不足时状态为未知，已观测的可用率仍可展示。",
+        "cacheHint": "缓存表现独立评价，不影响 API 健康。低缓存率不代表 API 不可用；请求样本不足时缓存状态为未知。",
+        "cacheStates": { "healthy": "缓存正常", "warning": "缓存需关注", "critical": "缓存偏低", "unknown": "缓存未知" },
         "availabilityHint": "业务与主动探测的真实生成请求统一统计；质量答错、额度查询和 HEAD 连通检查不作为 API 失败或成功。没有请求的时段保持未知。",
         "groupRate": "分组倍率 {value}x",
         "cache": "缓存率",
         "availability": "可用率",
         "ttft": "首 TOKEN",
-        "windows": "近 {count} 个时间段",
+        "windows": "API 健康 · 近 {count} 个时间段",
         "refreshIn": "{seconds}s 后刷新",
         "pageRefresh": "页面刷新",
         "refreshPaused": "暂停",
-        "trafficHistory": "真实请求健康状态时间线",
+        "trafficHistory": "API 健康时间线（错误率 / 首 Token，缓存独立）",
         "health": {
             "healthy": "正常",
             "warning": "降级",
             "critical": "异常",
-            "unknown": "样本不足"
+            "unknown": "未知（样本不足）"
         }
     },
     "candy": {
@@ -88,7 +91,7 @@ export default {
       label: '展示维度', platform: '平台', platformGroup: '平台 / 分组', platformModel: '平台 / 模型', platformGroupModel: '平台 / 分组 / 模型'
     },
     trendView: { label: '趋势视图', pulse: '色块矩阵', line: '折线图' },
-    healthMode: { label: '健康显示', overall: '综合', success: '错误率', ttft: '首 Token', cache: '缓存率' },
+    healthMode: { label: '健康显示', overall: 'API 健康', success: '错误率', ttft: '首 Token', cache: '缓存率' },
     tabs: { aria: '明细维度', models: '模型', errors: '错误原因', users: '用户排行' },
     metrics: {
       rpm: 'RPM',
@@ -102,7 +105,7 @@ export default {
       ttftP50: '首 Token P50',
       durationP50: '请求时长 P50',
       cacheRate: '缓存率',
-      cacheDetail: '读缓存占比',
+      cacheDetail: '读缓存占比 · 独立评价',
       successRate: '成功率',
       successRateValue: '成功率 {value}',
       errorRateValue: '错误率 {value}',
@@ -166,9 +169,11 @@ export default {
         '勾选「忽略」的类别不计入错误率与健康分，仍在错误原因列表中以灰色显示并标记忽略。未匹配的错误归入「其他」。',
       ignoredSummary: '已忽略 {ignored} 类 · 计入错误率 {counted} 类',
       healthTitle: '健康阈值',
-      healthHint: '控制用户端色块和整体评分。默认阈值较宽松，避免少量错误或低缓存率立即显示异常。',
+      healthHint: 'API 整体评分仅结合错误率与首 Token。缓存阈值仅用于独立缓存评价，不改变 API 健康色。',
+      minimumSampleHint: '统一按真实请求数设置门槛，低于门槛各项均为未知，不按 Token 数判断；首 Token 还需足够实际测量样本。',
+      cacheThresholdHint: '默认 0 / 0 不因未命中缓存判异常；设置非零阈值仅启用独立缓存评价。',
       fields: {
-        minimumSample: '最小样本数',
+        minimumSample: '最小请求样本数',
         warningError: '错误率关注 %',
         criticalError: '错误率异常 %',
         targetTtft: 'TTFT 目标 ms',
@@ -181,7 +186,7 @@ export default {
       namedModelsCount: '将展示 {count} 个命名模型维度；名单外模型归入各平台「其他」。',
       userContractTitle: '用户端展示约定',
       userContract: {
-        health: '健康色三指标：错误率 60% + 首 Token P50 20% + 缓存率 20%（阈值可在上方配置）',
+        health: 'API 健康色仅由错误率与首 Token P50 合成；缺少首 Token 样本时仅按错误率评价。缓存独立展示；请求样本不足均为未知。',
         trend: '趋势可切换色块矩阵 / 折线图（错误率 · 缓存率 · 首 Token）',
         latency: '延迟展示 AVG · P50 · P90；不展示绝对请求数 / 错误数',
         models: '模型列表留空时展示真实模型名，不会全部归入「其他」',

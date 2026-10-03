@@ -146,7 +146,7 @@ type ChannelMonitorV2Health struct {
 	TTFT      string `json:"ttft"`
 	Cache     string `json:"cache"`
 	// Score is 0–100 when samples are sufficient; omitted/null when unknown.
-	// Overall blends error-rate, TTFT p50, and cache rate (weights in Thresholds).
+	// Overall blends API error rate and TTFT p50. Cache is a separate efficiency signal.
 	Score          *float64                         `json:"score,omitempty"`
 	ErrorRateScore *float64                         `json:"error_rate_score,omitempty"`
 	TTFTScore      *float64                         `json:"ttft_score,omitempty"`
@@ -156,7 +156,8 @@ type ChannelMonitorV2Health struct {
 }
 
 type ChannelMonitorV2HealthThresholds struct {
-	// MinimumSample is required before scoring request/latency/cache signals.
+	// MinimumSample counts real requests before any signal is scored.
+	// TTFT also requires this many measured latency samples; token counts are not samples.
 	MinimumSample int64 `json:"minimum_sample"`
 	// WarningErrorRate / CriticalErrorRate map to discrete bands for legacy UI.
 	WarningErrorRate  float64 `json:"warning_error_rate"`
@@ -166,12 +167,13 @@ type ChannelMonitorV2HealthThresholds struct {
 	WarningTTFTMs  int64 `json:"warning_ttft_ms"`
 	CriticalTTFTMs int64 `json:"critical_ttft_ms"`
 	// WarningCacheRate / CriticalCacheRate: cache rate below these → warning/critical bands.
-	// Higher cache rate is better; defaults 20% warning / 5% critical.
+	// Higher cache rate is better; zero/zero disables independent cache penalties by default.
 	WarningCacheRate  float64 `json:"warning_cache_rate"`
 	CriticalCacheRate float64 `json:"critical_cache_rate"`
-	// ErrorWeight + TTFTWeight + CacheWeight should sum to 1.0.
+	// Positive ErrorWeight and TTFTWeight are normalized over observed API signals.
 	ErrorWeight float64 `json:"error_weight"`
 	TTFTWeight  float64 `json:"ttft_weight"`
+	// CacheWeight is retained for configuration compatibility, not API overall scoring.
 	CacheWeight float64 `json:"cache_weight"`
 }
 
@@ -884,8 +886,8 @@ func DefaultChannelMonitorV2HealthThresholds() ChannelMonitorV2HealthThresholds 
 		TargetTTFTMs:      3000,
 		WarningTTFTMs:     3000,
 		CriticalTTFTMs:    10000,
-		// A zero/zero cache threshold means cache misses do not affect health
-		// until an operator explicitly configures cache scoring.
+		// A zero/zero cache threshold disables penalties on the independent cache
+		// indicator until an operator explicitly configures cache scoring.
 		WarningCacheRate:  0,
 		CriticalCacheRate: 0,
 		ErrorWeight:       0.60,
@@ -1047,21 +1049,33 @@ func ChannelMonitorV2HealthForWithThresholds(metrics ChannelMonitorV2Metric, thr
 		Overall: "unknown", ErrorRate: "unknown", TTFT: "unknown", Cache: "unknown",
 		MinimumSample: thresholds.MinimumSample, Thresholds: thresholds,
 	}
+	// A few long prompts must not supply enough "samples" through their token
+	// counts to turn otherwise unknown API health red (or green).
+	if metrics.RequestCount < result.MinimumSample {
+		return result
+	}
 
+	// Preserve legacy configuration, including cache-only weights, without
+	// letting cache decide API health or leaving such configurations unscorable.
+	errorWeight, ttftWeight := thresholds.ErrorWeight, thresholds.TTFTWeight
+	if errorWeight <= 0 && ttftWeight <= 0 {
+		defaults := DefaultChannelMonitorV2HealthThresholds()
+		errorWeight, ttftWeight = defaults.ErrorWeight, defaults.TTFTWeight
+	}
 	type scored struct {
 		score  float64
 		weight float64
-		band   string
 	}
-	parts := make([]scored, 0, 3)
+	parts := make([]scored, 0, 2)
 
-	if metrics.RequestCount >= result.MinimumSample {
-		s := errorRateScore(metrics.ErrorRate, thresholds.CriticalErrorRate)
-		result.ErrorRateScore = &s
-		result.ErrorRate = healthBand(metrics.ErrorRate, thresholds.WarningErrorRate, thresholds.CriticalErrorRate)
-		parts = append(parts, scored{score: s, weight: thresholds.ErrorWeight, band: result.ErrorRate})
+	errorScore := errorRateScore(metrics.ErrorRate, thresholds.CriticalErrorRate)
+	result.ErrorRateScore = &errorScore
+	result.ErrorRate = healthBand(metrics.ErrorRate, thresholds.WarningErrorRate, thresholds.CriticalErrorRate)
+	if errorWeight > 0 {
+		parts = append(parts, scored{score: errorScore, weight: errorWeight})
 	}
 	// Prefer p50 for TTFT scoring; fall back to p95 only if p50 is missing.
+	// Enough requests do not manufacture missing first-token observations.
 	if metrics.TTFT.SampleCount >= result.MinimumSample {
 		var ttftMs *int64
 		if metrics.TTFT.P50Ms != nil {
@@ -1073,20 +1087,21 @@ func ChannelMonitorV2HealthForWithThresholds(metrics ChannelMonitorV2Metric, thr
 			s := ttftP50Score(float64(*ttftMs), float64(thresholds.TargetTTFTMs), float64(thresholds.CriticalTTFTMs))
 			result.TTFTScore = &s
 			result.TTFT = healthBand(float64(*ttftMs), float64(thresholds.WarningTTFTMs), float64(thresholds.CriticalTTFTMs))
-			parts = append(parts, scored{score: s, weight: thresholds.TTFTWeight, band: result.TTFT})
+			if ttftWeight > 0 {
+				parts = append(parts, scored{score: s, weight: ttftWeight})
+			}
 		}
 	}
-	// Cache: need a meaningful denominator; higher rate is better.
-	if metrics.CacheRateDenominator >= result.MinimumSample {
+	// Cache is an independent efficiency indicator. The request-sample gate
+	// above applies; its token denominator is only for computing the hit ratio.
+	if metrics.CacheRateDenominator > 0 {
 		s := cacheRateScore(metrics.CacheRate)
 		if thresholds.WarningCacheRate <= 0 && thresholds.CriticalCacheRate <= 0 {
 			// A zero/zero cache threshold means "do not penalize cache misses".
 			s = 100
 		}
 		result.CacheScore = &s
-		// Invert for healthBand (lower is worse): use (1 - rate) against warning/critical floors.
 		result.Cache = cacheRateBand(metrics.CacheRate, thresholds.WarningCacheRate, thresholds.CriticalCacheRate)
-		parts = append(parts, scored{score: s, weight: thresholds.CacheWeight, band: result.Cache})
 	}
 
 	if len(parts) == 0 {
@@ -1096,9 +1111,6 @@ func ChannelMonitorV2HealthForWithThresholds(metrics ChannelMonitorV2Metric, thr
 	for _, p := range parts {
 		weightSum += p.weight
 		scoreSum += p.weight * p.score
-	}
-	if weightSum <= 0 {
-		return result
 	}
 	overall := scoreSum / weightSum
 	result.Score = &overall

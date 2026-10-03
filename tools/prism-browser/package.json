@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "engines": { "node": ">=22" },
-  "scripts": { "start": "node src/server.mjs", "test": "node --test test/*.test.mjs",
+  "scripts": { "start": "node src/supervisor.mjs", "test": "node --test test/*.test.mjs",
     "test:smoke": "node --test test/smoke/*.test.mjs" },
   "dependencies": { "playwright": "1.56.1" }
 }

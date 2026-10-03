@@ -21,13 +21,14 @@
                 <span v-if="row.group_rate_multiplier != null" class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-gray-500 dark:bg-dark-700 dark:text-gray-400">{{ t('channelMonitorV2.cards.groupRate', { value: row.group_rate_multiplier.toFixed(2) }) }}</span>
               </div>
             </div>
-            <span class="shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold" :class="healthBadge[row.health.overall]" :title="t('channelMonitorV2.cards.healthHint')">{{ t(`channelMonitorV2.cards.health.${row.health.overall}`) }}</span>
+            <span class="max-w-[45%] shrink-0 rounded-full px-2 py-1 text-center text-[10px] font-semibold" :class="healthBadge[row.health.overall]" :title="t('channelMonitorV2.cards.healthHint')" data-testid="monitor-api-health">{{ t('channelMonitorV2.cards.apiHealth') }} · {{ t(`channelMonitorV2.cards.health.${row.health.overall}`) }}</span>
           </header>
 
           <dl class="mt-5 grid grid-cols-3 gap-2">
             <div v-for="metric in metrics(row)" :key="metric.name" class="min-w-0 rounded-2xl border border-gray-100 bg-gray-50/70 px-2.5 py-3 dark:border-dark-700/60 dark:bg-dark-900/40">
               <dt class="truncate text-[10px] tracking-wide text-gray-500 dark:text-gray-400" :title="metric.title || metric.name">{{ metric.name }}</dt>
               <dd class="mt-1.5 font-mono text-base font-semibold tabular-nums" :class="metric.color">{{ metric.value }}</dd>
+              <dd v-if="metric.stateLabel" class="mt-1 text-[10px]" :class="metric.color" data-testid="cache-health-state">{{ metric.stateLabel }}</dd>
               <dd v-if="metric.source" class="mt-1 text-[10px] text-gray-500 dark:text-gray-400" data-testid="availability-source">{{ metric.source }}</dd>
             </div>
           </dl>
@@ -88,7 +89,7 @@
         <div class="max-h-[min(18rem,calc(100vh-48px))] max-w-lg overflow-y-auto overscroll-contain break-words" data-testid="monitor-card-tooltip-content">
           <p class="font-semibold">{{ detail.row.group_name || '#' + detail.row.group_id }}</p>
           <template v-if="detail.kind === 'traffic'">
-            <p class="text-gray-500 dark:text-gray-400">{{ dateTime(detail.bar.start) }} - {{ dateTime(detail.bar.end) }} · {{ t('channelMonitorV2.cards.health.' + detail.bar.state) }}</p>
+            <p class="text-gray-500 dark:text-gray-400">{{ dateTime(detail.bar.start) }} - {{ dateTime(detail.bar.end) }} · {{ t('channelMonitorV2.cards.apiHealth') }} · {{ t('channelMonitorV2.cards.health.' + detail.bar.state) }}</p>
             <p v-if="!detail.bar.buckets.length" class="mt-1">{{ t('channelMonitorV2.matrix.noTraffic') }}</p>
             <template v-else>
               <p class="mt-1 text-gray-500 dark:text-gray-400">{{ t('channelMonitorV2.cards.bucketDetails') }}</p>
@@ -199,13 +200,17 @@ const platforms = computed(() => {
 })
 const healthBadge = { healthy: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300', warning: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300', critical: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300', unknown: 'bg-gray-100 text-gray-500 dark:bg-dark-700 dark:text-gray-400' }
 const healthBar = { healthy: 'h-5 bg-emerald-400', warning: 'h-3 bg-amber-400', critical: 'h-2 bg-red-400', unknown: 'h-1 bg-gray-300 dark:bg-dark-600' }
+const metricColor = { healthy: 'text-emerald-600 dark:text-emerald-300', warning: 'text-amber-600 dark:text-amber-300', critical: 'text-red-600 dark:text-red-300', unknown: 'text-gray-800 dark:text-gray-100' }
 const candyColor = { correct: 'bg-emerald-400', incorrect: 'bg-amber-400', error: 'bg-red-400', unknown: 'bg-gray-400', stale: 'bg-gray-400' }
 const time = (value: number | string) => new Date(value).toLocaleTimeString(locale.value, { hour: '2-digit', minute: '2-digit', hour12: false })
 function metrics(row: MonitorMatrixRow) {
   const sampled = hasMonitorSamples(row.metrics)
   const availability = effectiveAvailability(row.metrics)
+  // Use the backend cache verdict independently; never borrow API health or
+  // re-evaluate minimum samples from privacy-redacted request counters.
+  const cacheState = row.health.cache || 'unknown'
   return [
-    { name: t('channelMonitorV2.cards.cache'), value: sampled ? formatMonitorPercent(row.metrics.cache_rate) : '—', color: 'text-gray-800 dark:text-gray-100' },
+    { name: t('channelMonitorV2.cards.cache'), title: t('channelMonitorV2.cards.cacheHint'), value: sampled ? formatMonitorPercent(row.metrics.cache_rate) : '—', stateLabel: t('channelMonitorV2.cards.cacheStates.' + cacheState), color: metricColor[cacheState] },
     { name: t('channelMonitorV2.cards.availability'), title: t('channelMonitorV2.cards.availabilityHint'), value: availability == null ? '—' : formatMonitorPercent(availability), source: monitorAvailabilitySource(row.metrics) ? t('channelMonitorV2.sources.' + monitorAvailabilitySource(row.metrics)) : undefined, color: availability != null && row.health.error_rate === 'healthy' ? 'text-emerald-600 dark:text-emerald-300' : 'text-gray-800 dark:text-gray-100' },
     { name: t('channelMonitorV2.cards.ttft'), title: t('channelMonitorV2.metrics.ttftP50'), value: formatMonitorMs(row.metrics.ttft.p50_ms), color: 'text-gray-800 dark:text-gray-100' }
   ]
@@ -214,12 +219,14 @@ function dateTime(value: number | string) {
   return new Date(value).toLocaleString(locale.value, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 function trafficLabel(row: MonitorMatrixRow, bar: TrafficBar) {
-  return (row.group_name || '#' + row.group_id) + ' · ' + dateTime(bar.start) + ' - ' + dateTime(bar.end) + ' · ' + t('channelMonitorV2.cards.health.' + bar.state)
+  return (row.group_name || '#' + row.group_id) + ' · ' + dateTime(bar.start) + ' - ' + dateTime(bar.end) + ' · ' + t('channelMonitorV2.cards.apiHealth') + ' · ' + t('channelMonitorV2.cards.health.' + bar.state)
 }
 function trafficSample(bucket: MonitorMatrixBucket) {
   return t('channelMonitorV2.cards.sampleDetails', {
     time: dateTime(bucket.bucket_start), availability: formatMonitorPercent(1 - bucket.metrics.error_rate),
     cache: formatMonitorPercent(bucket.metrics.cache_rate), ttft: formatMonitorMs(bucket.metrics.ttft.p50_ms),
+    health: t('channelMonitorV2.cards.health.' + bucket.health.overall),
+    cacheState: t('channelMonitorV2.cards.cacheStates.' + (bucket.health.cache || 'unknown')),
   })
 }
 function candyTooltip(result: MonitorCandyResult) {

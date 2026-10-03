@@ -6,4 +6,4 @@ RUN npm ci --omit=dev --ignore-scripts
 COPY src ./src
 COPY THIRD_PARTY_NOTICES.md ./
 EXPOSE 8319
-CMD ["node", "src/server.mjs"]
+CMD ["node", "src/supervisor.mjs"]

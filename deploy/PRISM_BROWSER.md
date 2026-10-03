@@ -702,7 +702,8 @@ The gateway proxies `GET/PUT/DELETE /api/v1/admin/settings/prism` to the fixed
 deployment sidecar's management-authenticated `/internal/config`. A disabled
 gateway routing switch does not prevent managing a separately configured sidecar.
 The gateway does not save new connection URLs or keys, migrate account endpoints,
-or automatically restart either service. Older sidecars without this API show an
+or automatically restart either service on save. An explicit administrator-confirmed
+managed restart is available separately (see below). Older sidecars without this API show an
 unsupported message instead of an editable form with fabricated defaults.
 
 **Saving is not a hot reload.** The UI shows the immutable currently effective
@@ -724,6 +725,56 @@ mutate process environment, or immediately enable experimental multiplexing.
 values captured at the current sidecar startup as desired. It too requires a
 sidecar restart if those values differ from effective. To change environment
 configuration itself, edit the server deployment and recreate/restart the sidecar.
+
+### Restart and apply from the admin page
+
+The Prism configuration page now offers **重启并应用配置 / Restart and apply
+configuration** to administrators only. It checks managed-restart capability
+independently of startup configuration support. Observers cannot read this
+capability or request a restart. Unsaved edits must be saved (or discarded)
+first; the confirmation dialog warns that all running and queued Prism requests
+may be interrupted. The gateway itself is not restarted.
+
+The gateway exposes `GET/POST /api/v1/admin/settings/prism/restart` and contacts
+only its fixed deployment sidecar's management-authenticated `/internal/restart`.
+The POST contains the boot UUID and the complete saved configuration reviewed
+by the administrator; it cannot specify a command, host, container, file path,
+or environment variables. A changed boot or saved configuration returns a
+conflict instead of restarting an unreviewed target. Configuration writes are
+serialized with restart acceptance and blocked until the new startup so they
+cannot race the accepted target. Duplicate requests for the same pending target
+are idempotent.
+
+**A 202 response only acknowledges the restart; it is not a success verdict.**
+The page polls for up to two minutes and reports success only after it observes
+a different boot UUID, a ready management service, and both effective and desired
+configuration equal to the confirmed target with no pending restart. It never
+blindly resends a POST after an ambiguous network failure. A timeout means the
+result could not be verified, not that the restart definitely failed; use Refresh
+and inspect the deployment when necessary. Closing the page or losing admin
+access stops local polling, but cannot cancel an already accepted server restart.
+
+The packaged Docker image and `npm start` run the repository-owned
+`src/supervisor.mjs`. Its fixed Node worker performs a private IPC capability and
+restart-intent handshake, acknowledges HTTP before shutting down its browser
+manager, then exits with a reserved restart code. The supervisor starts a new
+worker with the same environment and data directory only for that acknowledged
+restart. It forwards container stop signals without respawning a stopped worker;
+other startup failures propagate instead of entering a restart loop. Shutdown is
+bounded and may cancel in-flight work; this is not a traffic-draining guarantee.
+No Docker socket, SSH credentials, arbitrary shell execution, or elevated host
+permissions are required. The container and gateway can remain running while the
+Prism worker and browser state are replaced.
+
+Older sidecars, or custom deployments still running `node src/server.mjs` directly,
+show the restart button as unavailable without disabling supported configuration
+reads/writes. A supervision environment marker alone cannot enable the action.
+Upgrade both the gateway and sidecar, and change any custom entrypoint to
+`node src/supervisor.mjs` (or `npm start`) before using the button. Existing saved
+configuration and account data remain in the original persistent `/data` mount;
+do not delete or replace that mount to apply these settings. Operators can still
+restart only the sidecar through their existing deployment tooling when the
+managed entrypoint is unavailable.
 
 The **BPS** tab also includes the complete BPS image settings card, shared with
 system settings. Its save operation sends only the BPS image fields and preserves

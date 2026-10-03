@@ -219,3 +219,53 @@ it.each([0, 1, 99, 100, 120])('renders exactly 100 enabled-check slots for %i ac
     expect(tooltip()?.textContent).toContain('channelMonitorV2.candy.states.error')
   }
 })
+
+it('keeps 100 percent API availability healthy while low cache is independently critical', async () => {
+  const { wrapper, row } = hoverFixture()
+  // Public counts are redacted: retain the authoritative server verdicts.
+  const metrics = { ...row.metrics, request_count: 0, has_samples: true, error_rate: 0, cache_rate: 0 }
+  const health = { ...row.health, overall: 'healthy' as const, error_rate: 'healthy' as const, cache: 'critical' as const, minimum_sample: 50 }
+  await wrapper.setProps({ items: [{ ...row, metrics, health, buckets: [{ ...row.buckets[0], metrics, health }] }] })
+  const apiHealth = wrapper.get('[data-testid="monitor-api-health"]')
+  expect(apiHealth.text()).toContain('channelMonitorV2.cards.apiHealth')
+  expect(apiHealth.text()).toContain('channelMonitorV2.cards.health.healthy')
+  expect(apiHealth.classes()).toContain('bg-emerald-100')
+  expect(apiHealth.classes()).not.toContain('bg-red-100')
+  const values = wrapper.findAll('dl > div')
+  expect(values[1].get('dd').text()).toBe('100.0%')
+  expect(values[0].get('dd').text()).toBe('0.00%')
+  expect(wrapper.get('[data-testid="cache-health-state"]').text()).toBe('channelMonitorV2.cards.cacheStates.critical')
+  expect(wrapper.get('[data-testid="cache-health-state"]').classes()).toContain('text-red-600')
+  const bar = wrapper.findAll('[data-testid="traffic-history-bar"]')[1]
+  expect(bar.classes()).toContain('bg-emerald-400')
+  await bar.trigger('mouseenter')
+  expect(tooltip()?.textContent).toContain('channelMonitorV2.cards.health.healthy')
+  expect(tooltip()?.textContent).toContain('channelMonitorV2.cards.cacheStates.critical')
+})
+
+it('keeps insufficient request samples unknown even with observed 100 percent availability', async () => {
+  const { wrapper, row } = hoverFixture()
+  const metrics = { ...row.metrics, request_count: 1, has_samples: true, error_rate: 0, cache_rate: 0 }
+  const health = { ...row.health, overall: 'unknown' as const, error_rate: 'unknown' as const, ttft: 'unknown' as const, cache: 'unknown' as const, score: null, error_rate_score: null, ttft_score: null, cache_score: null, minimum_sample: 50 }
+  await wrapper.setProps({ items: [{ ...row, metrics, health, buckets: [{ ...row.buckets[0], metrics, health }] }] })
+  const apiHealth = wrapper.get('[data-testid="monitor-api-health"]')
+  expect(apiHealth.text()).toContain('channelMonitorV2.cards.health.unknown')
+  expect(apiHealth.classes()).toContain('bg-gray-100')
+  expect(wrapper.findAll('dl > div')[1].get('dd').text()).toBe('100.0%')
+  expect(wrapper.get('[data-testid="cache-health-state"]').text()).toBe('channelMonitorV2.cards.cacheStates.unknown')
+  const bars = wrapper.findAll('[data-testid="traffic-history-bar"]')
+  expect(bars.every(bar => bar.classes().includes('bg-gray-300'))).toBe(true)
+  await bars[1].trigger('mouseenter')
+  expect(tooltip()?.textContent).toContain('channelMonitorV2.cards.health.unknown')
+  expect(tooltip()?.querySelectorAll('[data-testid="monitor-card-tooltip-sample"]')).toHaveLength(1)
+})
+
+it.each(['error_rate', 'ttft'] as const)('retains a critical API badge and timeline for real %s problems despite healthy cache', async (failedMetric) => {
+  const { wrapper, row } = hoverFixture()
+  const health = { ...row.health, overall: 'critical' as const, error_rate: 'healthy' as const, ttft: 'healthy' as const, cache: 'healthy' as const, [failedMetric]: 'critical' as const }
+  const metrics = { ...row.metrics, error_rate: failedMetric === 'error_rate' ? 1 : 0, ttft: { ...row.metrics.ttft, p50_ms: failedMetric === 'ttft' ? 30000 : 1000 } }
+  await wrapper.setProps({ items: [{ ...row, metrics, health, buckets: [{ ...row.buckets[0], metrics, health }] }] })
+  expect(wrapper.get('[data-testid="monitor-api-health"]').classes()).toContain('bg-red-100')
+  expect(wrapper.get('[data-testid="cache-health-state"]').text()).toBe('channelMonitorV2.cards.cacheStates.healthy')
+  expect(wrapper.findAll('[data-testid="traffic-history-bar"]')[1].classes()).toContain('bg-red-400')
+})

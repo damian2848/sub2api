@@ -251,7 +251,8 @@
           :label="t('channelMonitorV2.metrics.cacheRate')"
           :value="hasMonitorSamples(snapshot.metrics) ? formatPercent(snapshot.metrics.cache_rate) : '—'"
           :detail="t('channelMonitorV2.metrics.cacheDetail')"
-          :state="snapshot.health.cache || snapshot.health.overall"
+          :title="t('channelMonitorV2.cards.cacheHint')"
+          :state="snapshot.health.cache || 'unknown'"
         />
         <MetricCell
           v-if="showThroughput"

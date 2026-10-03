@@ -3,27 +3,30 @@ export default {
   channelMonitorV2: {
     "cards": {
         "bucketDetails": "Samples in this time window",
-        "sampleDetails": "{time} · Availability {availability} · Cache {cache} · TTFT P50 {ttft}",
+        "sampleDetails": "{time} · API health {health} · Availability {availability} · Cache {cache} ({cacheState}) · TTFT P50 {ttft}",
         "showCards": "Cards",
         "showAnalytics": "Detailed data",
         "passive": "Real requests + active probes · channel availability",
         "activeProbe": "Active probes",
-        "healthHint": "Composite health includes API errors, TTFT and cache performance. It is not the API availability rate shown below.",
+        "apiHealth": "API health",
+        "healthHint": "API health combines only error rate and first-token latency. Cache is assessed separately and does not affect API health colors. Insufficient request samples mean unknown health; observed availability may still be shown.",
+        "cacheHint": "Cache performance is assessed separately and does not affect API health. Low cache does not mean API unavailability; cache status is unknown below the request sample threshold.",
+        "cacheStates": { "healthy": "Cache healthy", "warning": "Cache watch", "critical": "Low cache", "unknown": "Cache unknown" },
         "availabilityHint": "Actual generation requests include business traffic and active probes. Answer quality, quota checks and HEAD pings are not API outcomes. Unobserved periods remain unknown.",
         "groupRate": "Group rate {value}x",
         "cache": "Cache rate",
         "availability": "Availability",
         "ttft": "First token",
-        "windows": "Last {count} time windows",
+        "windows": "API health · Last {count} time windows",
         "refreshIn": "Refresh in {seconds}s",
         "pageRefresh": "Page refresh",
         "refreshPaused": "Paused",
-        "trafficHistory": "Observed request health timeline",
+        "trafficHistory": "API health timeline (error rate / first token; cache is separate)",
         "health": {
             "healthy": "Healthy",
             "warning": "Degraded",
             "critical": "Unhealthy",
-            "unknown": "Insufficient samples"
+            "unknown": "Unknown (insufficient samples)"
         }
     },
     "candy": {
@@ -88,7 +91,7 @@ export default {
       label: 'Group by', platform: 'Platform', platformGroup: 'Platform / Group', platformModel: 'Platform / Model', platformGroupModel: 'Platform / Group / Model'
     },
     trendView: { label: 'Trend view', pulse: 'Pulse matrix', line: 'Line chart' },
-    healthMode: { label: 'Health display', overall: 'Overall', success: 'Error rate', ttft: 'First token', cache: 'Cache rate' },
+    healthMode: { label: 'Health display', overall: 'API health', success: 'Error rate', ttft: 'First token', cache: 'Cache rate' },
     tabs: { aria: 'Detail dimension', models: 'Models', errors: 'Error reasons', users: 'User ranking' },
     metrics: {
       rpm: 'RPM',
@@ -102,7 +105,7 @@ export default {
       ttftP50: 'First token P50',
       durationP50: 'Duration P50',
       cacheRate: 'Cache rate',
-      cacheDetail: 'Read cache share',
+      cacheDetail: 'Read cache share · separate assessment',
       successRate: 'Success rate',
       successRateValue: 'Success rate {value}',
       errorRateValue: 'Error rate {value}',
@@ -169,9 +172,11 @@ export default {
       ignoredSummary: 'Ignored {ignored} categories · counted in error rate {counted} categories',
       healthTitle: 'Health thresholds',
       healthHint:
-        'Controls user-facing color bands and overall score. Defaults are tolerant so small error rates or low cache do not immediately show as unhealthy.',
+        'Overall API health combines only error rate and first-token latency. Cache thresholds apply only to separate cache assessments, never to API health colors.',
+      minimumSampleHint: 'All health signals share the real request-count threshold and remain unknown below it; token counts are not used. First-token health also requires enough measured latency samples.',
+      cacheThresholdHint: 'The default 0 / 0 does not flag cache misses as unhealthy. Non-zero thresholds enable only the separate cache assessment.',
       fields: {
-        minimumSample: 'Minimum samples',
+        minimumSample: 'Minimum request samples',
         warningError: 'Error rate watch %',
         criticalError: 'Error rate critical %',
         targetTtft: 'TTFT target ms',
@@ -184,7 +189,7 @@ export default {
       namedModelsCount: 'Showing {count} named model dimensions; unlisted models fold into per-platform “Other”.',
       userContractTitle: 'User-facing display contract',
       userContract: {
-        health: 'Health color weights: error rate 60% + first-token P50 20% + cache rate 20% (thresholds configurable above)',
+        health: 'API colors combine only error rate and first-token P50, using errors alone when first-token samples are unavailable. Cache is separate; insufficient request samples mean unknown health.',
         trend: 'Trend can switch between pulse matrix and line chart (error · cache · first token)',
         latency: 'Latency shows AVG · P50 · P90; absolute request / error counts are not shown',
         models: 'Empty model lists show real names and never dump everything into “Other”',

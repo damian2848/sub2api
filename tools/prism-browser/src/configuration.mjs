@@ -103,6 +103,7 @@ export class PrismConfigurationStore {
   #source = 'environment';
   #writes = Promise.resolve();
   #initialized = false;
+  #restartPending = false;
 
   constructor({ dataDir, environment = process.env }) {
     this.dataDir = dataDir;
@@ -141,9 +142,25 @@ export class PrismConfigurationStore {
     return writing;
   }
 
+  // Serialized with configuration writes: freeze the exact desired snapshot
+  // only after a supervisor has accepted the restart. Later writes cannot race
+  // the acknowledged target that the UI verifies after the new startup.
+  beginRestart(work) {
+    return this.serialize(async () => {
+      const result = await work(this.snapshot());
+      this.#restartPending = true;
+      return result;
+    });
+  }
+
+  assertWritable() {
+    if (this.#restartPending) throw new PrismError('prism_restarting', 503);
+  }
+
   async put(body) {
     const value = validateConfiguration(body);
     return this.serialize(async () => {
+      this.assertWritable();
       await privateDirectory(this.dataDir);
       const temporary = `${this.path}.${randomUUID()}.tmp`;
       let file;
@@ -166,6 +183,7 @@ export class PrismConfigurationStore {
 
   async reset() {
     return this.serialize(async () => {
+      this.assertWritable();
       await unlink(this.path).catch(error => { if (error.code !== 'ENOENT') throw error; });
       await syncDirectory(this.dataDir);
       this.#desired = this.#environment;

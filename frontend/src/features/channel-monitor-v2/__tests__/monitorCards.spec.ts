@@ -100,3 +100,17 @@ it.each(['probe', 'mixed', 'business'] as const)('uses real request buckets and 
  expect(bars.filter(bar => bar.observed)).toHaveLength(1)
  expect(bars[1].buckets[0].metrics.ttft.p50_ms).toBeNull()
 })
+
+it('uses API health only in the timeline, preserving insufficient-sample unknown buckets', () => {
+  const metric = { has_samples: true, request_count: 0, error_rate: 0, cache_rate: 0, ttft: { p50_ms: 1000 } } as MonitorMetric
+  const row = { buckets: [
+    { bucket_start: '2026-09-28T00:06:00Z', metrics: metric, health: { overall: 'healthy', cache: 'critical', minimum_sample: 50 } },
+    { bucket_start: '2026-09-28T00:11:00Z', metrics: metric, health: { overall: 'critical', cache: 'healthy', minimum_sample: 50 } },
+    { bucket_start: '2026-09-28T00:16:00Z', metrics: { ...metric, request_count: 1 }, health: { overall: 'unknown', error_rate: 'unknown', ttft: 'unknown', cache: 'unknown', minimum_sample: 50 } },
+  ] } as MonitorMatrixRow
+  const bars = monitorCardTimeline(row, { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage)
+  expect(bars[1]).toMatchObject({ state: 'healthy', observed: true })
+  expect(bars[2]).toMatchObject({ state: 'critical', observed: true })
+  expect(bars[3]).toMatchObject({ state: 'unknown', observed: true })
+  expect(bars[3].buckets).toHaveLength(1)
+})

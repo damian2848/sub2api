@@ -202,6 +202,7 @@
           <label class="block">
             <span class="input-label">{{ t('channelMonitorV2.settings.fields.minimumSample') }}</span>
             <input v-model.number="draft.health_thresholds.minimum_sample" class="input" type="number" min="1" max="10000" />
+            <span class="mt-1 block text-[10px] text-gray-500 dark:text-gray-400">{{ t('channelMonitorV2.settings.minimumSampleHint') }}</span>
           </label>
           <label class="block">
             <span class="input-label">{{ t('channelMonitorV2.settings.fields.warningError') }}</span>
@@ -225,11 +226,12 @@
           </label>
           <label class="block">
             <span class="input-label">{{ t('channelMonitorV2.settings.fields.warningCache') }}</span>
-            <input v-model.number="warningCachePercent" class="input" type="number" min="0" max="100" step="0.1" />
+            <input v-model.number="warningCachePercent" class="input" type="number" min="0" max="100" step="0.1" data-testid="warning-cache-threshold" />
           </label>
           <label class="block">
             <span class="input-label">{{ t('channelMonitorV2.settings.fields.criticalCache') }}</span>
-            <input v-model.number="criticalCachePercent" class="input" type="number" min="0" max="100" step="0.1" />
+            <input v-model.number="criticalCachePercent" class="input" type="number" min="0" max="100" step="0.1" data-testid="critical-cache-threshold" />
+            <span class="mt-1 block text-[10px] text-gray-500 dark:text-gray-400">{{ t('channelMonitorV2.settings.cacheThresholdHint') }}</span>
           </label>
         </div>
       </div>
@@ -302,9 +304,9 @@ const defaultThresholds = {
   target_ttft_ms: 3000,
   warning_ttft_ms: 3000,
   critical_ttft_ms: 10000,
-  // Higher is better: below 85% watch, below 60% critical.
-  warning_cache_rate: 0.85,
-  critical_cache_rate: 0.60,
+  // Match backend defaults: cache scoring is opt-in and never affects API health.
+  warning_cache_rate: 0,
+  critical_cache_rate: 0,
   error_weight: 0.60,
   ttft_weight: 0.20,
   cache_weight: 0.20,

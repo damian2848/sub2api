@@ -204,3 +204,37 @@ describe('RelayPulseMatrix axis range', () => {
     expect(wrapper.findAll('.pulse-cell')).toHaveLength(5)
   })
 })
+
+it('keeps API colors healthy at 100 percent success while cache mode remains independently critical', async () => {
+  const metric = { ...metrics(0), has_samples: true, cache_rate: 0 }
+  const apiHealth: MonitorHealth = { ...health, overall: 'healthy', error_rate: 'healthy', ttft: 'healthy', cache: 'critical', score: 100, error_rate_score: 100, ttft_score: 100, cache_score: 0, minimum_sample: 50 }
+  const wrapper = mount(RelayPulseMatrix, { props: {
+    rows: [{ platform: 'openai', metrics: metric, health: apiHealth, buckets: [{ bucket_start: '2026-08-01T00:00:00Z', metrics: metric, health: apiHealth }] }],
+    coverage: { requested_start: '2026-08-01T00:00:00Z', requested_end: '2026-08-01T00:01:00Z', coverage_start: '2026-08-01T00:00:00Z', data_through: '2026-08-01T00:01:00Z', computed_at: '2026-08-01T00:01:00Z', aggregation_lag_seconds: 0, coverage_complete: true, bucket_seconds: 60 },
+    healthMode: 'overall', showThroughput: false,
+  } })
+  expect(wrapper.findAll('.summary-value')[0].text()).toBe('100.0%')
+  expect(wrapper.get('.status-dot').classes()).toContain('health-score10')
+  expect(wrapper.get('.pulse-cell').classes()).toContain('health-score10')
+  await wrapper.setProps({ healthMode: 'cache' })
+  expect(wrapper.get('.pulse-cell').classes()).toContain('health-score0')
+  expect(wrapper.findAll('.summary-value')[0].text()).toBe('100.0%')
+  wrapper.unmount()
+})
+
+it('keeps low request sample API and cache scores unknown instead of treating observed success as health', async () => {
+  const metric = { ...metrics(1), error_rate: 0, has_samples: true }
+  const unknownHealth: MonitorHealth = { ...health, overall: 'unknown', error_rate: 'unknown', ttft: 'unknown', cache: 'unknown', score: null, error_rate_score: null, ttft_score: null, cache_score: null, minimum_sample: 50 }
+  const wrapper = mount(RelayPulseMatrix, { props: {
+    rows: [{ platform: 'openai', metrics: metric, health: unknownHealth, buckets: [{ bucket_start: '2026-08-01T00:00:00Z', metrics: metric, health: unknownHealth }] }],
+    coverage: { requested_start: '2026-08-01T00:00:00Z', requested_end: '2026-08-01T00:01:00Z', coverage_start: '2026-08-01T00:00:00Z', data_through: '2026-08-01T00:01:00Z', computed_at: '2026-08-01T00:01:00Z', aggregation_lag_seconds: 0, coverage_complete: true, bucket_seconds: 60 },
+    healthMode: 'overall', showThroughput: false,
+  } })
+  expect(wrapper.findAll('.summary-value')[0].text()).toBe('100.0%')
+  expect(wrapper.get('.status-dot').classes()).toContain('health-unknown')
+  expect(wrapper.get('.pulse-cell').classes()).toContain('health-unknown')
+  expect(wrapper.get('.pulse-cell').text()).toContain('评分 —')
+  await wrapper.setProps({ healthMode: 'cache' })
+  expect(wrapper.get('.pulse-cell').classes()).toContain('health-unknown')
+  wrapper.unmount()
+})

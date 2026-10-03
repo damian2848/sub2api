@@ -26,9 +26,15 @@ type prismConfigurationService interface {
 	ResetConfiguration(context.Context) (*service.PrismConfigurationResult, error)
 }
 
+type prismRestartService interface {
+	GetRestartStatus(context.Context) (*service.PrismRestartResult, error)
+	Restart(context.Context, service.PrismRestartRequest) (*service.PrismRestartResult, error)
+}
+
 type PrismHandler struct {
 	prismService         prismAccountService
 	configurationService prismConfigurationService
+	restartService       prismRestartService
 }
 
 func NewPrismHandler(prismService *service.PrismAccountService) *PrismHandler {
@@ -36,6 +42,7 @@ func NewPrismHandler(prismService *service.PrismAccountService) *PrismHandler {
 	if prismService != nil {
 		h.prismService = prismService
 		h.configurationService = prismService
+		h.restartService = prismService
 	}
 	return h
 }
@@ -162,4 +169,68 @@ func (h *PrismHandler) ResetConfiguration(c *gin.Context) {
 	if !response.ErrorFrom(c, err) {
 		response.Success(c, result)
 	}
+}
+
+// GetRestartStatus uses a separate management contract; its independent interface
+// lets startup configuration implementations retain their existing behavior.
+func (h *PrismHandler) GetRestartStatus(c *gin.Context) {
+	if !prismConfigurationAdmin(c) {
+		return
+	}
+	if h == nil || h.restartService == nil {
+		response.Success(c, &service.PrismRestartResult{Availability: "not_configured"})
+		return
+	}
+	result, err := h.restartService.GetRestartStatus(c.Request.Context())
+	if !prismRestartError(c, err) {
+		response.Success(c, result)
+	}
+}
+
+func (h *PrismHandler) restartAvailable(c *gin.Context) bool {
+	if h == nil || h.restartService == nil {
+		prismRestartError(c, infraerrors.New(http.StatusServiceUnavailable, "PRISM_RESTART_NOT_CONFIGURED", "The Prism management connection is not configured"))
+		return false
+	}
+	return true
+}
+
+func (h *PrismHandler) Restart(c *gin.Context) {
+	if !prismConfigurationAdmin(c) {
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, service.PrismRestartRequestLimit)
+	request, err := service.DecodePrismRestartRequest(c.Request.Body)
+	if prismRestartError(c, err) || !h.restartAvailable(c) {
+		return
+	}
+	result, err := h.restartService.Restart(c.Request.Context(), request)
+	if !prismRestartError(c, err) {
+		response.Accepted(c, result)
+	}
+}
+
+// Only the restart contract's fixed public errors may cross the management
+// boundary. In particular, never forward upstream messages or metadata, even
+// when an untrusted error uses one of the expected public reason strings.
+func prismRestartError(c *gin.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, service.ErrObserverScope) {
+		return response.ErrorFrom(c, service.ErrObserverScope)
+	}
+	status := infraerrors.FromError(err)
+	code, reason, message := http.StatusServiceUnavailable, "PRISM_RESTART_UNAVAILABLE", "The Prism restart service is unavailable"
+	switch {
+	case status.Code == http.StatusBadRequest && status.Reason == "PRISM_RESTART_INVALID":
+		code, reason, message = http.StatusBadRequest, status.Reason, "Invalid Prism restart request"
+	case status.Code == http.StatusConflict && status.Reason == "PRISM_RESTART_CONFLICT":
+		code, reason, message = http.StatusConflict, status.Reason, "The Prism runtime or saved startup configuration has changed"
+	case status.Code == http.StatusServiceUnavailable && status.Reason == "PRISM_RESTART_UNSUPPORTED":
+		reason, message = status.Reason, "The Prism sidecar does not support managed restart"
+	case status.Code == http.StatusServiceUnavailable && status.Reason == "PRISM_RESTART_NOT_CONFIGURED":
+		reason, message = status.Reason, "The Prism management connection is not configured"
+	}
+	return response.ErrorFrom(c, infraerrors.New(code, reason, message))
 }

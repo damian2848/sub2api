@@ -1,3 +1,4 @@
+import type { AxiosRequestConfig } from 'axios'
 import { apiClient } from '../client'
 
 export interface PrismStartupConfig {
@@ -27,6 +28,20 @@ export interface PrismSettings {
   }
   configuration: PrismConfigurationState | null
   availability: 'ready' | 'not_configured' | 'unsupported' | 'unavailable'
+}
+
+export interface PrismRestartStatus {
+  availability: 'ready' | 'not_configured' | 'unsupported' | 'unavailable'
+  runtime: {
+    supported: true
+    runtime_id: string
+    state: 'ready' | 'restarting'
+  } | null
+}
+
+export interface PrismRestartRequest {
+  expected_runtime_id: string
+  expected_configuration: PrismStartupConfig
 }
 
 export const prismBooleanFields = [
@@ -81,5 +96,49 @@ export async function resetPrismSettings(signal?: AbortSignal): Promise<PrismSet
   const { data } = await apiClient.delete('/admin/settings/prism', { signal })
   const result = parseSettings(data)
   if (result.availability !== 'ready') throw new Error('Prism configuration reset was not confirmed')
+  return result
+}
+
+const runtimeIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+// Restart capability is independent of config support: older sidecars remain writable.
+function parseRestartStatus(value: unknown): PrismRestartStatus {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 2) {
+    throw new Error('Invalid Prism restart response')
+  }
+  const result = value as PrismRestartStatus
+  if (!['ready', 'not_configured', 'unsupported', 'unavailable'].includes(result.availability)) {
+    throw new Error('Invalid Prism restart response')
+  }
+  if (result.availability === 'ready') {
+    const runtime = result.runtime
+    if (!runtime || typeof runtime !== 'object' || Array.isArray(runtime) || Object.keys(runtime).length !== 3 ||
+        runtime.supported !== true || typeof runtime.runtime_id !== 'string' || !runtimeIdPattern.test(runtime.runtime_id) ||
+        !['ready', 'restarting'].includes(runtime.state)) {
+      throw new Error('Invalid Prism restart runtime')
+    }
+  } else if (result.runtime !== null) {
+    throw new Error('Invalid Prism restart runtime')
+  }
+  return result
+}
+
+export async function getPrismRestartStatus(signal?: AbortSignal): Promise<PrismRestartStatus> {
+  const { data } = await apiClient.get('/admin/settings/prism/restart', { signal })
+  return parseRestartStatus(data)
+}
+
+export async function restartPrismSettings(request: PrismRestartRequest, signal?: AbortSignal): Promise<PrismRestartStatus> {
+  if (!request || Object.keys(request).length !== 2 || typeof request.expected_runtime_id !== 'string' || !runtimeIdPattern.test(request.expected_runtime_id) ||
+      !validPrismStartupConfig(request.expected_configuration)) {
+    throw new Error('Invalid Prism restart request')
+  }
+  // A destructive restart must never be replayed by the client's 401 token-refresh interceptor.
+  const options: AxiosRequestConfig & { _retry: true } = { signal, _retry: true }
+  const { data, status } = await apiClient.post('/admin/settings/prism/restart', request, options)
+  const result = parseRestartStatus(data)
+  if (status !== 202 || result.availability !== 'ready' || result.runtime?.state !== 'restarting' || result.runtime.runtime_id !== request.expected_runtime_id) {
+    throw new Error('Prism restart acceptance was not confirmed')
+  }
   return result
 }
