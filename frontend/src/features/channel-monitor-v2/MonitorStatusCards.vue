@@ -39,7 +39,7 @@
             <div class="flex h-5 items-end gap-1" :aria-label="t('channelMonitorV2.cards.trafficHistory')">
               <button v-for="bar in monitorCardTimeline(row, coverage)" :key="bar.start" type="button"
                 class="min-w-0 flex-1 cursor-help rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-400"
-                :class="healthBar[bar.state]" :aria-label="trafficLabel(row, bar)" :aria-describedby="isTrafficDetail(row, bar) ? tooltipId : undefined"
+                :class="[healthBar[bar.state], bar.lowSample && bar.state !== 'unknown' ? 'opacity-50' : '']" :aria-label="trafficLabel(row, bar)" :aria-describedby="isTrafficDetail(row, bar) ? tooltipId : undefined"
                 data-testid="traffic-history-bar" @mouseenter="openDetail($event, { kind: 'traffic', row, bar })"
                 @focus="openDetail($event, { kind: 'traffic', row, bar })" @click="openDetail($event, { kind: 'traffic', row, bar })"
                 @mouseleave="scheduleClose" @blur="scheduleClose" />
@@ -90,6 +90,7 @@
           <p class="font-semibold">{{ detail.row.group_name || '#' + detail.row.group_id }}</p>
           <template v-if="detail.kind === 'traffic'">
             <p class="text-gray-500 dark:text-gray-400">{{ dateTime(detail.bar.start) }} - {{ dateTime(detail.bar.end) }} · {{ t('channelMonitorV2.cards.apiHealth') }} · {{ t('channelMonitorV2.cards.health.' + detail.bar.state) }}</p>
+            <p v-if="detail.bar.lowSample && detail.bar.state !== 'unknown'" class="mt-1 text-amber-600 dark:text-amber-400" data-testid="low-sample-warning">{{ t('channelMonitorV2.cards.lowSampleWarning') }}</p>
             <p v-if="!detail.bar.buckets.length" class="mt-1">{{ t('channelMonitorV2.matrix.noTraffic') }}</p>
             <template v-else>
               <p class="mt-1 text-gray-500 dark:text-gray-400">{{ t('channelMonitorV2.cards.bucketDetails') }}</p>

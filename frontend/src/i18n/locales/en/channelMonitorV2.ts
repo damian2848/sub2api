@@ -3,6 +3,7 @@ export default {
   channelMonitorV2: {
     "cards": {
         "bucketDetails": "Samples in this time window",
+        "lowSampleWarning": "⚠ Low sample count — treat with caution",
         "sampleDetails": "{time} · API health {health} · Availability {availability} · Cache {cache} ({cacheState}) · TTFT P50 {ttft}",
         "showCards": "Cards",
         "showAnalytics": "Detailed data",

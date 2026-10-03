@@ -3,6 +3,7 @@ export default {
   channelMonitorV2: {
     "cards": {
         "bucketDetails": "时段内采样详情",
+        "lowSampleWarning": "⚠ 样本少，仅供参考",
         "sampleDetails": "{time} · API 健康 {health} · 可用率 {availability} · 缓存率 {cache}（{cacheState}） · 首 Token P50 {ttft}",
         "showCards": "卡片视图",
         "showAnalytics": "详细数据",

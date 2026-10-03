@@ -243,20 +243,29 @@ it('keeps 100 percent API availability healthy while low cache is independently 
   expect(tooltip()?.textContent).toContain('channelMonitorV2.cards.cacheStates.critical')
 })
 
-it('keeps insufficient request samples unknown even with observed 100 percent availability', async () => {
+it('shows low-sample bars with derived health color at reduced opacity instead of grey', async () => {
   const { wrapper, row } = hoverFixture()
   const metrics = { ...row.metrics, request_count: 1, has_samples: true, error_rate: 0, cache_rate: 0 }
   const health = { ...row.health, overall: 'unknown' as const, error_rate: 'unknown' as const, ttft: 'unknown' as const, cache: 'unknown' as const, score: null, error_rate_score: null, ttft_score: null, cache_score: null, minimum_sample: 50 }
   await wrapper.setProps({ items: [{ ...row, metrics, health, buckets: [{ ...row.buckets[0], metrics, health }] }] })
+  // Card badge still shows unknown — that uses the server's overall verdict.
   const apiHealth = wrapper.get('[data-testid="monitor-api-health"]')
   expect(apiHealth.text()).toContain('channelMonitorV2.cards.health.unknown')
   expect(apiHealth.classes()).toContain('bg-gray-100')
   expect(wrapper.findAll('dl > div')[1].get('dd').text()).toBe('100.0%')
   expect(wrapper.get('[data-testid="cache-health-state"]').text()).toBe('channelMonitorV2.cards.cacheStates.unknown')
+  // Timeline bars derive health from error_rate: 0% errors → green, but at 50% opacity.
   const bars = wrapper.findAll('[data-testid="traffic-history-bar"]')
-  expect(bars.every(bar => bar.classes().includes('bg-gray-300'))).toBe(true)
-  await bars[1].trigger('mouseenter')
-  expect(tooltip()?.textContent).toContain('channelMonitorV2.cards.health.unknown')
+  const observedBar = bars[1]
+  expect(observedBar.classes()).toContain('bg-emerald-400')
+  expect(observedBar.classes()).toContain('opacity-50')
+  // Unobserved bars remain grey without opacity class.
+  expect(bars[0].classes()).toContain('bg-gray-300')
+  expect(bars[0].classes()).not.toContain('opacity-50')
+  // Hover tooltip shows the low-sample warning.
+  await observedBar.trigger('mouseenter')
+  expect(tooltip()?.textContent).toContain('channelMonitorV2.cards.health.healthy')
+  expect(tooltip()?.querySelector('[data-testid="low-sample-warning"]')).not.toBeNull()
   expect(tooltip()?.querySelectorAll('[data-testid="monitor-card-tooltip-sample"]')).toHaveLength(1)
 })
 
