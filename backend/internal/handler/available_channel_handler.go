@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"context"
+	"log/slog"
 	"sort"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
@@ -10,19 +12,27 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// groupModelLister 返回分组在指定平台下「账号实际可调用」的模型清单（空 = 无显式映射）。
+// 由 *service.GatewayService 实现，抽成接口便于单测。
+type groupModelLister interface {
+	GetAvailableModels(ctx context.Context, groupID *int64, platform string) []string
+}
+
 // AvailableChannelHandler 处理用户侧「可用渠道」查询。
 //
-// 用户侧接口委托 ChannelService.ListAvailable，并在返回前做四层过滤：
-//  1. 行过滤：只保留状态为 Active 且与当前用户可访问分组有交集的渠道；
-//  2. 分组过滤：渠道的 Groups 只保留用户可访问的那些；
-//  3. 平台过滤：普通分组只保留自身平台模型；Composite 分组按渠道已配置的具体模型平台
-//     展开。这样既防止普通分组跨平台泄漏，也让 Composite 正确展示其多平台能力；
+// 响应以分组为顶层（同平台分组不合并），每个分组只列出它真实可调用的模型：
+//  1. 分组过滤：只保留用户可访问、且挂了 Active 渠道的分组；
+//  2. 候选模型：分组关联渠道的支持模型（含定价），普通分组按分组平台隔离，
+//     Composite 分组展开渠道已配置的具体平台；
+//  3. 可调用裁剪：与分组下账号实际可调用清单（同 /v1/models 口径）求交，
+//     再叠加分组模型白名单与用户在该分组被禁用的模型；
 //  4. 字段白名单：仅返回用户需要的字段（省略 BillingModelSource / RestrictModels
 //     / 内部 ID / Status 等管理字段）。
 type AvailableChannelHandler struct {
 	channelService *service.ChannelService
 	apiKeyService  *service.APIKeyService
 	settingService *service.SettingService
+	gatewayService groupModelLister
 }
 
 // NewAvailableChannelHandler 创建用户侧可用渠道 handler。
@@ -30,12 +40,17 @@ func NewAvailableChannelHandler(
 	channelService *service.ChannelService,
 	apiKeyService *service.APIKeyService,
 	settingService *service.SettingService,
+	gatewayService *service.GatewayService,
 ) *AvailableChannelHandler {
-	return &AvailableChannelHandler{
+	h := &AvailableChannelHandler{
 		channelService: channelService,
 		apiKeyService:  apiKeyService,
 		settingService: settingService,
 	}
+	if gatewayService != nil {
+		h.gatewayService = gatewayService
+	}
+	return h
 }
 
 // featureEnabled 返回 available-channels 开关是否启用。默认关闭（opt-in）。
@@ -103,26 +118,20 @@ type userSupportedModel struct {
 	Pricing  *userSupportedModelPricing `json:"pricing"`
 }
 
-// userChannelPlatformSection 单渠道内某个平台的子视图：用户可见的分组 + 该平台
-// 支持的模型。按 platform 聚合后让前端可以把渠道名作为 row-group 一次渲染，
-// 后面的平台行按 sections 顺序铺开。
-type userChannelPlatformSection struct {
-	Platform        string               `json:"platform"`
-	Groups          []userAvailableGroup `json:"groups"`
-	SupportedModels []userSupportedModel `json:"supported_models"`
+// userGroupChannelRef 分组所挂渠道的简要信息。
+type userGroupChannelRef struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
-// userAvailableChannel 用户可见的渠道条目（白名单字段）。
-//
-// 每个渠道聚合为一条记录，内嵌 platforms 子数组：每个 section 对应一个平台，
-// 包含该平台的 groups 和 supported_models。
-type userAvailableChannel struct {
-	Name        string                       `json:"name"`
-	Description string                       `json:"description"`
-	Platforms   []userChannelPlatformSection `json:"platforms"`
+// userAvailableGroupView 用户可见的分组条目：分组概要 + 所挂渠道 + 该分组可调用的模型。
+type userAvailableGroupView struct {
+	Group    userAvailableGroup    `json:"group"`
+	Channels []userGroupChannelRef `json:"channels"`
+	Models   []userSupportedModel  `json:"models"`
 }
 
-// List 列出当前用户可见的「可用渠道」。
+// List 列出当前用户可见的「可用渠道」（分组视角）。
 // GET /api/v1/channels/available
 func (h *AvailableChannelHandler) List(c *gin.Context) {
 	subject, ok := middleware.GetAuthSubjectFromContext(c)
@@ -134,11 +143,12 @@ func (h *AvailableChannelHandler) List(c *gin.Context) {
 	// Feature 未启用时返回空数组（不暴露渠道信息）。检查放在认证之后，
 	// 保持与未开关前的 401 行为一致：未登录先 401，登录后再按开关决定。
 	if !h.featureEnabled(c) {
-		response.Success(c, []userAvailableChannel{})
+		response.Success(c, []userAvailableGroupView{})
 		return
 	}
 
-	userGroups, err := h.apiKeyService.GetAvailableGroups(c.Request.Context(), subject.UserID)
+	ctx := c.Request.Context()
+	userGroups, err := h.apiKeyService.GetAvailableGroups(ctx, subject.UserID)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
@@ -148,123 +158,97 @@ func (h *AvailableChannelHandler) List(c *gin.Context) {
 		allowedGroupIDs[userGroups[i].ID] = struct{}{}
 	}
 
-	channels, err := h.channelService.ListAvailable(c.Request.Context())
+	views, err := h.channelService.ListAvailableByGroup(ctx, allowedGroupIDs)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
 
-	out := make([]userAvailableChannel, 0, len(channels))
-	for _, ch := range channels {
-		if ch.Status != service.StatusActive {
-			continue
-		}
-		visibleGroups := filterUserVisibleGroups(ch.Groups, allowedGroupIDs)
-		if len(visibleGroups) == 0 {
-			continue
-		}
-		sections := buildPlatformSections(ch, visibleGroups)
-		if len(sections) == 0 {
-			continue
-		}
-		out = append(out, userAvailableChannel{
-			Name:        ch.Name,
-			Description: ch.Description,
-			Platforms:   sections,
-		})
+	// 用户在分组内被禁用的模型仅是展示裁剪，真正的准入在网关；取数失败时照常展示。
+	denied, err := h.apiKeyService.GetUserGroupDeniedModels(ctx, subject.UserID)
+	if err != nil {
+		slog.Warn("available_channels_user_denied_models_failed", "error", err, "user_id", subject.UserID)
+		denied = nil
 	}
 
+	out := make([]userAvailableGroupView, 0, len(views))
+	for i := range views {
+		out = append(out, buildUserGroupView(ctx, views[i], h.gatewayService, denied[views[i].Group.ID]))
+	}
 	response.Success(c, out)
 }
 
-// buildPlatformSections 把一个渠道按 visibleGroups 的平台集合拆成有序的 section 列表：
-// 每个 section 对应一个具体平台，只包含该平台的 groups 和 supported_models。
-//
-// Composite 分组可访问渠道中所有已配置的具体平台，因此会被展开到每个有支持模型的
-// 平台 section。普通分组仍严格留在自身平台，避免跨平台模型信息泄漏。Composite 渠道
-// 尚未配置任何模型时保留 composite section，以便前端继续展示该分组和“未配置模型”状态。
-// 输出按 platform 字母序稳定排序，便于前端等效比较与回归测试。
-func buildPlatformSections(
-	ch service.AvailableChannel,
-	visibleGroups []userAvailableGroup,
-) []userChannelPlatformSection {
-	groupsByPlatform := make(map[string][]userAvailableGroup, 4)
-	compositeGroups := make([]userAvailableGroup, 0, 1)
-	for _, g := range visibleGroups {
-		if g.Platform == "" {
-			continue
-		}
-		if g.Platform == service.PlatformComposite {
-			compositeGroups = append(compositeGroups, g)
-			continue
-		}
-		groupsByPlatform[g.Platform] = append(groupsByPlatform[g.Platform], g)
+// buildUserGroupView 把 service 层分组视图转换成用户 DTO，并把候选模型裁剪成真实可调用集合。
+func buildUserGroupView(
+	ctx context.Context,
+	v service.AvailableGroupView,
+	lister groupModelLister,
+	denied []string,
+) userAvailableGroupView {
+	channels := make([]userGroupChannelRef, 0, len(v.Channels))
+	for _, ch := range v.Channels {
+		channels = append(channels, userGroupChannelRef{Name: ch.Name, Description: ch.Description})
 	}
+	return userAvailableGroupView{
+		Group: userAvailableGroup{
+			ID:                 v.Group.ID,
+			Name:               v.Group.Name,
+			Platform:           v.Group.Platform,
+			SubscriptionType:   v.Group.SubscriptionType,
+			RateMultiplier:     v.Group.RateMultiplier,
+			PeakRateEnabled:    v.Group.PeakRateEnabled,
+			PeakStart:          v.Group.PeakStart,
+			PeakEnd:            v.Group.PeakEnd,
+			PeakRateMultiplier: v.Group.PeakRateMultiplier,
+			IsExclusive:        v.Group.IsExclusive,
+		},
+		Channels: channels,
+		Models:   toUserSupportedModels(resolveGroupModels(ctx, v, lister, denied), nil),
+	}
+}
 
-	if len(compositeGroups) > 0 {
-		modelPlatforms := make(map[string]struct{}, len(ch.SupportedModels))
-		for i := range ch.SupportedModels {
-			if platform := ch.SupportedModels[i].Platform; platform != "" {
-				modelPlatforms[platform] = struct{}{}
-			}
-		}
-		if len(modelPlatforms) == 0 {
-			groupsByPlatform[service.PlatformComposite] = append(
-				groupsByPlatform[service.PlatformComposite],
-				compositeGroups...,
-			)
-		} else {
-			for platform := range modelPlatforms {
-				groupsByPlatform[platform] = append(groupsByPlatform[platform], compositeGroups...)
-			}
-		}
+// resolveGroupModels 计算分组真实可调用的模型：
+//  1. 按平台与「账号实际可调用」清单求交（Composite 分组逐个具体平台求交；lister 为 nil
+//     或某平台无显式映射时不裁剪该平台）；
+//  2. 去掉不在分组模型白名单内的；
+//  3. 去掉用户在该分组被禁用的。
+func resolveGroupModels(
+	ctx context.Context,
+	v service.AvailableGroupView,
+	lister groupModelLister,
+	denied []string,
+) []service.SupportedModel {
+	byPlatform := make(map[string][]service.SupportedModel, 2)
+	for _, m := range v.Models {
+		byPlatform[m.Platform] = append(byPlatform[m.Platform], m)
 	}
-	if len(groupsByPlatform) == 0 {
-		return nil
-	}
-
-	platforms := make([]string, 0, len(groupsByPlatform))
-	for p := range groupsByPlatform {
+	platforms := make([]string, 0, len(byPlatform))
+	for p := range byPlatform {
 		platforms = append(platforms, p)
 	}
 	sort.Strings(platforms)
 
-	sections := make([]userChannelPlatformSection, 0, len(platforms))
+	groupID := v.Group.ID
+	out := make([]service.SupportedModel, 0, len(v.Models))
 	for _, platform := range platforms {
-		platformSet := map[string]struct{}{platform: {}}
-		sections = append(sections, userChannelPlatformSection{
-			Platform:        platform,
-			Groups:          groupsByPlatform[platform],
-			SupportedModels: toUserSupportedModels(ch.SupportedModels, platformSet),
-		})
-	}
-	return sections
-}
-
-// filterUserVisibleGroups 仅保留用户可访问的分组。
-func filterUserVisibleGroups(
-	groups []service.AvailableGroupRef,
-	allowed map[int64]struct{},
-) []userAvailableGroup {
-	visible := make([]userAvailableGroup, 0, len(groups))
-	for _, g := range groups {
-		if _, ok := allowed[g.ID]; !ok {
-			continue
+		models := byPlatform[platform]
+		if lister != nil {
+			models = service.NarrowModelsByListing(models, lister.GetAvailableModels(ctx, &groupID, platform))
 		}
-		visible = append(visible, userAvailableGroup{
-			ID:                 g.ID,
-			Name:               g.Name,
-			Platform:           g.Platform,
-			SubscriptionType:   g.SubscriptionType,
-			RateMultiplier:     g.RateMultiplier,
-			PeakRateEnabled:    g.PeakRateEnabled,
-			PeakStart:          g.PeakStart,
-			PeakEnd:            g.PeakEnd,
-			PeakRateMultiplier: g.PeakRateMultiplier,
-			IsExclusive:        g.IsExclusive,
-		})
+		for _, m := range models {
+			if !v.ModelAllowlist.Allows(m.Name) || service.UserGroupDeniesModel(denied, m.Name) {
+				continue
+			}
+			out = append(out, m)
+		}
 	}
-	return visible
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Platform < out[j].Platform
+	})
+	return out
 }
 
 // toUserSupportedModels 将 service 层支持模型转换为用户 DTO（字段白名单）。

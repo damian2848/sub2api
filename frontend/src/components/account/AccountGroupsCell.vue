@@ -1,7 +1,7 @@
 <template>
-  <div v-if="groups && groups.length > 0" class="relative max-w-56">
-    <!-- 分组容器：固定最大宽度，最多显示2行 -->
-    <div class="flex flex-wrap gap-1 max-h-14 overflow-hidden">
+  <div v-if="groups && groups.length > 0" class="relative min-w-36 max-w-80">
+    <!-- 分组容器：名称完整展示、自动换行；仅分组数超过 maxDisplay 时才折叠为 +N -->
+    <div class="flex flex-wrap gap-1">
       <GroupBadge
         v-for="group in displayGroups"
         :key="group.id"
@@ -10,7 +10,8 @@
         :subscription-type="group.subscription_type"
         :rate-multiplier="group.rate_multiplier"
         :show-rate="false"
-        class="max-w-24"
+        :title="group.name"
+        class="max-w-full"
       />
       <!-- 更多数量徽章 -->
       <button
@@ -89,7 +90,7 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), {
-  maxDisplay: 4
+  maxDisplay: 8
 })
 
 const { t } = useI18n()

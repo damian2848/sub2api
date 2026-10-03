@@ -309,3 +309,123 @@ func TestFillGlobalPricingFallback_KeepsExistingPrice(t *testing.T) {
 func newStubPricingServiceFromMap(data map[string]*LiteLLMModelPricing) *PricingService {
 	return &PricingService{pricingData: data}
 }
+
+func allowAll(ids ...int64) map[int64]struct{} {
+	m := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		m[id] = struct{}{}
+	}
+	return m
+}
+
+func TestListAvailableByGroup_SamePlatformGroupsStaySeparate(t *testing.T) {
+	// 同一渠道挂两个 openai 分组：不合并，各自一条，按倍率升序。
+	channels := []Channel{
+		plazaPricedChannel(1, "base", []int64{1, 2}, PlatformOpenAI, "gpt-5", "gpt-4o"),
+	}
+	groups := []Group{
+		{ID: 1, Name: "gpt-pro", Platform: PlatformOpenAI, RateMultiplier: 0.23},
+		{ID: 2, Name: "gpt-enterprise", Platform: PlatformOpenAI, RateMultiplier: 0.35},
+	}
+	svc := newAvailableChannelService(channels, &stubGroupRepoForAvailable{activeGroups: groups})
+
+	out, err := svc.ListAvailableByGroup(context.Background(), allowAll(1, 2))
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	require.Equal(t, "gpt-pro", out[0].Group.Name)
+	require.Equal(t, "gpt-enterprise", out[1].Group.Name)
+	for _, v := range out {
+		require.Len(t, v.Channels, 1)
+		require.Equal(t, "base", v.Channels[0].Name)
+		require.Len(t, v.Models, 2)
+		require.Equal(t, "gpt-4o", v.Models[0].Name)
+	}
+}
+
+func TestListAvailableByGroup_FiltersByAllowedAndActive(t *testing.T) {
+	channels := []Channel{
+		plazaPricedChannel(1, "a", []int64{1, 2, 3}, PlatformOpenAI, "gpt-5"),
+		{ID: 2, Name: "disabled", Status: StatusDisabled, GroupIDs: []int64{4}},
+	}
+	groups := []Group{
+		{ID: 1, Name: "g1", Platform: PlatformOpenAI},
+		{ID: 2, Name: "g2", Platform: PlatformOpenAI},
+		{ID: 4, Name: "only-disabled-channel", Platform: PlatformOpenAI},
+	}
+	svc := newAvailableChannelService(channels, &stubGroupRepoForAvailable{activeGroups: groups})
+
+	// g2 用户不可访问；g3 非活跃分组；g4 只挂了停用渠道。
+	out, err := svc.ListAvailableByGroup(context.Background(), allowAll(1, 3, 4))
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Equal(t, int64(1), out[0].Group.ID)
+}
+
+func TestListAvailableByGroup_PlatformIsolationAndComposite(t *testing.T) {
+	channels := []Channel{
+		{
+			ID: 1, Name: "multi", Status: StatusActive, GroupIDs: []int64{1, 9},
+			ModelPricing: []ChannelModelPricing{
+				{Platform: PlatformAnthropic, Models: []string{"claude-sonnet-4-6"}, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(3e-6)},
+				{Platform: PlatformOpenAI, Models: []string{"gpt-5"}, BillingMode: BillingModeToken, InputPrice: testPtrFloat64(2e-6)},
+			},
+		},
+	}
+	groups := []Group{
+		{ID: 1, Name: "ant", Platform: PlatformAnthropic},
+		{ID: 9, Name: "composite", Platform: PlatformComposite},
+	}
+	svc := newAvailableChannelService(channels, &stubGroupRepoForAvailable{activeGroups: groups})
+
+	out, err := svc.ListAvailableByGroup(context.Background(), allowAll(1, 9))
+	require.NoError(t, err)
+	require.Len(t, out, 2)
+	byID := map[int64]AvailableGroupView{}
+	for _, v := range out {
+		byID[v.Group.ID] = v
+	}
+	require.Len(t, byID[1].Models, 1)
+	require.Equal(t, "claude-sonnet-4-6", byID[1].Models[0].Name)
+	require.Len(t, byID[9].Models, 2)
+}
+
+func TestListAvailableByGroup_GroupWithoutModelsStillReturned(t *testing.T) {
+	channels := []Channel{{ID: 1, Name: "empty", Status: StatusActive, GroupIDs: []int64{1}}}
+	groups := []Group{{ID: 1, Name: "g1", Platform: PlatformOpenAI}}
+	svc := newAvailableChannelService(channels, &stubGroupRepoForAvailable{activeGroups: groups})
+
+	out, err := svc.ListAvailableByGroup(context.Background(), allowAll(1))
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.Empty(t, out[0].Models)
+}
+
+func TestListAvailableByGroup_CarriesModelAllowlist(t *testing.T) {
+	channels := []Channel{plazaPricedChannel(1, "a", []int64{1}, PlatformOpenAI, "gpt-5")}
+	groups := []Group{{
+		ID: 1, Name: "g1", Platform: PlatformOpenAI,
+		ModelAllowlist: GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5"}},
+	}}
+	svc := newAvailableChannelService(channels, &stubGroupRepoForAvailable{activeGroups: groups})
+
+	out, err := svc.ListAvailableByGroup(context.Background(), allowAll(1))
+	require.NoError(t, err)
+	require.Len(t, out, 1)
+	require.True(t, out[0].ModelAllowlist.Enabled)
+	require.Equal(t, []string{"gpt-5"}, out[0].ModelAllowlist.Models)
+}
+
+func TestNarrowModelsByListing(t *testing.T) {
+	models := []SupportedModel{{Name: "claude-opus-4-7"}, {Name: "claude-sonnet-4-6"}, {Name: "gpt-5"}}
+
+	// 空清单 = 无显式映射，不裁剪。
+	require.Equal(t, models, NarrowModelsByListing(models, nil))
+
+	got := NarrowModelsByListing(models, []string{"Claude-Opus-4-7", "claude-sonnet-*"})
+	require.Len(t, got, 2)
+	require.Equal(t, "claude-opus-4-7", got[0].Name)
+	require.Equal(t, "claude-sonnet-4-6", got[1].Name)
+
+	// 清单与候选完全无交集时结果为空（而不是回退成全集）。
+	require.Empty(t, NarrowModelsByListing(models, []string{"other-model"}))
+}

@@ -1,6 +1,6 @@
 /**
  * User Channels API endpoints (non-admin)
- * 用户侧「可用渠道」聚合查询：渠道 + 用户可访问的分组 + 支持模型（含定价）。
+ * 用户侧「可用渠道」聚合查询：用户可访问的分组 + 所挂渠道 + 分组可调用模型（含定价）。
  */
 
 import { apiClient } from './client'
@@ -58,26 +58,25 @@ export interface UserSupportedModel {
   pricing: UserSupportedModelPricing | null
 }
 
-/**
- * 渠道下单个平台的子视图：用户可访问的分组 + 该平台支持的模型。
- * 后端把一个渠道按平台聚合成 sections，前端可以把渠道名作为 row-group
- * 一次渲染，后面按 sections 顺序用 rowspan 铺开。
- */
-export interface UserChannelPlatformSection {
-  platform: string
-  groups: UserAvailableGroup[]
-  supported_models: UserSupportedModel[]
-}
-
-export interface UserAvailableChannel {
+/** 分组所挂渠道的简要信息。 */
+export interface UserGroupChannelRef {
   name: string
   description: string
-  platforms: UserChannelPlatformSection[]
 }
 
-/** 列出当前用户可见的「可用渠道」（与 /groups/available 保持一致，返回平数组）。 */
-export async function getAvailable(options?: { signal?: AbortSignal }): Promise<UserAvailableChannel[]> {
-  const { data } = await apiClient.get<UserAvailableChannel[]>('/channels/available', {
+/**
+ * 分组视角的可用渠道条目：同平台的多个分组各自独立一条，
+ * models 只含该分组真实可调用的模型（账号映射 ∩ 渠道定价，再叠加分组白名单与用户禁用）。
+ */
+export interface UserAvailableGroupView {
+  group: UserAvailableGroup
+  channels: UserGroupChannelRef[]
+  models: UserSupportedModel[]
+}
+
+/** 列出当前用户可见的「可用渠道」（以分组为顶层，同平台分组不合并）。 */
+export async function getAvailable(options?: { signal?: AbortSignal }): Promise<UserAvailableGroupView[]> {
+  const { data } = await apiClient.get<UserAvailableGroupView[]>('/channels/available', {
     signal: options?.signal
   })
   return data

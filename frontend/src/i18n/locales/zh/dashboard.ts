@@ -702,22 +702,20 @@ export default {
   // Available Channels (user-facing)
   availableChannels: {
     title: '可用渠道',
-    description: '查看您可访问的渠道与其支持的模型、定价',
-    searchPlaceholder: '搜索渠道或模型...',
+    description: '查看您可访问的分组及其可调用的模型、倍率与定价',
+    searchPlaceholder: '搜索分组、渠道或模型...',
     empty: '暂无可用渠道',
     noModels: '未配置模型',
     noPricing: '未配置定价',
     exclusive: '专属',
     public: '公开',
+    modelCount: '{count} 个模型',
+    expandAll: '展开全部（+{count}）',
+    collapse: '收起',
+    allPlatforms: '全部',
+    viaChannels: '所属渠道',
     exclusiveTooltip: '管理员授权给你的专属分组',
     publicTooltip: '对所有用户公开的分组',
-    columns: {
-      name: '渠道名',
-      description: '描述',
-      platform: '平台',
-      groups: '我可访问的分组',
-      supportedModels: '支持模型'
-    },
     pricing: {
       billingMode: '计费模式',
       billingModeToken: '按 Token',

@@ -3,7 +3,9 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -27,21 +29,6 @@ func TestUserAvailableChannel_Unauthenticated401(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestFilterUserVisibleGroups_IntersectionOnly(t *testing.T) {
-	// 渠道挂在 {g1, g2, g3}，用户只允许 {g1, g3} —— 响应必须仅含 g1/g3。
-	groups := []service.AvailableGroupRef{
-		{ID: 1, Name: "g1", Platform: "anthropic"},
-		{ID: 2, Name: "g2", Platform: "anthropic"},
-		{ID: 3, Name: "g3", Platform: "openai"},
-	}
-	allowed := map[int64]struct{}{1: {}, 3: {}}
-
-	visible := filterUserVisibleGroups(groups, allowed)
-	require.Len(t, visible, 2)
-	ids := []int64{visible[0].ID, visible[1].ID}
-	require.ElementsMatch(t, []int64{1, 3}, ids)
-}
-
 func TestToUserSupportedModels_FiltersByAllowedPlatforms(t *testing.T) {
 	// 用户可访问分组只覆盖 anthropic；anthropic 平台的模型保留，openai 模型被剔除。
 	src := []service.SupportedModel{
@@ -63,47 +50,30 @@ func TestToUserSupportedModels_NilAllowedPlatformsKeepsAll(t *testing.T) {
 	require.Len(t, toUserSupportedModels(src, nil), 2)
 }
 
-func TestUserAvailableChannel_FieldWhitelist(t *testing.T) {
-	// 通过序列化 userAvailableChannel 结构体验证响应形状：
-	// 只有 name / description / platforms；不含管理端字段。
-	row := userAvailableChannel{
-		Name:        "ch",
-		Description: "d",
-		Platforms: []userChannelPlatformSection{
-			{
-				Platform:        "anthropic",
-				Groups:          []userAvailableGroup{{ID: 1, Name: "g1", Platform: "anthropic"}},
-				SupportedModels: []userSupportedModel{},
-			},
-		},
+func TestUserAvailableGroupView_FieldWhitelist(t *testing.T) {
+	// 响应以分组为顶层：只有 group / channels / models；不含管理端字段。
+	row := userAvailableGroupView{
+		Group:    userAvailableGroup{ID: 1, Name: "g1", Platform: "anthropic"},
+		Channels: []userGroupChannelRef{{Name: "ch", Description: "d"}},
+		Models:   []userSupportedModel{},
 	}
 	raw, err := json.Marshal(row)
 	require.NoError(t, err)
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(raw, &decoded))
 
-	for _, key := range []string{"id", "status", "billing_model_source", "restrict_models"} {
+	for _, key := range []string{"id", "status", "billing_model_source", "restrict_models", "model_allowlist"} {
 		_, exists := decoded[key]
 		require.Falsef(t, exists, "user DTO must not expose %q", key)
 	}
-	for _, key := range []string{"name", "description", "platforms"} {
+	for _, key := range []string{"group", "channels", "models"} {
 		_, exists := decoded[key]
 		require.Truef(t, exists, "user DTO must expose %q", key)
 	}
 
-	// 验证 section 的字段（platform / groups / supported_models）。
-	rawSection, err := json.Marshal(row.Platforms[0])
-	require.NoError(t, err)
-	var sectionDecoded map[string]any
-	require.NoError(t, json.Unmarshal(rawSection, &sectionDecoded))
-	for _, key := range []string{"platform", "groups", "supported_models"} {
-		_, exists := sectionDecoded[key]
-		require.Truef(t, exists, "platform section must expose %q", key)
-	}
-
 	// Group DTO 暴露区分专属/公开、订阅类型、默认倍率和高峰倍率规则所需的字段，
 	// 前端据此渲染 GroupBadge 并与 API 密钥页保持一致的视觉。
-	rawGroup, err := json.Marshal(row.Platforms[0].Groups[0])
+	rawGroup, err := json.Marshal(row.Group)
 	require.NoError(t, err)
 	var groupDecoded map[string]any
 	require.NoError(t, json.Unmarshal(rawGroup, &groupDecoded))
@@ -149,125 +119,90 @@ func TestUserAvailableChannel_FieldWhitelist(t *testing.T) {
 	}
 }
 
-func TestBuildPlatformSections_GroupsByPlatform(t *testing.T) {
-	// 一个渠道横跨 anthropic / openai / 空平台：应该生成 2 个 section，
-	// 按 platform 字母序排序，各自 groups 和 supported_models 只含同平台条目。
-	ch := service.AvailableChannel{
-		Name: "ch",
-		SupportedModels: []service.SupportedModel{
-			{Name: "claude-sonnet-4-6", Platform: "anthropic"},
-			{Name: "gpt-4o", Platform: "openai"},
-		},
-	}
-	visible := []userAvailableGroup{
-		{ID: 1, Name: "g-openai", Platform: "openai"},
-		{ID: 2, Name: "g-ant", Platform: "anthropic"},
-		{ID: 3, Name: "g-empty", Platform: ""},
-	}
-	sections := buildPlatformSections(ch, visible)
-	require.Len(t, sections, 2)
-	require.Equal(t, "anthropic", sections[0].Platform)
-	require.Equal(t, "openai", sections[1].Platform)
-	require.Len(t, sections[0].Groups, 1)
-	require.Equal(t, int64(2), sections[0].Groups[0].ID)
-	require.Len(t, sections[0].SupportedModels, 1)
-	require.Equal(t, "claude-sonnet-4-6", sections[0].SupportedModels[0].Name)
+// stubGroupModelLister 按「分组 ID + 平台」返回预设的账号可调用清单。
+type stubGroupModelLister map[string][]string
+
+func (l stubGroupModelLister) GetAvailableModels(_ context.Context, groupID *int64, platform string) []string {
+	return l[fmt.Sprintf("%d/%s", *groupID, platform)]
 }
 
-func TestBuildPlatformSections_CompositeGroupExpandsAcrossConfiguredModelPlatforms(t *testing.T) {
-	anthropicPrice := 3e-6
-	openAIPrice := 2.5e-6
-	ch := service.AvailableChannel{
-		Name: "composite-channel",
-		SupportedModels: []service.SupportedModel{
-			{
-				Name:     "claude-sonnet-4-6",
-				Platform: service.PlatformAnthropic,
-				Pricing:  &service.ChannelModelPricing{InputPrice: &anthropicPrice},
-			},
-			{
-				Name:     "gpt-5",
-				Platform: service.PlatformOpenAI,
-				Pricing:  &service.ChannelModelPricing{InputPrice: &openAIPrice},
-			},
-		},
+func groupView(id int64, platform string, allow service.GroupModelAllowlist, models ...service.SupportedModel) service.AvailableGroupView {
+	return service.AvailableGroupView{
+		Group:          service.AvailableGroupRef{ID: id, Name: fmt.Sprintf("g%d", id), Platform: platform},
+		ModelAllowlist: allow,
+		Channels:       []service.AvailableGroupChannelRef{{Name: "ch"}},
+		Models:         models,
 	}
-	visible := []userAvailableGroup{
-		{ID: 9, Name: "composite", Platform: service.PlatformComposite},
-	}
-
-	sections := buildPlatformSections(ch, visible)
-
-	require.Len(t, sections, 2)
-	require.Equal(t, service.PlatformAnthropic, sections[0].Platform)
-	require.Equal(t, service.PlatformOpenAI, sections[1].Platform)
-	for _, section := range sections {
-		require.Len(t, section.Groups, 1)
-		require.Equal(t, int64(9), section.Groups[0].ID)
-		require.Equal(t, service.PlatformComposite, section.Groups[0].Platform)
-		require.Len(t, section.SupportedModels, 1)
-		require.Equal(t, section.Platform, section.SupportedModels[0].Platform)
-		require.NotNil(t, section.SupportedModels[0].Pricing)
-	}
-	require.Equal(t, "claude-sonnet-4-6", sections[0].SupportedModels[0].Name)
-	require.Equal(t, "gpt-5", sections[1].SupportedModels[0].Name)
 }
 
-func TestBuildPlatformSections_OrdinaryGroupRemainsPlatformIsolated(t *testing.T) {
-	ch := service.AvailableChannel{
-		SupportedModels: []service.SupportedModel{
-			{Name: "claude-sonnet-4-6", Platform: service.PlatformAnthropic},
-			{Name: "gpt-5", Platform: service.PlatformOpenAI},
-		},
+func modelNames(models []service.SupportedModel) []string {
+	names := make([]string, 0, len(models))
+	for _, m := range models {
+		names = append(names, m.Name)
 	}
-	visible := []userAvailableGroup{
-		{ID: 1, Name: "anthropic-only", Platform: service.PlatformAnthropic},
-	}
-
-	sections := buildPlatformSections(ch, visible)
-
-	require.Len(t, sections, 1)
-	require.Equal(t, service.PlatformAnthropic, sections[0].Platform)
-	require.Len(t, sections[0].SupportedModels, 1)
-	require.Equal(t, "claude-sonnet-4-6", sections[0].SupportedModels[0].Name)
+	return names
 }
 
-func TestBuildPlatformSections_CompositeAndOrdinaryGroupsShareConcreteSection(t *testing.T) {
-	ch := service.AvailableChannel{
-		SupportedModels: []service.SupportedModel{
-			{Name: "claude-sonnet-4-6", Platform: service.PlatformAnthropic},
-			{Name: "gpt-5", Platform: service.PlatformOpenAI},
-		},
-	}
-	visible := []userAvailableGroup{
-		{ID: 1, Name: "anthropic-only", Platform: service.PlatformAnthropic},
-		{ID: 9, Name: "composite", Platform: service.PlatformComposite},
-	}
-
-	sections := buildPlatformSections(ch, visible)
-
-	require.Len(t, sections, 2)
-	require.Equal(t, service.PlatformAnthropic, sections[0].Platform)
-	require.Equal(t, []int64{1, 9}, []int64{
-		sections[0].Groups[0].ID,
-		sections[0].Groups[1].ID,
-	})
-	require.Equal(t, service.PlatformOpenAI, sections[1].Platform)
-	require.Len(t, sections[1].Groups, 1)
-	require.Equal(t, int64(9), sections[1].Groups[0].ID)
+func TestResolveGroupModels_NilListerKeepsCandidates(t *testing.T) {
+	v := groupView(1, service.PlatformOpenAI, service.GroupModelAllowlist{},
+		service.SupportedModel{Name: "gpt-5", Platform: service.PlatformOpenAI},
+		service.SupportedModel{Name: "gpt-4o", Platform: service.PlatformOpenAI},
+	)
+	got := resolveGroupModels(context.Background(), v, nil, nil)
+	require.Equal(t, []string{"gpt-4o", "gpt-5"}, modelNames(got))
 }
 
-func TestBuildPlatformSections_CompositeWithoutModelsKeepsEmptyCompositeSection(t *testing.T) {
-	visible := []userAvailableGroup{
-		{ID: 9, Name: "composite", Platform: service.PlatformComposite},
-	}
+func TestResolveGroupModels_NoExplicitMappingDoesNotNarrow(t *testing.T) {
+	// 账号无显式映射（清单为空）= 默认全开放，渠道候选原样保留。
+	v := groupView(1, service.PlatformOpenAI, service.GroupModelAllowlist{},
+		service.SupportedModel{Name: "gpt-5", Platform: service.PlatformOpenAI},
+	)
+	got := resolveGroupModels(context.Background(), v, stubGroupModelLister{}, nil)
+	require.Equal(t, []string{"gpt-5"}, modelNames(got))
+}
 
-	sections := buildPlatformSections(service.AvailableChannel{
-		SupportedModels: []service.SupportedModel{{Name: "invalid-without-platform"}},
-	}, visible)
+func TestResolveGroupModels_IntersectsWithAccountListing(t *testing.T) {
+	// 渠道配了三个 claude 模型，账号只放行 opus 精确名 + sonnet-* 通配。
+	v := groupView(1, service.PlatformAnthropic, service.GroupModelAllowlist{},
+		service.SupportedModel{Name: "claude-opus-4-7", Platform: service.PlatformAnthropic},
+		service.SupportedModel{Name: "claude-sonnet-4-6", Platform: service.PlatformAnthropic},
+		service.SupportedModel{Name: "claude-haiku-4-5", Platform: service.PlatformAnthropic},
+	)
+	lister := stubGroupModelLister{"1/anthropic": {"claude-opus-4-7", "claude-sonnet-*"}}
+	got := resolveGroupModels(context.Background(), v, lister, nil)
+	require.Equal(t, []string{"claude-opus-4-7", "claude-sonnet-4-6"}, modelNames(got))
+}
 
-	require.Len(t, sections, 1)
-	require.Equal(t, service.PlatformComposite, sections[0].Platform)
-	require.Len(t, sections[0].Groups, 1)
-	require.Empty(t, sections[0].SupportedModels)
+func TestResolveGroupModels_AllowlistAndDeniedFilter(t *testing.T) {
+	v := groupView(1, service.PlatformOpenAI,
+		service.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5*", "o3"}},
+		service.SupportedModel{Name: "gpt-5", Platform: service.PlatformOpenAI},
+		service.SupportedModel{Name: "gpt-5-mini", Platform: service.PlatformOpenAI},
+		service.SupportedModel{Name: "o3", Platform: service.PlatformOpenAI},
+		service.SupportedModel{Name: "gpt-4o", Platform: service.PlatformOpenAI},
+	)
+	// 白名单挡掉 gpt-4o；用户在该分组被禁用 gpt-5-mini。
+	got := resolveGroupModels(context.Background(), v, nil, []string{"gpt-5-mini"})
+	require.Equal(t, []string{"gpt-5", "o3"}, modelNames(got))
+}
+
+func TestResolveGroupModels_CompositeNarrowsPerConcretePlatform(t *testing.T) {
+	// Composite 分组对每个具体平台分别求交：anthropic 有显式映射被裁剪，openai 无映射保持全开。
+	v := groupView(9, service.PlatformComposite, service.GroupModelAllowlist{},
+		service.SupportedModel{Name: "claude-opus-4-7", Platform: service.PlatformAnthropic},
+		service.SupportedModel{Name: "claude-haiku-4-5", Platform: service.PlatformAnthropic},
+		service.SupportedModel{Name: "gpt-5", Platform: service.PlatformOpenAI},
+	)
+	lister := stubGroupModelLister{"9/anthropic": {"claude-opus-4-7"}}
+	got := resolveGroupModels(context.Background(), v, lister, nil)
+	require.Equal(t, []string{"claude-opus-4-7", "gpt-5"}, modelNames(got))
+}
+
+func TestBuildUserGroupView_EmptyModelsStillReturnsGroup(t *testing.T) {
+	v := groupView(1, service.PlatformOpenAI, service.GroupModelAllowlist{})
+	view := buildUserGroupView(context.Background(), v, nil, nil)
+	require.Equal(t, int64(1), view.Group.ID)
+	require.Len(t, view.Channels, 1)
+	require.NotNil(t, view.Models)
+	require.Empty(t, view.Models)
 }

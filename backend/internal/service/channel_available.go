@@ -111,6 +111,162 @@ func (s *ChannelService) ListAvailable(ctx context.Context) ([]AvailableChannel,
 	return out, nil
 }
 
+// AvailableGroupChannelRef 分组视图中该分组所挂渠道的简要信息。
+type AvailableGroupChannelRef struct {
+	Name        string
+	Description string
+}
+
+// AvailableGroupView 可用渠道的分组视角：每个分组一条，附带所挂渠道与候选模型。
+//
+// Models 只是「渠道配置层」的候选集合（已按分组平台隔离、跨渠道去重），
+// 是否真实可调用由调用方再结合账号映射 / 分组白名单 / 用户禁用裁剪；
+// 为此一并带出分组的模型白名单配置。
+type AvailableGroupView struct {
+	Group          AvailableGroupRef
+	ModelAllowlist GroupModelAllowlist
+	Channels       []AvailableGroupChannelRef
+	Models         []SupportedModel
+}
+
+// ListAvailableByGroup 以分组为顶层返回「可用渠道」视图，只含 allowedGroupIDs 内的分组。
+//
+// 同平台的分组彼此独立、不合并。候选模型口径与 ModelPlazaService.ListGroups 一致：
+//   - 仅 Active 渠道；SupportedModels ∪ 全局定价回落；
+//   - 普通分组按分组平台隔离，Composite 分组展开为渠道已配置的具体平台；
+//   - 同分组跨渠道同名模型「先见者胜」，仅当已存条目无定价而新条目有定价时升级。
+//
+// 至少挂了一个 Active 渠道的分组才会返回；候选模型为空的分组也保留（前端显示“未配置模型”）。
+// 输出按 平台 → 倍率 → 名称 排序，组内模型按名称 → 平台排序。
+func (s *ChannelService) ListAvailableByGroup(ctx context.Context, allowedGroupIDs map[int64]struct{}) ([]AvailableGroupView, error) {
+	channels, err := s.repo.ListAll(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list channels: %w", err)
+	}
+	groups, err := s.groupRepo.ListActive(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list active groups: %w", err)
+	}
+
+	sort.SliceStable(channels, func(i, j int) bool {
+		return strings.ToLower(channels[i].Name) < strings.ToLower(channels[j].Name)
+	})
+
+	views := make(map[int64]*AvailableGroupView, len(groups))
+	order := make([]int64, 0, len(groups))
+	for i := range groups {
+		g := groups[i]
+		if _, ok := allowedGroupIDs[g.ID]; !ok {
+			continue
+		}
+		views[g.ID] = &AvailableGroupView{
+			Group: AvailableGroupRef{
+				ID:                 g.ID,
+				Name:               g.Name,
+				Platform:           g.Platform,
+				SubscriptionType:   g.SubscriptionType,
+				RateMultiplier:     g.RateMultiplier,
+				PeakRateEnabled:    g.PeakRateEnabled,
+				PeakStart:          g.PeakStart,
+				PeakEnd:            g.PeakEnd,
+				PeakRateMultiplier: g.PeakRateMultiplier,
+				IsExclusive:        g.IsExclusive,
+			},
+			ModelAllowlist: g.ModelAllowlist,
+		}
+		order = append(order, g.ID)
+	}
+
+	type modelKey struct{ platform, name string }
+	modelIdx := make(map[int64]map[modelKey]int, len(views))
+	for i := range channels {
+		ch := &channels[i]
+		if ch.Status != StatusActive {
+			continue
+		}
+		ch.normalizeBillingModelSource()
+		supported := ch.SupportedModels()
+		fillGlobalPricingFallback(s.pricingService, supported)
+
+		for _, gid := range ch.GroupIDs {
+			v, ok := views[gid]
+			if !ok {
+				continue
+			}
+			v.Channels = append(v.Channels, AvailableGroupChannelRef{Name: ch.Name, Description: ch.Description})
+			idx := modelIdx[gid]
+			if idx == nil {
+				idx = make(map[modelKey]int, len(supported))
+				modelIdx[gid] = idx
+			}
+			for j := range supported {
+				m := supported[j]
+				if v.Group.Platform == PlatformComposite {
+					if !isConcreteRequestPlatform(m.Platform) {
+						continue
+					}
+				} else if m.Platform != v.Group.Platform {
+					continue
+				}
+				key := modelKey{platform: m.Platform, name: m.Name}
+				if at, seen := idx[key]; seen {
+					if v.Models[at].Pricing == nil && m.Pricing != nil {
+						v.Models[at].Pricing = m.Pricing
+					}
+					continue
+				}
+				idx[key] = len(v.Models)
+				v.Models = append(v.Models, m)
+			}
+		}
+	}
+
+	out := make([]AvailableGroupView, 0, len(order))
+	for _, gid := range order {
+		v := views[gid]
+		if len(v.Channels) == 0 {
+			continue
+		}
+		sort.SliceStable(v.Models, func(i, j int) bool {
+			if v.Models[i].Name != v.Models[j].Name {
+				return v.Models[i].Name < v.Models[j].Name
+			}
+			return v.Models[i].Platform < v.Models[j].Platform
+		})
+		out = append(out, *v)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i].Group, out[j].Group
+		if a.Platform != b.Platform {
+			return a.Platform < b.Platform
+		}
+		if a.RateMultiplier != b.RateMultiplier {
+			return a.RateMultiplier < b.RateMultiplier
+		}
+		return a.Name < b.Name
+	})
+	return out, nil
+}
+
+// NarrowModelsByListing 用「账号实际可调用」清单（GatewayService.GetAvailableModels 的返回值）
+// 裁剪渠道候选模型：保留精确命中或命中清单中末尾 * 通配条目的模型。
+// listed 为空表示该分组没有显式映射（默认全开放），候选原样返回。
+func NarrowModelsByListing(models []SupportedModel, listed []string) []SupportedModel {
+	if len(listed) == 0 {
+		return models
+	}
+	out := make([]SupportedModel, 0, len(models))
+	for _, m := range models {
+		for _, entry := range listed {
+			if strings.EqualFold(entry, m.Name) || matchWildcard(entry, m.Name) {
+				out = append(out, m)
+				break
+			}
+		}
+	}
+	return out
+}
+
 // fillGlobalPricingFallback 对未命中渠道定价的支持模型，从全局 LiteLLM 数据合成一份
 // 展示用定价。仅用于「可用渠道」展示，不影响真实计费链路。
 //
