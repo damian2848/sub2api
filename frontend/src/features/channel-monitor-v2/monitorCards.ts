@@ -11,6 +11,17 @@ export function hasMonitorSamples(metric: MonitorMetric): boolean {
   return metric.has_samples === true || metric.request_count > 0
 }
 
+// Business availability takes precedence. Probe counts may be redacted, so the
+// explicit rate (including zero) is the signal, never a zero error-rate default.
+export function effectiveAvailability(metric: MonitorMetric): number | null {
+  const value = hasMonitorSamples(metric) ? 1 - metric.error_rate : metric.probe_availability
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1 ? value : null
+}
+
+export function hasAvailabilitySamples(metric: MonitorMetric): boolean {
+  return effectiveAvailability(metric) !== null
+}
+
 export function monitorRefreshSeconds(configSeconds: number | undefined, rows: readonly MonitorMatrixRow[], bootstrap: boolean): number {
   if (bootstrap) return 10
   let seconds = configSeconds && Number.isFinite(configSeconds) && configSeconds > 0 ? configSeconds : 300

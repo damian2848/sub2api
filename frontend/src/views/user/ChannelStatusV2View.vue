@@ -204,7 +204,7 @@
           </template>
           <template v-else>
             <span class="col-span-2 text-xs text-gray-500 dark:text-gray-400 sm:ml-3 sm:shrink-0">{{ t('channelMonitorV2.cards.passive') }}</span>
-            <span v-if="snapshot && hasMonitorSamples(snapshot.metrics)" class="ml-auto hidden text-xs text-gray-500 dark:text-gray-400 md:inline">{{ t('channelMonitorV2.cards.availability') }} {{ formatPercent(1 - snapshot.metrics.error_rate) }} · {{ t('channelMonitorV2.cards.cache') }} {{ formatPercent(snapshot.metrics.cache_rate) }}</span>
+            <span v-if="snapshot && hasAvailabilitySamples(snapshot.metrics)" class="ml-auto hidden text-xs text-gray-500 dark:text-gray-400 md:inline">{{ t('channelMonitorV2.cards.availability') }} {{ formatAvailability(snapshot.metrics) }}<template v-if="!hasMonitorSamples(snapshot.metrics)"> · {{ t('channelMonitorV2.cards.activeProbe') }}</template><template v-else> · {{ t('channelMonitorV2.cards.cache') }} {{ formatPercent(snapshot.metrics.cache_rate) }}</template></span>
           </template>
         </div>
       </section>
@@ -220,8 +220,9 @@
       >
         <MetricCell
           :label="t('channelMonitorV2.metrics.successRate')"
-          :value="formatPercent(1 - snapshot.metrics.error_rate)"
-          :detail="t('channelMonitorV2.metrics.errorRateValue', { value: formatPercent(snapshot.metrics.error_rate) })"
+          :value="formatAvailability(snapshot.metrics)"
+          :detail="availabilityDetail(snapshot.metrics)"
+          :title="t('channelMonitorV2.cards.availabilityHint')"
           :state="snapshot.health.error_rate"
         />
         <MetricCell
@@ -240,7 +241,7 @@
         />
         <MetricCell
           :label="t('channelMonitorV2.metrics.cacheRate')"
-          :value="formatPercent(snapshot.metrics.cache_rate)"
+          :value="hasMonitorSamples(snapshot.metrics) ? formatPercent(snapshot.metrics.cache_rate) : '—'"
           :detail="t('channelMonitorV2.metrics.cacheDetail')"
           :state="snapshot.health.cache || snapshot.health.overall"
         />
@@ -336,15 +337,15 @@
                     </div>
                   </td>
                   <td>
-                    <span class="block">{{ formatPercent(1 - row.metrics.error_rate) }}</span>
-                    <small class="text-xs text-gray-400">{{ t('channelMonitorV2.metrics.errorRateValue', { value: formatPercent(row.metrics.error_rate) }) }}</small>
+                    <span class="block">{{ formatAvailability(row.metrics) }}</span>
+                    <small class="text-xs text-gray-400">{{ availabilityDetail(row.metrics) }}</small>
                   </td>
                   <td>
                     <span class="block">{{ formatMs(row.metrics.ttft.p50_ms) }}</span>
                     <small class="text-xs text-gray-400">{{ latencyDetail(row.metrics.ttft) }}</small>
                   </td>
                   <td v-if="showThroughput" :title="exactTps(row.metrics.tpm)">{{ formatTps(row.metrics.tpm) }}</td>
-                  <td>{{ formatPercent(row.metrics.cache_rate) }}</td>
+                  <td>{{ hasMonitorSamples(row.metrics) ? formatPercent(row.metrics.cache_rate) : '—' }}</td>
                   <td v-if="showThroughput">{{ formatRate(row.metrics.rpm) }}</td>
                 </tr>
               </tbody>
@@ -437,15 +438,15 @@
                     </strong>
                   </td>
                   <td>
-                    <span class="block">{{ formatPercent(1 - row.metrics.error_rate) }}</span>
-                    <small class="text-xs text-gray-400">{{ t('channelMonitorV2.metrics.errorRateValue', { value: formatPercent(row.metrics.error_rate) }) }}</small>
+                    <span class="block">{{ formatAvailability(row.metrics) }}</span>
+                    <small class="text-xs text-gray-400">{{ availabilityDetail(row.metrics) }}</small>
                   </td>
                   <td>
                     <span class="block">{{ formatMs(row.metrics.ttft.p50_ms) }}</span>
                     <small class="text-xs text-gray-400">{{ latencyDetail(row.metrics.ttft) }}</small>
                   </td>
                   <td v-if="showThroughput" :title="exactTps(row.metrics.tpm)">{{ formatTps(row.metrics.tpm) }}</td>
-                  <td>{{ formatPercent(row.metrics.cache_rate) }}</td>
+                  <td>{{ hasMonitorSamples(row.metrics) ? formatPercent(row.metrics.cache_rate) : '—' }}</td>
                   <td v-if="showThroughput">{{ formatRate(row.metrics.rpm) }}</td>
                 </tr>
               </tbody>
@@ -488,7 +489,7 @@ import Select from '@/components/common/Select.vue'
 import FilterMultiSelect from '@/features/channel-monitor-v2/FilterMultiSelect.vue'
 import MonitorStatusCards from '@/features/channel-monitor-v2/MonitorStatusCards.vue'
 import MonitorObservationsPanel from '@/features/channel-monitor-v2/MonitorObservationsPanel.vue'
-import { hasMonitorSamples } from '@/features/channel-monitor-v2/monitorCards'
+import { effectiveAvailability, hasAvailabilitySamples, hasMonitorSamples } from '@/features/channel-monitor-v2/monitorCards'
 import MetricCell from '@/features/channel-monitor-v2/MetricCell.vue'
 import MonitorRankBadge from '@/features/channel-monitor-v2/MonitorRankBadge.vue'
 import MonitorTrendChart from '@/features/channel-monitor-v2/MonitorTrendChart.vue'
@@ -506,6 +507,7 @@ import type {
   MonitorHealth,
   MonitorMatrixGroupBy,
   MonitorMatrixResponse,
+  MonitorMetric,
   MonitorModelRow,
   MonitorRange,
   MonitorSnapshot,
@@ -877,6 +879,14 @@ function exactTps(tpm: number | null | undefined) {
 }
 function formatPercent(value: number) {
   return formatMonitorPercent(value)
+}
+function formatAvailability(metric: MonitorMetric) {
+  const availability = effectiveAvailability(metric)
+  return availability == null ? '—' : formatPercent(availability)
+}
+function availabilityDetail(metric: MonitorMetric) {
+  if (hasMonitorSamples(metric)) return t('channelMonitorV2.metrics.errorRateValue', { value: formatPercent(metric.error_rate) })
+  return hasAvailabilitySamples(metric) ? t('channelMonitorV2.cards.activeProbe') : t('channelMonitorV2.cards.health.unknown')
 }
 function formatMs(value: number | null) {
   return formatMonitorMs(value)

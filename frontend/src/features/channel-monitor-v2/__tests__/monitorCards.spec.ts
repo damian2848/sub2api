@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CANDY_HISTORY_LIMIT, candyDisplayState, candyHistorySlots, hasMonitorSamples, monitorCardTimeline, monitorRefreshSeconds } from '../monitorCards'
+import { CANDY_HISTORY_LIMIT, candyDisplayState, candyHistorySlots, effectiveAvailability, hasAvailabilitySamples, hasMonitorSamples, monitorCardTimeline, monitorRefreshSeconds } from '../monitorCards'
 import type { MonitorCandyHistory, MonitorCoverage, MonitorMatrixRow, MonitorMetric } from '@/api/channelMonitorV2'
 
 describe('monitor card data semantics', () => {
@@ -33,6 +33,23 @@ describe('monitor card data semantics', () => {
     expect(hasMonitorSamples({ request_count: 0, has_samples: false } as MonitorMetric)).toBe(false)
     expect(hasMonitorSamples({ request_count: 0, has_samples: true } as MonitorMetric)).toBe(true)
     expect(hasMonitorSamples({ request_count: 3 } as MonitorMetric)).toBe(true)
+  })
+  it('uses explicit probe availability without pretending there was business traffic', () => {
+    for (const availability of [0, 0.75, 1]) {
+      const metric = { request_count: 0, has_samples: false, error_rate: 0, probe_sample_count: 0, probe_availability: availability, availability_source: 'probe' } as MonitorMetric
+      expect(effectiveAvailability(metric)).toBe(availability)
+      expect(hasAvailabilitySamples(metric)).toBe(true)
+      expect(hasMonitorSamples(metric)).toBe(false)
+    }
+  })
+  it('keeps business availability authoritative even with failed probes', () => {
+    expect(effectiveAvailability({ request_count: 10, error_rate: 0.1, probe_availability: 0 } as MonitorMetric)).toBe(0.9)
+    expect(effectiveAvailability({ request_count: 0, has_samples: true, error_rate: 0.1, probe_availability: 0 } as MonitorMetric)).toBe(0.9)
+  })
+  it.each([undefined, null, Number.NaN, Infinity, -1, 2])('does not infer availability from missing or invalid probe rate %s', (availability) => {
+    const metric = { request_count: 0, error_rate: 0, probe_availability: availability } as MonitorMetric
+    expect(effectiveAvailability(metric)).toBeNull()
+    expect(hasAvailabilitySamples(metric)).toBe(false)
   })
   it('keeps empty time windows unknown and uses the worst observed health in each window', () => {
     const metric = { request_count: 0, has_samples: true } as MonitorMetric
