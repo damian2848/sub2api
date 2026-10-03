@@ -18,20 +18,24 @@
 
 ## 发布前检查
 
-在仓库根目录运行，全部通过再继续：
+本地只跑「和这次改动相关」的检查，完整验证交给推送后的 CI（CI 在同一个提交上跑全部后端、前端、sidecar、Docker 集成和 lint）：
 
 ```bash
-cd backend && go build ./... && go vet -tags unit ./internal/service/ ./internal/handler/... ./internal/repository/ ./internal/server/...
-cd backend && go test -tags unit ./internal/service/ ./internal/handler/... ./internal/repository/ ./internal/server/... ./internal/config/... -count=1
-cd frontend && node_modules/.bin/vitest run && node_modules/.bin/vue-tsc --noEmit
-cd tools/prism-browser && node --test test/*.test.mjs
+deploy/releasing/precheck.sh            # 默认对比最近一个 v* 标签；也可传一个 ref
+```
+
+它按改动路径选择：动了 `backend/` 只构建并测试改动的包；动了 `frontend/` 跑 `vue-tsc` 和 `vitest --changed`；动了 `tools/prism-browser/` 跑 sidecar 单测；动了 `deploy/releasing/` 跑部署脚本测试。需要真实浏览器验证的改动（比如 sidecar 的页面/轮询逻辑）另外跑：
+
+```bash
+cd tools/prism-browser && PRISM_CHROMIUM_EXECUTABLE=<chromium 路径> npm run test:smoke
 ```
 
 注意：
 
 - 前端不要用默认的 `pnpm`（11.x 会改写 `frontend/pnpm-lock.yaml`），构建用 `npx pnpm@9.15.9 run build`，提交前确认锁文件没有变化。
 - 已在生产执行过的迁移文件不能再改，否则迁移校验和对不上，服务无法启动。
-- `go test` 会在 `backend/internal/service/data/` 生成临时文件，不要提交。
+- `go test` 会在 `backend/internal/service/data/` 生成临时文件并可能删除已提交的夹具；`precheck.sh` 会还原，手工跑测试后也要 `git checkout -- backend/internal/service/data && git clean -fdq backend/internal/service/data`。
+- 本地检查通过不代表 CI 会通过。CI 失败时发布页已经公开（见下），所以动了共享代码、依赖或构建配置时，建议改用「全量本地检查」：`go test -tags unit ./internal/... && cd frontend && vitest run`。
 
 ## 发布说明怎么写
 
@@ -63,36 +67,50 @@ Sub2API <版本>
 ## 步骤
 
 ```bash
-# 1. 发布提交：改版本号、必要的文档
+# 1. 发布提交：改 backend/cmd/server/VERSION、必要的文档，提交。
 git commit -am "chore(release): prepare v<版本>"
 
-# 2. 推送到 fork，并在 main 上做一次不发布的演练（构建全部产物、校验、打包，但不发布）
-git push fork main
-gh workflow run release.yml --repo damian2848/sub2api --ref main \
-  -f tag=main -f dry_run=true -f simple_release=false -f publish_images=false
-
-# 3. 演练通过后，在同一个提交上打带注释标签，正文使用上面的结构。
-#    必须加 --cleanup=verbatim：默认会把以 # 开头的行当作注释删掉，章节标题（## 亮点 等）会全部丢失。
-git tag -a v<版本> -F notes.md --cleanup=verbatim
-git push fork v<版本>
-
-# 4. 推送标签会自动触发 Release（事件为 push，不发布镜像、不发通知）。先确认：
-gh run list --repo damian2848/sub2api --workflow release.yml --limit 3
-#    只有在列表里没有这个标签的 push 运行时才手动触发；两次都跑会对同一个标签重复发布
-#    （并发组会让第二次排队，等第一次完成后再发一遍）。需要手动触发时：
-gh workflow run release.yml --repo damian2848/sub2api --ref main \
-  -f tag=v<版本> -f dry_run=false -f simple_release=false -f publish_images=false -f notify_release=false
+# 2. 一条命令完成：推送 main → 打带注释标签 → 推送标签 → 并行等待 CI 与 Release → 核对发布页（10 个附件）。
+deploy/releasing/release.sh <版本> notes.md
 ```
+
+`release.sh` 的约定：
+
+- 不再单独做「不发布的演练」。标签触发的 Release 构建的就是演练会构建的产物，演练只是把同样的 5–6 分钟多花了一遍。
+- CI 和 Release 在推送后**同时**运行，两者都结束才返回。CI 或 Release 失败时命令以非零退出并明确提示。
+- 发布前它会拒绝：工作区有未提交改动、`VERSION` 不是目标版本、说明不是以 `Sub2API <版本>` 开头或缺少 `## ` 章节、标签已存在、不在 `main`。
+- 推送目标固定为 `fork`，永远不推 `origin`。
+- 标签用 `--cleanup=verbatim` 创建，否则 git 会把 `## ` 标题行当注释删掉。
+- **CI 失败的后果**：标签已推送、发布页已公开。此时删除发布页和标签（`gh release delete <标签> --cleanup-tag`），修复后用下一个补丁号重发，不要复用旧号。这是并行换来速度的代价；改动涉及共享代码、依赖或构建配置时，先在本地跑全量检查再发布。
+- 标签推送会自动触发 Release，不要再手动 `workflow_dispatch`，否则同一个标签会发布两次（并发组会让第二次排队，等第一次完成后再发一遍）。
 
 仓库变量 `PUBLISH_CONTAINER_IMAGES=false`，所以不发布容器镜像，只发布二进制和运行包。
 
+## 部署
+
+```bash
+deploy/releasing/deploy.sh <版本>              # 只读预检
+deploy/releasing/deploy.sh <版本> --execute    # 执行
+```
+
+- 目标版本取参数，目标提交取本地 git 标签（并要求标签已推到 `fork`），回滚基线取**线上正在运行的二进制**（读它自己的 `-version`），不需要手工改任何版本号或提交号。
+- 主程序压缩包（约 40 MB）和 Prism 包由**服务器自己从 GitHub 下载**并对照发布的校验和验证，另外校验下载下来的二进制确实是指定版本和提交；不再经过本机再 scp。
+- 执行时脚本在服务器上脱离终端运行（断线不会中断切换），本地每 20 秒读回进度并在结束时打印回执。
+- 切换前自动等待 Prism sidecar 空闲（默认最多 10 分钟，连续安静 20 秒），等不到就放弃，不会打断进行中的生成。
+- 迁移和 sidecar 启动命令不再写死：有新迁移时用 `--new-migration NAME.sql=SHA256`（可重复），本版本需要改 sidecar 启动命令时用 `--sidecar-cmd '["node","src/x.mjs"]'`，其余情况两者都不需要，并且任何其他运行参数变化都会被拒绝。
+- 数据库备份、镜像构建、回滚镜像、切换后的校验与自动回滚保持不变，这是回滚能力的来源，不为速度牺牲。
+
 ## 发布后核对
+
+`release.sh` 已核对：附件共 10 个、不是草稿、正文章节标题保留。其余在部署时由服务器完成：
+
+- 下载的主程序与发布的 `checksums.txt` 一致，并且 `-version` 返回目标版本和完整提交号；
+- `prism-browser_<版本>.tar.gz` 与 `.sha256` 一致，包内包含 `tools/prism-browser/Dockerfile`、`deploy/docker-compose.prism-browser.yml`、`deploy/.env.prism-browser.example` 和 `deploy/PRISM_BROWSER.md`。
+
+需要手工看发布页时：
 
 ```bash
 gh release view v<版本> --repo damian2848/sub2api --json assets,body
 ```
 
-- 附件共 10 个：五个平台的主程序、`checksums.txt`、两个架构的重新登录运行时、`prism-browser_<版本>.tar.gz` 及其 `.sha256`。
-- 下载一个主程序，`sha256sum -c checksums.txt --ignore-missing` 通过，运行 `--version` 返回目标版本和完整提交号。
-- 解开 `prism-browser_<版本>.tar.gz`，确认包含 `tools/prism-browser/Dockerfile`、`deploy/docker-compose.prism-browser.yml`、`deploy/.env.prism-browser.example` 和 `deploy/PRISM_BROWSER.md`。
-- 发布页正文和标签正文一致（包括 `## ` 章节标题），页脚的安装命令指向这个标签。已发布的标签不要移动；正文有问题时用 `gh release edit <标签> --notes-file` 修正发布页。
+已发布的标签不要移动；正文有问题时用 `gh release edit <标签> --notes-file` 修正发布页。
