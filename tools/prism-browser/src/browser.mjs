@@ -164,7 +164,7 @@ export class BrowserSession {
     this.worker = worker;
     // The official page polls status every 3.4-4 s; we poll every statusPollMs as well (0: page only).
     this.statusPollMs = statusPollInterval();
-    this.prewarm = prewarmEnabled();
+    this.prewarm = options.prewarm ?? prewarmEnabled();
     // The next chat, opened while idle: a promise of { page, generation, at } or null.
     this.preparing = null;
     // Bumped whenever the page is (re)loaded, so a chat prepared on an earlier load is never used.

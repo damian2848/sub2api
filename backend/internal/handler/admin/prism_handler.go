@@ -20,14 +20,22 @@ type prismAccountService interface {
 	Reconnect(context.Context, int64) (*service.PrismStatus, error)
 }
 
+type prismConfigurationService interface {
+	GetConfiguration(context.Context) (*service.PrismConfigurationResult, error)
+	UpdateConfiguration(context.Context, service.PrismConfigurationOptions) (*service.PrismConfigurationResult, error)
+	ResetConfiguration(context.Context) (*service.PrismConfigurationResult, error)
+}
+
 type PrismHandler struct {
-	prismService prismAccountService
+	prismService         prismAccountService
+	configurationService prismConfigurationService
 }
 
 func NewPrismHandler(prismService *service.PrismAccountService) *PrismHandler {
 	h := &PrismHandler{}
 	if prismService != nil {
 		h.prismService = prismService
+		h.configurationService = prismService
 	}
 	return h
 }
@@ -97,4 +105,61 @@ func (h *PrismHandler) Reconnect(c *gin.Context) {
 		return
 	}
 	response.Accepted(c, status)
+}
+
+// Global startup settings never share the scoped account permissions of the
+// create/status/reconnect endpoints. Keep this guard even behind admin routes.
+func prismConfigurationAdmin(c *gin.Context) bool {
+	if _, observer := service.ObserverGroupIDs(c.Request.Context()); observer {
+		response.ErrorFrom(c, service.ErrObserverScope)
+		return false
+	}
+	return true
+}
+
+func (h *PrismHandler) GetConfiguration(c *gin.Context) {
+	if !prismConfigurationAdmin(c) {
+		return
+	}
+	if h == nil || h.configurationService == nil {
+		response.Success(c, &service.PrismConfigurationResult{Availability: "not_configured"})
+		return
+	}
+	result, err := h.configurationService.GetConfiguration(c.Request.Context())
+	if !response.ErrorFrom(c, err) {
+		response.Success(c, result)
+	}
+}
+
+func (h *PrismHandler) configurationAvailable(c *gin.Context) bool {
+	if h == nil || h.configurationService == nil {
+		response.ErrorFrom(c, infraerrors.New(http.StatusServiceUnavailable, "PRISM_SETTINGS_NOT_CONFIGURED", "The Prism management connection is not configured"))
+		return false
+	}
+	return true
+}
+
+func (h *PrismHandler) UpdateConfiguration(c *gin.Context) {
+	if !prismConfigurationAdmin(c) {
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, service.PrismConfigurationRequestLimit)
+	options, err := service.DecodePrismConfigurationOptions(c.Request.Body)
+	if response.ErrorFrom(c, err) || !h.configurationAvailable(c) {
+		return
+	}
+	result, err := h.configurationService.UpdateConfiguration(c.Request.Context(), options)
+	if !response.ErrorFrom(c, err) {
+		response.Success(c, result)
+	}
+}
+
+func (h *PrismHandler) ResetConfiguration(c *gin.Context) {
+	if !prismConfigurationAdmin(c) || !h.configurationAvailable(c) {
+		return
+	}
+	result, err := h.configurationService.ResetConfiguration(c.Request.Context())
+	if !response.ErrorFrom(c, err) {
+		response.Success(c, result)
+	}
 }

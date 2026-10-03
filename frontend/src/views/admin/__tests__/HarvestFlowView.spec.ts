@@ -47,6 +47,19 @@ function response() {
 }
 
 describe('HarvestFlowView nullable API lists', () => {
+  it('runs and cleans up the original polling behavior when embedded without a second layout', async () => {
+    getFlow.mockResolvedValue(response())
+    const wrapper = mount(HarvestFlowView, { props: { embedded: true }, global: { stubs: { Icon: true, LoadingSpinner: true } } })
+    await flushPromises()
+    expect(wrapper.find('main').exists()).toBe(false)
+    expect(wrapper.text()).toContain('admin.harvestFlow.title')
+    expect(getFlow).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(getFlow).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(getFlow).toHaveBeenCalledTimes(2)
+  })
   it('shows a route failure without claiming the 780 body is missing or malformed', async () => {
     getFlow.mockResolvedValue({
       ...response(),

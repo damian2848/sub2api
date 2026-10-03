@@ -79,34 +79,37 @@ type prismSyncStamp struct {
 }
 
 type PrismAccountService struct {
-	repo    AccountRepository
-	admin   PrismAccountCreator
-	tokens  PrismTokenProvider
-	cfg     PrismRuntimeConfig
-	client  *http.Client
-	ctx     context.Context
-	cancel  context.CancelFunc
-	mu      sync.Mutex
-	create  sync.Mutex
-	jobs    map[int64]bool
-	pending map[int64]bool
-	queue   []int64
-	synced  map[int64]prismSyncStamp
-	locks   sync.Map
-	wg      sync.WaitGroup
-	start   sync.Once
+	repo   AccountRepository
+	admin  PrismAccountCreator
+	tokens PrismTokenProvider
+	cfg    PrismRuntimeConfig
+	// managementCfg is the immutable startup connection used by global settings.
+	// It is kept even when the gateway's Prism routing is disabled.
+	managementCfg PrismRuntimeConfig
+	client        *http.Client
+	ctx           context.Context
+	cancel        context.CancelFunc
+	mu            sync.Mutex
+	create        sync.Mutex
+	jobs          map[int64]bool
+	pending       map[int64]bool
+	queue         []int64
+	synced        map[int64]prismSyncStamp
+	locks         sync.Map
+	wg            sync.WaitGroup
+	start         sync.Once
 }
 
 func NewPrismAccountService(repo AccountRepository, admin PrismAccountCreator, tokens PrismTokenProvider, cfg PrismRuntimeConfig) *PrismAccountService {
 	ctx, cancel := context.WithCancel(context.Background())
 	u, err := url.Parse(strings.TrimRight(cfg.URL, "/"))
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") ||
-		u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
+		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Path != "" {
 		cfg.URL = ""
 	} else {
 		cfg.URL = u.String()
 	}
-	return &PrismAccountService{repo: repo, admin: admin, tokens: tokens, cfg: cfg,
+	return &PrismAccountService{repo: repo, admin: admin, tokens: tokens, cfg: cfg, managementCfg: cfg,
 		ctx: ctx, cancel: cancel, jobs: make(map[int64]bool), pending: make(map[int64]bool), synced: make(map[int64]prismSyncStamp),
 		client: &http.Client{Timeout: 270 * time.Second,
 			Transport:     &http.Transport{Proxy: nil, MaxIdleConnsPerHost: 4},
@@ -115,13 +118,15 @@ func NewPrismAccountService(repo AccountRepository, admin PrismAccountCreator, t
 
 func ProvidePrismAccountService(repo AccountRepository, groups GroupRepository, tokens *OpenAITokenProvider, cfg *config.Config) *PrismAccountService {
 	runtimeConfig := PrismRuntimeConfig{URL: os.Getenv("PRISM_BROWSER_BASE_URL"), ManagementKey: os.Getenv("PRISM_MANAGEMENT_KEY")}
-	if strings.EqualFold(os.Getenv("PRISM_BROWSER_ENABLED"), "false") {
-		runtimeConfig.URL = ""
-	}
 	// API-key creation uses repository/group policy only; the full admin service
 	// depends on the gateway that consumes this service.
 	creator := &adminServiceImpl{accountRepo: repo, groupRepo: groups, cfg: cfg}
 	s := NewPrismAccountService(repo, creator, tokens, runtimeConfig)
+	if strings.EqualFold(os.Getenv("PRISM_BROWSER_ENABLED"), "false") {
+		// Routing remains disabled, but administrators can still inspect and save
+		// the sidecar's next-start configuration through the fixed connection.
+		s.cfg.URL = ""
+	}
 	startBackgroundService(cfg, s)
 	return s
 }

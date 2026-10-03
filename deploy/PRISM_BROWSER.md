@@ -677,6 +677,59 @@ accounts through its `http_bridge` WebSocket mode:
   closed) fails over like any other unavailable account (the sidecar answers
   `503 account_not_ready`) and is cooled down only temporarily.
 
+## Admin configuration and channel operations
+
+The admin sidebar now has one **渠道运维 / Channel operations** entry at
+`/admin/channel-ops`. Its six tabs are BPS and initialization, ticket harvesting,
+Prism, smart operations, credentials and re-login, and Pelican tests. Quality
+rules, priority scheduling and operational alerts remain accessible under smart
+operations; both credential consoles remain available under credentials. Only
+the selected page is mounted, so inactive tabs do not continue polling. Existing
+admin tool URLs redirect to their corresponding tab and preserve query/hash.
+Account management and its per-account BPS, harvest and Prism actions are unchanged.
+
+The **Prism** tab (`/admin/channel-ops/prism`) manages seven non-secret startup
+options: project isolation, HTTP cache, submission-page multiplexing, chat
+prewarm, streamed reasoning, memory limit and memory reserve. Memory values must
+be integers from 0 to 1048576 MiB; a nonzero limit must exceed the reserve. A zero
+limit disables the memory admission guard. URL, routing enabled state and whether
+a management key is configured are read-only deployment metadata. The management
+key and account credentials are never returned to the browser. This global API
+is administrator-only; observer access to existing account-level operations is
+not changed.
+
+The gateway proxies `GET/PUT/DELETE /api/v1/admin/settings/prism` to the fixed
+deployment sidecar's management-authenticated `/internal/config`. A disabled
+gateway routing switch does not prevent managing a separately configured sidecar.
+The gateway does not save new connection URLs or keys, migrate account endpoints,
+or automatically restart either service. Older sidecars without this API show an
+unsupported message instead of an editable form with fabricated defaults.
+
+**Saving is not a hot reload.** The UI shows the immutable currently effective
+configuration and the desired configuration for the next startup separately.
+`PUT` requires all seven options and atomically saves
+`PRISM_DATA_DIR/runtime-config.json` (normally `/data/runtime-config.json`) as
+`{"schema":1,"values":{...}}`, with private directory/file permissions. Saved
+values override those seven environment options on the next sidecar startup.
+The existing `/data` volume must be retained across container recreation. Invalid
+or corrupt saved configuration fails startup closed; repair or remove the file
+with the sidecar stopped rather than silently relying on environment fallback.
+
+After saving, **restart the Prism sidecar** in a normal maintenance window to
+apply the options; do not restart the gateway solely for these options. Saving or
+resetting does not change live browser contexts, interrupt active requests,
+mutate process environment, or immediately enable experimental multiplexing.
+`restart_required` indicates whether desired and effective values differ.
+**Restore deployment environment** deletes the override and restores environment
+values captured at the current sidecar startup as desired. It too requires a
+sidecar restart if those values differ from effective. To change environment
+configuration itself, edit the server deployment and recreate/restart the sidecar.
+
+The **BPS** tab also includes the complete BPS image settings card, shared with
+system settings. Its save operation sends only the BPS image fields and preserves
+unrelated system settings. BPS defaults, OAuth initialization, billing/model
+mappings, concurrency upgrades and configuration history are retained.
+
 ## Verification
 
 ```sh

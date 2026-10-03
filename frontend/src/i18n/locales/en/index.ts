@@ -15,9 +15,13 @@ import misc from './misc'
 import requestTiming from './requestTiming'
 
 import autoConfig from './autoConfig'
+import channelOperations from './channelOperations'
+import prismConfig from './prismConfig'
 
 export default {
   autoConfig,
+  channelOperations,
+  prismConfig,
   priorityScheduling,
   qualityOps,
   accountOps,

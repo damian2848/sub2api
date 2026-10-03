@@ -1,0 +1,26 @@
+export default {
+  title: '渠道运维',
+  description: '在一个工作台管理 BPS、打票、Prism、智能运维、凭证与测智，原有功能和权限保持不变。',
+  bpsImageSaveHint: '仅保存 BPS 生图设置，不改变其他系统配置。',
+  bpsImageSaved: 'BPS 生图设置已保存。',
+  bpsImageLoadFailed: '无法读取 BPS 生图设置，请重试。',
+  bpsImageSaveFailed: 'BPS 生图设置保存失败，请刷新核对后重试。',
+  tabsLabel: '渠道运维模块',
+  sectionsLabel: '模块功能',
+  tabs: {
+    bps: 'BPS 与初始化',
+    harvest: '打票',
+    prism: 'Prism',
+    smart: '智能运维',
+    credentials: '凭证与重登',
+    pelican: '鹈鹕测智',
+  },
+  search: {
+    bps: 'BPS 自动配置 初始化 模型计价 映射 并发升级',
+    harvest: '打票 门票 节点 运行时 Harvest',
+    prism: 'Prism 浏览器 配置 项目隔离 缓存 内存 多路复用',
+    smart: '智能运维 质量规则 糖果检测 自动 BPS 优先调度 异常提醒 邮件告警',
+    credentials: '凭证守护 凭证运营 自动重登 令牌 巡检 2FA TOTP Worker Session Studio',
+    pelican: '鹈鹕测智 测试 作品 展示 API',
+  },
+}

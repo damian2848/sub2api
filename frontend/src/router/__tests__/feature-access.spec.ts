@@ -117,11 +117,32 @@ describe('feature route guard', () => {
     authStore.isAuthenticated = true
     authStore.isAdmin = false
     authStore.isObserver = false
+    authStore.canManageAccounts = false
     appStore.backendModeEnabled = false
     authStore.isSimpleMode = false
     appStore.publicSettingsLoaded = false
     appStore.cachedPublicSettings = null
     appStore.fetchPublicSettings.mockReset()
+  })
+
+  it.each(['observer', 'user'])('blocks %s access to channel operations without removing observer account access', async role => {
+    authStore.isObserver = role === 'observer'
+    authStore.canManageAccounts = authStore.isObserver
+    const hub = runGuard({ requiresAdmin: true }, '/admin/channel-ops/prism')
+    await hub.navigation
+    expect(hub.next).toHaveBeenCalledWith('/dashboard')
+    if (authStore.isObserver) {
+      const accounts = runGuard({ requiresAccountManagement: true }, '/admin/accounts')
+      await accounts.navigation
+      expect(accounts.next).toHaveBeenCalledWith()
+    }
+  })
+
+  it('allows the administrator to use channel operations', async () => {
+    authStore.isAdmin = true
+    const hub = runGuard({ requiresAdmin: true }, '/admin/channel-ops/smart/quality')
+    await hub.navigation
+    expect(hub.next).toHaveBeenCalledWith()
   })
 
   it('allows observers own usage in backend mode without opening other user or admin pages', async () => {

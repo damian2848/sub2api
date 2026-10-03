@@ -3,6 +3,7 @@
 package admin
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -37,6 +38,73 @@ func TestUpdateSettingsPartialPayloadKeepsUnsentKeys(t *testing.T) {
 	require.Equal(t, "smtp.example.com", repo.values[service.SettingKeySMTPHost])
 	require.Equal(t, "noreply@example.com", repo.values[service.SettingKeySMTPFrom])
 	require.Equal(t, "true", repo.values[service.SettingKeyTurnstileEnabled])
+}
+
+// The channel-operations BPS panel saves exactly this image-settings slice, not
+// the full system-settings form. Both image modes must preserve unrelated saved
+// values, including opt-out flags and secrets omitted from the browser payload.
+func TestUpdateSettingsBPSImageOnlyPayloadKeepsUnrelatedSettings(t *testing.T) {
+	for _, mode := range []string{"native", "relay"} {
+		t.Run(mode, func(t *testing.T) {
+			unrelated := map[string]string{
+				service.SettingKeySiteName:                 "Example Gateway",
+				service.SettingKeySiteSubtitle:             "Example Gateway Platform",
+				service.SettingKeySMTPHost:                 "smtp.example.com",
+				service.SettingKeySMTPPort:                 "587",
+				service.SettingKeySMTPUsername:             "mailer@example.com",
+				service.SettingKeySMTPPassword:             "stored-smtp-password",
+				service.SettingKeySMTPFrom:                 "noreply@example.com",
+				service.SettingKeySMTPFromName:             "Example Mailer",
+				service.SettingKeySMTPUseTLS:               "true",
+				service.SettingKeyTurnstileEnabled:         "true",
+				service.SettingKeyTurnstileSiteKey:         "stored-site-key",
+				service.SettingKeyTurnstileSecretKey:       "stored-turnstile-secret",
+				service.SettingKeyTencentCaptchaRegion:     service.TencentCaptchaRegionINTL,
+				service.SettingKeyRegistrationEnabled:      "false",
+				service.SettingKeySubscriptionEnabled:      "false",
+				service.SettingKeyRiskControlEnabled:       "false",
+				service.SettingKeyOpenAICodexTicketEnabled: "false",
+				service.SettingKeyOpenAICodexTicketModels:  `["gpt-6-astra"]`,
+			}
+			stored := make(map[string]string, len(unrelated))
+			for key, value := range unrelated {
+				stored[key] = value
+			}
+			h, repo := newStepUpSwitchTestHandler(t, stored)
+			baseURL := ""
+			if mode == "relay" {
+				baseURL = "https://images.example.com"
+			}
+			payload := map[string]any{
+				"excel_bps_image_mode":              mode,
+				"excel_bps_image_relay_enabled":     true,
+				"excel_bps_image_base_url":          baseURL,
+				"excel_bps_image_body_limit_mib":    64,
+				"excel_bps_image_budget_mib":        1024,
+				"excel_bps_image_max_requests":      128,
+				"excel_bps_image_max_image_mib":     20,
+				"excel_bps_image_limit_policy":      "off",
+				"excel_bps_image_warning_remaining": 8,
+				"excel_bps_image_compact_reserve":   3,
+				"excel_bps_image_max_images":        20,
+				"excel_bps_image_max_total_mib":     32,
+				"excel_bps_image_storage_mib":       1024,
+				"excel_bps_image_storage_entries":   512,
+				"excel_bps_image_ttl_minutes":       30,
+			}
+			require.Len(t, payload, 15)
+			rec := doUpdateSettings(t, h, payload, nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			for key, value := range payload {
+				require.Equal(t, fmt.Sprint(value), repo.values[key], key)
+			}
+			for key, value := range unrelated {
+				require.Equal(t, value, repo.values[key], "BPS-only save changed %s", key)
+			}
+			require.NotContains(t, rec.Body.String(), "stored-smtp-password")
+			require.NotContains(t, rec.Body.String(), "stored-turnstile-secret")
+		})
+	}
 }
 
 // A full payload keeps whole-document semantics: fields explicitly set to their

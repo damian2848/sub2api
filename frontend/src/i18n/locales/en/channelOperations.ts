@@ -1,0 +1,26 @@
+export default {
+  title: 'Channel Operations',
+  description: 'Manage BPS, ticket harvesting, Prism, smart operations, credentials and intelligence tests in one workspace, with existing features and permissions preserved.',
+  bpsImageSaveHint: 'Only BPS image settings are saved; other system settings are unchanged.',
+  bpsImageSaved: 'BPS image settings saved.',
+  bpsImageLoadFailed: 'Could not load BPS image settings. Please retry.',
+  bpsImageSaveFailed: 'Could not save BPS image settings. Refresh to verify and retry.',
+  tabsLabel: 'Channel operations modules',
+  sectionsLabel: 'Module functions',
+  tabs: {
+    bps: 'BPS & Initialization',
+    harvest: 'Ticket Harvesting',
+    prism: 'Prism',
+    smart: 'Smart Operations',
+    credentials: 'Credentials & Relogin',
+    pelican: 'Pelican Tests',
+  },
+  search: {
+    bps: 'BPS automatic configuration initialization model billing mappings concurrency upgrades',
+    harvest: 'tickets harvesting nodes runtime Harvest',
+    prism: 'Prism browser configuration project isolation cache memory multiplex',
+    smart: 'smart operations quality rules candy tests automatic BPS priority scheduling alerts email',
+    credentials: 'credential guard credential operations automatic relogin tokens inspection 2FA TOTP Worker Session Studio',
+    pelican: 'Pelican intelligence tests artworks gallery API',
+  },
+}

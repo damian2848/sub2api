@@ -76,6 +76,28 @@ func TestRedactAuditBody_BareSessionKeyRedacted(t *testing.T) {
 	}
 }
 
+func TestRedactAuditBody_PrismManagementKeysRedactedEvenForRejectedInput(t *testing.T) {
+	raw := []byte(`{
+		"management_key":"prism-management-canary",
+		"nested":{"ManagementKey":"camel-management-canary","PRISM_MANAGEMENT_KEY":"env-management-canary"},
+		"management_key_configured":true,
+		"http_cache":false
+	}`)
+	out := RedactAuditBody(raw, "application/json")
+	for _, secret := range []string{"prism-management-canary", "camel-management-canary", "env-management-canary"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("audit body exposes rejected Prism management key: %s", out)
+		}
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("redacted body is not valid JSON: %v", err)
+	}
+	if parsed["management_key"] != auditRedactedPlaceholder || parsed["management_key_configured"] != true || parsed["http_cache"] != false {
+		t.Fatalf("secret must be redacted while harmless configuration metadata is preserved: %s", out)
+	}
+}
+
 // TestRedactAuditBody_AuthoritativeTablesSynced 覆盖曾经漏网的凭证字段：
 // 账号 credentials 敏感子键、支付渠道无分隔符密钥、字符串值内嵌凭证的 proxy_key / custom_key，
 // 以及 camelCase 等命名变体（归一化比对）。

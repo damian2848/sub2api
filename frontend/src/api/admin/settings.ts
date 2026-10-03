@@ -1133,8 +1133,8 @@ export interface UpdateSettingsRequest {
  * Get all system settings
  * @returns System settings
  */
-export async function getSettings(): Promise<SystemSettings> {
-  const { data } = await apiClient.get<SystemSettings>("/admin/settings");
+export async function getSettings(signal?: AbortSignal): Promise<SystemSettings> {
+  const { data } = await apiClient.get<SystemSettings>("/admin/settings", { signal });
   return data;
 }
 
@@ -1145,10 +1145,12 @@ export async function getSettings(): Promise<SystemSettings> {
  */
 export async function updateSettings(
   settings: UpdateSettingsRequest,
+  signal?: AbortSignal,
 ): Promise<SystemSettings> {
   const { data } = await apiClient.put<SystemSettings>(
     "/admin/settings",
     settings,
+    { signal },
   );
   return data;
 }

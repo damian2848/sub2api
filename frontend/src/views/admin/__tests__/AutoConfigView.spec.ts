@@ -24,6 +24,16 @@ beforeEach(() => {
  vi.mocked(getAll).mockResolvedValue([{ id: 5, name: 'OpenAI test', platform: 'openai', status: 'active' }, { id: 6, name: 'Anthropic test', platform: 'anthropic', status: 'active' }] as Group[])
 })
 describe('AutoConfigView', () => {
+ it('embeds the complete configuration form without a second layout or old navigation', async () => {
+  const w = mount(AutoConfigView, { props: { embedded: true } }); await flushPromises()
+  expect(w.find('main').exists()).toBe(false)
+  expect(w.find('nav').exists()).toBe(false)
+  expect(w.find('[data-testid="initial-enabled"]').exists()).toBe(true)
+  expect(w.find('[data-testid="model-billing-enabled"]').exists()).toBe(true)
+  await w.get('form').trigger('submit'); await flushPromises()
+  expect(saveAutoConfig).toHaveBeenCalledWith(config)
+  w.unmount()
+ })
  it('starts with the Luna 10x rule disabled and saves model billing independently', async () => {
   const w = mount(AutoConfigView); await flushPromises()
   expect(w.get<HTMLInputElement>('[data-testid="model-billing-enabled"]').element.checked).toBe(false)

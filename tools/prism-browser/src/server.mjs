@@ -8,9 +8,9 @@ import { createStreamWriter, parseRequest, resultBody } from './protocol.mjs';
 import { PromptCache } from './prompt-cache.mjs';
 import { attachmentLimits, resolveAttachments } from './attachments.mjs';
 import { nativeStartSettings } from './start-limit.mjs';
-import { ProjectRegistry, projectIsolationEnabled, requestProjectScope } from './projects.mjs';
+import { ProjectRegistry, requestProjectScope } from './projects.mjs';
 import { ResourceGuard, RuntimeMetrics } from './resources.mjs';
-import { multiplexEnabled } from './page-multiplexer.mjs';
+import { CONFIGURATION_BODY_LIMIT, PrismConfigurationStore } from './configuration.mjs';
 
 function bearer(req) {
   const value = req.headers.authorization;
@@ -63,7 +63,7 @@ export function streamReasoningEnabled(value = process.env.PRISM_STREAM_REASONIN
 export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024 * 1024, requestTimeout = 1800000,
   sessionTimeout = 30000, keepaliveMs = 10000, maxTextBytes, maxTranscriptChars,
   maxAttachments, maxAttachmentBytes, maxTotalAttachmentBytes, promptCache = new PromptCache(),
-  streamReasoning = streamReasoningEnabled(), projectIsolation = false }) {
+  streamReasoning = streamReasoningEnabled(), projectIsolation = false, configuration }) {
   if (typeof managementKey !== 'string' || managementKey.length < 32) throw new Error('PRISM_MANAGEMENT_KEY must have at least 32 characters');
   const managementHash = createHash('sha256').update(managementKey).digest('hex');
   // Codex requests (tool schemas plus history) are large; management bodies are not.
@@ -85,6 +85,15 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
       if (url.pathname === '/internal/resources' && req.method === 'GET') {
         if (!keyMatches(bearer(req), managementHash)) throw new PrismError('invalid_management_key', 401);
         return send(res, 200, await manager.resources?.() || { available: false });
+      }
+      if (url.pathname === '/internal/config') {
+        if (!keyMatches(bearer(req), managementHash)) throw new PrismError('invalid_management_key', 401);
+        if (!configuration) throw new PrismError('prism_configuration_unavailable', 503);
+        if (req.method === 'GET') return send(res, 200, configuration.snapshot());
+        if (req.method === 'PUT') return send(res, 200,
+          await configuration.put(await readJSON(req, Math.min(managementLimit, CONFIGURATION_BODY_LIMIT))));
+        if (req.method === 'DELETE') return send(res, 200, await configuration.reset());
+        throw new PrismError('method_not_allowed', 405);
       }
       const internal = /^\/internal\/accounts\/([1-9][0-9]{0,18})\/(session|bootstrap|status)$/.exec(url.pathname);
       const user = /^\/accounts\/([1-9][0-9]{0,18})\/v1\/(models|responses|chat\/completions)$/.exec(url.pathname);
@@ -197,22 +206,21 @@ export async function main() {
     if (!Number.isInteger(value) || value < min || value > max) throw new Error(`invalid ${name}`);
     return value;
   };
-  for (const name of ['PRISM_HTTP_CACHE', 'PRISM_MULTIPLEX_PAGES', 'PRISM_PROJECT_ISOLATION']) {
-    const value = process.env[name];
-    if (value !== undefined && value !== '' && !['true', 'false', '1', '0', 'on', 'off'].includes(value.trim().toLowerCase())) {
-      throw new Error(`invalid ${name}`);
-    }
-  }
   const dataDir = process.env.PRISM_DATA_DIR || '/data';
-  const projectIsolation = projectIsolationEnabled();
+  const configuration = new PrismConfigurationStore({ dataDir });
+  await configuration.init();
+  const effective = configuration.effective;
+  const projectIsolation = effective.project_isolation;
   const metrics = new RuntimeMetrics();
   const admissionGuard = new ResourceGuard({
     // 0 (default) = no admission guard. Set it from /internal/resources measurements, not a guess.
-    limitBytes: integer('PRISM_MEMORY_LIMIT_MIB', 0, 0, 1048576) * 1024 * 1024,
-    reserveBytes: integer('PRISM_MEMORY_RESERVE_MIB', 32, 0, 1048576) * 1024 * 1024,
+    limitBytes: effective.memory_limit_mib * 1024 * 1024,
+    reserveBytes: effective.memory_reserve_mib * 1024 * 1024,
     onAudit: (event, fields) => { if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event, ...fields })); } });
   const manager = new AccountPoolManager({ dataDir, admissionGuard, metrics, projectIsolation,
-    multiplex: multiplexEnabled(), browserOptions: { pollMs: integer('PRISM_STATUS_POLL_MS', 1000, 0, 10000) },
+    multiplex: effective.multiplex_pages, browserOptions: {
+      pollMs: integer('PRISM_STATUS_POLL_MS', 1000, 0, 10000), httpCache: effective.http_cache,
+      prewarm: effective.prewarm_chat },
     projectRegistry: new ProjectRegistry({ dataDir,
       maxSessions: integer('PRISM_MAX_SESSION_PROJECTS', 128, 1, 4096),
       ttlMs: integer('PRISM_SESSION_PROJECT_TTL_SECONDS', 86400, 1, 604800) * 1000 }),
@@ -236,7 +244,7 @@ export async function main() {
     requestTimeout: integer('PRISM_REQUEST_TIMEOUT', 1800, 30, 3600) * 1000,
     // 0 turns the estimated cache-read share off (usage then reports no cached tokens).
     promptCache: new PromptCache({ ttlMs: integer('PRISM_PROMPT_CACHE_TTL_SECONDS', 600, 0, 3600) * 1000 }),
-    projectIsolation });
+    projectIsolation, streamReasoning: effective.stream_reasoning, configuration });
   const port = integer('PRISM_PORT', 8319, 1, 65535);
   await new Promise(resolve => server.listen(port, process.env.PRISM_HOST || '0.0.0.0', resolve));
   console.log(JSON.stringify({ event: 'listening', port }));

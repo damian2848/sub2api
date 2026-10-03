@@ -80,3 +80,18 @@ describe('AppSidebar subscription feature flag', () => {
     expect(componentSource).toMatch(/path: '\/purchase'[^\n]*label: purchaseNavLabel\.value/)
   })
 })
+
+describe('AppSidebar channel operations entry', () => {
+  it('consolidates the old operations group and harvesting menu into one flat entry', () => {
+    expect(componentSource).toMatch(/path: '\/admin\/channel-ops', label: t\('channelOperations\.title'\), icon: SmartOpsIcon/)
+    for (const oldPath of ['/admin/smart-ops', '/admin/auto-config', '/admin/harvest-flow', '/admin/token-guard', '/admin/pelican-tests']) {
+      expect(componentSource).not.toContain(`path: '${oldPath}'`)
+    }
+    expect(componentSource).toContain('withChannelOperationsSearch([')
+  })
+
+  it('keeps observer account management and standalone monitoring entries unchanged', () => {
+    expect(componentSource).toContain("{ path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon }")
+    expect(componentSource).toContain("{ path: '/admin/ops', label: t('nav.ops'), icon: OpsMonitoringIcon")
+  })
+})

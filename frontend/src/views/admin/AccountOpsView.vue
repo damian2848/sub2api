@@ -1,7 +1,7 @@
 <template>
-  <AppLayout>
+  <component :is="embedded ? 'div' : AppLayout">
     <div class="account-ops">
-      <SmartOpsNav />
+      <SmartOpsNav v-if="!embedded" />
       <header class="ops-heading"><div><p class="eyebrow">{{ t('accountOps.smartTitle') }}</p><h2>{{ t('accountOps.workspaceTitle') }}</h2><p class="subtitle">{{ t('accountOps.description') }}</p></div><button class="btn btn-secondary inline-flex items-center gap-2" :disabled="loading" @click="load"><Icon name="refresh" size="sm" :class="{ 'animate-spin': loading }" />{{ t('qualityOps.refresh') }}</button></header>
       <p v-if="error" role="alert" class="error-banner">{{ error }}</p><p v-if="notice" role="status" class="success-banner">{{ notice }}</p>
       <div class="ops-columns">
@@ -35,7 +35,7 @@
       </div>
       <aside class="scope-note"><Icon name="infoCircle" size="sm" /><p>{{ t('accountOps.scopeNote') }}</p></aside>
     </div>
-  </AppLayout>
+  </component>
 </template>
 <script setup lang="ts">
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
@@ -47,6 +47,7 @@ import AppLayout from '@/components/layout/AppLayout.vue'
 import SmartOpsNav from '@/components/admin/operations/SmartOpsNav.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { getAccountOpsSettings, saveAccountOpsSettings, getAccountOpsEvents } from '@/api/admin/accountOps'
+withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
 const { t } = useI18n(), auth = useAuthStore()
 const { remote, draft, events, hasMore } = storeToRefs(useAccountOpsStore())
 const loading = ref(false), loadingMore = ref(false), saving = ref(false)
