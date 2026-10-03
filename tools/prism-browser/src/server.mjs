@@ -8,6 +8,9 @@ import { createStreamWriter, parseRequest, resultBody } from './protocol.mjs';
 import { PromptCache } from './prompt-cache.mjs';
 import { attachmentLimits, resolveAttachments } from './attachments.mjs';
 import { nativeStartSettings } from './start-limit.mjs';
+import { ProjectRegistry, projectIsolationEnabled, requestProjectScope } from './projects.mjs';
+import { ResourceGuard, RuntimeMetrics } from './resources.mjs';
+import { multiplexEnabled } from './page-multiplexer.mjs';
 
 function bearer(req) {
   const value = req.headers.authorization;
@@ -54,7 +57,7 @@ export function readJSON(req, limit) {
 
 export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024 * 1024, requestTimeout = 1800000,
   sessionTimeout = 30000, keepaliveMs = 10000, maxTextBytes, maxTranscriptChars,
-  maxAttachments, maxAttachmentBytes, maxTotalAttachmentBytes, promptCache = new PromptCache() }) {
+  maxAttachments, maxAttachmentBytes, maxTotalAttachmentBytes, promptCache = new PromptCache(), projectIsolation = false }) {
   if (typeof managementKey !== 'string' || managementKey.length < 32) throw new Error('PRISM_MANAGEMENT_KEY must have at least 32 characters');
   const managementHash = createHash('sha256').update(managementKey).digest('hex');
   // Codex requests (tool schemas plus history) are large; management bodies are not.
@@ -73,6 +76,10 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
       const url = new URL(req.url, 'http://localhost');
       if (url.search || url.hash) throw new PrismError('query_parameters_not_supported', 400);
       if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { status: 'ok' });
+      if (url.pathname === '/internal/resources' && req.method === 'GET') {
+        if (!keyMatches(bearer(req), managementHash)) throw new PrismError('invalid_management_key', 401);
+        return send(res, 200, await manager.resources?.() || { available: false });
+      }
       const internal = /^\/internal\/accounts\/([1-9][0-9]{0,18})\/(session|bootstrap|status)$/.exec(url.pathname);
       const user = /^\/accounts\/([1-9][0-9]{0,18})\/v1\/(models|responses|chat\/completions)$/.exec(url.pathname);
       if (!internal && !user) throw new PrismError('route_not_found', 404);
@@ -114,6 +121,8 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
       const request = parseRequest(await readJSON(req, bodyLimit), action === 'responses' ? 'responses' : 'chat',
         status.models, { ...mediaLimits, ...(maxTextBytes ? { maxTextBytes } : {}),
           ...(maxTranscriptChars ? { maxTranscriptChars } : {}) });
+      // Scope headers are only read when isolation is on; otherwise they are ignored, never rejected.
+      if (projectIsolation) request.projectScope = requestProjectScope(req.headers);
       request.failover = req.headers['x-prism-failover'] === 'none' ? 'none' : 'available';
       if (request.attachments?.length) {
         request.attachments = await resolveAttachments(request.attachments, { signal: controller.signal, limits: mediaLimits });
@@ -140,7 +149,10 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
       const prompt = request.input.map(item => item.content.filter(part => part.type === 'input_text')
         .map(part => part.text).join('')).join('\n');
       // The text markers do not describe attachment contents or Prism's native file inspection.
-      const cachedTokens = request.attachments?.length ? 0 : promptCache.observe(source, prompt);
+      // Isolated projects estimate cache reads per conversation scope (none for anonymous requests);
+      // without isolation the estimate stays per source account, as before.
+      const cachedTokens = request.attachments?.length ? 0 : !projectIsolation ? promptCache.observe(source, prompt)
+        : request.projectScope?.reusable ? promptCache.observe(`${source}:${request.projectScope.id}`, prompt) : 0;
       const result = resultBody(request, text, streamWriter?.identity, { cachedTokens });
       if (res.destroyed) return;
       if (request.stream) await streamWriter.finish(result);
@@ -169,7 +181,25 @@ export async function main() {
     if (!Number.isInteger(value) || value < min || value > max) throw new Error(`invalid ${name}`);
     return value;
   };
-  const manager = new AccountPoolManager({ dataDir: process.env.PRISM_DATA_DIR || '/data',
+  for (const name of ['PRISM_HTTP_CACHE', 'PRISM_MULTIPLEX_PAGES', 'PRISM_PROJECT_ISOLATION']) {
+    const value = process.env[name];
+    if (value !== undefined && value !== '' && !['true', 'false', '1', '0', 'on', 'off'].includes(value.trim().toLowerCase())) {
+      throw new Error(`invalid ${name}`);
+    }
+  }
+  const dataDir = process.env.PRISM_DATA_DIR || '/data';
+  const projectIsolation = projectIsolationEnabled();
+  const metrics = new RuntimeMetrics();
+  const admissionGuard = new ResourceGuard({
+    // 0 (default) = no admission guard. Set it from /internal/resources measurements, not a guess.
+    limitBytes: integer('PRISM_MEMORY_LIMIT_MIB', 0, 0, 1048576) * 1024 * 1024,
+    reserveBytes: integer('PRISM_MEMORY_RESERVE_MIB', 32, 0, 1048576) * 1024 * 1024,
+    onAudit: (event, fields) => { if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event, ...fields })); } });
+  const manager = new AccountPoolManager({ dataDir, admissionGuard, metrics, projectIsolation,
+    multiplex: multiplexEnabled(), browserOptions: { pollMs: integer('PRISM_STATUS_POLL_MS', 1000, 0, 10000) },
+    projectRegistry: new ProjectRegistry({ dataDir,
+      maxSessions: integer('PRISM_MAX_SESSION_PROJECTS', 128, 1, 4096),
+      ttlMs: integer('PRISM_SESSION_PROJECT_TTL_SECONDS', 86400, 1, 604800) * 1000 }),
     queueLimit: integer('PRISM_QUEUE_LIMIT', 8, 1, 64), maxAccounts: integer('PRISM_MAX_ACCOUNTS', 16, 1, 256),
     concurrency: integer('PRISM_ACCOUNT_CONCURRENCY', 2, 1, 4), maxWorkers: integer('PRISM_MAX_WORKERS', 32, 1, 1024),
     startOptions: nativeStartSettings(),
@@ -189,7 +219,8 @@ export async function main() {
     maxTranscriptChars: integer('PRISM_MAX_TRANSCRIPT_CHARS', 32000, 1000, 1000000),
     requestTimeout: integer('PRISM_REQUEST_TIMEOUT', 1800, 30, 3600) * 1000,
     // 0 turns the estimated cache-read share off (usage then reports no cached tokens).
-    promptCache: new PromptCache({ ttlMs: integer('PRISM_PROMPT_CACHE_TTL_SECONDS', 600, 0, 3600) * 1000 }) });
+    promptCache: new PromptCache({ ttlMs: integer('PRISM_PROMPT_CACHE_TTL_SECONDS', 600, 0, 3600) * 1000 }),
+    projectIsolation });
   const port = integer('PRISM_PORT', 8319, 1, 65535);
   await new Promise(resolve => server.listen(port, process.env.PRISM_HOST || '0.0.0.0', resolve));
   console.log(JSON.stringify({ event: 'listening', port }));

@@ -51,8 +51,13 @@ compose file and listed in `.env.prism-browser.example`):
 | `PRISM_MAX_TRANSCRIPT_CHARS` | `32000` | 1000-1000000 | Characters of earlier conversation kept per request; older entries are replaced by a note. The final user message is never cut. |
 | `PRISM_QUEUE_LIMIT` | `8` | 1-64 | Waiting requests per account. |
 | `PRISM_MAX_ACCOUNTS` | `16` | 1-256 | Provisioned source accounts. |
-| `PRISM_ACCOUNT_CONCURRENCY` | `2` | 1-4 | Independent workers per source account. Each worker has its own browser context, page and project. |
-| `PRISM_MAX_WORKERS` | `32` | 1-1024 | Global browser-context limit, including contexts initializing or closing. |
+| `PRISM_ACCOUNT_CONCURRENCY` | `2` | 1-4 | Independent workers per source account. Each worker has its own browser context and submission page. |
+| `PRISM_MAX_WORKERS` | `32` | 1-1024 | Global reserved browser-context limit, including initializing/closing workers and experimental resident pollers. |
+| `PRISM_PROJECT_ISOLATION` | `false` | true/false | Opt-in: run user requests in Key + session scoped projects instead of the worker's shared project. See "Project isolation" for the cost and prerequisites. |
+| `PRISM_MAX_SESSION_PROJECTS` / `PRISM_SESSION_PROJECT_TTL_SECONDS` | `128` / `86400` | 1-4096 / 1-604800 | Isolation only: remembered session projects per source and their idle TTL. |
+| `PRISM_HTTP_CACHE` | `false` | true/false | Opt-in: Chromium CDP interception with static-asset caching and blocked service workers, instead of the Playwright route guard. |
+| `PRISM_MEMORY_LIMIT_MIB` / `PRISM_MEMORY_RESERVE_MIB` | `0` (off) / `32` | 0-1048576 | Opt-in admission guard for new contexts/pages/projects. Set from measured peaks only. |
+| `PRISM_MULTIPLEX_PAGES` | `false` | true/false | Experimental: release the submission page after the start is accepted. |
 | `PRISM_ACCOUNT_START_LIMIT` | `0` | 0-120 | Legacy token-bucket capacity when `PRISM_START_BURST` is unset. Zero disables pacing, not rejection cooldowns. |
 | `PRISM_START_WINDOW_SECONDS` | `65` | 1-3600 | Legacy refill derivation: window / start limit seconds per token. |
 | `PRISM_START_BURST` | legacy start limit | 0-120 | Token capacity per source across every worker, readiness probe and retry; 0 disables pacing. |
@@ -401,7 +406,7 @@ these files, while caller tool calls still use the emulated action protocol.
 Unrelated native history is never imported into the API conversation. Every
 retry registers the same bytes in its selected worker's project.
 
-Uploads remain in the worker's dedicated managed project; the same filename
+Uploads remain in the worker's project (the isolated Key + session project when `PRISM_PROJECT_ISOLATION=true`); the same filename
 and content can use Prism's existing-file control. They are not deleted after
 each turn. Request limits bound each upload, not the lifetime size of a project.
 Failed or cancelled preparation closes the browser context before reuse.
@@ -458,7 +463,7 @@ Limitations that remain:
   Prism reports no token usage at all (its result carries only the text and
   async-job metadata), so cache reads are estimated too, the way OpenAI's
   automatic prompt caching behaves: the longest prefix a prompt shares with a
-  prompt the same source account processed within
+  prompt the same authenticated Key + explicit session on that source processed within
   `PRISM_PROMPT_CACHE_TTL_SECONDS` counts as `input_tokens_details.cached_tokens`
   (Chat: `prompt_tokens_details.cached_tokens`), once the prompt has 1024
   tokens and in 128-token blocks. `input_tokens` stays the whole prompt and no
@@ -468,7 +473,7 @@ Limitations that remain:
   prefix and lowers the estimate. Attachment requests report no estimated
   cached tokens; image/PDF inspection and file bytes are not included in the
   character-based token estimate.
-  The estimator stores at most 64 prompts per source, as packed 16-byte chained
+  The estimate is per source account. With `PRISM_PROJECT_ISOLATION=true` it is per conversation scope instead, anonymous requests report zero cache reads and are not recorded, and the estimator holds at most 256 conversation scopes (LRU/TTL bounded). It stores at most 64 prompts per key, as packed 16-byte chained
   SHA-256 hashes of 384 JavaScript characters per block plus length and last-use
   metadata, not plaintext. UTF-16 code-unit hashing preserves prefix identity
   even across surrogate boundaries. Only complete matching blocks count toward
@@ -479,8 +484,24 @@ Limitations that remain:
   and a full queue is rejected. Clients on one account can overlap up to its
   ready worker count, while any configured native start allowance is shared.
 - **Tool calls are prompt-emulated**, at most eight per reply, run in order (they
-  are not parallel). `tool_choice` and strict schemas are not enforced, and weaker
-  adherence to the tag protocol shows up as plain text instead of a call.
+  may contain more than one action when permitted). Only these policies are read
+  and enforced, on the prompt and on the parsed reply: `tool_choice` of `none`,
+  `required` or one named function (Responses `{type:"function",name}` or Chat
+  `{type:"function",function:{name}}`), and `parallel_tool_calls=false` (at most
+  one call). Everything else (other `tool_choice` shapes such as `allowed_tools`,
+  `custom` or `any`, a forced name that is not offered, `required` without
+  tools, a wrongly typed value) falls back to auto and is **never rejected**.
+  `tool_choice=none` never emits a call and returns the model text as it is,
+  even if it wrote tool tags. `required` or a named choice without a matching
+  call, a violated `parallel_tool_calls=false`, an unknown tool name, or
+  malformed tool markup returns a fixed, redacted 502 (or an SSE error after
+  acceptance): the whole reply is refused, never a silently truncated call list.
+  An unknown tag that only appears inside markdown code is treated as an
+  example and stays in the text; a request that offered no tools is never
+  parsed for calls. A tool without parameters may be called with an empty body
+  (meaning `{}`); a non-empty body that is not a JSON object is refused.
+  Raw-input `exec` and the existing repairable-JSON compatibility remain
+  supported. Full JSON Schema validation of function arguments is still not provided.
 - **Audio and OpenAI file IDs are unsupported.** Audio parts still return
   `400 image_input_not_supported` (the legacy error code); unresolved `file_id`
   returns `400 attachment_file_id_not_supported`. A native WAV upload was
@@ -496,6 +517,121 @@ Limitations that remain:
 - The OpenAI-API surface is limited to `models`, `responses` and
   `chat/completions`. Errors never contain raw upstream bodies, browser
   exceptions, cookies or access tokens.
+
+## Project isolation, cache and memory admission (all opt-in)
+
+None of this is on by default: an unconfigured sidecar behaves exactly as it did
+before these features existed (one shared managed project per worker, the
+Playwright route guard, no memory guard). Each switch is turned on only after
+its numbers have been measured on a real account. `GET /internal/resources`
+(below) and the audit's `internal_tool_calls` are the evidence to collect first.
+
+### Project isolation (`PRISM_PROJECT_ISOLATION=true`)
+
+Off: all user requests of a worker run as separate chat tabs in that worker's
+shared managed project, so its sandbox filesystem is shared. On: the persisted
+account `project_id` is **readiness-only**; user requests never use that shared
+sandbox, including on terminal-error refresh or transient retry.
+
+The gateway overwrites `X-Prism-Key-Scope` from its authenticated downstream
+API Key ID and `X-Prism-Session-Scope` from an explicitly declared conversation
+ID (it sends them in both modes; the sidecar reads them only when isolation is
+on, and then rejects malformed values). Both are SHA-256 namespace hashes; raw
+client IDs and keys are not sent. The sidecar requires both hashes for project
+reuse. It does not infer a session from user prompt text, common prefixes,
+generic `metadata.user_id`, or a compatibility cache key the gateway generated
+after protocol conversion. Missing either identifier means a fresh project for
+every request.
+
+- Header session IDs, caller `prompt_cache_key`, Responses/WS
+  `client_metadata.session_id/thread_id`, and Claude Code's explicit embedded
+  session ID are supported. A Key defines the tenant boundary; callers sharing
+  one Key and session deliberately share its project.
+- Same-scope requests are serialized across workers, including retries;
+  unrelated scopes can use different workers concurrently. A same-project ready
+  worker keeps its prepared chat and cache without navigating again (see worker affinity below).
+- The registry in `/data/projects/:source.json` stores only hashes, project
+  UUIDs and readiness/timestamps (0700 directory, 0600 files, atomic writes).
+  It defaults to 128 sessions per source (`PRISM_MAX_SESSION_PROJECTS`, 1-4096)
+  and a 24-hour idle TTL (`PRISM_SESSION_PROJECT_TTL_SECONDS`, 1-604800).
+  Failed or partially initialized projects do not become reusable. Eviction
+  only forgets the mapping: it never reassigns a sandbox to another user or
+  deletes upstream files. Anonymous/evicted remote projects can accumulate;
+  upstream project quota/retention still needs operational monitoring.
+
+**Worker affinity.** A request whose Key + session scope already has a ready
+project goes to an idle worker that is on that project, so consecutive turns of
+one conversation keep the prepared chat and cache and do not reload anything.
+If that worker is busy with another scope the request moves to another worker,
+which loads the same project in its own context (correct, but it pays the load).
+Requests without a scope still rotate over the workers.
+
+**Cost, and what must be true before enabling it.** Every request without a
+reliable session pays a page load, a project creation and a sandbox sync (up to
+120 s), and it discards the prewarmed next chat that makes a warm request
+prepare in a fraction of a second; it also leaves a new project in the Prism
+account. Before enabling: (1) read the production audit and confirm Prism's own
+tools (`internal_tool_calls > 0`) are really used, otherwise there is nothing to
+isolate; (2) decide how anonymous traffic is served (today: a fresh project per
+request); (3) deploy the gateway before the sidecar, because an old gateway sends
+no scope headers and every request would then count as anonymous.
+
+### HTTP cache (`PRISM_HTTP_CACHE=true`)
+
+Off (default): the Playwright route guard, which disables Chromium's HTTP cache
+for the page. On: Chromium CDP Fetch handles the guarded API requests while
+static assets stay cacheable, **and service workers are blocked**. Project-
+mutation, upload, start/history and model guards behave the same on both
+paths. The real-browser smoke suite runs the main scenarios on both paths and
+checks the asset cache hit count and Chromium's `requestServedFromCache` on the
+CDP path. It uses a local mock, not Prism: canary on one account and compare
+`page_load` timings in `/internal/resources` before turning it on for all. This is
+asset caching, not the estimated token cache.
+
+### Memory admission (`PRISM_MEMORY_LIMIT_MIB`, default `0` = off)
+
+When set, new context/page/project preparations check memory before admission and
+are refused when used bytes + `PRISM_MEMORY_RESERVE_MIB` (default 32) reaches the
+smaller of the configured and cgroup memory limits. Linux cgroup v2/v1 usage
+includes Chromium, its renderers and page cache. Outside a readable cgroup the
+adapter uses sampled process-tree RSS and marks the estimate degraded; if even
+that is unavailable it reports Node-only RSS, which does **not** include
+Chromium. Rejection is 429 `browser_memory_pressure` with Retry-After; it does
+not kill in-flight turns. A steady production sidecar (several workers across
+accounts) is normally well above 1 GiB, so a small value starves it: set the
+limit from measured peaks. With the default no sampling or auditing happens.
+
+### Diagnostics
+
+`GET /internal/resources` requires the management bearer, not a caller bearer.
+It reports memory source/coverage/threshold, admission rejects, worker/queue
+counts and bounded timing samples: page/project preparation, first admission
+queue wait, full worker-turn occupancy and multiplex submission queue wait.
+Means are lifetime aggregates; p50/p95 use the last 256 samples per metric.
+The diagnostic contains no prompt, tool arguments, cookie or access token.
+Capture it under representative load before choosing a concurrency setting.
+
+## Experimental submission-page multiplexing
+
+`PRISM_MULTIPLEX_PAGES=false` is the default. Turning it on retains **independent
+worker contexts** for safety and creates one lightweight resident poller per
+source account. Preparation and submission are serialized for that source.
+After an accepted start and the first matching successful status response
+supply its exact opaque polling template, the editor page closes and releases
+its submission lease; the resident polls multiple in-flight turns concurrently.
+A later turn lazily creates an editor page in the same isolated context.
+Accounts do not share cookies or pollers. A cancellation/stop targets its own
+request ID and cannot close another turn's resident poller.
+
+Authenticated same-identity `/auth/session` health checks (30 seconds) keep
+idle detached workers healthy; successful matching status polls also refresh
+health. Failed probes never manufacture a heartbeat. Worker and native-start
+limits are unchanged (at most four workers per source); each resident context
+also consumes `PRISM_MAX_WORKERS` capacity. This version releases editor pages,
+not browser contexts: it is not ranxi's single-context/20-in-flight design, and
+no production latency or memory gain has been measured. Enable only in a
+controlled rollout after checking queue wait, page load cost and memory;
+rollback by setting it to false and restarting the sidecar.
 
 ## Gateway behavior and Codex WebSocket
 
@@ -525,6 +661,7 @@ accounts through its `http_bridge` WebSocket mode:
 cd tools/prism-browser
 npm ci --ignore-scripts
 npm test
+npm run test:smoke
 ```
 
 The tests use simulated browser sessions and cover request flattening for
@@ -536,5 +673,15 @@ and exact file references,
 single-start behavior per native attempt, bounded conversation resubmission,
 persistent recovery, explicit probe retries, queue limits,
 cancellation, HTTP authentication, timeouts and error redaction. They do not
-access production credentials or call Prism. Real browser verification remains
-necessary after changes to Prism's UI or authentication behavior.
+access production credentials or call Prism. `test:smoke` uses real Chromium
+against an offline HTTPS UI/upstream behind a deny-by-default CONNECT proxy,
+with fake OAuth and fixture-only TLS keys. It covers actual Enter/DOM behavior,
+CDP rewrites and cache, sandbox guards, status/error/stop semantics, native file
+upload, independent-context concurrency, and resident multiplex lifecycle.
+A missing Chromium fails rather than silently skipping. Install the browser
+matching the lockfile (`npx playwright install chromium`), use the pinned
+Playwright Docker image, or set `PRISM_CHROMIUM_EXECUTABLE` explicitly. See
+`tools/prism-browser/test/smoke/README.md` for exact prerequisites and limits.
+The CI sidecar job runs both suites in the matching browser image. Offline
+fixtures cannot prove that the real Prism UI or verification requirements are
+unchanged; a controlled live check is still necessary before production rollout.

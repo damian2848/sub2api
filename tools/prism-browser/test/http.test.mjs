@@ -33,8 +33,8 @@ async function fixture(t, overrides, settings = {}, { accept = true } = {}) {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });
   const base = `http://127.0.0.1:${server.address().port}`;
-  const post = (path, value, key = userKey) => fetch(base + path, { method: 'POST', headers: {
-    Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
+  const post = (path, value, key = userKey, extraHeaders = {}) => fetch(base + path, { method: 'POST', headers: {
+    Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...extraHeaders }, body: JSON.stringify(value) });
   return { base, post };
 }
 
@@ -306,17 +306,19 @@ test('a follow-up turn reports the shared prompt prefix as estimated cached toke
   let fail = false;
   const { post } = await fixture(t, { async generate() { if (fail) throw new PrismError('prism_generation_failed', 502); return 'done'; } });
   const history = 'Earlier step and its tool output. '.repeat(400);
-  const first = await (await post('/accounts/32/v1/responses', { ...body, input: history })).json();
+  const scope = { 'X-Prism-Key-Scope': 'a'.repeat(64), 'X-Prism-Session-Scope': 'b'.repeat(64) };
+  const scopedPost = value => post('/accounts/32/v1/responses', value, userKey, scope);
+  const first = await (await scopedPost({ ...body, input: history })).json();
   assert.equal(first.usage.input_tokens_details.cached_tokens, 0);
-  const second = await (await post('/accounts/32/v1/responses', { ...body, input: `${history} New tool result.` })).json();
+  const second = await (await scopedPost({ ...body, input: `${history} New tool result.` })).json();
   const cached = second.usage.input_tokens_details.cached_tokens;
   assert.ok(cached >= 1024 && cached % 128 === 0 && cached <= second.usage.input_tokens, String(cached));
   assert.equal(second.usage.estimation, 'character_based_estimate');
   // A failed request is not recorded: the next different prompt finds nothing new to share with it.
   fail = true;
-  assert.equal((await post('/accounts/32/v1/responses', { ...body, input: `Other ${history}` })).status, 502);
+  assert.equal((await scopedPost({ ...body, input: `Other ${history}` })).status, 502);
   fail = false;
-  const after = await (await post('/accounts/32/v1/responses', { ...body, input: `Other ${history}` })).json();
+  const after = await (await scopedPost({ ...body, input: `Other ${history}` })).json();
   assert.equal(after.usage.input_tokens_details.cached_tokens, 0);
   // Turned off, nothing is reported as cached.
   const off = await fixture(t, {}, { promptCache: { observe: () => 0 } });
@@ -395,4 +397,158 @@ test('a no-failover stream sends no headers or heartbeat while queued or retryin
   const response = await pending;
   assert.equal(response.status, 200);
   assert.match(await response.text(), /retried successfully/);
+});
+
+
+test('unusable tool policies fall back to auto instead of rejecting the request', async t => {
+  let calls = 0;
+  const { post } = await fixture(t, { async generate() { calls++; return 'unexpected'; } });
+  for (const family of ['responses', 'chat/completions']) {
+    const base = family === 'responses' ? body : { model: models[0], messages: [{ role: 'user', content: 'run' }] };
+    const forced = name => family === 'responses' ? { type: 'function', name } : { type: 'function', function: { name } };
+    const values = [
+      { tool_choice: 'invalid' }, { tool_choice: 'any' }, { tool_choice: { type: 'allowed_tools', mode: 'auto', tools: [] } },
+      { tool_choice: { type: 'custom', name: 'exec_command' } },
+      { parallel_tool_calls: 'false' }, { parallel_tool_calls: null },
+      { tool_choice: forced('not_offered') }, { tool_choice: 'required', tools: [] },
+    ];
+    for (const value of values) {
+      const response = await post('/accounts/32/v1/' + family, { ...base, tools: [execTool], ...value });
+      assert.equal(response.status, 200, JSON.stringify(value));
+    }
+  }
+  assert.equal(calls, 2 * 8, 'every request reached generation');
+});
+
+test('none, required, forced-function and single-call policies survive the HTTP bridge for both API families', async t => {
+  let next = 'No action taken.';
+  const seen = [];
+  const { post } = await fixture(t, { async generate(_, request) { seen.push(request); return next; } });
+  for (const family of ['responses', 'chat/completions']) {
+    const base = family === 'responses' ? body : { model: models[0], messages: [{ role: 'user', content: 'run' }] };
+    const forced = family === 'responses' ? { type: 'function', name: 'exec_command' }
+      : { type: 'function', function: { name: 'exec_command' } };
+    next = 'No action taken.';
+    let response = await post('/accounts/32/v1/' + family, { ...base, tools: [execTool], tool_choice: 'none' });
+    assert.equal(response.status, 200);
+    assert.match(seen.at(-1).input[0].content[0].text, /tool_choice=none/);
+    assert.ok(!seen.at(-1).input[0].content[0].text.includes('Available actions:'));
+    next = '<tool_call name="exec_command">{"cmd":"ls"}</tool_call>';
+    for (const choice of ['required', forced]) {
+      response = await post('/accounts/32/v1/' + family, { ...base, tools: [execTool], tool_choice: choice, parallel_tool_calls: false });
+      assert.equal(response.status, 200);
+      const result = await response.json();
+      const calls = family === 'responses' ? result.output : result.choices[0].message.tool_calls;
+      assert.equal(calls.length, 1);
+      assert.equal(family === 'responses' ? calls[0].name : calls[0].function.name, 'exec_command');
+      assert.equal(seen.at(-1).toolPolicy.parallel, false);
+      assert.match(seen.at(-1).input[0].content[0].text, /parallel_tool_calls=false/);
+    }
+  }
+});
+
+test('tool_choice none returns the model text unchanged and never emits a call, even if the model wrote tool tags', async t => {
+  const reply = '<tool_call name="exec_command">{"cmd":"ls"}</tool_call>';
+  const { post } = await fixture(t, { async generate() { return reply; } });
+  for (const family of ['responses', 'chat/completions']) {
+    const base = family === 'responses' ? body : { model: models[0], messages: [{ role: 'user', content: 'run' }] };
+    const response = await post('/accounts/32/v1/' + family, { ...base, tools: [execTool], tool_choice: 'none' });
+    assert.equal(response.status, 200);
+    const wire = await response.text();
+    assert.ok(!wire.includes('"function_call"') && !wire.includes('"tool_calls"'));
+    assert.ok(wire.includes('exec_command'), 'the text is returned, not swallowed');
+  }
+});
+
+test('nonstream malformed and policy-violating model output returns a safe 502, never a partial plan or leaked tags', async t => {
+  const sensitive = 'secret-model-output';
+  let next = '';
+  const { post } = await fixture(t, { async generate() { return next; } });
+  const one = '<tool_call name="exec_command">{"cmd":"ls"}</tool_call>';
+  for (const family of ['responses', 'chat/completions']) {
+    const base = family === 'responses' ? body : { model: models[0], messages: [{ role: 'user', content: 'run' }] };
+    for (const [reply, policy, code] of [
+      ['No action taken.', { tool_choice: 'required' }, 'prism_tool_policy_violation'],
+      [one + one, { parallel_tool_calls: false }, 'prism_tool_policy_violation'],
+      [one + one, { tool_choice: family === 'responses' ? { type: 'function', name: 'exec_command' }
+        : { type: 'function', function: { name: 'exec_command' } }, parallel_tool_calls: true }, 'prism_tool_policy_violation'],
+      [`<tool_call name="unknown">{"secret":"${sensitive}"}</tool_call>`, {}, 'prism_unknown_tool'],
+      [one + `<tool_call name="unknown">${sensitive}</tool_call>`, {}, 'prism_unknown_tool'],
+      [`<tool_call>${sensitive}</tool_call>`, {}, 'prism_invalid_tool_output'],
+      [`<tool_call name="exec_command">${sensitive}</tool_call>`, {}, 'prism_invalid_tool_arguments'],
+      [one.repeat(9), {}, 'prism_too_many_tool_calls'],
+    ]) {
+      next = reply;
+      const response = await post('/accounts/32/v1/' + family, { ...base, tools: [execTool], ...policy });
+      assert.equal(response.status, 502);
+      const wire = await response.text();
+      assert.equal(JSON.parse(wire).error.code, code);
+      assert.ok(!wire.includes('<tool_call') && !wire.includes('"function_call"') && !wire.includes('"tool_calls"'));
+      assert.ok(!wire.includes(sensitive));
+    }
+  }
+});
+
+test('accepted SSE reports tool validation failure as one safe error and emits no output items or executable deltas', async t => {
+  let next = '';
+  const { post } = await fixture(t, { async generate() { return next; } });
+  const one = '<tool_call name="exec_command">{"cmd":"ls"}</tool_call>';
+  for (const family of ['responses', 'chat/completions']) {
+    const base = family === 'responses' ? body : { model: models[0], messages: [{ role: 'user', content: 'run' }] };
+    for (const [reply, policy, code] of [
+      [one + one, { parallel_tool_calls: false }, 'prism_tool_policy_violation'],
+      ['No action taken.', { tool_choice: 'required' }, 'prism_tool_policy_violation'],
+      [one + '<tool_call name="secret-unknown-tool">{}</tool_call>', {}, 'prism_unknown_tool'],
+      [one + '<tool_call>', {}, 'prism_invalid_tool_output'],
+    ]) {
+      next = reply;
+      const response = await post('/accounts/32/v1/' + family, { ...base, tools: [execTool], stream: true, ...policy });
+      assert.equal(response.status, 200); // start was already accepted; errors are now SSE frames
+      assert.match(response.headers.get('content-type'), /text\/event-stream/);
+      const wire = await response.text();
+      assert.ok(!wire.includes('secret-unknown-tool') && !wire.includes('<tool_call'));
+      assert.ok(!wire.includes('function_call_arguments') && !wire.includes('output_item.added') && !wire.includes('tool_calls'));
+      if (family === 'responses') {
+        const events = responseEvents(wire);
+        assert.deepEqual(events.map(event => event.type), ['response.created', 'response.in_progress', 'error']);
+        assert.equal(events.at(-1).code, code);
+      } else {
+        const events = wire.split('\n\n').filter(frame => frame.startsWith('data: ') && frame !== 'data: [DONE]')
+          .map(frame => JSON.parse(frame.slice(6)));
+        assert.equal(events.at(-1).error.code, code);
+        assert.ok(!wire.includes('[DONE]'), 'error-only Chat streams do not claim successful completion');
+        assert.equal(events.filter(event => event.error).length, 1);
+      }
+    }
+  }
+});
+
+test('prompt cache estimates do not cross key or session scopes and anonymous requests never share estimates', async t => {
+  const { post } = await fixture(t, undefined, { projectIsolation: true });
+  const long = { ...body, input: 'Large shared prompt prefix. '.repeat(500) };
+  const cached = async headers => (await (await post('/accounts/32/v1/responses', long, userKey, headers)).json())
+    .usage.input_tokens_details.cached_tokens;
+  const scopeA = { 'X-Prism-Key-Scope': 'a'.repeat(64), 'X-Prism-Session-Scope': 'b'.repeat(64) };
+  const scopeB = { ...scopeA, 'X-Prism-Key-Scope': 'c'.repeat(64) };
+  const scopeC = { ...scopeA, 'X-Prism-Session-Scope': 'd'.repeat(64) };
+  assert.equal(await cached(scopeA), 0);
+  assert.ok(await cached(scopeA) >= 1024);
+  assert.equal(await cached(scopeB), 0);
+  assert.equal(await cached(scopeC), 0);
+  assert.equal(await cached(), 0);
+  assert.equal(await cached(), 0);
+  // A key without a reliable session does not identify a reusable project.
+  assert.equal(await cached({ 'X-Prism-Key-Scope': scopeA['X-Prism-Key-Scope'] }), 0);
+  assert.equal(await cached({ 'X-Prism-Key-Scope': scopeA['X-Prism-Key-Scope'] }), 0);
+});
+
+test('without project isolation scope headers are ignored and the estimate stays per source account', async t => {
+  const { post } = await fixture(t);
+  const long = { ...body, input: 'Large shared prompt prefix. '.repeat(500) };
+  const cached = async headers => (await (await post('/accounts/32/v1/responses', long, userKey, headers)).json())
+    .usage.input_tokens_details.cached_tokens;
+  assert.equal(await cached(), 0);
+  assert.ok(await cached() >= 1024, 'the second identical prompt reads the estimate, as before isolation existed');
+  // Malformed scope headers are not rejected when isolation is off.
+  assert.ok(await cached({ 'X-Prism-Key-Scope': 'not-a-hash', 'X-Prism-Session-Scope': 'x' }) >= 1024);
 });

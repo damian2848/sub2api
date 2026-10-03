@@ -34,10 +34,12 @@ function commonBlocks(entry, hashes, length, blockChars) {
 }
 
 export class PromptCache {
-  constructor({ ttlMs = 600000, maxEntries = 64, minTokens = 1024, blockTokens = 128, now = () => Date.now() } = {}) {
+  constructor({ ttlMs = 600000, maxEntries = 64, maxKeys = 256, minTokens = 1024, blockTokens = 128, now = () => Date.now() } = {}) {
     if (!Number.isInteger(blockTokens) || blockTokens < 1) throw new RangeError('invalid_prompt_cache_block');
     this.ttlMs = ttlMs;
     this.maxEntries = maxEntries;
+    if (!Number.isInteger(maxKeys) || maxKeys < 1) throw new RangeError('invalid_prompt_cache_keys');
+    this.maxKeys = maxKeys;
     this.minTokens = minTokens;
     this.blockTokens = blockTokens;
     this.now = now;
@@ -63,11 +65,16 @@ export class PromptCache {
   // Remembers a prompt that Prism processed, refreshing it if it is already known.
   record(key, text, suppliedHashes) {
     if (!this.enabled || typeof text !== 'string' || !text) return;
+    // Scoped keys vary by conversation; prune ALL expired scopes and cap the
+    // global map, not only the key currently being used. No plaintext is retained.
+    for (const scope of this.accounts.keys()) this.prune(scope);
     const hashes = suppliedHashes || promptHashes(text, this.blockTokens * CHARS_PER_TOKEN);
     const entries = this.prune(key).filter(entry => entry.length !== text.length || !entry.hashes.equals(hashes));
     entries.push({ hashes, length: text.length, used: this.now() });
     while (entries.length > this.maxEntries) entries.shift();
+    this.accounts.delete(key);
     this.accounts.set(key, entries);
+    while (this.accounts.size > this.maxKeys) this.accounts.delete(this.accounts.keys().next().value);
   }
 
   // Looks up and then records: the estimate for a request that has just completed.

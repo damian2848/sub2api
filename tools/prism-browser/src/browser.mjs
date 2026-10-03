@@ -1,5 +1,7 @@
 import { PrismError, aborted, interruptible } from './errors.mjs';
 import { NativeAttachmentUpload, nativeAttachmentInput } from './browser-attachments.mjs';
+import { httpCacheEnabled, installCachePreservingInterceptor } from './cache-interceptor.mjs';
+import { multiplexEnabled } from './page-multiplexer.mjs';
 
 const origin = 'https://prism.openai.com';
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -106,8 +108,17 @@ export function modelFromLabel(label) {
 }
 
 export class BrowserSession {
-  constructor(browser, onHeartbeat, source, worker = 0) {
+  constructor(browser, onHeartbeat, source, worker = 0, options = {}) {
     this.browser = browser;
+    this.origin = new URL(options.origin || origin).origin;
+    this.admissionGuard = options.admissionGuard;
+    this.metrics = options.metrics;
+    this.multiplexer = options.multiplexer || null;
+    this.multiplex = (options.multiplex ?? multiplexEnabled()) && Boolean(this.multiplexer);
+    this.cacheMode = null;
+    this.authIdentity = null;
+    this.authCredentials = null;
+    this.httpCache = options.httpCache ?? httpCacheEnabled();
     this.onHeartbeat = onHeartbeat;
     this.context = null;
     this.contextEpoch = 0;
@@ -146,24 +157,20 @@ export class BrowserSession {
     };
     return interruptible(async () => {
       try {
-        context = await this.browser.newContext({ locale: 'en-US' });
+        await this.admissionGuard?.assertAdmission('context');
+        checkCurrent();
+        // Blocking service workers is part of the opt-in CDP/cache path; the default page environment is unchanged.
+        context = await this.browser.newContext({ locale: 'en-US', ...(this.httpCache ? { serviceWorkers: 'block' } : {}) });
         checkCurrent();
         this.context = context;
         installed = true;
         await context.addCookies([{ name: 'prism_oai_access_token', value: access_token,
-          domain: 'prism.openai.com', path: '/', secure: true, httpOnly: true, sameSite: 'Lax' }]);
+          domain: new URL(this.origin).hostname, path: '/', secure: new URL(this.origin).protocol === 'https:',
+          httpOnly: true, sameSite: 'Lax' }]);
         checkCurrent();
-        const page = await context.newPage();
+        const page = await this.createSubmissionPage(epoch);
         checkCurrent();
-        this.page = page;
-        const currentPage = () => this.contextEpoch === epoch && this.page === page;
-        await page.route(`${origin}/**`, route => currentPage()
-          ? this.route(route).catch(() => route.abort().catch(() => {})) : route.abort().catch(() => {}));
-        checkCurrent();
-        page.on('response', response => { if (currentPage()) this.observe(response).catch(() => {}); });
-        page.on('close', () => { if (currentPage()) this.turn?.reject(new PrismError('browser_session_closed', 503)); });
-        page.on('crash', () => { if (currentPage()) this.close().catch(() => {}); });
-        await page.goto(origin + '/', { waitUntil: 'domcontentloaded', timeout: 25000 });
+        await this.loadPage(page, this.origin + '/', { waitUntil: 'domcontentloaded', timeout: 25000 });
         checkCurrent();
         const auth = await page.evaluate(async expected => {
           const response = await fetch('/auth/session', { signal: AbortSignal.timeout(15000) });
@@ -179,6 +186,10 @@ export class BrowserSession {
         checkCurrent();
         if (!auth.signedIn) throw new PrismError('oauth_session_rejected', 401);
         if (!auth.emailMatches || !auth.idMatches) throw new PrismError('oauth_identity_mismatch', 403);
+        // AccountManager verifies its persisted source identity AFTER authenticate returns.
+        // Do not establish a shared resident with an identity that may still be rejected.
+        this.authIdentity = auth.actualUserId;
+        this.authCredentials = { access_token };
         return auth.actualUserId;
       } catch (error) {
         if (context && !installed) await context.close().catch(() => {});
@@ -186,6 +197,48 @@ export class BrowserSession {
         throw error;
       }
     }, signal, () => this.contextEpoch === epoch ? this.close() : undefined);
+  }
+
+  async loadPage(page, url, options) {
+    const begun = performance.now();
+    try { return await page.goto(url, options); }
+    finally { this.metrics?.record('page_load', performance.now() - begun,
+      { worker: this.worker, multiplex: this.multiplex, cache_mode: this.cacheMode }); }
+  }
+
+  async createSubmissionPage(epoch = this.contextEpoch) {
+    if (!this.context || this.contextEpoch !== epoch) throw new PrismError('browser_session_closed', 503);
+    const context = this.context;
+    await this.admissionGuard?.assertAdmission('page');
+    if (this.context !== context || this.contextEpoch !== epoch) throw new PrismError('browser_session_closed', 503);
+    const page = await context.newPage();
+    if (!this.context || this.contextEpoch !== epoch) {
+      await page.close?.().catch(() => {});
+      throw new PrismError('browser_session_closed', 503);
+    }
+    this.page = page;
+    const currentPage = () => this.contextEpoch === epoch && this.page === page;
+    await installCachePreservingInterceptor(this.context, page, { origin: this.origin,
+      enabled: this.httpCache, current: currentPage, route: route => this.route(route), observe: response => this.observe(response),
+      onMode: mode => { this.cacheMode = mode; this.audit('browser_cache_mode', { mode }); } });
+    page.on('close', () => { if (currentPage()) this.turn?.reject(new PrismError('browser_session_closed', 503)); });
+    page.on('crash', () => { if (currentPage()) this.close().catch(() => {}); });
+    return page;
+  }
+
+  async detachSubmissionPage(turn) {
+    if (!this.multiplex || turn.detached || !turn.submitFinished || !turn.statusTemplate || turn.completed || this.turn !== turn) return;
+    // No page is released until start acceptance and the first matching successful native status
+    // provide the exact opaque polling shape. The resident poller never invents an upstream body.
+    this.multiplexer.startPolling(this, turn);
+    turn.detached = true;
+    const page = this.page;
+    this.page = null;
+    this.preparing = null;
+    this.pageGeneration += 1;
+    turn.releaseSubmission?.(); turn.releaseSubmission = null;
+    await page?.close().catch(() => {});
+    this.audit('submission_page_detached', { worker: this.worker, independent_context: true });
   }
 
   async route(route) {
@@ -324,7 +377,9 @@ export class BrowserSession {
     if (!isStart && !own && !turn.statusTemplate && sent && typeof sent === 'object') {
       // The page's first good poll gives the exact body shape (diff_format etc.); ours copy it.
       turn.statusTemplate = sent;
-      if (this.statusPollMs > 0 && turn.ownBodies) this.pollStatus(turn).catch(() => { turn.ownPollFailed = true; });
+      if (this.multiplex) {
+        if (!terminal) await this.detachSubmissionPage(turn);
+      } else if (this.statusPollMs > 0 && turn.ownBodies) this.pollStatus(turn).catch(() => { turn.ownPollFailed = true; });
     }
     if (!['completed', 'error', 'failed'].includes(data.status)) return;
     turn.completed = true;
@@ -396,8 +451,30 @@ export class BrowserSession {
   }
 
   async initialize(projectId, onProjectCreated, signal, previousModels = []) {
-    const page = this.page;
     const epoch = this.contextEpoch;
+    let releasePreparation;
+    if (this.multiplex) releasePreparation = await this.multiplexer.acquireSubmission(signal);
+    const preparationAt = performance.now();
+    let page;
+    try {
+      await interruptible(async () => {
+        await this.admissionGuard?.assertAdmission('project');
+        aborted(signal);
+        if (this.contextEpoch !== epoch) throw new PrismError('browser_session_closed', 503);
+        if (this.multiplex) {
+          if (!this.authIdentity || !this.authCredentials) throw new PrismError('oauth_identity_unavailable', 403);
+          await this.multiplexer.register(this.browser, this.authCredentials, this.authIdentity, this);
+          if (this.contextEpoch !== epoch) {
+            this.multiplexer.unregister(this);
+            throw new PrismError('browser_session_closed', 503);
+          }
+          aborted(signal);
+        }
+        page = this.page || await this.createSubmissionPage(epoch);
+      }, signal, () => this.contextEpoch === epoch ? this.close() : undefined);
+    } catch (error) { releasePreparation?.(); throw error; }
+    // A null means a NEW isolated project, not reuse of the previous scope's project UUID.
+    this.projectId = projectId || null;
     this.pageGeneration += 1;
     this.preparing = null;
     const checkCurrent = () => {
@@ -406,17 +483,17 @@ export class BrowserSession {
         throw new PrismError('browser_session_closed', 503);
       }
     };
-    checkCurrent();
     this.bootstrapping = true;
     this.syncSeen = false;
     this.lastHeartbeat = 0;
     this.reserveProject = onProjectCreated;
     try {
+      checkCurrent();
       await interruptible(async () => {
         if (projectId) {
           if (!uuidPattern.test(projectId)) throw new PrismError('invalid_managed_project');
           this.projectId = projectId;
-          await page.goto(`${origin}/?u=${encodeURIComponent(projectId)}&pg=1`,
+          await this.loadPage(page, `${this.origin}/?u=${encodeURIComponent(projectId)}&pg=1`,
             { waitUntil: 'domcontentloaded', timeout: 45000 });
           checkCurrent();
         } else {
@@ -424,7 +501,7 @@ export class BrowserSession {
           const creation = page.waitForResponse(response => new URL(response.url()).pathname === '/api/projects' &&
             response.request().method() === 'POST', { timeout: 90000 });
           creation.catch(() => {});
-          await page.goto(`${origin}/?n=1`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+          await this.loadPage(page, `${this.origin}/?n=1`, { waitUntil: 'domcontentloaded', timeout: 45000 });
           checkCurrent();
           const response = await creation;
           checkCurrent();
@@ -448,6 +525,8 @@ export class BrowserSession {
       }, signal, () => this.contextEpoch === epoch ? this.close() : undefined);
       return [...this.labels.keys()];
     } finally {
+      releasePreparation?.();
+      this.metrics?.record('project_prepare', performance.now() - preparationAt, { worker: this.worker, multiplex: this.multiplex });
       if (this.contextEpoch === epoch) {
         this.creating = false;
         this.bootstrapping = false;
@@ -583,14 +662,16 @@ export class BrowserSession {
   async generate(request, signal, onText) {
     aborted(signal);
     if (this.turn) throw new PrismError('account_busy', 409);
+    const releaseSubmission = this.multiplex ? await this.multiplexer.acquireSubmission(signal) : null;
     const page = this.page;
     // onText is reserved for verified cumulative assistant text; pending progress is not that text.
     const turn = { request, signal, onText, started: false, submitAllowed: false,
       ownBodies: new Set(), ownPolls: 0, ownPolling: false, ownPollFailed: false,
-      ownPollErrors: 0, ownPollErrorTotal: 0, statusTemplate: null, completedBy: null };
+      ownPollErrors: 0, ownPollErrorTotal: 0, statusTemplate: null, completedBy: null,
+      releaseSubmission, submitFinished: false, detached: false };
     const checkCurrent = () => {
       aborted(signal);
-      if (this.turn !== turn || this.page !== page || !page || page.isClosed?.()) {
+      if (this.turn !== turn || (!turn.detached && (this.page !== page || !page || page.isClosed?.()))) {
         throw new PrismError('browser_session_closed', 503);
       }
     };
@@ -634,6 +715,8 @@ export class BrowserSession {
         turn.submitAllowed = true;
         turn.timing.submit = performance.now();
         await composer.press('Enter');
+        turn.submitFinished = true;
+        await this.detachSubmissionPage(turn);
         checkCurrent();
         stage = 'generation';
         return result;
@@ -656,6 +739,8 @@ export class BrowserSession {
       }
       throw error instanceof PrismError ? error : new PrismError(`browser_ui_${stage}_failed`);
     } finally {
+      turn.releaseSubmission?.(); turn.releaseSubmission = null;
+      this.multiplexer?.cancel(turn);
       if (this.turn === turn) this.turn = null;
       // Only after a clean turn: a failed one may still be stopping, or be followed by a page reload.
       if (succeeded && this.page === page && !this.turn) this.schedulePrepare();
@@ -666,7 +751,7 @@ export class BrowserSession {
   // so the next request only fills it in and submits. The promise never rejects; null means "not
   // prepared" and the request opens its chat itself, as without prewarming.
   schedulePrepare() {
-    if (!this.prewarm || !this.isAlive()) return;
+    if (this.multiplex || !this.prewarm || !this.isAlive()) return;
     const page = this.page;
     const generation = this.pageGeneration;
     const checkCurrent = () => {
@@ -747,12 +832,23 @@ export class BrowserSession {
 
   async stop() {
     const turn = this.turn;
-    if (!turn?.started || turn.completed || !this.page || this.page.isClosed()) return;
+    if (!turn?.started || turn.completed || (!turn.detached && (!this.page || this.page.isClosed()))) return;
     if (!turn.stopping) turn.stopping = this.stopTurn(turn);
     return turn.stopping;
   }
 
   async stopTurn(turn) {
+    if (turn.detached) {
+      // Resident stop/cancel belongs only to this accepted turn; never close a shared poller.
+      const stopped = await this.multiplexer.stop(turn);
+      this.multiplexer.cancel(turn);
+      if (!stopped) {
+        this.audit('resident_stop_failed', { worker: this.worker });
+        // Close only this submission context. Other in-flight turns and the resident stay alive.
+        await this.terminateContext();
+      }
+      return;
+    }
     try {
       const stop = this.page.getByTestId('ai-stop-button');
       const visible = await stop.first().waitFor({ state: 'visible', timeout: 5000 }).then(() => true).catch(() => false);
@@ -786,19 +882,25 @@ export class BrowserSession {
 
   async terminateContext() {
     this.contextEpoch += 1;
+    this.multiplexer?.unregister?.(this);
     const context = this.context;
     this.context = null;
     this.page = null;
+    this.authIdentity = null;
+    this.authCredentials = null;
     this.preparing = null;
     this.creating = false;
     this.bootstrapping = false;
     this.reserveProject = null;
+    this.turn?.releaseSubmission?.();
+    if (this.turn) this.multiplexer?.cancel(this.turn);
     this.turn?.reject(new PrismError('session_closed', 503));
     this.turn = null;
     if (context) await context.close().catch(() => {});
   }
 
-  isAlive() { return Boolean(this.context && this.page && !this.page.isClosed()); }
+  isAlive() { return Boolean(this.context && ((this.page && !this.page.isClosed()) ||
+    (this.multiplex && this.multiplexer?.isAlive()))); }
 }
 
 export async function launchBrowser() {

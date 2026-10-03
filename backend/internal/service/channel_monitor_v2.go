@@ -90,7 +90,16 @@ type ChannelMonitorV2Filter struct {
 }
 
 type ChannelMonitorV2Metric struct {
-	HasSamples               bool                    `json:"has_samples"`
+	HasSamples bool `json:"has_samples"`
+	// Probe signals supplement availability only; HasSamples and all business
+	// volume, latency, cache and error fields retain their business-only meaning.
+	ProbeSampleCount         int64                   `json:"probe_sample_count"`
+	ProbePassedCount         int64                   `json:"probe_passed_count"`
+	ProbeFailedCount         int64                   `json:"probe_failed_count"`
+	ProbeInconclusiveCount   int64                   `json:"probe_inconclusive_count"`
+	ProbeAvailability        *float64                `json:"probe_availability,omitempty"`
+	ProbeCheckedAt           *time.Time              `json:"probe_checked_at,omitempty"`
+	AvailabilitySource       string                  `json:"availability_source,omitempty"`
 	SuccessRequests          int64                   `json:"success_requests"`
 	ErrorRequests            int64                   `json:"error_requests"`
 	RequestCount             int64                   `json:"request_count"`
@@ -391,7 +400,7 @@ func NewChannelMonitorV2Service(repo ChannelMonitorV2Repository) *ChannelMonitor
 	return &ChannelMonitorV2Service{repo: repo, now: func() time.Time { return time.Now().UTC() }}
 }
 
-// SetRuntimeReader wires optional settings for privacy flags (hide throughput).
+// SetRuntimeReader wires runtime probe gates and viewer privacy settings.
 func (s *ChannelMonitorV2Service) SetRuntimeReader(r channelMonitorRuntimeReader) {
 	if s == nil {
 		return
@@ -513,6 +522,17 @@ func (s *ChannelMonitorV2Service) Snapshot(ctx context.Context, filter ChannelMo
 	if err != nil {
 		return nil, err
 	}
+	if snap != nil {
+		probes, err := s.loadAvailabilityProbes(ctx, filter, cfg, admin)
+		if err != nil {
+			return nil, err
+		}
+		var total channelMonitorProbeAvailability
+		for _, probe := range probes {
+			total.add(probe.observation)
+		}
+		total.apply(&snap.Metrics, &snap.Health, cfg.HealthThresholds)
+	}
 	if !admin && snap != nil {
 		redactChannelMonitorV2Snapshot(snap, s.hideThroughputForViewer(ctx, admin))
 	}
@@ -527,6 +547,13 @@ func (s *ChannelMonitorV2Service) Models(ctx context.Context, filter ChannelMoni
 	list, err := s.repo.GetModels(ctx, filter, *cfg, admin)
 	if err != nil {
 		return nil, err
+	}
+	if list != nil {
+		probes, err := s.loadAvailabilityProbes(ctx, filter, cfg, admin)
+		if err != nil {
+			return nil, err
+		}
+		mergeModelProbeAvailability(list, probes, cfg.HealthThresholds)
 	}
 	if !admin && list != nil {
 		hideTP := s.hideThroughputForViewer(ctx, admin)
@@ -548,6 +575,13 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 	matrix, err := s.repo.GetMatrix(ctx, filter, *cfg, groupBy, admin)
 	if err != nil {
 		return nil, err
+	}
+	if matrix != nil {
+		probes, err := s.loadAvailabilityProbes(ctx, filter, cfg, admin)
+		if err != nil {
+			return nil, err
+		}
+		mergeMatrixProbeAvailability(matrix, probes, groupBy, cfg.HealthThresholds)
 	}
 	if !admin && matrix != nil {
 		hideTP := s.hideThroughputForViewer(ctx, admin)
@@ -665,6 +699,10 @@ func redactChannelMonitorV2Metric(m *ChannelMonitorV2Metric, hideThroughput bool
 		return
 	}
 	m.HasSamples = m.RequestCount > 0
+	m.ProbeSampleCount = 0
+	m.ProbePassedCount = 0
+	m.ProbeFailedCount = 0
+	m.ProbeInconclusiveCount = 0
 	m.SuccessRequests = 0
 	m.ErrorRequests = 0
 	m.RequestCount = 0

@@ -82,6 +82,36 @@ function metrics(requestCount: number): MonitorMetric {
 }
 
 describe('RelayPulseMatrix', () => {
+  it.each([true, false])('uses probe availability with or without visible throughput (%s), leaving missing history empty', (showThroughput) => {
+    const probeMetric = { ...metrics(0), has_samples: false, rpm: 0, tpm: 0, probe_availability: 0.9, availability_source: 'probe' as const }
+    const wrapper = mount(RelayPulseMatrix, {
+      props: {
+        rows: [{ platform: 'openai', group_id: 7, metrics: probeMetric, health, buckets: [] }],
+        coverage: { requested_start: '2026-08-01T00:00:00Z', requested_end: '2026-08-01T00:03:00Z', coverage_start: '2026-08-01T00:00:00Z', data_through: '2026-08-01T00:03:00Z', computed_at: '2026-08-01T00:03:00Z', aggregation_lag_seconds: 0, coverage_complete: true, bucket_seconds: 60 },
+        healthMode: 'overall', showThroughput,
+      },
+    })
+    expect(wrapper.text()).toContain('90.0%')
+    expect(wrapper.text()).toContain('channelMonitorV2.cards.activeProbe')
+    expect(wrapper.get('.status-dot').classes()).toContain('health-score5')
+    expect(wrapper.findAll('.pulse-cell').every(cell => cell.classes().includes('health-unknown'))).toBe(true)
+    wrapper.unmount()
+  })
+
+  it.each([true, false])('does not show default 100 percent for unexecuted probes (%s)', (showThroughput) => {
+    const wrapper = mount(RelayPulseMatrix, {
+      props: {
+        rows: [{ platform: 'openai', metrics: { ...metrics(0), has_samples: false, rpm: 0, tpm: 0 }, health: { overall: 'unknown', error_rate: 'unknown', ttft: 'unknown', minimum_sample: 50 }, buckets: [] }],
+        coverage: { requested_start: '2026-08-01T00:00:00Z', requested_end: '2026-08-01T00:03:00Z', coverage_start: '2026-08-01T00:00:00Z', data_through: '2026-08-01T00:03:00Z', computed_at: '2026-08-01T00:03:00Z', aggregation_lag_seconds: 0, coverage_complete: true, bucket_seconds: 60 },
+        healthMode: 'overall', showThroughput,
+      },
+    })
+    expect(wrapper.text()).not.toContain('100.0%')
+    expect(wrapper.get('.status-dot').classes()).toContain('health-unknown')
+    expect(wrapper.findAll('.summary-value')[0].text()).toBe('—')
+    wrapper.unmount()
+  })
+
   it('shows privacy-safe hover tooltips and multi-band colors without click modal', async () => {
     const wrapper = mount(RelayPulseMatrix, {
       props: {

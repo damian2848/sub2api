@@ -22,6 +22,20 @@ services:
       PRISM_MAX_ACCOUNTS: "${PRISM_MAX_ACCOUNTS:-16}"
       PRISM_ACCOUNT_CONCURRENCY: "${PRISM_ACCOUNT_CONCURRENCY:-2}"
       PRISM_MAX_WORKERS: "${PRISM_MAX_WORKERS:-32}"
+      # Opt-in (default false = the shared managed project per worker, as before). When true, user requests
+      # run in a project scoped to authenticated Key + explicit session; anonymous requests get a fresh project.
+      PRISM_PROJECT_ISOLATION: "${PRISM_PROJECT_ISOLATION:-false}"
+      PRISM_MAX_SESSION_PROJECTS: "${PRISM_MAX_SESSION_PROJECTS:-128}"
+      PRISM_SESSION_PROJECT_TTL_SECONDS: "${PRISM_SESSION_PROJECT_TTL_SECONDS:-86400}"
+      # Admission guard counts the container (including Chromium), not only Node RSS. 0 (default) disables it:
+      # set it from /internal/resources measurements, never from a guess.
+      PRISM_MEMORY_LIMIT_MIB: "${PRISM_MEMORY_LIMIT_MIB:-0}"
+      PRISM_MEMORY_RESERVE_MIB: "${PRISM_MEMORY_RESERVE_MIB:-32}"
+      # Opt-in (default false = the Playwright route guard production runs today, HTTP cache disabled).
+      # true switches to Chromium CDP interception (static-asset caching) and blocks service workers.
+      PRISM_HTTP_CACHE: "${PRISM_HTTP_CACHE:-false}"
+      # Experimental: release accepted submission pages to an account-bound resident poller.
+      PRISM_MULTIPLEX_PAGES: "${PRISM_MULTIPLEX_PAGES:-false}"
       PRISM_ACCOUNT_START_LIMIT: "${PRISM_ACCOUNT_START_LIMIT:-0}"
       PRISM_START_WINDOW_SECONDS: "${PRISM_START_WINDOW_SECONDS:-65}"
       # Blank inherits the legacy capacity (default 0); do not mask an existing start limit.

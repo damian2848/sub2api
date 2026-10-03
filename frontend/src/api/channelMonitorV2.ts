@@ -35,6 +35,13 @@ export interface LatencyMetric {
 
 export interface MonitorMetric {
   has_samples?: boolean
+  probe_sample_count?: number
+  probe_passed_count?: number
+  probe_failed_count?: number
+  probe_inconclusive_count?: number
+  probe_availability?: number | null
+  probe_checked_at?: string
+  availability_source?: 'business' | 'probe' | 'unknown'
   success_requests: number
   error_requests: number
   request_count: number

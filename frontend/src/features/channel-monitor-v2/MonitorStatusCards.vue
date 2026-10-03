@@ -28,6 +28,7 @@
             <div v-for="metric in metrics(row)" :key="metric.name" class="min-w-0 rounded-2xl border border-gray-100 bg-gray-50/70 px-2.5 py-3 dark:border-dark-700/60 dark:bg-dark-900/40">
               <dt class="truncate text-[10px] tracking-wide text-gray-500 dark:text-gray-400" :title="metric.title || metric.name">{{ metric.name }}</dt>
               <dd class="mt-1.5 font-mono text-base font-semibold tabular-nums" :class="metric.color">{{ metric.value }}</dd>
+              <dd v-if="metric.source" class="mt-1 text-[10px] text-gray-500 dark:text-gray-400" data-testid="availability-source">{{ metric.source }}</dd>
             </div>
           </dl>
           <div class="mt-4 border-t border-gray-100 pt-3 dark:border-dark-700/70">
@@ -108,7 +109,7 @@ import type { MonitorCandyResult, MonitorCoverage, MonitorMatrixBucket, MonitorM
 import ProviderIcon from '@/components/user/monitor/ProviderIcon.vue'
 import { useChannelMonitorFormat } from '@/composables/useChannelMonitorFormat'
 import { formatMonitorMs, formatMonitorPercent } from './monitorFormat'
-import { CANDY_HISTORY_LIMIT, candyDisplayState, candyHistorySlots, hasMonitorSamples, monitorCardTimeline, monitorCandyHistories } from './monitorCards'
+import { CANDY_HISTORY_LIMIT, candyDisplayState, candyHistorySlots, effectiveAvailability, hasMonitorSamples, monitorCardTimeline, monitorCandyHistories } from './monitorCards'
 
 const props = defineProps<{ items: MonitorMatrixRow[]; coverage?: MonitorCoverage; countdown: number; loading: boolean; now: number }>()
 const { t, locale } = useI18n()
@@ -202,9 +203,10 @@ const candyColor = { correct: 'bg-emerald-400', incorrect: 'bg-amber-400', error
 const time = (value: number | string) => new Date(value).toLocaleTimeString(locale.value, { hour: '2-digit', minute: '2-digit', hour12: false })
 function metrics(row: MonitorMatrixRow) {
   const sampled = hasMonitorSamples(row.metrics)
+  const availability = effectiveAvailability(row.metrics)
   return [
     { name: t('channelMonitorV2.cards.cache'), value: sampled ? formatMonitorPercent(row.metrics.cache_rate) : '—', color: 'text-gray-800 dark:text-gray-100' },
-    { name: t('channelMonitorV2.cards.availability'), value: sampled ? formatMonitorPercent(1 - row.metrics.error_rate) : '—', color: sampled && row.health.error_rate === 'healthy' ? 'text-emerald-600 dark:text-emerald-300' : 'text-gray-800 dark:text-gray-100' },
+    { name: t('channelMonitorV2.cards.availability'), title: t('channelMonitorV2.cards.availabilityHint'), value: availability == null ? '—' : formatMonitorPercent(availability), source: !sampled && availability != null ? t('channelMonitorV2.cards.activeProbe') : undefined, color: availability != null && row.health.error_rate === 'healthy' ? 'text-emerald-600 dark:text-emerald-300' : 'text-gray-800 dark:text-gray-100' },
     { name: t('channelMonitorV2.cards.ttft'), title: t('channelMonitorV2.metrics.ttftP50'), value: formatMonitorMs(row.metrics.ttft.p50_ms), color: 'text-gray-800 dark:text-gray-100' }
   ]
 }

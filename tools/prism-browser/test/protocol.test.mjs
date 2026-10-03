@@ -113,13 +113,12 @@ test('tool call parsing tolerates fences, short leading prose, missing braces an
   assert.deepEqual(JSON.parse(call('{"tool_call":{"name":"exec_command","arguments":"{\\"cmd\\":\\"pwd\\"}"}}').arguments), { cmd: 'pwd' });
   assert.equal(call('{"tool_call":{"name":"exec_command","arguments":{"cmd":"ls"}}} and then I will explain.').type, 'function_call');
   assert.equal(call('{"tool_call":{"name":"functions.exec_command"}}').arguments, '{}');
-  // Long prose before the JSON, an unknown tool, or no JSON at all is plain text.
+  // Long prose before the JSON or no JSON at all is plain text; an unknown tool fails safely.
   const prose = 'I will now carefully run the listing command for you: {"tool_call":{"name":"exec_command","arguments":{}}}';
   assert.equal(call(prose).type, 'message');
   assert.equal(call(prose).content[0].text, prose);
   const unknown = '{"tool_call":{"name":"rm_rf","arguments":{}}}';
-  assert.equal(call(unknown).type, 'message');
-  assert.equal(call(unknown).content[0].text, unknown);
+  assert.throws(() => call(unknown), error => error.status === 502 && error.code === 'prism_unknown_tool');
   assert.equal(call('The directory has two files.').content[0].text, 'The directory has two files.');
   assert.equal(call('{"done":"Listed two files."}').content[0].text, 'Listed two files.');
   assert.equal(call('{"done": 3}').content[0].text, '{"done": 3}');
@@ -259,7 +258,7 @@ test('previous_response_id is rejected unless null; model must be in the catalog
 });
 
 test('all other parameters are ignored, never rejected', () => {
-  const ignored = { temperature: 0.2, top_p: 0.9, tool_choice: 'required', parallel_tool_calls: false, include: ['reasoning.encrypted_content'],
+  const ignored = { temperature: 0.2, top_p: 0.9, include: ['reasoning.encrypted_content'],
     prompt_cache_key: 'k', text: { format: { type: 'json_object' } }, store: true, metadata: { a: 'b' }, user: 'u', service_tier: 'flex',
     max_output_tokens: 20, max_tokens: 20, max_completion_tokens: 20, truncation: 'auto', stream_options: { include_usage: true, extra: 1 },
     seed: 1, n: 1, stop: ['x'], response_format: { type: 'text' }, frequency_penalty: 0, logit_bias: {}, some_future_param: { nested: true } };
@@ -890,4 +889,86 @@ test('Chat SSE streams the note, then one tool_calls chunk carrying every call w
   assert.deepEqual(calls.map(call => call.index), [0, 1]);
   assert.equal(chunks.at(-1).choices[0].finish_reason, 'tool_calls');
   assert.ok(res.frames.at(-1).endsWith('data: [DONE]\n\n'));
+});
+
+
+test('Chat and Responses normalize supported tool policy shapes and expose one shared policy', () => {
+  for (const family of ['chat', 'responses']) {
+    const base = family === 'chat' ? { messages: [{ role: 'user', content: 'Run ls.' }] } : { input: 'Run ls.' };
+    for (const choice of ['auto', 'none', 'required']) {
+      const request = parse({ ...base, tools: [execTool], tool_choice: choice, parallel_tool_calls: false }, family);
+      assert.deepEqual(request.toolPolicy, { choice, parallel: false });
+      // Even none retains the original specs to identify and reject forbidden calls.
+      assert.ok(request.toolSpecs.has('exec_command'));
+    }
+    const forced = family === 'chat' ? { type: 'function', function: { name: 'exec_command' } }
+      : { type: 'function', name: 'exec_command' };
+    const request = parse({ ...base, tools: [execTool], tool_choice: forced }, family);
+    assert.deepEqual(request.toolPolicy, { choice: 'function', name: 'exec_command', parallel: true });
+    assert.match(text(request), /call only the action "exec_command"/);
+    assert.deepEqual(parse(base, family).toolPolicy, { choice: 'auto', parallel: true });
+    assert.deepEqual(parse({ ...base, tool_choice: null }, family).toolPolicy, { choice: 'auto', parallel: true });
+  }
+  const extra = parse({ input: [{ type: 'message', role: 'user', content: 'Use the extra tool.' },
+    { type: 'additional_tools', tools: [{ type: 'namespace', name: 'terminal', tools: [execTool] }] }],
+    tool_choice: { type: 'function', name: 'exec_command' } });
+  assert.equal(extra.toolPolicy.name, 'exec_command');
+  assert.equal(resultBody(extra, '<tool_call name="exec_command">{"cmd":"pwd"}</tool_call>').output[0].namespace, 'terminal');
+});
+
+test('unusable tool policies fall back to auto and never reject the request', () => {
+  for (const family of ['chat', 'responses']) {
+    const base = family === 'chat' ? { messages: [{ role: 'user', content: 'run' }] } : { input: 'run' };
+    const policyOf = value => parse({ ...base, tools: [execTool], ...value }, family).toolPolicy;
+    for (const choice of ['', 'sometimes', 'any', 7, true, [], {}, { type: 'custom', name: 'exec_command' },
+      { type: 'allowed_tools', mode: 'auto', tools: [] }, { type: 'function' }]) {
+      assert.deepEqual(policyOf({ tool_choice: choice }), { choice: 'auto', parallel: true }, JSON.stringify(choice));
+    }
+    // Only an explicit false turns parallel calls off; anything else keeps the default.
+    for (const value of [null, 'false', 0, 1, [], {}, true]) assert.equal(policyOf({ parallel_tool_calls: value }).parallel, true);
+    assert.equal(policyOf({ parallel_tool_calls: false }).parallel, false);
+    const forced = name => family === 'chat' ? { type: 'function', function: { name } } : { type: 'function', name };
+    for (const name of [null, '', 3, [], 'not_offered']) assert.equal(policyOf({ tool_choice: forced(name) }).choice, 'auto');
+    assert.deepEqual(policyOf({ tool_choice: forced('exec_command') }), { choice: 'function', name: 'exec_command', parallel: true });
+    // Either family's forced-function shape names the tool.
+    assert.equal(policyOf({ tool_choice: family === 'chat' ? { type: 'function', name: 'exec_command' }
+      : { type: 'function', function: { name: 'exec_command' } } }).choice, 'function');
+    assert.equal(parse({ ...base, tool_choice: 'required' }, family).toolPolicy.choice, 'auto', 'required without tools is not enforceable');
+    assert.equal(parse({ ...base, tools: [{ type: 'web_search' }], tool_choice: 'required' }, family).toolPolicy.choice, 'auto');
+    assert.equal(policyOf({ tool_choice: 'required' }).choice, 'required');
+    assert.equal(policyOf({ tool_choice: 'none' }).choice, 'none');
+  }
+});
+
+test('both API result families enforce policy before shaping any partial result', () => {
+  const one = '<tool_call name="exec_command">{"cmd":"ls"}</tool_call>';
+  for (const family of ['chat', 'responses']) {
+    const base = family === 'chat' ? { messages: [{ role: 'user', content: 'run' }] } : { input: 'run' };
+    const request = policy => parse({ ...base, tools: [execTool], ...policy }, family);
+    for (const [policy, reply] of [
+      [{ tool_choice: 'required' }, 'All done.'],
+      [{ parallel_tool_calls: false }, one + one],
+      [{ tool_choice: family === 'chat' ? { type: 'function', function: { name: 'exec_command' } }
+        : { type: 'function', name: 'exec_command' } }, 'All done.'],
+    ]) {
+      assert.throws(() => resultBody(request(policy), reply),
+        error => error.status === 502 && error.code === 'prism_tool_policy_violation');
+    }
+    const forced = family === 'chat' ? { type: 'function', function: { name: 'exec_command' } }
+      : { type: 'function', name: 'exec_command' };
+    assert.throws(() => resultBody(request({ tool_choice: forced, parallel_tool_calls: true }), one + one),
+      error => error.status === 502 && error.code === 'prism_tool_policy_violation');
+    const accepted = resultBody(request({ tool_choice: 'required', parallel_tool_calls: false }), one);
+    assert.equal(family === 'chat' ? accepted.choices[0].message.tool_calls.length : accepted.output.length, 1);
+    const none = resultBody(request({ tool_choice: 'none' }), 'No action taken.');
+    assert.equal(family === 'chat' ? none.choices[0].message.content : none.output_text, 'No action taken.');
+    // tool_choice=none never emits a call; text that still holds tool tags goes back as text.
+    const ignored = resultBody(request({ tool_choice: 'none' }), one);
+    assert.equal(family === 'chat' ? ignored.choices[0].message.tool_calls : ignored.output.some(item => item.type === 'function_call'),
+      family === 'chat' ? undefined : false);
+    assert.equal(family === 'chat' ? ignored.choices[0].message.content : ignored.output_text, one);
+    // A request that offered no tools is never parsed for calls: text that mentions the tags is the answer.
+    const plain = resultBody(parse(base, family), one);
+    assert.equal(family === 'chat' ? plain.choices[0].message.content : plain.output_text, one);
+  }
 });
