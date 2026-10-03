@@ -130,6 +130,22 @@ export class AccountPageMultiplexer {
       } catch { return { status: 0, text: '' }; }
     }, { path, body, timeoutMs });
   }
+  // Why did the resident page get refused? The editor page's own poll is accepted for the same turn,
+  // so the difference matters. Only fixed, non-secret facts are recorded: the status, Prism's error
+  // code (never its message or body), and which cookie NAMES the resident context holds.
+  async diagnoseRefusal(path, result) {
+    let code;
+    try {
+      const parsed = JSON.parse(result.text);
+      const value = parsed?.error?.code ?? parsed?.code ?? parsed?.detail?.code;
+      if (typeof value === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(value)) code = value;
+    } catch {}
+    let cookies;
+    try { cookies = (await this.context?.cookies?.(this.origin) ?? []).map(item => item.name).filter(name => /^[A-Za-z0-9_.-]{1,64}$/.test(name)).sort(); }
+    catch {}
+    this.onAudit('resident_poll_refused', { path: path.split('?')[0], status: result.status, code,
+      resident_cookie_names: cookies, resident_url_origin: this.page?.url?.().startsWith(this.origin) ? 'same_origin' : 'other' });
+  }
   async poll(session, turn) {
     const job = this.jobs.get(turn);
     const live = () => this.jobs.get(turn) === job && !job.cancelled && session.turn === turn &&
@@ -144,6 +160,7 @@ export class AccountPageMultiplexer {
       if (result.status >= 200 && result.status < 300) { try { JSON.parse(result.text); valid = true; } catch {} }
       if (!valid) {
         turn.ownPollErrors += 1; turn.ownPollErrorTotal += 1;
+        if (!turn.refusalDiagnosed) { turn.refusalDiagnosed = true; await this.diagnoseRefusal('/api/llm/response_with_tools_status', result).catch(() => {}); }
         if ([401, 403].includes(result.status) || turn.ownPollErrors >= 3) {
           turn.ownPollFailed = true;
           const error = new PrismError([401, 403].includes(result.status) ? 'session_expired' : 'prism_upstream_http_error',

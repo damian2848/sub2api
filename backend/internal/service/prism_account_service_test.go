@@ -30,6 +30,7 @@ type prismTestRepository struct {
 	bulkUpdates      []AccountBulkUpdate
 	extraCalls       int
 	schedulableCalls int
+	clearErrorCalls  int
 }
 
 func prismTestClone(a *Account) *Account {
@@ -138,6 +139,16 @@ func (r *prismTestRepository) SetTempUnschedulable(_ context.Context, id int64, 
 		return ErrAccountNotFound
 	}
 	r.items[id].TempUnschedulableUntil, r.items[id].TempUnschedulableReason = &until, reason
+	return nil
+}
+
+func (r *prismTestRepository) ClearError(_ context.Context, id int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if a := r.items[id]; a != nil {
+		a.Status, a.ErrorMessage = StatusActive, ""
+		r.clearErrorCalls++
+	}
 	return nil
 }
 
@@ -1170,4 +1181,50 @@ func TestPrismExplicitReconnectIsNotLostWhileBackgroundBootstrapIsRunning(t *tes
 	mu.Lock()
 	require.Equal(t, []bool{false, true}, retryProbes, "an explicit readiness probe retry must survive a currently running background job")
 	mu.Unlock()
+}
+
+func TestPrismReconnectRecoversAccountParkedInErrorWithoutManualClear(t *testing.T) {
+	// A permanent auth failure used to leave the account in status=error, where reconnect answered
+	// 400 "enable the account first" and the background sync deleted the sidecar session.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/bootstrap") {
+			_, _ = w.Write([]byte(`{"phase":"ready","ready":true,"models":["gpt-6.1-sol"]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	parked := prismTestManaged(server.URL)
+	parked.Status = StatusError
+	parked.ErrorMessage = "Authentication failed (401): The Prism session expired and is reconnecting"
+	parked.Schedulable = false
+	repo := newPrismTestRepository(prismTestSource(), parked)
+	svc := prismTestService(t, server.URL, repo, &prismTestTokens{token: prismTestJWT("latest")})
+
+	status, err := svc.Reconnect(context.Background(), 101)
+	require.NoError(t, err)
+	require.Equal(t, "provisioning", status.Phase)
+	prismTestWaitJobs(svc)
+
+	recovered, _ := repo.GetByID(context.Background(), 101)
+	require.Equal(t, StatusActive, recovered.Status)
+	require.Empty(t, recovered.ErrorMessage)
+	require.Equal(t, 1, repo.clearErrorCalls)
+	require.Equal(t, "ready", recovered.Extra["prism_phase"])
+	require.True(t, recovered.Schedulable)
+}
+
+func TestPrismReconnectStillRefusesManuallyDisabledAccount(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{}`)) }))
+	defer server.Close()
+	disabled := prismTestManaged(server.URL)
+	disabled.Status = StatusDisabled
+	repo := newPrismTestRepository(prismTestSource(), disabled)
+	svc := prismTestService(t, server.URL, repo, &prismTestTokens{token: prismTestJWT("latest")})
+
+	_, err := svc.Reconnect(context.Background(), 101)
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "Enable the Prism account")
+	require.Equal(t, 0, repo.clearErrorCalls)
 }

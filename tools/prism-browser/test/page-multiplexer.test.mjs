@@ -179,3 +179,38 @@ test('cancelling a late resident registration releases preparation and removes i
   assert.equal(releases, 1); assert.equal(driver.context, null);
   finish(); await tick(); assert.equal(members.size, 0); assert.equal(driver.context, null);
 });
+
+test('a refused resident poll records only status, error code and cookie names, once per turn', async () => {
+  const audits = [];
+  const mux = new AccountPageMultiplexer({ pollMs: 250, onAudit: (event, fields) => audits.push({ event, ...fields }) });
+  mux.context = { cookies: async () => [{ name: 'prism_oai_access_token', value: 'SECRET-TOKEN-VALUE' }, { name: '_dd_s', value: 'x' }] };
+  let calls = 0;
+  mux.page = { isClosed: () => false, url: () => 'https://prism.openai.com/auth/session',
+    evaluate: async () => { calls += 1; return { status: 401, text: JSON.stringify({ error: { code: 'unauthorized', message: 'SECRET message' } }) }; } };
+  const driver = new BrowserSession({}, () => {}, 'account', 0, { multiplex: true, multiplexer: mux });
+  let rejected;
+  const turn = { started: true, requestId: 'one', conversationId: 'c', turnState: 's', statusTemplate: { diff_format: 'dense' }, request,
+    ownBodies: new Set(), ownPolls: 0, ownPollErrors: 0, ownPollErrorTotal: 0, reject: error => { rejected = error; } };
+  driver.turn = turn;
+  mux.startPolling(driver, turn);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(rejected.code, 'session_expired');
+  const refused = audits.filter(item => item.event === 'resident_poll_refused');
+  assert.equal(refused.length, 1);
+  assert.deepEqual(refused[0], { event: 'resident_poll_refused', path: '/api/llm/response_with_tools_status', status: 401,
+    code: 'unauthorized', resident_cookie_names: ['_dd_s', 'prism_oai_access_token'], resident_url_origin: 'same_origin' });
+  assert.equal(JSON.stringify(audits).includes('SECRET'), false, 'neither a token value nor an upstream message may be logged');
+});
+
+test('a resident refusal diagnosis never breaks the poll when cookies cannot be read', async () => {
+  const audits = [];
+  const mux = new AccountPageMultiplexer({ onAudit: (event, fields) => audits.push({ event, ...fields }) });
+  mux.context = { cookies: async () => { throw new Error('closed'); } };
+  mux.page = { isClosed: () => false, url: () => '' };
+  await mux.diagnoseRefusal('/api/llm/response_with_tools_status?x=1', { status: 403, text: 'not json' });
+  assert.equal(audits.length, 1);
+  assert.equal(audits[0].path, '/api/llm/response_with_tools_status');
+  assert.equal(audits[0].code, undefined);
+  assert.equal(audits[0].resident_cookie_names, undefined);
+  assert.equal(audits[0].resident_url_origin, 'other');
+});

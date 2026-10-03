@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -366,4 +367,60 @@ func TestRateLimitService_HandleUpstreamError_OAuth401NoRefreshTokenSetsError(t 
 		require.Contains(t, repo.lastErrorMsg, "refresh_token missing")
 		require.Len(t, invalidator.accounts, 1)
 	})
+}
+
+func managedPrismAccount(id int64) *Account {
+	return &Account{
+		ID:       id,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Extra: map[string]any{
+			"provider_preset":     PrismProviderPreset,
+			PrismSourceAccountKey: int64(32),
+		},
+	}
+}
+
+func TestRateLimitService_HandleUpstreamError_PrismSessionExpiredIsTemporary(t *testing.T) {
+	// The sidecar's browser session dropped: recoverable, so the account is parked briefly and
+	// must NOT be moved to the permanent status=error that needs a manual "clear error".
+	repo := &rateLimitAccountRepoStub{}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	body := []byte(`{"error":{"message":"The Prism session expired and is reconnecting","type":"invalid_request_error","code":"session_expired"}}`)
+
+	shouldDisable := service.HandleUpstreamError(context.Background(), managedPrismAccount(209), 401, http.Header{}, body)
+
+	require.True(t, shouldDisable, "the request must still fail over to another account")
+	require.Equal(t, 0, repo.setErrorCalls, "session_expired must never become a permanent error")
+	require.Equal(t, 1, repo.tempCalls)
+	require.Equal(t, int64(209), repo.lastTempID)
+	require.Equal(t, prismSessionExpiredReason, repo.lastTempReason)
+	// The Prism sync only clears blocks carrying this prefix once the session is ready again.
+	require.True(t, strings.HasPrefix(repo.lastTempReason, "prism:"))
+}
+
+func TestRateLimitService_HandleUpstreamError_PrismOtherUnauthorizedStaysPermanent(t *testing.T) {
+	// Only session_expired is recoverable. Any other 401 from a managed Prism account keeps the
+	// existing behaviour (the API key itself may be wrong).
+	repo := &rateLimitAccountRepoStub{}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	body := []byte(`{"error":{"message":"bad key","code":"invalid_api_key"}}`)
+
+	shouldDisable := service.HandleUpstreamError(context.Background(), managedPrismAccount(209), 401, http.Header{}, body)
+
+	require.True(t, shouldDisable)
+	require.Equal(t, 1, repo.setErrorCalls)
+	require.Equal(t, 0, repo.tempCalls)
+}
+
+func TestRateLimitService_HandleUpstreamError_NonPrismSessionExpiredCodeStaysPermanent(t *testing.T) {
+	// A plain API-key account that happens to return the same code is not a Prism sidecar.
+	repo := &rateLimitAccountRepoStub{}
+	service := NewRateLimitService(repo, nil, &config.Config{}, nil, nil)
+	body := []byte(`{"error":{"code":"session_expired"}}`)
+	account := &Account{ID: 7, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+
+	require.True(t, service.HandleUpstreamError(context.Background(), account, 401, http.Header{}, body))
+	require.Equal(t, 1, repo.setErrorCalls)
+	require.Equal(t, 0, repo.tempCalls)
 }

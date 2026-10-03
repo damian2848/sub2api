@@ -25,6 +25,11 @@ import (
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
+// prismSessionExpiredReason keeps the "prism:" prefix: syncAccount clears temp-unschedulable
+// blocks with it once the sidecar session is ready again.
+const prismSessionExpiredReason = "prism: session expired"
+const prismSessionExpiredCooldown = 90 * time.Second
+
 const PrismSourceAccountKey = "prism_source_account_id"
 const PrismProviderPreset = "prism_browser"
 
@@ -345,7 +350,15 @@ func (s *PrismAccountService) Reconnect(ctx context.Context, id int64) (*PrismSt
 		return nil, err
 	}
 	if !a.IsActive() {
-		return nil, infraerrors.BadRequest("PRISM_ACCOUNT_DISABLED", "Enable the Prism account before reconnecting")
+		// An explicit reconnect is the administrator's recovery action, so a managed account that
+		// an earlier auth failure parked in status=error must not also require a separate manual
+		// "clear error". A manually disabled account still has to be enabled first.
+		if a.Status != StatusError {
+			return nil, infraerrors.BadRequest("PRISM_ACCOUNT_DISABLED", "Enable the Prism account before reconnecting")
+		}
+		if err := s.repo.ClearError(ctx, id); err != nil {
+			return nil, err
+		}
 	}
 	if err := s.repo.UpdateExtra(ctx, id, map[string]any{"prism_phase": "provisioning", "prism_error_code": "",
 		"prism_auto_enable_pending": a.Schedulable || a.Extra["prism_auto_enable_pending"] == true}); err != nil {

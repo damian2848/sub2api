@@ -461,6 +461,21 @@ func (s *RateLimitService) handleUpstreamErrorAfterStreakReset(ctx context.Conte
 			shouldDisable = true
 			break
 		}
+		// Managed Prism: the sidecar answers 401 "session_expired" when ITS browser session
+		// dropped. That is a recoverable sidecar state (the background sync re-provisions it),
+		// not evidence that the account's API key is bad, so it must never become the permanent
+		// status=error that only a manual "clear error" can leave. Park the account briefly;
+		// the "prism:" reason prefix lets the Prism sync clear the block once it is ready again.
+		// Any other 401 from a managed Prism account keeps the existing permanent handling.
+		if account.IsManagedPrismAccount() && extractUpstreamErrorCode(responseBody) == "session_expired" {
+			until := time.Now().Add(prismSessionExpiredCooldown)
+			s.notifyAccountSchedulingBlocked(account, until, "prism_session_expired")
+			if err := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, prismSessionExpiredReason); err != nil {
+				slog.Warn("prism_session_expired_set_temp_unschedulable_failed", "account_id", account.ID, "error", err)
+			}
+			shouldDisable = true
+			break
+		}
 		// OAuth 账号在 401 错误时临时不可调度（给 token 刷新窗口）；非 OAuth 账号保持原有 SetError 行为。
 		if authAccount.Type == AccountTypeOAuth {
 			// 1. 失效缓存
