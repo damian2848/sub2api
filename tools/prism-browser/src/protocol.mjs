@@ -141,6 +141,22 @@ function responsesConversation(body, limits) {
   return state;
 }
 
+// Only the policies the adapter really enforces are read: none, required, one named function and
+// parallel_tool_calls=false. Anything else (other shapes such as allowed_tools or custom, a name that is not
+// offered, a wrongly typed value) falls back to auto: unknown tool parameters were never rejected here and
+// a client that sends one keeps working.
+function normalizeToolPolicy(body, family, specs) {
+  const parallel = body.parallel_tool_calls !== false;
+  const choice = body.tool_choice;
+  if (choice === 'none') return { choice: 'none', parallel };
+  if (choice === 'required') return specs.length ? { choice: 'required', parallel } : { choice: 'auto', parallel };
+  if (choice && typeof choice === 'object' && !Array.isArray(choice) && choice.type === 'function') {
+    const name = family === 'chat' ? choice.function?.name ?? choice.name : choice.name ?? choice.function?.name;
+    if (typeof name === 'string' && specs.some(spec => spec.name === name)) return { choice: 'function', name, parallel };
+  }
+  return { choice: 'auto', parallel };
+}
+
 // `limits` is `{ maxTextBytes, maxTranscriptChars }`; a bare number is maxTextBytes.
 export function parseRequest(body, family, models, limits = {}) {
   const { maxTextBytes = DEFAULT_MAX_TEXT_BYTES, maxTranscriptChars = envInt('PRISM_MAX_TRANSCRIPT_CHARS', 32000) } =
@@ -152,21 +168,22 @@ export function parseRequest(body, family, models, limits = {}) {
   if (body.previous_response_id !== undefined && body.previous_response_id !== null) {
     invalid('previous_response_not_supported', 'previous_response_id');
   }
-  // Every other parameter (sampling, tool_choice, include, store, ...) is ignored, never rejected.
+  // Other parameters (sampling, include, store, ...) are ignored, never rejected; tool policies are soft-read below.
   const chat = family === 'chat';
   const param = chat ? 'messages' : 'input';
   const mediaLimits = attachmentLimits(typeof limits === 'number' ? {} : limits);
   const state = chat ? chatConversation(body, mediaLimits) : responsesConversation(body, mediaLimits);
   if (!state.convo.length && !state.system.length) invalid('empty_input', param);
   const specs = collectTools(body.tools, state.items);
+  const toolPolicy = normalizeToolPolicy(body, family, specs);
   const text = buildPrompt({ system: state.system, convo: state.convo, tools: specs, envParts: state.env,
-    budget: maxTranscriptChars });
+    budget: maxTranscriptChars, toolPolicy });
   if (!text.trim()) invalid('empty_input', param);
   if (Buffer.byteLength(text) > maxTextBytes) invalid('input_too_large', param);
   const fileLinks = fileLinkOptions(family, state.system, state.linkInputs);
   return { family, model: body.model, input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text }] }],
     effort: mapEffort(chat ? body.reasoning_effort ?? body.reasoning?.effort : body.reasoning?.effort ?? body.reasoning_effort),
-    stream: body.stream === true, includeUsage: body.stream_options?.include_usage === true,
+    stream: body.stream === true, includeUsage: body.stream_options?.include_usage === true, toolPolicy,
     tools: specs.length ? new Map(specs.map(spec => [spec.name, spec.ns])) : null,
     toolSpecs: specs.length ? new Map(specs.map(spec => [spec.name, spec])) : null,
     ...(state.attachments.length ? { attachments: state.attachments } : {}), ...(fileLinks ? { fileLinks } : {}) };
@@ -190,7 +207,7 @@ export function resultIdentity(request) {
 
 export function resultBody(request, text, identity = resultIdentity(request), { cachedTokens = 0 } = {}) {
   // In tool mode the reply is parsed into the actions asked for and the text for the user.
-  const reply = request.toolSpecs ? parseReply(text, request.toolSpecs) : { calls: [], text };
+  const reply = request.toolSpecs ? parseReply(text, request.toolSpecs, request.toolPolicy) : { calls: [], text };
   const { calls } = reply;
   const message = request.family === 'responses' && !calls.length ? rewriteFileLinks(reply.text, request.fileLinks) : reply.text;
   const usage = estimatedUsage(request.input, `${reply.text} ${calls.map(call => `${call.name} ${call.arguments}`).join(' ')}`.trim(),

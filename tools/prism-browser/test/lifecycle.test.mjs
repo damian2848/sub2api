@@ -32,7 +32,7 @@ async function fixture(t, options = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), 'prism-browser-test-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const log = { auth: [], projects: [], previous: [], generations: [], closed: 0 };
-  const settings = { dataDir, browserFactory: async () => ({ async close() {} }), sessionFactory: fakeFactory(log, options) };
+  const settings = { dataDir, projectIsolation: false, browserFactory: async () => ({ async close() {} }), sessionFactory: fakeFactory(log, options) };
   const manager = new AccountManager(settings);
   await manager.init();
   t.after(() => manager.close());

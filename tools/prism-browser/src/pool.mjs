@@ -4,17 +4,20 @@ import { AccountQueue } from './queue.mjs';
 import { BrowserSession, launchBrowser } from './browser.mjs';
 import { PrismError, aborted, pause } from './errors.mjs';
 import { NativeStartLimiter } from './start-limit.mjs';
+import { ProjectRegistry, freshProjectScope } from './projects.mjs';
+import { AccountPageMultiplexer, multiplexEnabled } from './page-multiplexer.mjs';
 
 export class AccountPoolManager {
   constructor({ dataDir, concurrency = 2, maxWorkers = 32, queueLimit = 8, maxAccounts = 16,
     startLimit = 0, startWindowMs = 65000, transientRetries = 1, transientRetryDelayMs = 4000, transientRetryWaitMs = 15000,
-    startCooldownMs = 60000, startOptions = {},
+    startCooldownMs = 60000, startOptions = {}, projectIsolation = false, projectRegistry, admissionGuard, metrics,
+    browserOptions = {}, multiplex = multiplexEnabled(),
     startLimiterFactory = source => new NativeStartLimiter({ limit: startLimit, windowMs: startWindowMs, ...startOptions,
       onAudit: (event, fields) => {
         if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event, source, ...fields }));
       } }),
     browserFactory = launchBrowser,
-    sessionFactory = (browser, heartbeat, source, slot) => new BrowserSession(browser, heartbeat, source, slot) }) {
+    sessionFactory = (browser, heartbeat, source, slot, options) => new BrowserSession(browser, heartbeat, source, slot, options) }) {
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 4 ||
       !Number.isInteger(maxWorkers) || maxWorkers < 1 || maxWorkers > 1024) throw new Error('invalid_worker_capacity');
     if (!Number.isInteger(startLimit) || startLimit < 0 || startLimit > 120 ||
@@ -28,6 +31,13 @@ export class AccountPoolManager {
       throw new Error('invalid_start_cooldown');
     }
     this.startCooldownMs = startCooldownMs;
+    this.projectIsolation = projectIsolation;
+    this.projects = projectRegistry || new ProjectRegistry({ dataDir });
+    this.admissionGuard = admissionGuard;
+    this.metrics = metrics;
+    this.browserOptions = browserOptions;
+    this.multiplex = multiplex;
+    this.multiplexers = new Map();
     this.transientRetries = transientRetries;
     this.transientRetryDelayMs = transientRetryDelayMs;
     this.transientRetryWaitMs = transientRetryWaitMs;
@@ -44,7 +54,7 @@ export class AccountPoolManager {
     this.stopping = false;
     this.managers = Array.from({ length: concurrency }, (_, slot) => new AccountManager({
       dataDir: slot === 0 ? dataDir : join(dataDir, 'workers', String(slot)), queueLimit, maxAccounts,
-      ownsBrowser: false,
+      ownsBrowser: false, projectIsolation, projectRegistry: this.projects, admissionGuard, metrics,
       browserFactory: () => this.getBrowser(),
       sessionFactory: (browser, heartbeat, source) => this.createDriver(browser, heartbeat, source, slot),
     }));
@@ -57,7 +67,11 @@ export class AccountPoolManager {
     if (this.stopping) return Promise.reject(new PrismError('service_stopping', 503));
     if (!this.browserPromise) this.browserPromise = this.browserFactory().then(browser => {
       if (this.stopping) return browser.close().then(() => { throw new PrismError('service_stopping', 503); });
-      browser.on?.('disconnected', () => { this.browserPromise = null; this.drivers.clear(); });
+      browser.on?.('disconnected', () => {
+        this.browserPromise = null; this.drivers.clear();
+        for (const multiplexer of this.multiplexers.values()) multiplexer.close().catch(() => {});
+        this.multiplexers.clear();
+      });
       return browser;
     }).catch(error => { this.browserPromise = null; throw error; });
     return this.browserPromise;
@@ -65,8 +79,23 @@ export class AccountPoolManager {
 
   createDriver(browser, heartbeat, source, slot) {
     if (this.stopping) throw new PrismError('service_stopping', 503);
-    if (this.drivers.size >= this.maxWorkers) throw new PrismError('browser_capacity_full', 429);
-    const driver = this.sessionFactory(browser, heartbeat, source, slot);
+    const previousMultiplexer = this.multiplexers.get(source);
+    if (previousMultiplexer?.closed) this.multiplexers.delete(source);
+    const residentReservation = this.multiplex && !this.multiplexers.has(source) ? 1 : 0;
+    if (this.drivers.size + this.multiplexers.size + residentReservation >= this.maxWorkers) throw new PrismError('browser_capacity_full', 429);
+    let multiplexer;
+    if (this.multiplex) {
+      multiplexer = this.multiplexers.get(source);
+      if (!multiplexer) {
+        multiplexer = new AccountPageMultiplexer({ ...this.browserOptions, admissionGuard: this.admissionGuard,
+          metrics: this.metrics, onAudit: (event, details) => {
+            if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event, source, ...details }));
+          } });
+        this.multiplexers.set(source, multiplexer);
+      }
+    }
+    const driver = this.sessionFactory(browser, heartbeat, source, slot, { ...this.browserOptions,
+      admissionGuard: this.admissionGuard, metrics: this.metrics, multiplex: this.multiplex, multiplexer });
     let limiter = this.startLimiters.get(source);
     if (!limiter) {
       limiter = this.startLimiterFactory(source);
@@ -125,7 +154,7 @@ export class AccountPoolManager {
     let account = this.accounts.get(source);
     if (!account) {
       account = { queue: new AccountQueue(this.queueLimit, this.concurrency), version: 0, session: null,
-        workers: this.managers.map((manager, slot) => ({ manager, slot, busy: false })), next: 0 };
+        workers: this.managers.map((manager, slot) => ({ manager, slot, busy: false })), next: 0, activeScopes: new Set() };
       this.accounts.set(source, account);
     }
     return account;
@@ -158,6 +187,15 @@ export class AccountPoolManager {
       concurrency: ready.length, pool_size: this.concurrency, ready_workers: ready.length,
       busy_workers: ready.filter(worker => worker.busy).length, queued: account.queue.pending,
       start_bucket: this.startLimiters.get(source)?.status?.() || null };
+  }
+
+  async resources() {
+    return { memory: await this.admissionGuard?.snapshot() || null, timings: this.metrics?.snapshot() || {},
+      contexts: this.drivers.size + [...this.multiplexers.values()].filter(value => value.isAlive()).length,
+      reserved_contexts: this.drivers.size + this.multiplexers.size, multiplex_enabled: this.multiplex,
+      multiplexers: [...this.multiplexers.values()].map(value => value.status()),
+      accounts: [...this.accounts].map(([source, account]) => ({ source,
+        busy_workers: account.workers.filter(value => value.busy).length, queued: account.queue.pending })) };
   }
 
   authenticateKey(source, key) { return this.primary.authenticateKey(source, key); }
@@ -237,11 +275,22 @@ export class AccountPoolManager {
     if (this.stopping || account.version !== version) throw new PrismError('session_revoked', 409);
   }
 
-  available(source, account, model) {
+  // With project isolation, a request whose scope already has a project goes to an idle worker that is
+  // on that project, so consecutive turns of one conversation keep the prepared chat instead of reloading the
+  // project on another worker. Everything else (no scope, no holder, holder busy) is plain round-robin.
+  available(source, account, model, scope = null) {
     const matching = account.workers.filter(worker => this.usable(source, worker) &&
       this.workerStatus(source, worker).models.includes(model));
     if (!matching.length) throw new PrismError(this.status(source).ready ? 'model_not_available' : 'account_not_ready',
       this.status(source).ready ? 400 : 503);
+    if (this.projectIsolation && scope?.reusable) {
+      const known = this.projects.peek(source, scope.id);
+      const holder = known && matching.find(worker => {
+        const driver = worker.manager.accounts.get(source)?.driver;
+        return !worker.busy && driver?.projectId === known.project_id && driver.isAlive?.() !== false;
+      });
+      if (holder) return holder;
+    }
     for (let offset = 0; offset < account.workers.length; offset += 1) {
       const worker = account.workers[(account.next + offset) % account.workers.length];
       if (!worker.busy && matching.includes(worker)) return worker;
@@ -268,6 +317,8 @@ export class AccountPoolManager {
   async generate(source, request, signal, onText) {
     const account = this.runtime(source);
     const version = account.version;
+    if (this.projectIsolation) request.projectScope ||= freshProjectScope();
+    const scope = request.projectScope?.id;
     const queuedAt = performance.now();
     let published = false;
     const progress = onText ? value => {
@@ -285,6 +336,7 @@ export class AccountPoolManager {
         return text;
       } finally {
         worker.busy = false;
+        this.metrics?.record('worker_turn_ms', performance.now() - startedAt);
         if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event: 'request_timing',
           source, worker: worker.slot, model: request.model, queue_wait_ms: Math.round(startedAt - queuedAt),
           generation_ms: Math.round(performance.now() - startedAt) }));
@@ -292,26 +344,31 @@ export class AccountPoolManager {
     };
     return account.queue.run(async () => {
       this.assertCurrent(account, version, signal);
-      let worker = this.available(source, account, request.model);
+      let worker = this.available(source, account, request.model, request.projectScope);
       if (!worker) throw new PrismError('account_busy', 409);
-      for (let attempt = 0; ; attempt += 1) {
-        try {
-          return await run(worker);
-        } catch (error) {
-          // Prism's own servers failed (HTTP 5xx on start or status, or a terminal 5xx) before any text was
-          // published: one resubmission, after a short pause, on another worker. Anything else, a second
-          // failure, or a request that is already gone surfaces as it is.
-          if (attempt >= this.transientRetries || published || !(error instanceof PrismError) || error.transient !== true) throw error;
-          this.assertCurrent(account, version, signal);
-          await pause(this.transientRetryDelayMs, signal);
-          const next = await this.retryWorker(source, account, version, request.model, worker, signal);
-          if (!next) throw error;
-          if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event: 'transient_retry',
-            source, model: request.model, from_worker: worker.slot, to_worker: next.slot, code: error.code }));
-          worker = next;
+      if (scope) account.activeScopes.add(scope);
+      this.metrics?.record('queue_wait_ms', performance.now() - queuedAt);
+      try {
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            return await run(worker);
+          } catch (error) {
+            // Prism's own servers failed (HTTP 5xx on start or status, or a terminal 5xx) before any text was
+            // published: one resubmission, after a short pause, on another worker. Anything else, a second
+            // failure, or a request that is already gone surfaces as it is.
+            if (attempt >= this.transientRetries || published || !(error instanceof PrismError) || error.transient !== true) throw error;
+            this.assertCurrent(account, version, signal);
+            await pause(this.transientRetryDelayMs, signal);
+            const next = await this.retryWorker(source, account, version, request.model, worker, signal);
+            if (!next) throw error;
+            if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event: 'transient_retry',
+              source, model: request.model, from_worker: worker.slot, to_worker: next.slot, code: error.code }));
+            worker = next;
+          }
         }
-      }
-    }, signal, { canStart: () => { this.assertCurrent(account, version, signal); return Boolean(this.available(source, account, request.model)); } });
+      } finally { if (scope) account.activeScopes.delete(scope); }
+    }, signal, { canStart: () => { this.assertCurrent(account, version, signal);
+      return !(scope && account.activeScopes.has(scope)) && Boolean(this.available(source, account, request.model, request.projectScope)); } });
   }
 
   async revoke(source, signal) {
@@ -320,11 +377,15 @@ export class AccountPoolManager {
     account.session = null;
     account.queue.cancelPending(new PrismError('session_revoked', 409));
     this.startLimiters.get(source)?.cancelPending(new PrismError('session_revoked', 409));
+    const multiplexer = this.multiplexers.get(source);
+    this.multiplexers.delete(source);
+    const multiplexerClosing = multiplexer?.close();
     const revocations = Promise.all(account.workers.filter(worker => worker.manager.accounts.has(source))
       .map(worker => worker.manager.revoke(source)));
     revocations.catch(() => {});
     return account.queue.exclusive(async () => {
       await revocations;
+      await multiplexerClosing;
       aborted(signal);
       return this.status(source);
     }, undefined, { priority: true });
@@ -335,6 +396,8 @@ export class AccountPoolManager {
     for (const limiter of this.startLimiters.values()) limiter.close();
     for (const account of this.accounts.values()) { account.session = null; account.queue.close(); }
     await Promise.allSettled(this.managers.map(manager => manager.close()));
+    await Promise.allSettled([...this.multiplexers.values()].map(value => value.close()));
+    this.multiplexers.clear();
     const browser = await this.browserPromise?.catch(() => null);
     await browser?.close();
     this.browserPromise = null;

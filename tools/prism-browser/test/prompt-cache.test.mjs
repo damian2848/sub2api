@@ -124,3 +124,17 @@ test('the default sixty-four entry bound and record refresh retain TTL behavior'
   now = 19;
   assert.equal(cache.lookup('32', `1:${tokens(2000)}`), 0);
 });
+
+test('conversation scopes are globally LRU bounded and TTL-pruned even when never used again', () => {
+  let now = 0;
+  const cache = new PromptCache({ maxKeys: 2, ttlMs: 100, now: () => now });
+  cache.record('32:one', tokens(2000));
+  cache.record('32:two', tokens(2000));
+  cache.record('32:one', tokens(2000));
+  cache.record('32:three', tokens(2000));
+  assert.equal(cache.accounts.size, 2);
+  assert.equal(cache.accounts.has('32:two'), false);
+  now = 110;
+  cache.record('32:four', tokens(2000));
+  assert.deepEqual([...cache.accounts.keys()], ['32:four']);
+});

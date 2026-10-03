@@ -24,7 +24,7 @@ async function fixture(t, { concurrency = 2, maxWorkers = 32, queueLimit = 8, mo
   const dataDir = await mkdtemp(join(tmpdir(), 'prism-pool-test-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const log = { drivers: [], projects: [], probes: [], generations: [], closes: 0 };
-  const settings = { dataDir, concurrency, maxWorkers, queueLimit, startLimiterFactory,
+  const settings = { dataDir, projectIsolation: false, concurrency, maxWorkers, queueLimit, startLimiterFactory,
     browserFactory: async () => ({ on() {}, async close() {} }),
     sessionFactory: (_, heartbeat, source, slot) => {
       const closing = deferred();

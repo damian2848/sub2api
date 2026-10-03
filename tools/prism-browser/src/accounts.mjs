@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { AccountQueue } from './queue.mjs';
 import { PrismError, aborted } from './errors.mjs';
 import { BrowserSession, launchBrowser, probeModel } from './browser.mjs';
+import { ProjectRegistry, freshProjectScope } from './projects.mjs';
 
 const sourcePattern = /^[1-9][0-9]{0,18}$/;
 // Failures that mean the browser session itself is unusable, as opposed to one bad request.
@@ -20,8 +21,13 @@ export function keyMatches(value, expectedHash) {
 
 export class AccountManager {
   constructor({ dataDir, queueLimit = 8, maxAccounts = 16, browserFactory = launchBrowser, ownsBrowser = true,
+    projectIsolation = false, projectRegistry, admissionGuard, metrics,
     sessionFactory = (browser, callback, source) => new BrowserSession(browser, callback, source) }) {
     this.dataDir = dataDir;
+    this.projectIsolation = projectIsolation;
+    this.projects = projectRegistry || new ProjectRegistry({ dataDir });
+    this.admissionGuard = admissionGuard;
+    this.metrics = metrics;
     this.queueLimit = queueLimit;
     this.maxAccounts = maxAccounts;
     this.browserFactory = browserFactory;
@@ -36,6 +42,7 @@ export class AccountManager {
   async init() {
     await mkdir(this.dataDir, { recursive: true, mode: 0o700 });
     await chmod(this.dataDir, 0o700);
+    if (this.projectIsolation) await this.projects.init();
     for (const name of await readdir(this.dataDir)) {
       if (!/^[1-9][0-9]{0,18}\.json$/.test(name)) continue;
       const metadata = JSON.parse(await readFile(join(this.dataDir, name), 'utf8'));
@@ -168,12 +175,22 @@ export class AccountManager {
       await account.driver?.close();
       account.driver = null;
       account.accessHash = null;
+      await this.admissionGuard?.assertAdmission('context');
       const browser = await this.getBrowser();
       aborted(signal);
       if (this.stopping || version !== account.version) throw new PrismError('session_revoked', 409);
       const driver = this.sessionFactory(browser, (timestamp, error) => {
         if (account.driver !== driver) return;
-        if (timestamp) account.lastHeartbeat = timestamp;
+        if (timestamp) {
+          account.lastHeartbeat = timestamp;
+          // A new verified heartbeat can recover a stale-health observation, never
+          // an authentication, initialization, expiry or revocation failure.
+          if (account.phase === 'heartbeat_stale' && account.expiresAt > Date.now() / 1000 &&
+            account.metadata.verified_project === account.metadata.project_id && account.metadata.models.length &&
+            driver.isAlive?.() !== false) {
+            account.ready = true; account.phase = 'ready'; account.errorCode = undefined;
+          }
+        }
         if (error) { account.ready = false; account.phase = 'authentication_required'; account.errorCode = error; }
       }, source);
       account.driver = driver;
@@ -229,6 +246,7 @@ export class AccountManager {
         }
       };
       try {
+        await this.admissionGuard?.assertAdmission('project');
         const models = await driver.initialize(account.metadata.project_id, async id => {
           assertCurrent();
           account.metadata.project_id = id;
@@ -303,7 +321,20 @@ export class AccountManager {
           throw new PrismError('account_not_ready', 503);
         }
       };
+      let userProjectId = account.metadata.project_id;
       try {
+        if (this.projectIsolation) {
+          assertCurrent();
+          const begun = performance.now();
+          const prepared = await this.projects.prepare(source, request.projectScope || freshProjectScope(), driver,
+            { signal, models: [...account.metadata.models], assertCurrent, admissionGuard: this.admissionGuard });
+          userProjectId = prepared.projectId;
+          account.metadata.models = prepared.models;
+          account.lastHeartbeat = driver.lastHeartbeat;
+          this.metrics?.record('project_prepare_ms', performance.now() - begun, { reused: prepared.reused });
+          if (!account.metadata.models.includes(request.model)) throw new PrismError('model_not_available', 400, 'model');
+          assertCurrent();
+        }
         let text;
         let published = false;
         const progress = onText ? value => { assertCurrent(); onText(value); published = true; } : undefined;
@@ -312,14 +343,14 @@ export class AccountManager {
         } catch (error) {
           assertCurrent();
           if (published || !(error instanceof PrismError) || error.code !== 'prism_generation_failed' || error.retryConversation !== true ||
-            driver.isAlive?.() === false || !account.metadata.project_id) throw error;
+            driver.isAlive?.() === false || !userProjectId) throw error;
           // The native terminal response explicitly asks for resubmission. Refresh
           // its project state once; readiness probes never enter this user path.
           account.ready = false;
           account.phase = 'initializing';
           account.errorCode = undefined;
           try {
-            const models = await driver.initialize(account.metadata.project_id,
+            const models = await driver.initialize(userProjectId,
               () => { throw new PrismError('browser_project_mismatch'); }, signal, [...account.metadata.models]);
             assertCurrent();
             account.metadata.models = models;

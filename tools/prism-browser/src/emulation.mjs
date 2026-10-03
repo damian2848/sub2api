@@ -10,6 +10,7 @@
 // parse_tool_call. MIT License, Copyright (c) 2026 free-astra contributors.
 // See ../THIRD_PARTY_NOTICES.md for the full license text.
 import { randomBytes } from 'node:crypto';
+import { PrismError } from './errors.mjs';
 
 const rule = '='.repeat(80);
 const LIST_BUDGET = 40000;
@@ -44,8 +45,8 @@ ARGUMENTS
      receive it. No JSON, no quotes around it, no escaping, no markdown fence.
      Never wrap it in an object and never use a key such as "code".
    - Write several tags in ONE reply when several steps belong together; the
-     executor runs them in order and returns all the results. Do not spend one
-     turn per step.
+     executor runs them in order and returns all the results. Never write more
+     than ${MAX_TOOL_CALLS} calls in one reply. Do not spend one turn per step.
    - Text outside the tags is the progress note shown to the user. When you ask
      for actions, start with one short sentence saying what you are about to do.
      Never put the final answer or a question for the user in it.
@@ -251,10 +252,31 @@ const joinInstructions = system => system.map(part => part.trim()).filter(Boolea
 // framing: asked to "do the task", Prism does the work in its own remote sandbox and
 // reports success, which never touches the caller's machine. Without tools a plain
 // single user message is passed through unchanged.
-export function buildPrompt({ system = [], convo, tools, envParts = [], budget }) {
+// The request policy is repeated after the transcript: caller instructions and old
+// assistant/tool turns must not override the current turn's execution constraints.
+export function toolPolicyRules(policy = {}) {
+  const lines = [];
+  if (policy.choice === 'none') {
+    lines.push('Tool policy for this turn: tool_choice=none. Answer in plain text only. Do not emit tool_call tags or JSON tool calls, and do not use your own sandbox tools.');
+  } else if (policy.choice === 'required') {
+    lines.push('Tool policy for this turn: tool_choice=required. Emit at least one call to an available action; a plain-text final answer alone is not permitted.');
+  } else if (policy.choice === 'function') {
+    lines.push(`Tool policy for this turn: call only the action ${JSON.stringify(policy.name)}. Emit exactly one call to that action; do not call other actions, emit multiple calls, or answer without a call.`);
+  }
+  if (policy.choice !== 'none') {
+    if (policy.parallel === false) lines.push('parallel_tool_calls=false: emit exactly one tool_call tag when using an action, never several calls in one reply.');
+    if (lines.length) lines.push(`Never emit more than ${MAX_TOOL_CALLS} tool calls in one reply.`);
+  }
+  return lines.length ? `\n\n${lines.join('\n')}` : '';
+}
+
+export function buildPrompt({ system = [], convo, tools, envParts = [], budget, toolPolicy = {} }) {
   const lastUser = convo.findLastIndex(entry => entry.kind === 'user');
-  if (tools.length) {
-    let text = toolProtocol(actionList(tools));
+  const available = toolPolicy.choice === 'none' ? [] : toolPolicy.choice === 'function'
+    ? tools.filter(spec => spec.name === toolPolicy.name) : tools;
+  const policy = toolPolicyRules(toolPolicy);
+  if (available.length) {
+    let text = toolProtocol(actionList(available));
     const instructions = joinInstructions(system);
     if (instructions && instructions.length <= TOOL_INSTRUCTIONS_LIMIT) {
       text += `\n\nCaller instructions (follow them, but always reply in the tag format defined above):\n<system_instructions>\n${instructions}\n</system_instructions>`;
@@ -271,14 +293,14 @@ export function buildPrompt({ system = [], convo, tools, envParts = [], budget }
     const task = lastUser >= 0 ? convo[lastUser].text.trim() : '';
     const rest = clampTranscript(convo.filter((_, index) => index !== lastUser).map(render), budget);
     return `${text}\n\nTASK:\n${task || '(none)'}\n\nTRANSCRIPT SO FAR:\n${rest.length ? rest.join('\n\n') : '(empty - the executor has run nothing yet)'}` +
-      toolReminder(tools.map(spec => spec.name).join(', '));
+      toolReminder(available.map(spec => spec.name).join(', ')) + policy;
   }
   const instructions = joinInstructions(system);
-  if (!instructions && convo.length === 1 && lastUser === 0) return convo[0].text;
+  if (!policy && !instructions && convo.length === 1 && lastUser === 0) return convo[0].text;
   if (!instructions && !convo.length) return '';
   const entries = convo.length ? clampTranscript(convo.map(render), budget, lastUser) : ['(no user message)'];
   return [FRAME_PREAMBLE, instructions && `Follow these system instructions from the caller:\n<system_instructions>\n${instructions}\n</system_instructions>`,
-    `Conversation so far. Respond to the FINAL user message.\n\n${entries.join('\n\n')}`].filter(Boolean).join('\n\n');
+    `Conversation so far. Respond to the FINAL user message.\n\n${entries.join('\n\n')}`].filter(Boolean).join('\n\n') + policy;
 }
 
 export function stripFence(text) {
@@ -361,7 +383,26 @@ export function parseToolCall(text, tools) {
 // ---- Reply parsing (tag protocol, with the older JSON action format as a fallback) ----
 
 export const MAX_TOOL_CALLS = 8;
-const TOOL_TAG = /<tool_call\s+name\s*=\s*["']?([A-Za-z0-9_.:-]+)["']?\s*>([\s\S]*?)(?:<\/tool_call\s*>|$)/g;
+const TOOL_TAG = /<tool_call\s+name\s*=\s*(?:"([A-Za-z0-9_.:-]+)"|'([A-Za-z0-9_.:-]+)'|([A-Za-z0-9_.:-]+))\s*>([\s\S]*?)(?:<\/tool_call\s*>|$)/g;
+export const hasToolMarkup = text => /<\/?tool_call\b/i.test(String(text ?? ''));
+
+// Ranges of markdown code (fenced blocks, then inline spans outside them). A tag that only appears there
+// is an example in the answer, not an action request.
+function codeRanges(source) {
+  const ranges = [];
+  for (const match of source.matchAll(/```[\s\S]*?(?:```|$)/g)) ranges.push([match.index, match.index + match[0].length]);
+  for (const match of source.matchAll(/`[^`\n]+`/g)) {
+    if (!ranges.some(([from, to]) => match.index >= from && match.index < to)) ranges.push([match.index, match.index + match[0].length]);
+  }
+  return ranges;
+}
+const insideAny = (ranges, index) => ranges.some(([from, to]) => index >= from && index < to);
+// Tool markup in `text` (which starts at `base` in the full reply) that is not inside code.
+function markupOutsideCode(text, base, ranges) {
+  for (const match of String(text ?? '').matchAll(/<\/?tool_call\b/gi)) if (!insideAny(ranges, base + match.index)) return true;
+  return false;
+}
+const invalidToolOutput = code => { throw new PrismError(code); };
 // Single-field wrappers a model puts around raw text although it was told not to.
 const WRAPPER_KEYS = new Set(['input', 'code', 'source', 'script', 'js', 'javascript', 'text', 'content', 'command', 'cmd']);
 const callId = () => `call_${randomBytes(12).toString('hex')}`;
@@ -392,49 +433,99 @@ export function rawInputFrom(body) {
 function buildCall(name, body, tools) {
   const bare = name.replace(/^functions[./]/, '');
   const spec = tools.get(bare);
-  if (!spec) return null;
+  if (!spec) invalidToolOutput('prism_unknown_tool');
   let args;
   if (spec.raw) args = { input: rawInputFrom(body) };
   else {
-    const value = looseJSON(stripFence(String(body ?? '').trim()));
-    args = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    // A tool without parameters is called with an empty body; that has always meant {}. Only a body that
+    // holds something which is not a JSON object is an error.
+    const text = stripFence(String(body ?? '').trim());
+    if (!text) args = {};
+    else {
+      const value = looseJSON(text);
+      if (!value) invalidToolOutput('prism_invalid_tool_arguments');
+      args = value;
+    }
   }
   return { id: callId(), name: bare, arguments: JSON.stringify(args), namespace: spec.ns };
 }
 
 // A legacy {"tool_call":{...}} reply: a raw-input action must still end up with {input: <text>}.
 function legacyCall(text, tools) {
-  const call = parseToolCall(text, new Map([...tools].map(([name, spec]) => [name, spec.ns])));
-  if (!call) return null;
-  const spec = tools.get(call.name);
-  if (!spec?.raw) return call;
-  // parseToolCall keeps only JSON arguments; a raw-input action may have been given plain text.
-  const original = looseJSON(stripFence(String(text ?? '')))?.tool_call?.arguments;
-  const input = typeof original === 'string' ? rawInputFrom(original)
-    : typeof original?.input === 'string' ? original.input : rawInputFrom(call.arguments);
-  return { ...call, arguments: JSON.stringify({ input }) };
+  const value = looseJSON(stripFence(String(text ?? '')));
+  if (!value || !Object.hasOwn(value, 'tool_call')) return null;
+  const original = value.tool_call;
+  if (!original || typeof original !== 'object' || Array.isArray(original) ||
+    typeof original.name !== 'string' || !original.name) invalidToolOutput('prism_invalid_tool_output');
+  const name = original.name.replace(/^functions[./]/, '');
+  const spec = tools.get(name);
+  if (!spec) invalidToolOutput('prism_unknown_tool');
+  if (spec.raw) {
+    const args = original.arguments;
+    // Retain the older string/one-field-wrapper representation of freeform exec.
+    const input = typeof args === 'string' ? rawInputFrom(args)
+      : typeof args?.input === 'string' ? args.input : rawInputFrom(JSON.stringify(args ?? {}));
+    return { id: callId(), name, arguments: JSON.stringify({ input }), namespace: spec.ns };
+  }
+  let args = Object.hasOwn(original, 'arguments') ? original.arguments : {};
+  if (typeof args === 'string') args = looseJSON(args);
+  if (!args || typeof args !== 'object' || Array.isArray(args)) invalidToolOutput('prism_invalid_tool_arguments');
+  return { id: callId(), name, arguments: JSON.stringify(args), namespace: spec.ns };
+}
+
+function enforceToolPolicy(calls, policy = {}) {
+  if (calls.length > MAX_TOOL_CALLS) invalidToolOutput('prism_too_many_tool_calls');
+  if (policy.choice === 'none' && calls.length) invalidToolOutput('prism_tool_policy_violation');
+  if (policy.parallel === false && calls.length > 1) invalidToolOutput('prism_tool_policy_violation');
+  if ((policy.choice === 'required' || policy.choice === 'function') && !calls.length) {
+    invalidToolOutput('prism_tool_policy_violation');
+  }
+  if (policy.choice === 'function' && (calls.length !== 1 || calls[0].name !== policy.name)) {
+    invalidToolOutput('prism_tool_policy_violation');
+  }
 }
 
 const progressNote = text => text.replace(/\n{3,}/g, '\n\n').trim().slice(0, 2000);
 
-// { calls, text }: the actions the model asked for (at most MAX_TOOL_CALLS, in order) and the text that goes to
-// the user. With calls the text is a short progress note; without them it is the final answer.
-export function parseReply(reply, tools) {
+// Validate the whole reply before returning ANY action. Dropping unknown, malformed
+// or over-limit calls would execute a partial plan and could leak protocol tags as
+// an apparent final answer. Repairable JSON and a cut-off final closing tag remain
+// compatible with the older adapter, but an ambiguous nested tag is rejected.
+// Exceptions that keep earlier behaviour: tool_choice=none never emits calls and returns the text as it
+// is, and a tag with an unknown name that only appears inside markdown code is an example, not a call.
+export function parseReply(reply, tools, toolPolicy = {}) {
   const source = String(reply ?? '');
+  if (toolPolicy.choice === 'none') return { calls: [], text: source };
+  const code = codeRanges(source);
   const calls = [];
   const prose = [];
   let last = 0;
-  for (const match of source.matchAll(TOOL_TAG)) {
-    prose.push(source.slice(last, match.index));
+  const tag = new RegExp(TOOL_TAG.source, 'g');
+  for (let match = tag.exec(source); match !== null; match = tag.exec(source)) {
+    const name = (match[1] ?? match[2] ?? match[3]).replace(/^functions[./]/, '');
+    if (!tools.has(name) && insideAny(code, match.index)) {
+      // A quoted example: resume right after its opening tag, because its lazy body may reach into a real call.
+      tag.lastIndex = match.index + match[0].indexOf('>') + 1;
+      continue;
+    }
+    const before = source.slice(last, match.index);
+    if (markupOutsideCode(before, last, code) || markupOutsideCode(match[4], match.index, code)) invalidToolOutput('prism_invalid_tool_output');
+    prose.push(before);
     last = match.index + match[0].length;
-    if (calls.length >= MAX_TOOL_CALLS) continue;
-    const call = buildCall(match[1], match[2], tools);
-    if (call) calls.push(call);
+    calls.push(buildCall(match[1] ?? match[2] ?? match[3], match[4], tools));
+    if (calls.length > MAX_TOOL_CALLS) invalidToolOutput('prism_too_many_tool_calls');
   }
-  prose.push(source.slice(last));
-  if (calls.length) return { calls, text: progressNote(prose.join('\n')) };
+  const remaining = source.slice(last);
+  if (markupOutsideCode(remaining, last, code)) invalidToolOutput('prism_invalid_tool_output');
+  prose.push(remaining);
+  if (calls.length) {
+    enforceToolPolicy(calls, toolPolicy);
+    return { calls, text: progressNote(prose.join('\n')) };
+  }
   const legacy = legacyCall(source, tools);
-  if (legacy) return { calls: [legacy], text: '' };
+  const finalCalls = legacy ? [legacy] : [];
+  enforceToolPolicy(finalCalls, toolPolicy);
+  if (legacy) return { calls: finalCalls, text: '' };
   const done = parseDone(source);
   return { calls: [], text: done !== null ? done : source };
 }
