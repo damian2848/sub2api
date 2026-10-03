@@ -15,6 +15,12 @@
             <span class="flex items-center gap-1 truncate">
               <ModelIcon :model="model" size="14px" />
               <span class="truncate">{{ model }}</span>
+              <span
+                v-if="testStatus[model]"
+                data-testid="model-test-status"
+                class="shrink-0"
+                :title="testStatus[model] === 'fail' ? testErrors[model] : undefined"
+              >{{ testStatus[model] === 'ok' ? '✅' : testStatus[model] === 'fail' ? '❌' : '⏳' }}</span>
             </span>
             <button
               type="button"
@@ -111,6 +117,15 @@
         {{ isSyncingUpstream ? t('admin.accounts.syncUpstreamModelsLoading') : t('admin.accounts.syncUpstreamModels') }}
       </button>
       <button
+        v-if="accountId && modelValue.length > 0"
+        type="button"
+        data-testid="test-models"
+        @click="isTestingModels ? stopTestModels() : testModels()"
+        class="rounded-lg border border-amber-200 px-3 py-1.5 text-sm text-amber-600 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-400 dark:hover:bg-amber-900/30"
+      >
+        {{ isTestingModels ? t('admin.accounts.testModelsStop', { done: testedCount, total: modelValue.length }) : t('admin.accounts.testModels') }}
+      </button>
+      <button
         type="button"
         @click="clearAll"
         class="rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/30"
@@ -145,7 +160,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { accountsAPI } from '@/api/admin/accounts'
@@ -363,7 +378,76 @@ const syncUpstreamModels = async () => {
 }
 
 const clearAll = () => {
+  stopTestModels()
+  testStatus.value = {}
+  testErrors.value = {}
   emit('update:modelValue', [])
 }
+
+const TEST_CONCURRENCY = 3
+const testStatus = ref<Record<string, 'pending' | 'ok' | 'fail'>>({})
+const testErrors = ref<Record<string, string>>({})
+const isTestingModels = ref(false)
+const testedCount = ref(0)
+let testAbort: AbortController | null = null
+
+const stopTestModels = () => {
+  testAbort?.abort()
+  testAbort = null
+}
+
+const testModels = async () => {
+  if (isTestingModels.value || !props.accountId) return
+  const accountId = props.accountId
+  const models = [...props.modelValue]
+  if (models.length === 0) return
+
+  const abort = new AbortController()
+  testAbort = abort
+  isTestingModels.value = true
+  testedCount.value = 0
+  testStatus.value = Object.fromEntries(models.map(m => [m, 'pending' as const]))
+  testErrors.value = {}
+
+  let next = 0
+  const worker = async () => {
+    while (!abort.signal.aborted && next < models.length) {
+      const model = models[next++]
+      try {
+        const result = await accountsAPI.testAccountModel(accountId, model, abort.signal)
+        testStatus.value = { ...testStatus.value, [model]: result.success ? 'ok' : 'fail' }
+        if (!result.success && result.error) {
+          testErrors.value = { ...testErrors.value, [model]: result.error }
+        }
+        testedCount.value += 1
+      } catch {
+        break // aborted
+      }
+    }
+  }
+
+  try {
+    await Promise.all(Array.from({ length: Math.min(TEST_CONCURRENCY, models.length) }, worker))
+  } finally {
+    // Drop markers for models that never finished (stopped early).
+    const done: typeof testStatus.value = {}
+    for (const [m, st] of Object.entries(testStatus.value)) {
+      if (st !== 'pending') done[m] = st
+    }
+    testStatus.value = done
+    isTestingModels.value = false
+    testAbort = null
+  }
+  if (abort.signal.aborted) return
+  const failed = Object.values(testStatus.value).filter(st => st === 'fail').length
+  const ok = models.length - failed
+  if (failed > 0) {
+    appStore.showWarning(t('admin.accounts.testModelsDone', { ok, failed }))
+  } else {
+    appStore.showSuccess(t('admin.accounts.testModelsDone', { ok, failed }))
+  }
+}
+
+onBeforeUnmount(stopTestModels)
 
 </script>

@@ -961,6 +961,9 @@ export default {
         'Model IDs were synced, but no capability metadata could be updated.',
       syncUpstreamModelsMetadataPartial:
         'Some model capabilities were updated; remaining models are still incomplete.',
+      testModels: 'Test models',
+      testModelsStop: 'Stop ({done}/{total})',
+      testModelsDone: 'Test finished: {ok} usable, {failed} unusable',
       clearAllModels: 'Clear all models',
       customModelName: 'Custom model name',
       enterCustomModelName: 'Enter custom model name',

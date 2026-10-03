@@ -8,7 +8,8 @@ const {
   showInfo,
   showWarning,
   syncUpstreamModels,
-  syncUpstreamModelsPreview
+  syncUpstreamModelsPreview,
+  testAccountModel
 } = vi.hoisted(() => ({
   copyToClipboard: vi.fn().mockResolvedValue(true),
   showError: vi.fn(),
@@ -16,7 +17,8 @@ const {
   showInfo: vi.fn(),
   showWarning: vi.fn(),
   syncUpstreamModels: vi.fn(),
-  syncUpstreamModelsPreview: vi.fn()
+  syncUpstreamModelsPreview: vi.fn(),
+  testAccountModel: vi.fn()
 }))
 
 vi.mock('vue-i18n', async () => {
@@ -41,7 +43,8 @@ vi.mock('@/stores/app', () => ({
 vi.mock('@/api/admin/accounts', () => ({
   accountsAPI: {
     syncUpstreamModels,
-    syncUpstreamModelsPreview
+    syncUpstreamModelsPreview,
+    testAccountModel
   }
 }))
 
@@ -267,5 +270,25 @@ describe('ModelWhitelistSelector', () => {
 
     expect(syncButton).toBeDefined()
     expect(syncButton?.exists()).toBe(true)
+  })
+
+  it('tests selected models and marks each as usable or unusable', async () => {
+    testAccountModel.mockImplementation(async (_id: number, model: string) =>
+      model === 'bad-model' ? { success: false, error: 'boom' } : { success: true }
+    )
+    const wrapper = mountSelector({ accountId: 7, modelValue: ['good-model', 'bad-model'] })
+
+    await wrapper.get('[data-testid="test-models"]').trigger('click')
+    await flushPromises()
+
+    expect(testAccountModel).toHaveBeenCalledTimes(2)
+    const marks = wrapper.findAll('[data-testid="model-test-status"]').map(m => m.text())
+    expect(marks).toEqual(['✅', '❌'])
+    expect(showWarning).toHaveBeenCalled()
+  })
+
+  it('hides the model test button when there is no saved account', () => {
+    const wrapper = mountSelector({ modelValue: ['good-model'] })
+    expect(wrapper.find('[data-testid="test-models"]').exists()).toBe(false)
   })
 })

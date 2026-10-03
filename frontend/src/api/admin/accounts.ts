@@ -313,6 +313,67 @@ export async function testAccount(id: number): Promise<{
 }
 
 /**
+ * Run the account test (SSE stream) against a single model and report only the outcome.
+ * Used by the model whitelist selector to mark each model as usable or not.
+ */
+export async function testAccountModel(
+  id: number,
+  modelId: string,
+  signal?: AbortSignal
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const response = await fetch(buildApiUrl(`/admin/accounts/${id}/test`), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${localStorage.getItem('auth_token')}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ model_id: modelId, prompt: '', mode: 'default' }),
+      signal
+    })
+    if (!response.ok) {
+      return { success: false, error: `HTTP ${response.status}` }
+    }
+    const reader = response.body?.getReader()
+    if (!reader) return { success: false, error: 'No response body' }
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let result: { success: boolean; error?: string } | null = null
+    const handleLine = (line: string) => {
+      if (!line.startsWith('data: ')) return
+      const jsonStr = line.slice(6).trim()
+      if (!jsonStr) return
+      try {
+        const event = JSON.parse(jsonStr)
+        if (event.type === 'test_complete') {
+          result = event.success
+            ? { success: true }
+            : { success: false, error: event.error || 'Test failed' }
+        } else if (event.type === 'error') {
+          result = { success: false, error: event.error || 'Unknown error' }
+        }
+      } catch {
+        // ignore malformed events
+      }
+    }
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      lines.forEach(handleLine)
+    }
+    handleLine(buffer)
+    return result ?? { success: false, error: 'No test result received' }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+  }
+}
+
+/**
  * Refresh account credentials
  * @param id - Account ID
  * @returns Updated account
@@ -1449,6 +1510,7 @@ export const accountsAPI = {
   delete: deleteAccount,
   toggleStatus,
   testAccount,
+  testAccountModel,
   refreshCredentials,
   applyOAuthCredentials,
   getStats,
