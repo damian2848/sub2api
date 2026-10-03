@@ -10,7 +10,7 @@ export default {
         "passive": "Real requests + active probes · channel availability",
         "activeProbe": "Active probes",
         "apiHealth": "API health",
-        "healthHint": "API health combines only error rate and first-token latency. Cache is assessed separately and does not affect API health colors. Insufficient request samples mean unknown health; observed availability may still be shown.",
+        "healthHint": "API health combines only error rate and first-token latency. Cache is assessed separately and does not affect API health colors. Insufficient request samples make the badge unknown (observed availability may still be shown); timeline bars for such windows are colored by their error rate and drawn semi-transparent.",
         "cacheHint": "Cache performance is assessed separately and does not affect API health. Low cache does not mean API unavailability; cache status is unknown below the request sample threshold.",
         "cacheStates": { "healthy": "Cache healthy", "warning": "Cache watch", "critical": "Low cache", "unknown": "Cache unknown" },
         "availabilityHint": "Actual generation requests include business traffic and active probes. Answer quality, quota checks and HEAD pings are not API outcomes. Unobserved periods remain unknown.",
@@ -190,7 +190,7 @@ export default {
       namedModelsCount: 'Showing {count} named model dimensions; unlisted models fold into per-platform “Other”.',
       userContractTitle: 'User-facing display contract',
       userContract: {
-        health: 'API colors combine only error rate and first-token P50, using errors alone when first-token samples are unavailable. Cache is separate; insufficient request samples mean unknown health.',
+        health: 'API colors combine only error rate and first-token P50, using errors alone when first-token samples are unavailable. Cache is separate; the badge is unknown below the request sample threshold, while card timeline bars are colored by error rate (semi-transparent = few samples; windows with fewer than 3 requests stay unknown).',
         trend: 'Trend can switch between pulse matrix and line chart (error · cache · first token)',
         latency: 'Latency shows AVG · P50 · P90; absolute request / error counts are not shown',
         models: 'Empty model lists show real names and never dump everything into “Other”',

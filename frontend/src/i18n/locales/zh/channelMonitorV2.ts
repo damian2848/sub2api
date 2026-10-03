@@ -10,7 +10,7 @@ export default {
         "passive": "真实请求 + 主动探测 · 渠道可用性",
         "activeProbe": "主动探测",
         "apiHealth": "API 健康",
-        "healthHint": "API 健康仅结合错误率与首 Token；缓存表现单独评价，不影响 API 健康色。请求样本不足时状态为未知，已观测的可用率仍可展示。",
+        "healthHint": "API 健康仅结合错误率与首 Token；缓存表现单独评价，不影响 API 健康色。请求样本不足时徽章状态为未知，已观测的可用率仍可展示；时间线上样本不足的时段按其错误率着色并显示为半透明。",
         "cacheHint": "缓存表现独立评价，不影响 API 健康。低缓存率不代表 API 不可用；请求样本不足时缓存状态为未知。",
         "cacheStates": { "healthy": "缓存正常", "warning": "缓存需关注", "critical": "缓存偏低", "unknown": "缓存未知" },
         "availabilityHint": "业务与主动探测的真实生成请求统一统计；质量答错、额度查询和 HEAD 连通检查不作为 API 失败或成功。没有请求的时段保持未知。",
@@ -187,7 +187,7 @@ export default {
       namedModelsCount: '将展示 {count} 个命名模型维度；名单外模型归入各平台「其他」。',
       userContractTitle: '用户端展示约定',
       userContract: {
-        health: 'API 健康色仅由错误率与首 Token P50 合成；缺少首 Token 样本时仅按错误率评价。缓存独立展示；请求样本不足均为未知。',
+        health: 'API 健康色仅由错误率与首 Token P50 合成；缺少首 Token 样本时仅按错误率评价。缓存独立展示；徽章在请求样本不足时为未知，卡片时间线则按错误率着色（半透明表示样本少，请求数不足 3 个的时段保持未知）。',
         trend: '趋势可切换色块矩阵 / 折线图（错误率 · 缓存率 · 首 Token）',
         latency: '延迟展示 AVG · P50 · P90；不展示绝对请求数 / 错误数',
         models: '模型列表留空时展示真实模型名，不会全部归入「其他」',

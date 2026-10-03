@@ -328,7 +328,7 @@ export async function testAccountModel(
         Authorization: `Bearer ${localStorage.getItem('auth_token')}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ model_id: modelId, prompt: '', mode: 'default' }),
+      body: JSON.stringify({ model_id: modelId, prompt: '', mode: 'default', skip_recovery: true }),
       signal
     })
     if (!response.ok) {

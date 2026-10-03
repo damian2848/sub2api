@@ -160,7 +160,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onBeforeUnmount } from 'vue'
+import { ref, computed, onBeforeUnmount, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { accountsAPI } from '@/api/admin/accounts'
@@ -447,6 +447,17 @@ const testModels = async () => {
     appStore.showSuccess(t('admin.accounts.testModelsDone', { ok, failed }))
   }
 }
+
+// A removed (or re-added) model must not keep a result from its previous life.
+watch(() => props.modelValue, models => {
+  const present = new Set(models)
+  const prune = <T>(map: Record<string, T>) =>
+    Object.fromEntries(Object.entries(map).filter(([model]) => present.has(model))) as Record<string, T>
+  if (Object.keys(testStatus.value).some(model => !present.has(model))) {
+    testStatus.value = prune(testStatus.value)
+    testErrors.value = prune(testErrors.value)
+  }
+})
 
 onBeforeUnmount(stopTestModels)
 

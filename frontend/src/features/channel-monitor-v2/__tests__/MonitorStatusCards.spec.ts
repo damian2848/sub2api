@@ -245,7 +245,7 @@ it('keeps 100 percent API availability healthy while low cache is independently 
 
 it('shows low-sample bars with derived health color at reduced opacity instead of grey', async () => {
   const { wrapper, row } = hoverFixture()
-  const metrics = { ...row.metrics, request_count: 1, has_samples: true, error_rate: 0, cache_rate: 0 }
+  const metrics = { ...row.metrics, request_count: 5, has_samples: true, error_rate: 0, cache_rate: 0 }
   const health = { ...row.health, overall: 'unknown' as const, error_rate: 'unknown' as const, ttft: 'unknown' as const, cache: 'unknown' as const, score: null, error_rate_score: null, ttft_score: null, cache_score: null, minimum_sample: 50 }
   await wrapper.setProps({ items: [{ ...row, metrics, health, buckets: [{ ...row.buckets[0], metrics, health }] }] })
   // Card badge still shows unknown — that uses the server's overall verdict.

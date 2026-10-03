@@ -92,6 +92,7 @@ describe('ModelWhitelistSelector', () => {
     showWarning.mockReset()
     syncUpstreamModels.mockReset()
     syncUpstreamModelsPreview.mockReset()
+    testAccountModel.mockReset()
   })
 
   it('rejects a custom whitelist model that is already mapped to a different target', async () => {
@@ -290,5 +291,40 @@ describe('ModelWhitelistSelector', () => {
   it('hides the model test button when there is no saved account', () => {
     const wrapper = mountSelector({ modelValue: ['good-model'] })
     expect(wrapper.find('[data-testid="test-models"]').exists()).toBe(false)
+  })
+
+  it('drops a model\'s test marker when the model leaves the whitelist', async () => {
+    testAccountModel.mockResolvedValue({ success: true })
+    const wrapper = mountSelector({ accountId: 7, modelValue: ['a', 'b'] })
+    await wrapper.get('[data-testid="test-models"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('[data-testid="model-test-status"]')).toHaveLength(2)
+
+    await wrapper.setProps({ modelValue: ['a'] })
+    expect(wrapper.findAll('[data-testid="model-test-status"]')).toHaveLength(1)
+    await wrapper.setProps({ modelValue: ['a', 'b'] })
+    expect(wrapper.findAll('[data-testid="model-test-status"]')).toHaveLength(1)
+  })
+
+  it('stops a running test and leaves unfinished models unmarked', async () => {
+    let release!: () => void
+    testAccountModel.mockImplementation((_id: number, _model: string, signal: AbortSignal) =>
+      new Promise((resolve, reject) => {
+        release = () => resolve({ success: true })
+        signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+      })
+    )
+    const wrapper = mountSelector({ accountId: 7, modelValue: ['a', 'b', 'c', 'd'] })
+    await wrapper.get('[data-testid="test-models"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="test-models"]').text()).toContain('admin.accounts.testModelsStop')
+
+    await wrapper.get('[data-testid="test-models"]').trigger('click')
+    await flushPromises()
+    expect(release).toBeTypeOf('function')
+    expect(wrapper.findAll('[data-testid="model-test-status"]')).toHaveLength(0)
+    expect(wrapper.get('[data-testid="test-models"]').text()).toBe('admin.accounts.testModels')
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(showWarning).not.toHaveBeenCalled()
   })
 })

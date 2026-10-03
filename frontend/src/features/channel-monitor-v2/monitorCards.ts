@@ -46,6 +46,11 @@ export function monitorCandyHistories(row: MonitorMatrixRow): MonitorCandyHistor
   return row.candy_histories?.length ? row.candy_histories : row.candy ? [row.candy] : []
 }
 
+// Below this many requests a bucket carries no usable signal (one transient
+// 403 would paint a whole window red). Only enforceable when the count is
+// visible: non-admin responses redact request_count to 0.
+const TIMELINE_MIN_DERIVED_REQUESTS = 3
+
 // Derive a visual health state from the bucket's error rate when the server
 // returned "unknown" because request_count < minimum_sample.  This lets
 // low-traffic windows show red/green instead of a grey bar that hides failures.
@@ -54,6 +59,8 @@ function timelineHealthOverride(bucket: MonitorMatrixBucket): HealthState {
   if (h !== 'unknown') return h
   // No actual request facts → genuinely unknown.
   if (!hasMonitorSamples(bucket.metrics)) return 'unknown'
+  const count = bucket.metrics.request_count
+  if (count > 0 && count < TIMELINE_MIN_DERIVED_REQUESTS) return 'unknown'
   // Derive from error_rate alone (TTFT is unreliable at low N).
   const errorRate = bucket.metrics.error_rate
   if (!Number.isFinite(errorRate)) return 'unknown'
@@ -88,9 +95,10 @@ export function monitorCardTimeline(row: MonitorMatrixRow, coverage: MonitorCove
     // the error rate so low-traffic windows are not hidden behind grey.
     const effective = timelineHealthOverride(bucket)
     if (severity[effective] > severity[bar.state]) bar.state = effective
-    // Track whether ANY bucket in this bar was below the sample threshold.
-    const minSample = bucket.health.minimum_sample ?? 50
-    if (bucket.metrics.request_count < minSample) bar.lowSample = true
+    // The server only returns "unknown" for a bucket with samples when it is
+    // below minimum_sample, so a derived color is exactly the low-sample case.
+    // (request_count cannot be compared here: it is redacted to 0 for non-admins.)
+    if (effective !== 'unknown' && bucket.health.overall === 'unknown') bar.lowSample = true
   }
   for (const bar of bars) bar.buckets.sort((a, b) => Date.parse(a.bucket_start) - Date.parse(b.bucket_start))
   return bars

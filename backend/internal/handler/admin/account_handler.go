@@ -1341,6 +1341,10 @@ type TestAccountRequest struct {
 	// ImageDataURL / AudioDataURL are data:<mime>;base64,... payloads.
 	ImageDataURL string `json:"image_data_url"`
 	AudioDataURL string `json:"audio_data_url"`
+	// SkipRecovery keeps a successful test from clearing the account's
+	// error / rate-limit / overload state. Batch model checks set it: one
+	// passing model must not reset an account whose other models fail.
+	SkipRecovery bool `json:"skip_recovery"`
 }
 
 type PelicanTestRequest struct {
@@ -1387,7 +1391,7 @@ func (h *AccountHandler) Test(c *gin.Context) {
 		return
 	}
 
-	if h.rateLimitService != nil {
+	if h.rateLimitService != nil && !req.SkipRecovery {
 		if _, err := h.rateLimitService.RecoverAccountAfterSuccessfulTest(c.Request.Context(), accountID); err != nil {
 			_ = c.Error(err)
 		}

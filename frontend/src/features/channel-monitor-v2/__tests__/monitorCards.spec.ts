@@ -106,12 +106,12 @@ it('uses API health only in the timeline, preserving insufficient-sample unknown
   const row = { buckets: [
     { bucket_start: '2026-09-28T00:06:00Z', metrics: metric, health: { overall: 'healthy', cache: 'critical', minimum_sample: 50 } },
     { bucket_start: '2026-09-28T00:11:00Z', metrics: metric, health: { overall: 'critical', cache: 'healthy', minimum_sample: 50 } },
-    { bucket_start: '2026-09-28T00:16:00Z', metrics: { ...metric, request_count: 1 }, health: { overall: 'unknown', error_rate: 'unknown', ttft: 'unknown', cache: 'unknown', minimum_sample: 50 } },
+    { bucket_start: '2026-09-28T00:16:00Z', metrics: { ...metric, request_count: 5 }, health: { overall: 'unknown', error_rate: 'unknown', ttft: 'unknown', cache: 'unknown', minimum_sample: 50 } },
   ] } as MonitorMatrixRow
   const bars = monitorCardTimeline(row, { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage)
   expect(bars[1]).toMatchObject({ state: 'healthy', observed: true })
   expect(bars[2]).toMatchObject({ state: 'critical', observed: true })
-  // Bucket with 1 request (< 50 minimum) now derives health from error_rate
+  // Bucket with 5 requests (< 50 minimum) now derives health from error_rate
   // instead of staying unknown: 0% errors → healthy, with lowSample flag.
   expect(bars[3]).toMatchObject({ state: 'healthy', observed: true, lowSample: true })
   expect(bars[3].buckets).toHaveLength(1)
@@ -125,8 +125,8 @@ it('derives timeline health from error rate when server says unknown due to low 
     { bucket_start: '2026-09-28T00:06:00Z', metrics: { ...base, request_count: 3, error_rate: 0 }, health: health('unknown') },
     // 5 requests, 10% error → should derive warning (≥ 0.05)
     { bucket_start: '2026-09-28T00:11:00Z', metrics: { ...base, request_count: 5, error_rate: 0.10 }, health: health('unknown') },
-    // 2 requests, 50% error → should derive critical (≥ 0.20)
-    { bucket_start: '2026-09-28T00:16:00Z', metrics: { ...base, request_count: 2, error_rate: 0.50 }, health: health('unknown') },
+    // 4 requests, 50% error → should derive critical (≥ 0.20)
+    { bucket_start: '2026-09-28T00:16:00Z', metrics: { ...base, request_count: 4, error_rate: 0.50 }, health: health('unknown') },
   ] } as MonitorMatrixRow
   const bars = monitorCardTimeline(row, { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage)
   expect(bars[1]).toMatchObject({ state: 'healthy', observed: true, lowSample: true })
@@ -141,4 +141,26 @@ it('marks bars with sufficient samples as not lowSample', () => {
   ] } as MonitorMatrixRow
   const bars = monitorCardTimeline(row, { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage)
   expect(bars[1]).toMatchObject({ state: 'healthy', observed: true, lowSample: false })
+})
+
+it('does not flag redacted non-admin buckets as low-sample when the server verdict is sufficient', () => {
+  // Non-admin responses redact request_count to 0 but keep has_samples + the server verdict.
+  const metric = { has_samples: true, request_count: 0, error_rate: 0, cache_rate: 0, ttft: { p50_ms: 1000 } } as MonitorMetric
+  const row = { buckets: [
+    { bucket_start: '2026-09-28T00:06:00Z', metrics: metric, health: { overall: 'healthy', minimum_sample: 50 } },
+  ] } as MonitorMatrixRow
+  const bars = monitorCardTimeline(row, { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage)
+  expect(bars[1]).toMatchObject({ state: 'healthy', lowSample: false })
+})
+
+it('keeps buckets with fewer than 3 visible requests unknown instead of painting one failure red', () => {
+  const base = { has_samples: true, error_rate: 1, cache_rate: 0, ttft: { p50_ms: null } } as MonitorMetric
+  const unknown = { overall: 'unknown', minimum_sample: 50 }
+  const row = { buckets: [
+    { bucket_start: '2026-09-28T00:06:00Z', metrics: { ...base, request_count: 1 }, health: unknown },
+    { bucket_start: '2026-09-28T00:11:00Z', metrics: { ...base, request_count: 3 }, health: unknown },
+  ] } as MonitorMatrixRow
+  const bars = monitorCardTimeline(row, { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage)
+  expect(bars[1]).toMatchObject({ state: 'unknown', observed: true, lowSample: false })
+  expect(bars[2]).toMatchObject({ state: 'critical', lowSample: true })
 })
