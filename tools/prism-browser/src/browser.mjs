@@ -527,6 +527,18 @@ export class BrowserSession {
 
   async initialize(projectId, onProjectCreated, signal, previousModels = []) {
     const epoch = this.contextEpoch;
+    // A project refresh may begin while the idle prewarm promise is still waiting for
+    // its composer.  Never let that promise keep mutating the page we are about to
+    // navigate: invalidate it before the first await, and retire the old page so a
+    // pending Playwright action fails quickly instead of holding a 120s composer wait.
+    const stalePage = this.page;
+    const stalePreparation = this.preparing;
+    this.preparing = null;
+    this.pageGeneration += 1;
+    if (stalePreparation && stalePage && !this.turn && !this.multiplex) {
+      this.page = null;
+      await stalePage.close?.().catch(() => {});
+    }
     let releasePreparation;
     if (this.multiplex) releasePreparation = await this.multiplexer.acquireSubmission(signal);
     const preparationAt = performance.now();
@@ -554,11 +566,11 @@ export class BrowserSession {
     } catch (error) { releasePreparation?.(); throw error; }
     // A null means a NEW isolated project, not reuse of the previous scope's project UUID.
     this.projectId = projectId || null;
-    this.pageGeneration += 1;
-    this.preparing = null;
+    const initializationGeneration = this.pageGeneration;
     const checkCurrent = () => {
       aborted(signal);
-      if (this.contextEpoch !== epoch || this.page !== page || !page || page.isClosed?.()) {
+      if (this.contextEpoch !== epoch || this.pageGeneration !== initializationGeneration ||
+        this.page !== page || !page || page.isClosed?.()) {
         throw new PrismError('browser_session_closed', 503);
       }
     };
@@ -831,8 +843,11 @@ export class BrowserSession {
       turn.releaseSubmission?.(); turn.releaseSubmission = null;
       this.multiplexer?.cancel(turn);
       if (this.turn === turn) this.turn = null;
+      // A non-reusable isolated scope will never select this worker's prepared chat again.
+      // Skip opening one for it; reusable conversations and legacy shared projects keep the warm path.
+      const reusableScope = request.projectScope?.reusable !== false;
       // Only after a clean turn: a failed one may still be stopping, or be followed by a page reload.
-      if (succeeded && this.page === page && !this.turn) this.schedulePrepare();
+      if (succeeded && reusableScope && this.page === page && !this.turn) this.schedulePrepare();
     }
   }
 
@@ -852,6 +867,10 @@ export class BrowserSession {
     let stage = 'new_chat';
     this.preparing = (async () => {
       try {
+        // initialize() can invalidate a prewarm while this promise is pending. Check
+        // before the first page action so a stale prewarm never clicks the new-chat
+        // control on a page that is about to be reloaded.
+        checkCurrent();
         await page.getByRole('button', { name: 'New chat tab', exact: true }).click({ timeout: 15000 });
         checkCurrent();
         stage = 'composer';

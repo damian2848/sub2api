@@ -141,6 +141,13 @@ test('a prepared chat from an earlier page load, too old, or no longer empty is 
   }
 });
 
+test('non-reusable isolated scopes do not open an idle chat that cannot be reused', async () => {
+  const { driver } = session();
+  await driver.generate({ ...request(), projectScope: { reusable: false } });
+  assert.equal(driver.preparing, null);
+  assert.deepEqual(driver.page.calls, ['new_chat', 'fill', 'submit']);
+});
+
 test('a failed turn prepares nothing, and prewarming can be turned off', async () => {
   const { driver } = session({ reply: () => failure({ httpStatus: 500, reason: 'unknown' }) });
   await assert.rejects(driver.generate(request()), error => error.code === 'prism_generation_failed');
@@ -247,4 +254,40 @@ test('closing old chat tabs middle-clicks every chat tab except the newest and t
   tabs.push(tab('chat:7000'));
   const single = await run();
   assert.deepEqual([single.before, single.after, closed.length], [1, 1, 0]);
+});
+
+test('initialization retires a pending prewarm page before navigating it', async () => {
+  const driver = new BrowserSession({}, () => {}, '32', 0, { prewarm: true });
+  driver.context = { async close() {} };
+  let rejectClick;
+  let clickStarted;
+  const clickEntered = new Promise(resolve => { clickStarted = resolve; });
+  let closed = false;
+  const oldPage = {
+    isClosed: () => closed,
+    getByRole() { return { async click() {
+      clickStarted();
+      await new Promise((resolve, reject) => { rejectClick = reject; });
+    } }; },
+    async close() { closed = true; rejectClick?.(new Error('page closed')); },
+  };
+  driver.page = oldPage;
+  driver.schedulePrepare();
+  const stale = driver.preparing;
+  await clickEntered;
+
+  const newPage = { isClosed: () => false };
+  driver.createSubmissionPage = async () => { assert.equal(driver.page, null); driver.page = newPage; return newPage; };
+  driver.loadPage = async page => {
+    assert.equal(page, newPage);
+    driver.syncSeen = true;
+    driver.lastHeartbeat = 1;
+  };
+  driver.composer = async () => ({});
+  driver.catalog = async () => new Map([['gpt-5.6-sol', '5.6 Sol']]);
+  await driver.initialize(projectId, async () => {});
+  assert.equal(closed, true);
+  assert.equal(driver.page, newPage);
+  assert.equal(driver.preparing, null);
+  assert.equal(await stale, null);
 });

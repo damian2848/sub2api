@@ -260,7 +260,7 @@ approach follows the free-astra project (MIT; see
 `tools/prism-browser/THIRD_PARTY_NOTICES.md`).
 A normal UI send produces the SDK's authenticated request; only its input is
 replaced with that single message. Official identity, sandbox metadata and
-Sentinel proof are preserved. A newly initialized project reuses its first empty chat for the first request; later requests use the prewarmed next chat, while a project reload still opens a fresh chat to avoid carrying history.
+Sentinel proof are preserved. A newly initialized project reuses its first empty chat for the first request; later reusable-scope requests use the prewarmed next chat, while a project reload still opens a fresh chat to avoid carrying history. Non-reusable isolated scopes do not open an idle chat that cannot be reused.
 The native start's
 `metadata.model` and `reasoning_effort` are set to the requested catalog model
 and one of Prism's four efforts (low, medium, high, xhigh), because the UI's own controls can still be on
@@ -593,9 +593,8 @@ Requests without a scope still rotate over the workers.
 
 **Cost, and what must be true before enabling it.** Every request without a
 reliable session pays a page load, a project creation and a sandbox sync (up to
-120 s), and it discards the prewarmed next chat that makes a warm request
-prepare in a fraction of a second; it also leaves a new project in the Prism
-account. Before enabling: (1) read the production audit and confirm Prism's own
+120 s); it also leaves a new project in the Prism account. Reusable scopes keep
+the prewarmed next chat and avoid that extra preparation on the next turn. Before enabling: (1) read the production audit and confirm Prism's own
 tools (`internal_tool_calls > 0`) are really used, otherwise there is nothing to
 isolate; (2) decide how anonymous traffic is served (today: a fresh project per
 request); (3) deploy the gateway before the sidecar, because an old gateway sends
