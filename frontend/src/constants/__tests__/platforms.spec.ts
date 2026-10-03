@@ -13,6 +13,7 @@ import { platformLabel } from '@/utils/platformColors'
 import { normalizePlatformQuotasMap, sanitizePlatformQuotasMap } from '@/api/admin/settings'
 import { platformQuotaPlatforms } from '@/api/admin/users'
 
+// 改为读取平台清单之前的平台字面量，加上之后内置登记的 Command Code。
 const concretePlatforms = [
   'anthropic',
   'openai',
@@ -24,7 +25,8 @@ const concretePlatforms = [
   'deepseek',
   'minimax',
   'opencode_go',
-  'typesafe'
+  'typesafe',
+  'command_code'
 ]
 
 describe('platform option catalogs', () => {
@@ -44,9 +46,9 @@ describe('platform catalog with a newly registered platform', () => {
   const withNewProvider = {
     platforms: [
       ...BUILTIN_PLATFORM_CATALOG.platforms,
-      { id: 'command_code', display_name: 'Command Code', gateway: 'openai', cn_provider: false }
+      { id: 'acme_router', display_name: 'Acme Router', gateway: 'openai', cn_provider: false }
     ],
-    composite_precedence: [...BUILTIN_PLATFORM_CATALOG.composite_precedence, 'command_code']
+    composite_precedence: [...BUILTIN_PLATFORM_CATALOG.composite_precedence, 'acme_router']
   }
 
   afterEach(() => {
@@ -57,11 +59,11 @@ describe('platform catalog with a newly registered platform', () => {
     expect(listPlatformIds()).toEqual(concretePlatforms)
     expect(compositePrecedencePlatformIds()).toEqual([
       'anthropic', 'gemini', 'openai', 'antigravity', 'grok',
-      'kimi', 'zhipu', 'deepseek', 'minimax', 'opencode_go', 'typesafe'
+      'kimi', 'zhipu', 'deepseek', 'minimax', 'opencode_go', 'typesafe', 'command_code'
     ])
     expect(CONCRETE_PLATFORM_OPTIONS.map((option) => option.label)).toEqual([
       'Anthropic', 'OpenAI', 'Gemini', 'Antigravity', 'Grok',
-      'Kimi', 'Zhipu GLM', 'DeepSeek', 'MiniMax', 'OpenCode', 'TypeSafe / Jev'
+      'Kimi', 'Zhipu GLM', 'DeepSeek', 'MiniMax', 'OpenCode', 'TypeSafe / Jev', 'Command Code'
     ])
     expect(platformLabel('zhipu')).toBe('Zhipu GLM')
     expect(platformLabel('composite')).toBe('Composite')
@@ -70,22 +72,22 @@ describe('platform catalog with a newly registered platform', () => {
 
   it('adds newly registered platforms to options, labels and quota lists reactively', () => {
     const optionValues = computed(() => CONCRETE_PLATFORM_OPTIONS.map((option) => option.value))
-    expect(optionValues.value).not.toContain('command_code')
+    expect(optionValues.value).not.toContain('acme_router')
 
     setPlatformCatalog(withNewProvider)
 
-    expect(optionValues.value).toEqual([...concretePlatforms, 'command_code'])
+    expect(optionValues.value).toEqual([...concretePlatforms, 'acme_router'])
     expect(GROUP_PLATFORM_OPTIONS.map((option) => option.value)).toEqual([
       ...concretePlatforms,
-      'command_code',
+      'acme_router',
       'composite'
     ])
-    expect(platformLabel('command_code')).toBe('Command Code')
-    expect(platformDisplayName('command_code')).toBe('Command Code')
+    expect(platformLabel('acme_router')).toBe('Acme Router')
+    expect(platformDisplayName('acme_router')).toBe('Acme Router')
     expect(platformLabel('unregistered')).toBe('unregistered')
-    expect(platformQuotaPlatforms()).toContain('command_code')
-    expect(Object.keys(normalizePlatformQuotasMap())).toEqual([...concretePlatforms, 'command_code'])
-    expect(sanitizePlatformQuotasMap({ command_code: { daily: 5, weekly: -1, monthly: null } }).command_code).toEqual({
+    expect(platformQuotaPlatforms()).toContain('acme_router')
+    expect(Object.keys(normalizePlatformQuotasMap())).toEqual([...concretePlatforms, 'acme_router'])
+    expect(sanitizePlatformQuotasMap({ acme_router: { daily: 5, weekly: -1, monthly: null } }).acme_router).toEqual({
       daily: 5,
       weekly: null,
       monthly: null

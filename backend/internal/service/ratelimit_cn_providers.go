@@ -175,12 +175,20 @@ func cnProviderQuotaSnapshotReset(account *Account, now time.Time) *time.Time {
 	if account == nil || len(account.Extra) == 0 {
 		return nil
 	}
-	if !account.IsOpenCodeGo() && (!account.IsCNProvider() || !account.IsCodingPlan()) {
+	switch {
+	case account.IsOpenCodeGo():
+	case account.IsCommandCode():
+		// 有充值积分时上游跳过窗口检查，429 与窗口无关。
+		if !commandCodeWindowsBinding(account.Extra) {
+			return nil
+		}
+	case account.IsCNProvider() && account.IsCodingPlan():
+	default:
 		return nil
 	}
 	provider := account.Platform
 	suffixes := []string{cnExtraSuffix5hReset, cnExtraSuffixWeeklyReset}
-	if account.IsOpenCodeGo() {
+	if cnQuotaHasMonthlyWindow(provider) {
 		suffixes = append(suffixes, cnExtraSuffixMonthlyReset)
 	}
 	var earliest *time.Time

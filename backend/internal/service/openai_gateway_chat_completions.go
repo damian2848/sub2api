@@ -140,14 +140,14 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 	// 维持原样把请求体交给所选路径。
 	convertResponsesShape := isResponsesShape && (account.routesByModel() || account.IsAdaptiveAPIProtocol())
 
-	// 上游协议统一由 resolveUpstreamProtocol 判定。Anthropic 分流必须先于
+	// 上游协议统一由 resolveUpstreamProtocol 判定（按模型分流时带上游模型目录）。Anthropic 分流必须先于
 	// ShouldUseResponsesAPI：Anthropic 协议账号经 probe 落标
 	// openai_responses_supported=false，否则会命中 CC 直转。
 	routingModel := upstreamRoutingModel(account, body, defaultMappedModel)
 	if account.IsOpenCodeGo() && IsOpenCodeUnsupportedModel(routingModel) {
 		return nil, writeOpenCodeUnsupportedModelError(c, false, routingModel)
 	}
-	switch resolveUpstreamProtocol(account, inbound, routingModel) {
+	switch s.resolveUpstreamProtocolFor(account, inbound, routingModel) {
 	case APIProtocolAnthropic:
 		if convertResponsesShape {
 			return s.forwardResponsesViaNativeAnthropic(ctx, c, account, body, "")

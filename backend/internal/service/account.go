@@ -1622,7 +1622,8 @@ func (a *Account) GetCNAPIKey() string {
 	return a.GetCredential("api_key")
 }
 
-// GetCodingPlanProvider 根据 base_url 识别 Coding Plan 供应商（kimi / zhipu / minimax），
+// GetCodingPlanProvider 根据 base_url 识别 Coding Plan 供应商（kimi / zhipu / minimax；
+// OpenCode Go 订阅与官方主机上的 Command Code 账号按平台识别），
 // 用于路由到对应的额度查询端点。非 coding 模式或无法识别时返回空串。
 // 只认官方域名：自定义中转不得把第三方 Key 发往厂商官方额度端点。
 func (a *Account) GetCodingPlanProvider() string {
@@ -1631,6 +1632,12 @@ func (a *Account) GetCodingPlanProvider() string {
 	}
 	if a.IsOpenCodeGoPlan() {
 		return PlatformOpenCodeGo
+	}
+	if a.IsCommandCode() {
+		if a.commandCodeUsageSupported() {
+			return PlatformCommandCode
+		}
+		return ""
 	}
 	if a.GetAccountMode() != AccountModeCoding {
 		return ""

@@ -239,13 +239,29 @@ func observeRouting(tc routingMatrixCase) (obs routingObservation) {
 	return obs
 }
 
+// legacyOpenCodeProtocol 复述统一判定前 OpenCode 的分流（原 openCodeGoNativeProtocol）：
+// 显式协议 → 账号 protocol_rules（已配置但未命中为 Chat Completions）→ 接入模式的内置规则表。
+func legacyOpenCodeProtocol(account *Account, model string) string {
+	switch proto := account.GetAPIProtocol(); proto {
+	case APIProtocolChatCompletions, APIProtocolAnthropic, APIProtocolResponses:
+		return proto
+	}
+	if rules, configured := account.configuredProtocolRules(); configured {
+		return matchProtocolRules(model, rules)
+	}
+	if account.IsOpenCodeZen() {
+		return matchProtocolRules(model, DefaultOpenCodeZenProtocolRules())
+	}
+	return matchProtocolRules(model, DefaultOpenCodeGoProtocolRules())
+}
+
 // legacyUpstreamRouting 复述统一判定前三个入口各自的分流顺序，返回预期的上游协议
 // 以及 Chat Completions 上游是否先把 Responses 形状请求体转换成 messages。
 func legacyUpstreamRouting(account *Account, ingress routingMatrixIngress, model string) (string, bool) {
 	openCode := account.IsOpenCodeGo()
 	var openCodeProto string
 	if openCode {
-		openCodeProto = openCodeGoNativeProtocol(account, model)
+		openCodeProto = legacyOpenCodeProtocol(account, model)
 	}
 	switch ingress.name {
 	case "responses":

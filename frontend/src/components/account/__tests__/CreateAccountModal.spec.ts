@@ -948,8 +948,8 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
       platforms: [
         ...BUILTIN_PLATFORM_CATALOG.platforms,
         {
-          id: 'command_code',
-          display_name: 'Command Code',
+          id: 'acme_router',
+          display_name: 'Acme Router',
           gateway: 'openai',
           cn_provider: false,
           multi_protocol: {
@@ -959,16 +959,16 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
               {
                 mode: 'standard',
                 base_urls: {
-                  chat_completions: 'https://api.commandcode.ai/provider/v1',
-                  anthropic: 'https://api.commandcode.ai/provider',
+                  chat_completions: 'https://api.acme-router.example/provider/v1',
+                  anthropic: 'https://api.acme-router.example/provider',
                 },
                 protocol_rules: [{ pattern: 'claude-*', protocol: 'anthropic' }],
               },
               {
                 mode: 'team',
                 base_urls: {
-                  chat_completions: 'https://team.commandcode.ai/provider/v1',
-                  anthropic: 'https://team.commandcode.ai/provider',
+                  chat_completions: 'https://team.acme-router.example/provider/v1',
+                  anthropic: 'https://team.acme-router.example/provider',
                 },
                 protocol_rules: [{ pattern: 'sonnet-*', protocol: 'anthropic' }],
               },
@@ -987,7 +987,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
           },
         },
       ],
-      composite_precedence: [...BUILTIN_PLATFORM_CATALOG.composite_precedence, 'command_code', 'cline_pass'],
+      composite_precedence: [...BUILTIN_PLATFORM_CATALOG.composite_precedence, 'acme_router', 'cline_pass'],
     }
 
     beforeEach(() => {
@@ -1000,7 +1000,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
 
     it('creates a by-model provider account from its profile defaults', async () => {
       const wrapper = mountModal()
-      await wrapper.get('[data-testid="platform-button-command_code"]').trigger('click')
+      await wrapper.get('[data-testid="platform-button-acme_router"]').trigger('click')
       await wrapper.get('form#create-account-form input[type="text"]').setValue('cc')
       await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-cc')
 
@@ -1009,16 +1009,16 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
 
       expect(createAccountMock).toHaveBeenCalledTimes(1)
       const payload = createAccountMock.mock.calls[0]?.[0]
-      expect(payload?.platform).toBe('command_code')
+      expect(payload?.platform).toBe('acme_router')
       expect(payload?.type).toBe('apikey')
       expect(payload?.credentials).toMatchObject({
         api_key: 'sk-cc',
         account_mode: 'standard',
         api_protocol: 'adaptive',
-        base_url: 'https://api.commandcode.ai/provider/v1',
+        base_url: 'https://api.acme-router.example/provider/v1',
         api_base_urls: {
-          chat_completions: 'https://api.commandcode.ai/provider/v1',
-          anthropic: 'https://api.commandcode.ai/provider',
+          chat_completions: 'https://api.acme-router.example/provider/v1',
+          anthropic: 'https://api.acme-router.example/provider',
         },
         protocol_rules: [{ pattern: 'claude-*', protocol: 'anthropic' }],
       })
@@ -1030,7 +1030,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
 
     it('switches endpoints and default rules with the provider mode', async () => {
       const wrapper = mountModal()
-      await wrapper.get('[data-testid="platform-button-command_code"]').trigger('click')
+      await wrapper.get('[data-testid="platform-button-acme_router"]').trigger('click')
       await wrapper.get('[data-testid="generic-account-mode"]').findAll('button')[1].trigger('click')
       await wrapper.get('form#create-account-form input[type="text"]').setValue('cc-team')
       await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-cc')
@@ -1040,10 +1040,10 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
 
       expect(createAccountMock.mock.calls[0]?.[0]?.credentials).toMatchObject({
         account_mode: 'team',
-        base_url: 'https://team.commandcode.ai/provider/v1',
+        base_url: 'https://team.acme-router.example/provider/v1',
         api_base_urls: {
-          chat_completions: 'https://team.commandcode.ai/provider/v1',
-          anthropic: 'https://team.commandcode.ai/provider',
+          chat_completions: 'https://team.acme-router.example/provider/v1',
+          anthropic: 'https://team.acme-router.example/provider',
         },
         protocol_rules: [{ pattern: 'sonnet-*', protocol: 'anthropic' }],
       })
@@ -1072,7 +1072,7 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
 
     it('falls back to the Kimi default mode after a server-only provider', async () => {
       const wrapper = mountModal()
-      await wrapper.get('[data-testid="platform-button-command_code"]').trigger('click')
+      await wrapper.get('[data-testid="platform-button-acme_router"]').trigger('click')
       await selectButtonByText(wrapper, 'Kimi')
       await wrapper.get('form#create-account-form input[type="text"]').setValue('kimi')
       await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-kimi')

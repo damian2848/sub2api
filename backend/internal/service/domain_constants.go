@@ -45,13 +45,14 @@ const (
 	PlatformAntigravity = domain.PlatformAntigravity
 	PlatformGrok        = domain.PlatformGrok
 	// 国产 OpenAI 兼容供应商（与 grok 一样经 OpenAI 网关转发）。
-	PlatformKimi       = domain.PlatformKimi
-	PlatformZhipu      = domain.PlatformZhipu
-	PlatformDeepseek   = domain.PlatformDeepseek
-	PlatformMiniMax    = domain.PlatformMiniMax
-	PlatformTypeSafe   = domain.PlatformTypeSafe
-	PlatformOpenCodeGo = domain.PlatformOpenCodeGo
-	PlatformComposite  = domain.PlatformComposite
+	PlatformKimi        = domain.PlatformKimi
+	PlatformZhipu       = domain.PlatformZhipu
+	PlatformDeepseek    = domain.PlatformDeepseek
+	PlatformMiniMax     = domain.PlatformMiniMax
+	PlatformOpenCodeGo  = domain.PlatformOpenCodeGo
+	PlatformTypeSafe    = domain.PlatformTypeSafe
+	PlatformCommandCode = domain.PlatformCommandCode
+	PlatformComposite   = domain.PlatformComposite
 	// PlatformKiro is retained for unsupported-platform threshold tests and legacy
 	// account rows. Scheduling-threshold evaluation never pauses kiro accounts.
 	PlatformKiro = "kiro"
@@ -87,6 +88,8 @@ const (
 	DefaultOpenCodeGoBaseURL = "https://opencode.ai/zen/go/v1"
 	// OpenCode Zen：按量付费网关，模型列表为 /zen/v1/models。
 	DefaultOpenCodeZenBaseURL = "https://opencode.ai/zen/v1"
+	// Command Code Provider API：Chat Completions / Responses / models 共用 /provider/v1 基址。
+	DefaultCommandCodeBaseURL = "https://api.commandcode.ai/provider/v1"
 )
 
 // 国产供应商 Anthropic 协议端点的默认 base_url（上游路径为 {base}/v1/messages）。
@@ -100,6 +103,8 @@ const (
 	// OpenCode Go Anthropic 基址不含 /v1：nativeAnthropicTargetURL 会再拼 /v1/messages。
 	DefaultOpenCodeGoAnthropicBaseURL  = "https://opencode.ai/zen/go"
 	DefaultOpenCodeZenAnthropicBaseURL = "https://opencode.ai/zen"
+	// Command Code 的 Anthropic 端点为 /provider/v1/messages（Claude 系模型只在此端点提供）。
+	DefaultCommandCodeAnthropicBaseURL = "https://api.commandcode.ai/provider"
 )
 
 // IsCNProvider 报告 platform 是否为国产 OpenAI 兼容供应商（kimi/zhipu/deepseek/minimax），
@@ -127,6 +132,7 @@ var AllowedQuotaPlatforms = domain.ConcretePlatformIDs()
 // AllowedSchedulingThresholdPlatforms 是允许设置账号自动停调阈值的平台列表。
 // openai/anthropic/grok 有原生用量窗口；kimi/zhipu/minimax 的 Coding Plan 同样暴露
 // 5h/weekly 滚动窗口，纳入阈值评估。deepseek 为余额型，走余额检测而非阈值。
+// OpenCode Go 与 Command Code 的订阅套餐另有月度窗口。
 var AllowedSchedulingThresholdPlatforms = []string{
 	PlatformOpenAI,
 	PlatformAnthropic,
@@ -135,6 +141,7 @@ var AllowedSchedulingThresholdPlatforms = []string{
 	PlatformZhipu,
 	PlatformMiniMax,
 	PlatformOpenCodeGo,
+	PlatformCommandCode,
 }
 
 // IsAllowedQuotaPlatform 报告 s 是否为合法的 quota platform 标识。

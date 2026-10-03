@@ -1183,8 +1183,8 @@ describe('EditAccountModal', () => {
         platforms: [
           ...BUILTIN_PLATFORM_CATALOG.platforms,
           {
-            id: 'command_code',
-            display_name: 'Command Code',
+            id: 'acme_router',
+            display_name: 'Acme Router',
             gateway: 'openai',
             cn_provider: false,
             multi_protocol: {
@@ -1194,16 +1194,16 @@ describe('EditAccountModal', () => {
                 {
                   mode: 'standard',
                   base_urls: {
-                    chat_completions: 'https://api.commandcode.ai/provider/v1',
-                    anthropic: 'https://api.commandcode.ai/provider'
+                    chat_completions: 'https://api.acme-router.example/provider/v1',
+                    anthropic: 'https://api.acme-router.example/provider'
                   },
                   protocol_rules: [{ pattern: 'claude-*', protocol: 'anthropic' }]
                 },
                 {
                   mode: 'team',
                   base_urls: {
-                    chat_completions: 'https://team.commandcode.ai/provider/v1',
-                    anthropic: 'https://team.commandcode.ai/provider'
+                    chat_completions: 'https://team.acme-router.example/provider/v1',
+                    anthropic: 'https://team.acme-router.example/provider'
                   },
                   protocol_rules: [{ pattern: 'sonnet-*', protocol: 'anthropic' }]
                 }
@@ -1211,7 +1211,7 @@ describe('EditAccountModal', () => {
             }
           }
         ],
-        composite_precedence: [...BUILTIN_PLATFORM_CATALOG.composite_precedence, 'command_code']
+        composite_precedence: [...BUILTIN_PLATFORM_CATALOG.composite_precedence, 'acme_router']
       })
       checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
     })
@@ -1222,7 +1222,7 @@ describe('EditAccountModal', () => {
 
     function commandCodeAccount() {
       const account = buildAccount()
-      account.platform = 'command_code'
+      account.platform = 'acme_router'
       account.credentials = {
         api_key: 'sk-cc',
         account_mode: 'standard',

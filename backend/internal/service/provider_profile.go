@@ -39,6 +39,12 @@ type ProviderProfile struct {
 	// ResponsesPath 覆盖 Responses 端点路径（按 buildOpenAIEndpointURL 的版本感知
 	// 规则拼接），空值为 /v1/responses。对自定义 base_url 的账号同样生效。
 	ResponsesPath string
+	// DefaultTestModel 是管理端连接测试未指定模型时使用的模型；空值时按各协议的
+	// 通用默认模型。
+	DefaultTestModel string
+	// ModelCatalog 表示上游 {Chat Completions 基址}/models 为每个模型给出
+	// supported_endpoints；按模型分流时据此判断模型支持哪些协议（见 model_protocol_catalog.go）。
+	ModelCatalog bool
 }
 
 // Endpoints 返回指定接入模式的端点；未知模式回落 DefaultMode。
@@ -147,9 +153,10 @@ var providerProfiles = map[string]*ProviderProfile{
 		},
 	},
 	PlatformOpenCodeGo: {
-		Platform:    PlatformOpenCodeGo,
-		DefaultMode: AccountModeGo,
-		Routing:     ProviderRoutingByModel,
+		Platform:         PlatformOpenCodeGo,
+		DefaultMode:      AccountModeGo,
+		Routing:          ProviderRoutingByModel,
+		DefaultTestModel: DefaultOpenCodeGoTestModel,
 		Modes: map[string]ProviderEndpoints{
 			AccountModeGo: {
 				BaseURLs: map[string]string{
@@ -166,6 +173,24 @@ var providerProfiles = map[string]*ProviderProfile{
 					APIProtocolAnthropic:       DefaultOpenCodeZenAnthropicBaseURL,
 				},
 				ProtocolRules: DefaultOpenCodeZenProtocolRules(),
+			},
+		},
+	},
+	PlatformCommandCode: {
+		Platform:         PlatformCommandCode,
+		DefaultMode:      AccountModePayG,
+		Routing:          ProviderRoutingByModel,
+		DefaultTestModel: DefaultCommandCodeTestModel,
+		ModelCatalog:     true,
+		// 订阅套餐与 Provider 按量计费共用同一个 API Key 与端点，只有一个接入模式。
+		Modes: map[string]ProviderEndpoints{
+			AccountModePayG: {
+				BaseURLs: map[string]string{
+					APIProtocolChatCompletions: DefaultCommandCodeBaseURL,
+					APIProtocolResponses:       DefaultCommandCodeBaseURL,
+					APIProtocolAnthropic:       DefaultCommandCodeAnthropicBaseURL,
+				},
+				ProtocolRules: DefaultCommandCodeProtocolRules(),
 			},
 		},
 	},

@@ -314,6 +314,11 @@ export function providerRoutesByModel(platform: string): boolean {
   return getProviderProfile(platform)?.routing === 'by_model'
 }
 
+/** 上游模型目录给出每个模型支持的协议；未命中分流规则的模型据此选协议。 */
+export function providerHasModelCatalog(platform: string): boolean {
+  return getProviderProfile(platform)?.model_catalog === true
+}
+
 /** 供应商的接入模式，默认模式在前。 */
 export function providerAccountModes(platform: string): string[] {
   return getProviderProfile(platform)?.modes.map(item => item.mode) ?? []
@@ -345,17 +350,40 @@ export const OPENCODE_GO_PROTOCOL_RULES_KEY = 'protocol_rules'
 
 export interface OpenCodeGoProtocolRule {
   pattern: string
+  /** 首选协议：入站协议不在模型支持的协议中时使用。 */
   protocol: CnNativeApiProtocol
+  /** 模型同时支持的其他协议（不含 protocol）；入站协议在其中时同协议直通，免去协议转换。 */
+  extraProtocols?: CnNativeApiProtocol[]
 }
 
 function isNativeOpenCodeGoProtocol(value: unknown): value is CnNativeApiProtocol {
   return value === 'chat_completions' || value === 'anthropic' || value === 'responses'
 }
 
+/** 从 protocols 列表中取出首选协议以外的原生协议（去重、保持顺序）。 */
+function extraRuleProtocols(protocol: CnNativeApiProtocol, protocols: unknown): CnNativeApiProtocol[] {
+  if (!Array.isArray(protocols)) return []
+  const extra: CnNativeApiProtocol[] = []
+  for (const item of protocols) {
+    if (isNativeOpenCodeGoProtocol(item) && item !== protocol && !extra.includes(item)) extra.push(item)
+  }
+  return extra
+}
+
+function buildRule(pattern: string, protocol: CnNativeApiProtocol, protocols?: unknown): OpenCodeGoProtocolRule {
+  const extra = extraRuleProtocols(protocol, protocols)
+  return extra.length > 0 ? { pattern, protocol, extraProtocols: extra } : { pattern, protocol }
+}
+
+/** 规则支持的协议集合，首项为首选协议。 */
+export function protocolRuleSet(rule: OpenCodeGoProtocolRule): CnNativeApiProtocol[] {
+  return [rule.protocol, ...extraRuleProtocols(rule.protocol, rule.extraProtocols)]
+}
+
 function normalizeProfileRules(rules: ProviderProtocolRule[] | undefined): OpenCodeGoProtocolRule[] {
   return (rules ?? [])
     .filter(rule => rule.pattern && isNativeOpenCodeGoProtocol(rule.protocol))
-    .map(rule => ({ pattern: rule.pattern, protocol: rule.protocol as CnNativeApiProtocol }))
+    .map(rule => buildRule(rule.pattern, rule.protocol as CnNativeApiProtocol, rule.protocols))
 }
 
 function builtinProtocolRules(platform: string, mode: string): OpenCodeGoProtocolRule[] {
@@ -382,7 +410,7 @@ export function defaultOpenCodeProtocolRules(mode: string = 'go'): OpenCodeGoPro
 export function cloneOpenCodeGoProtocolRules(
   rules: OpenCodeGoProtocolRule[] = DEFAULT_OPENCODE_GO_PROTOCOL_RULES
 ): OpenCodeGoProtocolRule[] {
-  return rules.map(rule => ({ pattern: rule.pattern, protocol: rule.protocol }))
+  return rules.map(rule => buildRule(rule.pattern, rule.protocol, rule.extraProtocols))
 }
 
 export function parseOpenCodeGoProtocolRules(raw: unknown): OpenCodeGoProtocolRule[] | null {
@@ -394,9 +422,12 @@ export function parseOpenCodeGoProtocolRules(raw: unknown): OpenCodeGoProtocolRu
     const pattern = typeof (item as { pattern?: unknown }).pattern === 'string'
       ? (item as { pattern: string }).pattern.trim()
       : ''
-    const protocol = (item as { protocol?: unknown }).protocol
+    const protocols = (item as { protocols?: unknown }).protocols
+    let protocol = (item as { protocol?: unknown }).protocol
+    // 与后端一致：只给了 protocols 时首项即首选协议。
+    if ((protocol == null || protocol === '') && Array.isArray(protocols)) protocol = protocols[0]
     if (!pattern || !isNativeOpenCodeGoProtocol(protocol)) continue
-    rules.push({ pattern, protocol })
+    rules.push(buildRule(pattern, protocol, protocols))
   }
   return rules
 }
@@ -407,11 +438,17 @@ export function applyOpenCodeGoProtocolRules(
   mode: 'create' | 'edit'
 ): void {
   const serialized = rules
-    .map(rule => ({
-      pattern: rule.pattern.trim().toLowerCase(),
-      protocol: rule.protocol
-    }))
-    .filter(rule => rule.pattern.length > 0 && isNativeOpenCodeGoProtocol(rule.protocol))
+    .filter(rule => isNativeOpenCodeGoProtocol(rule.protocol))
+    .map(rule => {
+      const entry: { pattern: string; protocol: CnNativeApiProtocol; protocols?: CnNativeApiProtocol[] } = {
+        pattern: rule.pattern.trim().toLowerCase(),
+        protocol: rule.protocol
+      }
+      const protocols = protocolRuleSet(rule)
+      if (protocols.length > 1) entry.protocols = protocols
+      return entry
+    })
+    .filter(rule => rule.pattern.length > 0)
   if (serialized.length > 0 || mode === 'edit') {
     credentials[OPENCODE_GO_PROTOCOL_RULES_KEY] = serialized
   }
@@ -501,13 +538,73 @@ export function defaultCNAdaptiveBaseUrls(
 // CNProviderQuotaCell / CNProviderBalanceCell 与 AccountUsageCell 的占位符判定
 // 共用，避免多处复制条件后一处改另一处漏改。
 
-export function cnQuotaCellVisible(platform: string, accountMode: string): boolean {
-  if (platform === 'opencode_go') return accountMode !== 'zen'
-  return (platform === 'kimi' || platform === 'zhipu' || platform === 'minimax') && accountMode === 'coding'
+/** 用量单元格可见性判定所需的账号字段。 */
+export interface CNUsageCellAccount {
+  platform: string
+  type: string
+  credentials?: Record<string, unknown>
 }
 
-export function cnBalanceCellVisible(platform: string, accountMode: string): boolean {
-  return (platform === 'kimi' || platform === 'deepseek') && accountMode !== 'coding'
+// Command Code 的积分与用量接口只查官方主机上的 API Key 账号（与后端
+// commandCodeUsageSupported 一致）：自定义中转的 Key 不发往官方接口，后端直接拒绝
+// 探测，单元格只会显示一行报错。
+const OFFICIAL_ACCOUNT_API_PLATFORMS = ['command_code']
+
+function cnUsageCellAccountMode(account: CNUsageCellAccount): string {
+  const mode = account.credentials?.account_mode
+  return typeof mode === 'string' ? mode : ''
+}
+
+/** 与后端 Account.GetAPIProtocol 一致：按模型分流的供应商未指定原生协议时为 adaptive。 */
+function accountUsesAdaptiveProtocol(platform: string, mode: string, protocol: unknown): boolean {
+  if (protocol === 'adaptive') return true
+  if (protocol === 'chat_completions' || protocol === 'anthropic') return false
+  if (protocol === 'responses' && cnSupportsNativeResponses(platform, mode)) return false
+  return providerRoutesByModel(platform)
+}
+
+/**
+ * 账号实际使用的 Chat Completions 端点（与后端 Account.GetOpenAIBaseURL 一致）：adaptive
+ * 账号优先分协议端点，其次 base_url，都没填时为平台清单的默认端点。
+ */
+function accountChatBaseUrl(account: CNUsageCellAccount, mode: string): string {
+  const credentials = account.credentials
+  const baseUrls = credentials?.api_base_urls
+  if (baseUrls && typeof baseUrls === 'object' && accountUsesAdaptiveProtocol(account.platform, mode, credentials?.api_protocol)) {
+    const chat = (baseUrls as Record<string, unknown>).chat_completions
+    if (typeof chat === 'string' && chat.trim()) return chat.trim()
+  }
+  const baseUrl = credentials?.base_url
+  if (typeof baseUrl === 'string' && baseUrl.trim()) return baseUrl.trim()
+  return defaultCNBaseUrl(account.platform, mode)
+}
+
+/** 官方主机即平台清单默认端点的主机，且必须是 https。 */
+function officialAccountAPISupported(account: CNUsageCellAccount, mode: string): boolean {
+  if (account.type !== 'apikey') return false
+  try {
+    const target = new URL(accountChatBaseUrl(account, mode))
+    const official = new URL(defaultCNBaseUrl(account.platform, mode))
+    return target.protocol === 'https:' && target.hostname === official.hostname
+  } catch {
+    return false
+  }
+}
+
+export function cnQuotaCellVisible(account: CNUsageCellAccount): boolean {
+  const { platform } = account
+  const mode = cnUsageCellAccountMode(account)
+  if (platform === 'opencode_go') return mode !== 'zen'
+  // Command Code：订阅套餐窗口与积分同源，一次探测同时刷新两者。
+  if (OFFICIAL_ACCOUNT_API_PLATFORMS.includes(platform)) return officialAccountAPISupported(account, mode)
+  return (platform === 'kimi' || platform === 'zhipu' || platform === 'minimax') && mode === 'coding'
+}
+
+export function cnBalanceCellVisible(account: CNUsageCellAccount): boolean {
+  const { platform } = account
+  const mode = cnUsageCellAccountMode(account)
+  if (OFFICIAL_ACCOUNT_API_PLATFORMS.includes(platform)) return officialAccountAPISupported(account, mode)
+  return (platform === 'kimi' || platform === 'deepseek') && mode !== 'coding'
 }
 
 /**

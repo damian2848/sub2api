@@ -68,14 +68,14 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		return nil, err
 	}
 
-	// 上游协议统一由 resolveUpstreamProtocol 判定。Anthropic 分流必须先于
+	// 上游协议统一由 resolveUpstreamProtocol 判定（按模型分流时带上游模型目录）。Anthropic 分流必须先于
 	// ShouldUseResponsesAPI：Anthropic 协议账号经 probe 落标
 	// openai_responses_supported=false，否则会命中 CC 直转。
 	routingModel := upstreamRoutingModel(account, body, defaultMappedModel)
 	if account.IsOpenCodeGo() && IsOpenCodeUnsupportedModel(routingModel) {
 		return nil, writeOpenCodeUnsupportedModelError(c, true, routingModel)
 	}
-	switch resolveUpstreamProtocol(account, APIProtocolAnthropic, routingModel) {
+	switch s.resolveUpstreamProtocolFor(account, APIProtocolAnthropic, routingModel) {
 	case APIProtocolAnthropic:
 		// 上游为供应商原生 Anthropic 端点：/v1/messages 零转换直通（仅模型名映射 +
 		// 少量 body 清洗），完整保留 thinking / tool_use / cache 语义。

@@ -418,6 +418,15 @@ func (s *RateLimitService) handleUpstreamErrorAfterStreakReset(ctx context.Conte
 		upstreamMsg = truncateForLog([]byte(upstreamMsg), 512)
 	}
 
+	// Command Code 用量超限按文案区分、与状态码无关（见 ratelimit_command_code.go）；
+	// 未识别的错误（含普通频率限制）继续走下面的默认逻辑。
+	if account.IsCommandCode() && (statusCode == http.StatusPaymentRequired ||
+		statusCode == http.StatusForbidden || statusCode == http.StatusTooManyRequests) {
+		if handled, disable := s.handleCommandCodeUsageError(ctx, account, statusCode, responseBody, upstreamMsg); handled {
+			return disable
+		}
+	}
+
 	switch statusCode {
 	case 400:
 		// "organization has been disabled" → 永久禁用
@@ -558,9 +567,10 @@ func (s *RateLimitService) handleUpstreamErrorAfterStreakReset(ctx context.Conte
 			shouldDisable = true
 		}
 	case 402:
-		// 国产供应商：余额不足是可恢复状态（充值/检测恢复后由周期任务自动解除），
-		// 不能走 handleAuthError 永久置 status=error。改为可恢复的临时停调。
-		if account.IsCNProvider() || account.IsOpenCodeZen() {
+		// 国产供应商 / OpenCode Zen / Command Code：余额（积分）不足是可恢复状态
+		// （充值/检测恢复后由周期任务自动解除），不能走 handleAuthError 永久置
+		// status=error。改为可恢复的临时停调。
+		if account.IsCNProvider() || account.IsOpenCodeZen() || account.IsCommandCode() {
 			s.handleCNProviderInsufficientBalance(ctx, account, upstreamMsg)
 			shouldDisable = true
 			break

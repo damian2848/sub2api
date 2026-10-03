@@ -15,7 +15,10 @@ export type ProviderNativeProtocol = 'chat_completions' | 'anthropic' | 'respons
 
 export interface ProviderProtocolRule {
   pattern: string
+  /** 首选协议；入站协议不在 protocols 中时使用。 */
   protocol: string
+  /** 模型支持的协议集合（首项即 protocol）；入站协议在其中时同协议直通。仅一个协议时省略。 */
+  protocols?: string[]
 }
 
 export interface ProviderModeInfo {
@@ -29,6 +32,8 @@ export interface ProviderProfileInfo {
   default_mode: string
   routing: ProviderRouting
   responses_path?: string
+  /** 上游 /models 为每个模型给出 supported_endpoints，按模型分流时未命中规则的模型据此选协议。 */
+  model_catalog?: boolean
   /** 默认模式在前。 */
   modes: ProviderModeInfo[]
 }

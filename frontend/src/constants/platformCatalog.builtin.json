@@ -221,6 +221,41 @@
       "gateway": "anthropic",
       "cn_provider": false,
       "litellm_provider": "typesafe"
+    },
+    {
+      "id": "command_code",
+      "display_name": "Command Code",
+      "gateway": "openai",
+      "cn_provider": false,
+      "multi_protocol": {
+        "default_mode": "payg",
+        "routing": "by_model",
+        "model_catalog": true,
+        "modes": [
+          {
+            "mode": "payg",
+            "base_urls": {
+              "anthropic": "https://api.commandcode.ai/provider",
+              "chat_completions": "https://api.commandcode.ai/provider/v1",
+              "responses": "https://api.commandcode.ai/provider/v1"
+            },
+            "protocol_rules": [
+              {
+                "pattern": "claude-*",
+                "protocol": "anthropic"
+              },
+              {
+                "pattern": "gpt-*",
+                "protocol": "responses",
+                "protocols": [
+                  "responses",
+                  "chat_completions"
+                ]
+              }
+            ]
+          }
+        ]
+      }
     }
   ],
   "composite_precedence": [
@@ -234,6 +269,7 @@
     "deepseek",
     "minimax",
     "opencode_go",
-    "typesafe"
+    "typesafe",
+    "command_code"
   ]
 }

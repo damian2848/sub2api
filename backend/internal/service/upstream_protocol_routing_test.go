@@ -95,17 +95,18 @@ func TestResolveUpstreamProtocol(t *testing.T) {
 		{"openai oauth ignores probe", openAIWithProbe(AccountTypeOAuth, false), cc, "", responses},
 	}
 	for _, tc := range cases {
-		require.Equal(t, tc.want, resolveUpstreamProtocol(tc.account, tc.inbound, tc.model), tc.name)
+		require.Equal(t, tc.want, resolveUpstreamProtocol(tc.account, tc.inbound, tc.model, nil), tc.name)
 	}
 }
 
 func TestRoutesByModelOnlyForAggregators(t *testing.T) {
 	t.Parallel()
 
+	aggregators := map[string]bool{PlatformOpenCodeGo: true, PlatformCommandCode: true}
 	for platform, profile := range providerProfiles {
 		account := &Account{Platform: platform}
-		require.Equal(t, platform == PlatformOpenCodeGo, account.routesByModel(), platform)
-		require.Equal(t, account.IsOpenCodeGo(), profile.Routing == ProviderRoutingByModel, platform)
+		require.Equal(t, aggregators[platform], account.routesByModel(), platform)
+		require.Equal(t, aggregators[platform], profile.Routing == ProviderRoutingByModel, platform)
 	}
 	require.False(t, (&Account{Platform: PlatformOpenAI}).routesByModel())
 	require.False(t, (*Account)(nil).routesByModel())
