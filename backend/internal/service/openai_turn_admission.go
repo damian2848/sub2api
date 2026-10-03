@@ -326,15 +326,18 @@ func (s *OpenAIGatewayService) admitOpenAITurn(ctx context.Context, c *gin.Conte
 
 // admitOpenAITurnForGroup is used by connection-pool callbacks, which run
 // after the request's gin context has been reduced to a plain context.  The
-// group is carried explicitly so a stale account cannot still complete a
-// new handshake after it has been removed from the API key's group.
+// group scope is captured up front with openAITurnAdmissionGroupFromContext,
+// so a stale account cannot still complete a new handshake after it has been
+// removed from the API key's group, while keyless account tests stay unscoped
+// exactly as on the HTTP path.
 func (s *OpenAIGatewayService) admitOpenAITurnForGroup(
 	ctx context.Context,
 	groupID int64,
+	enforceGroup bool,
 	selected *Account,
 	outboundModel string,
 ) (*Account, error) {
-	return s.admitOpenAITurnWithGroup(ctx, selected, outboundModel, groupID, true)
+	return s.admitOpenAITurnWithGroup(ctx, selected, outboundModel, groupID, enforceGroup)
 }
 
 func (s *OpenAIGatewayService) admitOpenAITurnWithGroup(

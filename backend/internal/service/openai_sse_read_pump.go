@@ -27,7 +27,17 @@ type openAISSEReadPump struct {
 	err       error
 	// Consumer-owned semantic deadline; upstream heartbeats do not clear it.
 	firstOutputDeadline time.Time
+	// cancelUpstream aborts the upstream request before the body is closed, so a
+	// blocked Read returns by itself and Close never races a decompressor that is
+	// mid-Read. leaveBodyOpen hands the single Body.Close to the caller once the
+	// reader has joined.
+	cancelUpstream func()
+	leaveBodyOpen  bool
 }
+
+// openAISSEReadPumpCancelGrace bounds how long Close waits for a cancelled
+// transport to unblock Read before it forces the body shut.
+const openAISSEReadPumpCancelGrace = 2 * time.Second
 
 type openAISSEReadEvent struct {
 	line string
@@ -81,7 +91,24 @@ func newOpenAISSEReadPump(body io.ReadCloser, maxLineSize int) *openAISSEReadPum
 func (p *openAISSEReadPump) Close() {
 	p.closeOnce.Do(func() {
 		close(p.stop)
-		_ = p.body.Close()
+		if p.cancelUpstream != nil {
+			p.cancelUpstream()
+			timer := time.NewTimer(openAISSEReadPumpCancelGrace)
+			select {
+			case <-p.done:
+			case <-timer.C:
+			}
+			timer.Stop()
+		}
+		readerJoined := false
+		select {
+		case <-p.done:
+			readerJoined = true
+		default:
+		}
+		if !p.leaveBodyOpen || !readerJoined {
+			_ = p.body.Close()
+		}
 		<-p.done
 	})
 }
