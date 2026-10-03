@@ -68,8 +68,8 @@ func TestPrismHTTPStreamLifecycleIsEarlyWithoutChangingTTFT(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				svc, c, recorder := newPrismHTTPStreamTestContext()
 				pr, pw := io.Pipe()
-				defer pr.Close()
-				defer pw.Close()
+				defer func() { _ = pr.Close() }()
+				defer func() { _ = pw.Close() }()
 				finish := make(chan struct{})
 				go func() {
 					_, _ = io.WriteString(pw, prismStreamCreated+prismStreamInProgress)
@@ -126,7 +126,7 @@ func TestPrismHTTPStreamPartialEventTimeoutDoesNotReplayOrLeak(t *testing.T) {
 					svc, c, recorder := newPrismHTTPStreamTestContext()
 					svc.cfg.Gateway.OpenAIFirstOutputTimeoutSeconds = 2
 					pr, pw := io.Pipe()
-					defer pw.Close()
+					defer func() { _ = pw.Close() }()
 					body := &firstOutputCloseTrackingBody{ReadCloser: pr, closed: make(chan struct{})}
 					go func() {
 						_, _ = io.WriteString(pw, prismStreamCreated)
@@ -236,7 +236,7 @@ func TestPrismHTTPStreamDoneWithoutBoundaryTimesOutWithTerminalFailure(t *testin
 		svc, c, recorder := newPrismHTTPStreamTestContext()
 		svc.cfg.Gateway.OpenAIFirstOutputTimeoutSeconds = 2
 		pr, pw := io.Pipe()
-		defer pw.Close()
+		defer func() { _ = pw.Close() }()
 		go func() { _, _ = io.WriteString(pw, prismStreamCreated+"data: [DONE]\n") }()
 		_, err := runPrismHTTPStreamTest(svc, c, pr, true)
 		require.Error(t, err)
@@ -251,8 +251,8 @@ func TestPrismChatStreamRoleIsEarlyWithoutChangingTTFT(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		svc, c, recorder := newPrismHTTPStreamTestContext()
 		pr, pw := io.Pipe()
-		defer pr.Close()
-		defer pw.Close()
+		defer func() { _ = pr.Close() }()
+		defer func() { _ = pw.Close() }()
 		role := `data: {"id":"chatcmpl_prism","object":"chat.completion.chunk","model":"gpt-5.6-sol","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}` + "\n\n"
 		finish := make(chan struct{})
 		go func() {
@@ -343,8 +343,8 @@ func TestPrismHTTPStreamReasoningSummaryIsDeliveredBeforeTheAnswer(t *testing.T)
 			synctest.Test(t, func(t *testing.T) {
 				svc, c, recorder := newPrismHTTPStreamTestContext()
 				pr, pw := io.Pipe()
-				defer pr.Close()
-				defer pw.Close()
+				defer func() { _ = pr.Close() }()
+				defer func() { _ = pw.Close() }()
 				finish := make(chan struct{})
 				go func() {
 					_, _ = io.WriteString(pw, prismStreamCreated+prismStreamInProgress+prismReasoningStreamHead)

@@ -20,6 +20,7 @@ func TestPrismUpstreamCancellationPreservesOtherAccountBillingDrain(t *testing.T
 	require.ErrorIs(t, prismCtx.Err(), context.Canceled)
 	require.NoError(t, otherCtx.Err())
 
+	//nolint:staticcheck // Deliberately verifies the helper's nil-context fallback.
 	nilCtx, releaseNil := openaiAccountUpstreamContext(nil, managed)
 	defer releaseNil()
 	require.NotNil(t, nilCtx)

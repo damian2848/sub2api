@@ -16,8 +16,9 @@ import (
 func TestChannelMonitorV2CandyWritesRouteAndConsumptionTogether(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
-	defer db.Close()
-	repo := NewChannelMonitorV2Repository(db).(*channelMonitorV2Repository)
+	defer func() { _ = db.Close() }()
+	repo, ok := NewChannelMonitorV2Repository(db).(*channelMonitorV2Repository)
+	require.True(t, ok, "expected concrete channel monitor repository")
 	cost := 0.03
 	usage := &service.ChannelMonitorProbeUsage{Source: "probe", RequestCount: 2, InputTokens: 20, OutputTokens: 10, CacheReadTokens: 60, ReasoningTokens: 5, CostUSD: &cost, CostIncomplete: true}
 	attempts := []service.ChannelMonitorProbeAttempt{{AccountID: 77, Platform: service.PlatformOpenAI, RequestedModel: "public", UpstreamModel: "mapped", Usage: usage}}
@@ -41,8 +42,9 @@ func TestChannelMonitorV2CandyWritesRouteAndConsumptionTogether(t *testing.T) {
 func TestChannelMonitorV2CandyReadsIndependentConfigHistoryAndUnknownUsage(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
-	defer db.Close()
-	repo := NewChannelMonitorV2Repository(db).(*channelMonitorV2Repository)
+	defer func() { _ = db.Close() }()
+	repo, ok := NewChannelMonitorV2Repository(db).(*channelMonitorV2Repository)
+	require.True(t, ok, "expected concrete channel monitor repository")
 	now := time.Now()
 	cost := 0.01
 	usage := &service.ChannelMonitorProbeUsage{Source: "probe", RequestCount: 1, InputTokens: 12, OutputTokens: 2, CostUSD: &cost}

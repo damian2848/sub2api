@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -154,13 +156,20 @@ func TestChannelMonitorRequestAggregationIncludesProbesAndKeepsBusinessLeaderboa
 	key := mustCreateApiKey(t, integrationEntClient, &service.APIKey{UserID: user.ID, Key: "monitor-source-" + strconv.FormatInt(time.Now().UnixNano(), 10), Name: "monitor-source"})
 	account := mustCreateAccount(t, integrationEntClient, &service.Account{Name: "monitor-source", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey})
 	t.Cleanup(func() {
-		_, _ = integrationDB.ExecContext(ctx, `DELETE FROM ops_error_logs WHERE group_id=$1`, group.ID)
+		// Ordinary Ent deletes are soft deletes and leave usage visible to later dashboard tests.
+		_, err := integrationDB.ExecContext(ctx, `DELETE FROM usage_logs WHERE api_key_id=$1`, key.ID)
+		assert.NoError(t, err, "cleanup fixture usage logs")
+		_, err = integrationDB.ExecContext(ctx, `DELETE FROM ops_error_logs WHERE group_id=$1`, group.ID)
+		assert.NoError(t, err, "cleanup fixture ops errors")
 		for _, table := range []string{"channel_monitor_v2_latency_histograms_rollup", "channel_monitor_v2_error_metrics_rollup", "channel_monitor_v2_user_metrics_rollup", "channel_monitor_v2_metrics_rollup", "channel_monitor_v2_latency_histograms_1m", "channel_monitor_v2_error_metrics_1m", "channel_monitor_v2_user_metrics_1m", "channel_monitor_v2_metrics_1m"} {
-			_, _ = integrationDB.ExecContext(ctx, "DELETE FROM "+table+" WHERE group_id=$1", group.ID)
+			_, err = integrationDB.ExecContext(ctx, "DELETE FROM "+table+" WHERE group_id=$1", group.ID)
+			assert.NoError(t, err, "cleanup fixture %s", table)
 		}
-		_ = integrationEntClient.User.DeleteOneID(user.ID).Exec(ctx)
-		_ = integrationEntClient.Account.DeleteOneID(account.ID).Exec(ctx)
-		_ = integrationEntClient.Group.DeleteOneID(group.ID).Exec(ctx)
+		hardDeleteCtx := mixins.SkipSoftDelete(ctx)
+		assert.NoError(t, integrationEntClient.APIKey.DeleteOneID(key.ID).Exec(hardDeleteCtx), "cleanup fixture API key")
+		assert.NoError(t, integrationEntClient.User.DeleteOneID(user.ID).Exec(hardDeleteCtx), "cleanup fixture user")
+		assert.NoError(t, integrationEntClient.Account.DeleteOneID(account.ID).Exec(hardDeleteCtx), "cleanup fixture account")
+		assert.NoError(t, integrationEntClient.Group.DeleteOneID(group.ID).Exec(hardDeleteCtx), "cleanup fixture group")
 	})
 	now := time.Now().UTC().Truncate(time.Minute)
 	firstToken, duration := 12, 24
@@ -284,13 +293,20 @@ func TestChannelMonitorZeroPricedCompletionAndChargedFailureAreNotBillingProxies
 	key := mustCreateApiKey(t, integrationEntClient, &service.APIKey{UserID: user.ID, Key: "monitor-outcome-" + strconv.FormatInt(time.Now().UnixNano(), 10), Name: "monitor-outcome"})
 	account := mustCreateAccount(t, integrationEntClient, &service.Account{Name: "monitor-outcome", Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey})
 	t.Cleanup(func() {
-		_, _ = integrationDB.ExecContext(ctx, `DELETE FROM ops_error_logs WHERE group_id=$1`, group.ID)
+		// Ordinary Ent deletes are soft deletes and leave usage visible to later dashboard tests.
+		_, err := integrationDB.ExecContext(ctx, `DELETE FROM usage_logs WHERE api_key_id=$1`, key.ID)
+		assert.NoError(t, err, "cleanup fixture usage logs")
+		_, err = integrationDB.ExecContext(ctx, `DELETE FROM ops_error_logs WHERE group_id=$1`, group.ID)
+		assert.NoError(t, err, "cleanup fixture ops errors")
 		for _, table := range []string{"channel_monitor_v2_latency_histograms_rollup", "channel_monitor_v2_error_metrics_rollup", "channel_monitor_v2_user_metrics_rollup", "channel_monitor_v2_metrics_rollup", "channel_monitor_v2_latency_histograms_1m", "channel_monitor_v2_error_metrics_1m", "channel_monitor_v2_user_metrics_1m", "channel_monitor_v2_metrics_1m"} {
-			_, _ = integrationDB.ExecContext(ctx, "DELETE FROM "+table+" WHERE group_id=$1", group.ID)
+			_, err = integrationDB.ExecContext(ctx, "DELETE FROM "+table+" WHERE group_id=$1", group.ID)
+			assert.NoError(t, err, "cleanup fixture %s", table)
 		}
-		_ = integrationEntClient.User.DeleteOneID(user.ID).Exec(ctx)
-		_ = integrationEntClient.Account.DeleteOneID(account.ID).Exec(ctx)
-		_ = integrationEntClient.Group.DeleteOneID(group.ID).Exec(ctx)
+		hardDeleteCtx := mixins.SkipSoftDelete(ctx)
+		assert.NoError(t, integrationEntClient.APIKey.DeleteOneID(key.ID).Exec(hardDeleteCtx), "cleanup fixture API key")
+		assert.NoError(t, integrationEntClient.User.DeleteOneID(user.ID).Exec(hardDeleteCtx), "cleanup fixture user")
+		assert.NoError(t, integrationEntClient.Account.DeleteOneID(account.ID).Exec(hardDeleteCtx), "cleanup fixture account")
+		assert.NoError(t, integrationEntClient.Group.DeleteOneID(group.ID).Exec(hardDeleteCtx), "cleanup fixture group")
 	})
 	now := time.Now().UTC().Truncate(time.Minute).Add(-2 * time.Minute)
 	usageRepo := NewUsageLogRepository(integrationEntClient, integrationDB)

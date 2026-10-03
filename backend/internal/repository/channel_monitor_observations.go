@@ -32,7 +32,7 @@ func (r *channelMonitorV2Repository) ListMonitorObservationTargets(ctx context.C
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	items := []service.ChannelMonitorObservation{}
 	for rows.Next() {
 		var item service.ChannelMonitorObservation
@@ -62,7 +62,7 @@ func (r *channelMonitorV2Repository) ListMonitorObservations(ctx context.Context
 	if err != nil {
 		return nil, fmt.Errorf("query monitor observations: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	items := []service.ChannelMonitorObservation{}
 	for rows.Next() {
 		var payload []byte

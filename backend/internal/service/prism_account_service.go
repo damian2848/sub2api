@@ -379,7 +379,7 @@ func (s *PrismAccountService) request(ctx context.Context, sourceID int64, metho
 	if err != nil {
 		return infraerrors.New(http.StatusServiceUnavailable, "PRISM_UPSTREAM_UNAVAILABLE", "The Prism browser service is unavailable")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20+1))
 	if err != nil || len(data) > 1<<20 {
 		return infraerrors.New(http.StatusServiceUnavailable, "PRISM_UPSTREAM_UNAVAILABLE", "The Prism browser service rejected the request")
@@ -420,8 +420,12 @@ func (s *PrismAccountService) syncSession(ctx context.Context, a, source *Accoun
 		return infraerrors.New(http.StatusServiceUnavailable, "PRISM_NOT_CONFIGURED", "The managed Prism endpoint is unavailable")
 	}
 	lock, _ := s.locks.LoadOrStore(source.ID, &sync.Mutex{})
-	lock.(*sync.Mutex).Lock()
-	defer lock.(*sync.Mutex).Unlock()
+	mutex, ok := lock.(*sync.Mutex)
+	if !ok {
+		panic("invalid Prism account synchronization lock type")
+	}
+	mutex.Lock()
+	defer mutex.Unlock()
 	fresh, loadErr := s.repo.GetByID(ctx, a.ID)
 	if loadErr != nil || !fresh.IsManagedPrismAccount() || !fresh.IsActive() || fresh.PrismSourceAccountID() != source.ID {
 		return infraerrors.BadRequest("PRISM_ACCOUNT_DISABLED", "The Prism account is disabled or deleted")
@@ -779,7 +783,11 @@ func (s *PrismAccountService) cleanupDeleted(accounts []Account) {
 	s.mu.Unlock()
 	for _, source := range stale {
 		lock, _ := s.locks.LoadOrStore(source, &sync.Mutex{})
-		lock.(*sync.Mutex).Lock()
+		mutex, ok := lock.(*sync.Mutex)
+		if !ok {
+			panic("invalid Prism account synchronization lock type")
+		}
+		mutex.Lock()
 		ctx, cancel := context.WithTimeout(s.ctx, 5*time.Second)
 		current, err := s.repo.FindByExtraField(ctx, PrismSourceAccountKey, source)
 		if err == nil && !slices.ContainsFunc(current, func(a Account) bool { return a.IsManagedPrismAccount() }) {
@@ -790,7 +798,7 @@ func (s *PrismAccountService) cleanupDeleted(accounts []Account) {
 			}
 		}
 		cancel()
-		lock.(*sync.Mutex).Unlock()
+		mutex.Unlock()
 	}
 }
 
@@ -810,8 +818,12 @@ func (s *PrismAccountService) RevokeDeleted(ctx context.Context, account *Accoun
 		source = account.ID
 	}
 	lock, _ := s.locks.LoadOrStore(source, &sync.Mutex{})
-	lock.(*sync.Mutex).Lock()
-	defer lock.(*sync.Mutex).Unlock()
+	mutex, ok := lock.(*sync.Mutex)
+	if !ok {
+		panic("invalid Prism account synchronization lock type")
+	}
+	mutex.Lock()
+	defer mutex.Unlock()
 	s.mu.Lock()
 	s.synced[source] = prismSyncStamp{}
 	s.mu.Unlock()

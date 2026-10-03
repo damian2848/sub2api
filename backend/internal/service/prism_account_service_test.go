@@ -373,7 +373,7 @@ func TestPrismBootstrapFailureDoesNotEnableAndExplicitReconnectAuthorizesProbeRe
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 			retryProbes = append(retryProbes, body.RetryProbe)
 			if firstFailure.Swap(false) {
-				http.Error(w, "private browser failure", 503)
+				http.Error(w, "private browser failure", http.StatusServiceUnavailable)
 				return
 			}
 			_, _ = w.Write([]byte(`{"phase":"ready","ready":true,"models":["gpt-6.1-sol"]}`))
@@ -592,8 +592,13 @@ func TestPrismSessionUsesNewTokenAndRejectsInvalidSourceBeforeWorkerCalls(t *tes
 		}
 		var body map[string]any
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		accessToken, ok := body["access_token"].(string)
+		if !ok {
+			t.Error("access_token must be a string")
+			return
+		}
 		mu.Lock()
-		sent = append(sent, body["access_token"].(string))
+		sent = append(sent, accessToken)
 		mu.Unlock()
 		_, _ = w.Write([]byte(`{}`))
 	}))

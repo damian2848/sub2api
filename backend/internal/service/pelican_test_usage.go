@@ -22,8 +22,6 @@ type pelicanTestUsageCollector struct {
 	requestedModel                string
 	runID, logicalRequestID, role string
 	groupID                       *int64
-	account                       *Account
-	recorder                      ProbeRequestFactRecorder
 	requests                      []*pelicanTestUsage
 }
 

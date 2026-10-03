@@ -85,14 +85,15 @@ func TestPrismConfigurationFixedConnectionAndPendingRestart(t *testing.T) {
 		require.Empty(t, r.URL.RawQuery)
 		require.Equal(t, "Bearer private-prism-management-key-canary", r.Header.Get("Authorization"))
 		methods = append(methods, r.Method)
-		if r.Method == http.MethodPut {
+		switch r.Method {
+		case http.MethodPut:
 			body, err := io.ReadAll(r.Body)
 			require.NoError(t, err)
 			options, err := decodePrismConfigurationOptions(body)
 			require.NoError(t, err)
 			state.Desired, state.Source = options, "saved"
 			state.RestartRequired = state.Effective != state.Desired
-		} else if r.Method == http.MethodDelete {
+		case http.MethodDelete:
 			state.Desired, state.Source, state.RestartRequired = state.Effective, "environment", false
 		}
 		require.NoError(t, json.NewEncoder(w).Encode(state))

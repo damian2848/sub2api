@@ -218,7 +218,7 @@ func (s *PrismAccountService) requestConfiguration(ctx context.Context, method s
 	resp, err := client.Do(req)
 	result.Availability = "unavailable"
 	if err == nil {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode == http.StatusNotFound {
 			result.Availability = "unsupported"
 		} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
