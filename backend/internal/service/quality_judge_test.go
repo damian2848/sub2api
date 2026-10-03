@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -103,7 +104,7 @@ func TestQualityJudgeSkipsUnavailableOrUnsupportedAccounts(t *testing.T) {
 
 func TestQualityJudgeMetersFailedAndSuccessfulRequestsWithoutCallerDoubleCount(t *testing.T) {
 	svc, cfg, accounts, slots := judgeFixture()
-	svc.billing = newTestBillingService()
+	svc.billing = NewBillingService(&config.Config{}, nil)
 	for i := range accounts.accounts {
 		accounts.accounts[i].Credentials = map[string]any{"model_mapping": map[string]any{cfg.Quality.Judge.ModelID: "claude-sonnet-4"}}
 	}

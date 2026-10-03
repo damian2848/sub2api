@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -258,7 +259,7 @@ func TestChannelMonitorV2CandyMeteringIncludesFailedAttempts(t *testing.T) {
 		}
 		return &ScheduledTestResult{Status: "success", ResponseText: "21"}, nil
 	})
-	groups.billing = newTestBillingService()
+	groups.billing = NewBillingService(&config.Config{}, nil)
 	s := candyServiceFixture(repo, groups)
 	s.RunDue(context.Background(), groupTestNow)
 	require.Len(t, repo.results, 1)
