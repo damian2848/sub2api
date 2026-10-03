@@ -976,18 +976,18 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
           },
         },
         {
-          id: 'cline_pass',
-          display_name: 'Cline Pass',
+          id: 'acme_chat',
+          display_name: 'Acme Chat',
           gateway: 'openai',
           cn_provider: false,
           multi_protocol: {
             default_mode: 'pass',
             routing: 'by_inbound',
-            modes: [{ mode: 'pass', base_urls: { chat_completions: 'https://api.cline.bot/api/v1' } }],
+            modes: [{ mode: 'pass', base_urls: { chat_completions: 'https://api.acme-chat.example/v1' } }],
           },
         },
       ],
-      composite_precedence: [...BUILTIN_PLATFORM_CATALOG.composite_precedence, 'acme_router', 'cline_pass'],
+      composite_precedence: [...BUILTIN_PLATFORM_CATALOG.composite_precedence, 'acme_router', 'acme_chat'],
     }
 
     beforeEach(() => {
@@ -1051,11 +1051,11 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
 
     it('creates a by-inbound provider account without protocol rules', async () => {
       const wrapper = mountModal()
-      await wrapper.get('[data-testid="platform-button-cline_pass"]').trigger('click')
+      await wrapper.get('[data-testid="platform-button-acme_chat"]').trigger('click')
       // 单一接入模式时不显示模式选择。
       expect(wrapper.find('[data-testid="generic-account-mode"]').exists()).toBe(false)
-      await wrapper.get('form#create-account-form input[type="text"]').setValue('cline')
-      await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-cline')
+      await wrapper.get('form#create-account-form input[type="text"]').setValue('acme-chat')
+      await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-acme-chat')
 
       await wrapper.get('form#create-account-form').trigger('submit.prevent')
       await flushPromises()
@@ -1064,8 +1064,8 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
       expect(credentials).toMatchObject({
         account_mode: 'pass',
         api_protocol: 'adaptive',
-        base_url: 'https://api.cline.bot/api/v1',
-        api_base_urls: { chat_completions: 'https://api.cline.bot/api/v1' },
+        base_url: 'https://api.acme-chat.example/v1',
+        api_base_urls: { chat_completions: 'https://api.acme-chat.example/v1' },
       })
       expect(credentials).not.toHaveProperty('protocol_rules')
     })
@@ -1086,6 +1086,38 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
       })
       expect(createAccountMock.mock.calls[0]?.[0]?.credentials).not.toHaveProperty('protocol_rules')
     })
+  })
+
+  it('groups the aggregators on their own row below the CN providers', () => {
+    const wrapper = mountModal()
+    const labels = (testid: string) =>
+      wrapper.get(`[data-testid="${testid}"]`).findAll('button').map(button => button.text().trim())
+    expect(labels('platform-row-cn')).toEqual(['Kimi', 'Zhipu GLM', 'DeepSeek', 'MiniMax'])
+    expect(labels('platform-row-aggregators')).toEqual(['OpenCode', 'Command Code', 'Cline'])
+  })
+
+  it('creates a Cline account without an account type and with only the Chat Completions endpoint', async () => {
+    const wrapper = mountModal()
+    await wrapper.get('[data-testid="platform-button-cline"]').trigger('click')
+    // 积分与 ClinePass 共用同一个 Key，按模型计费，不需要选择账号类型。
+    expect(wrapper.find('[data-testid="generic-account-mode"]').exists()).toBe(false)
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('cline')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('sk-cline')
+
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    const payload = createAccountMock.mock.calls[0]?.[0]
+    expect(payload?.platform).toBe('cline')
+    expect(payload?.credentials).toMatchObject({
+      account_mode: 'payg',
+      api_protocol: 'adaptive',
+      base_url: 'https://api.cline.bot/api/v1',
+      api_base_urls: { chat_completions: 'https://api.cline.bot/api/v1' },
+    })
+    expect(payload?.credentials).not.toHaveProperty('protocol_rules')
+    expect(payload?.credentials?.api_base_urls).not.toHaveProperty('responses')
+    expect(payload?.credentials?.api_base_urls).not.toHaveProperty('anthropic')
   })
 
   it('submits adaptive Kimi protocol endpoints', async () => {

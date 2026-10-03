@@ -52,6 +52,7 @@ const (
 	PlatformOpenCodeGo  = domain.PlatformOpenCodeGo
 	PlatformTypeSafe    = domain.PlatformTypeSafe
 	PlatformCommandCode = domain.PlatformCommandCode
+	PlatformCline       = domain.PlatformCline
 	PlatformComposite   = domain.PlatformComposite
 	// PlatformKiro is retained for unsupported-platform threshold tests and legacy
 	// account rows. Scheduling-threshold evaluation never pauses kiro accounts.
@@ -90,6 +91,8 @@ const (
 	DefaultOpenCodeZenBaseURL = "https://opencode.ai/zen/v1"
 	// Command Code Provider API：Chat Completions / Responses / models 共用 /provider/v1 基址。
 	DefaultCommandCodeBaseURL = "https://api.commandcode.ai/provider/v1"
+	// Cline API：只提供 Chat Completions（{base}/chat/completions）与模型列表。
+	DefaultClineBaseURL = "https://api.cline.bot/api/v1"
 )
 
 // 国产供应商 Anthropic 协议端点的默认 base_url（上游路径为 {base}/v1/messages）。

@@ -47,6 +47,21 @@ type ProviderProfile struct {
 	ModelCatalog bool
 }
 
+// providerDefaultTestModel 返回账号连接测试未指定模型时的默认模型；非多协议供应商或
+// 未设置时为空。
+func (a *Account) providerDefaultTestModel() string {
+	profile := a.providerProfile()
+	if profile == nil {
+		return ""
+	}
+	// Cline 订阅了 ClinePass 的账号用订阅模型测试，不消耗积分；ClinePass 钱包冷却中
+	// （窗口用满等）时改用按量模型，否则测试必然失败，而积分模型照常可用。
+	if a.IsCline() && a.clinePassSubscribed() && !a.isRateLimitActiveForKey(clinePassRateLimitKey) {
+		return DefaultClinePassTestModel
+	}
+	return profile.DefaultTestModel
+}
+
 // Endpoints 返回指定接入模式的端点；未知模式回落 DefaultMode。
 func (p *ProviderProfile) Endpoints(mode string) ProviderEndpoints {
 	if p == nil {
@@ -191,6 +206,18 @@ var providerProfiles = map[string]*ProviderProfile{
 					APIProtocolAnthropic:       DefaultCommandCodeAnthropicBaseURL,
 				},
 				ProtocolRules: DefaultCommandCodeProtocolRules(),
+			},
+		},
+	},
+	PlatformCline: {
+		Platform:         PlatformCline,
+		DefaultMode:      AccountModePayG,
+		DefaultTestModel: DefaultClineTestModel,
+		// 按量积分与 ClinePass 订阅共用同一个 API Key 与端点，由模型名决定扣哪一边
+		// （cline-pass/* 走订阅），只有一个接入模式；两边的超限分别冷却（见 cline.go）。
+		Modes: map[string]ProviderEndpoints{
+			AccountModePayG: {
+				BaseURLs: map[string]string{APIProtocolChatCompletions: DefaultClineBaseURL},
 			},
 		},
 	},

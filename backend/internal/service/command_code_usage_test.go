@@ -341,7 +341,7 @@ func TestCommandCodeWindowsIgnoredWithPurchasedCredits(t *testing.T) {
 	require.Nil(t, cnProviderQuotaSnapshotReset(account, time.Now()))
 }
 
-// commandCodeCheckRepo 记录周期检测对 Command Code 账号的停调。
+// commandCodeCheckRepo 按平台列出账号，并记录周期检测对账号的停调。
 type commandCodeCheckRepo struct {
 	AccountRepository
 	accounts []Account
@@ -350,10 +350,13 @@ type commandCodeCheckRepo struct {
 }
 
 func (r *commandCodeCheckRepo) ListByPlatform(_ context.Context, platform string) ([]Account, error) {
-	if platform == PlatformCommandCode {
-		return r.accounts, nil
+	var accounts []Account
+	for _, account := range r.accounts {
+		if account.Platform == platform {
+			accounts = append(accounts, account)
+		}
 	}
-	return nil, nil
+	return accounts, nil
 }
 
 func (r *commandCodeCheckRepo) SetTempUnschedulable(_ context.Context, id int64, _ time.Time, _ string) error {

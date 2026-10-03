@@ -256,6 +256,24 @@
           }
         ]
       }
+    },
+    {
+      "id": "cline",
+      "display_name": "Cline",
+      "gateway": "openai",
+      "cn_provider": false,
+      "multi_protocol": {
+        "default_mode": "payg",
+        "routing": "by_inbound",
+        "modes": [
+          {
+            "mode": "payg",
+            "base_urls": {
+              "chat_completions": "https://api.cline.bot/api/v1"
+            }
+          }
+        ]
+      }
     }
   ],
   "composite_precedence": [
@@ -270,6 +288,7 @@
     "minimax",
     "opencode_go",
     "typesafe",
-    "command_code"
+    "command_code",
+    "cline"
   ]
 }

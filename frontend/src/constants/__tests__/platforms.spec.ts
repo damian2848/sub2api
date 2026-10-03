@@ -26,7 +26,8 @@ const concretePlatforms = [
   'minimax',
   'opencode_go',
   'typesafe',
-  'command_code'
+  'command_code',
+  'cline'
 ]
 
 describe('platform option catalogs', () => {
@@ -59,11 +60,11 @@ describe('platform catalog with a newly registered platform', () => {
     expect(listPlatformIds()).toEqual(concretePlatforms)
     expect(compositePrecedencePlatformIds()).toEqual([
       'anthropic', 'gemini', 'openai', 'antigravity', 'grok',
-      'kimi', 'zhipu', 'deepseek', 'minimax', 'opencode_go', 'typesafe', 'command_code'
+      'kimi', 'zhipu', 'deepseek', 'minimax', 'opencode_go', 'typesafe', 'command_code', 'cline'
     ])
     expect(CONCRETE_PLATFORM_OPTIONS.map((option) => option.label)).toEqual([
       'Anthropic', 'OpenAI', 'Gemini', 'Antigravity', 'Grok',
-      'Kimi', 'Zhipu GLM', 'DeepSeek', 'MiniMax', 'OpenCode', 'TypeSafe / Jev', 'Command Code'
+      'Kimi', 'Zhipu GLM', 'DeepSeek', 'MiniMax', 'OpenCode', 'TypeSafe / Jev', 'Command Code', 'Cline'
     ])
     expect(platformLabel('zhipu')).toBe('Zhipu GLM')
     expect(platformLabel('composite')).toBe('Composite')

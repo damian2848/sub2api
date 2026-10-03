@@ -25,9 +25,7 @@ const accountTestSuppressCompletionContextKey = "account_test_suppress_completio
 func (s *AccountTestService) testCNProviderAdaptiveConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
 	requestedModelID := strings.TrimSpace(modelID)
 	if requestedModelID == "" {
-		if profile := account.providerProfile(); profile != nil {
-			requestedModelID = profile.DefaultTestModel
-		}
+		requestedModelID = account.providerDefaultTestModel()
 	}
 	if requestedModelID == "" {
 		requestedModelID = openai.DefaultTestModel

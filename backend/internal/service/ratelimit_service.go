@@ -426,6 +426,19 @@ func (s *RateLimitService) handleUpstreamErrorAfterStreakReset(ctx context.Conte
 			return disable
 		}
 	}
+	// Cline 积分、花费上限与 ClinePass 超限同样按文案区分，只冷却对应的钱包
+	// （见 ratelimit_cline.go）。
+	if account.IsCline() && (statusCode == http.StatusBadRequest || statusCode == http.StatusPaymentRequired ||
+		statusCode == http.StatusForbidden || statusCode == http.StatusTooManyRequests) {
+		if s.handleClineError(ctx, account, statusCode, responseBody, upstreamMsg) {
+			return false
+		}
+		// 402 只会是积分不足：冷却没写进去也不能落到下面的 402 默认分支——那里永久置
+		// status=error，而周期探测只覆盖激活账号，充值后无法自动恢复。
+		if statusCode == http.StatusPaymentRequired {
+			return false
+		}
+	}
 
 	switch statusCode {
 	case 400:

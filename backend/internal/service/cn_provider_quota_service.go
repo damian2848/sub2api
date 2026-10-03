@@ -67,8 +67,8 @@ type CNProviderQuotaProbeResult struct {
 	Balance *CNProviderBalanceResult `json:"balance,omitempty"`
 }
 
-// CNProviderQuotaService 探测 Kimi / Zhipu / MiniMax Coding Plan、OpenCode Go 与
-// Command Code 的滚动窗口用量。
+// CNProviderQuotaService 探测 Kimi / Zhipu / MiniMax Coding Plan、OpenCode Go、
+// Command Code 与 Cline（ClinePass）的滚动窗口用量。
 type CNProviderQuotaService struct {
 	accountRepo  AccountRepository
 	proxyRepo    ProxyRepository
@@ -137,6 +137,9 @@ func (s *CNProviderQuotaService) queryUsageForAccount(ctx context.Context, accou
 	provider := account.GetCodingPlanProvider()
 	if provider == PlatformCommandCode {
 		return s.queryCommandCodeUsage(ctx, account)
+	}
+	if provider == PlatformCline {
+		return s.queryClineUsage(ctx, account)
 	}
 	if provider != PlatformKimi && provider != PlatformZhipu && provider != PlatformMiniMax && provider != PlatformOpenCodeGo {
 		return nil, infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "account is not a kimi/zhipu/minimax coding plan or opencode go account")
@@ -300,6 +303,12 @@ func validateCodingPlanAccount(account *Account) error {
 	if account.IsCommandCode() {
 		if !account.commandCodeUsageSupported() {
 			return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "command code usage is only available for api key accounts on the official host")
+		}
+		return nil
+	}
+	if account.IsCline() {
+		if !account.clineAccountAPISupported() {
+			return infraerrors.New(http.StatusBadRequest, "CN_QUOTA_NOT_CODING_PLAN", "cline usage is only available for api key accounts on the official host")
 		}
 		return nil
 	}

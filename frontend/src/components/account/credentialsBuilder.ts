@@ -319,6 +319,22 @@ export function providerHasModelCatalog(platform: string): boolean {
   return getProviderProfile(platform)?.model_catalog === true
 }
 
+/** 接入模式的展示名；未知模式原样显示。 */
+export function providerModeLabel(mode: string, t: (key: string) => string): string {
+  switch (mode) {
+    case 'payg':
+      return t('admin.accounts.cnProviders.accountMode.payg')
+    case 'coding':
+      return t('admin.accounts.cnProviders.accountMode.coding')
+    case 'zen':
+      return t('admin.accounts.opencodeGo.accountMode.zen')
+    case 'go':
+      return t('admin.accounts.opencodeGo.accountMode.go')
+    default:
+      return mode
+  }
+}
+
 /** 供应商的接入模式，默认模式在前。 */
 export function providerAccountModes(platform: string): string[] {
   return getProviderProfile(platform)?.modes.map(item => item.mode) ?? []
@@ -545,10 +561,10 @@ export interface CNUsageCellAccount {
   credentials?: Record<string, unknown>
 }
 
-// Command Code 的积分与用量接口只查官方主机上的 API Key 账号（与后端
-// commandCodeUsageSupported 一致）：自定义中转的 Key 不发往官方接口，后端直接拒绝
-// 探测，单元格只会显示一行报错。
-const OFFICIAL_ACCOUNT_API_PLATFORMS = ['command_code']
+// Command Code、Cline 的积分与用量接口只查官方主机上的 API Key 账号（与后端
+// commandCodeUsageSupported / clineAccountAPISupported 一致）：自定义中转的 Key 不发往
+// 官方接口，后端直接拒绝探测，单元格只会显示一行报错。
+const OFFICIAL_ACCOUNT_API_PLATFORMS = ['command_code', 'cline']
 
 function cnUsageCellAccountMode(account: CNUsageCellAccount): string {
   const mode = account.credentials?.account_mode
@@ -595,7 +611,7 @@ export function cnQuotaCellVisible(account: CNUsageCellAccount): boolean {
   const { platform } = account
   const mode = cnUsageCellAccountMode(account)
   if (platform === 'opencode_go') return mode !== 'zen'
-  // Command Code：订阅套餐窗口与积分同源，一次探测同时刷新两者。
+  // Command Code、Cline：订阅窗口与积分由一次探测同时刷新。
   if (OFFICIAL_ACCOUNT_API_PLATFORMS.includes(platform)) return officialAccountAPISupported(account, mode)
   return (platform === 'kimi' || platform === 'zhipu' || platform === 'minimax') && mode === 'coding'
 }

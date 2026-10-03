@@ -419,6 +419,29 @@ describe('AccountUsageCell', () => {
     expect(wrapper.find('div[title="admin.accounts.cnProviders.noBalanceEndpoint"]').exists()).toBe(true)
   })
 
+  it('Cline 账号渲染 ClinePass 窗口与积分余额单元格', async () => {
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 9104,
+          platform: 'cline',
+          type: 'apikey',
+          credentials: { api_key: 'sk-cline' }
+        })
+      },
+      global: {
+        stubs: { ...cnUsageCellStubs, UsageProgressBar: true, AccountQuotaInfo: true }
+      }
+    })
+
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="cn-quota-cell"]').exists()).toBe(true)
+    expect(wrapper.find('[data-test="cn-balance-cell"]').exists()).toBe(true)
+    // 子单元格可见时不显示 `-` 占位符（按量账号与订阅账号用同一套单元格）。
+    expect(wrapper.text()).not.toContain('-')
+  })
+
   it('Antigravity 图片用量会聚合新旧 image 模型', async () => {
     getUsage.mockResolvedValue({
       antigravity_quota: {
