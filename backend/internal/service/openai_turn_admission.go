@@ -258,6 +258,11 @@ func (s *OpenAIGatewayService) latestOpenAITurnAccountForGroup(
 	latest := selected
 	var parent *Account
 	authoritativeRead := false
+	if ttl := s.openAITurnAdmissionCacheTTL(); ttl > 0 {
+		if cached, cachedParent, ok := s.openAITurnAdmissionCache.load(selected.ID, ttl); ok {
+			latest, parent, authoritativeRead = cached, cachedParent, true
+		}
+	}
 	if s.accountRepo != nil {
 		reader, ok := s.accountRepo.(OpenAITurnAdmissionReader)
 		if !ok {
@@ -271,7 +276,7 @@ func (s *OpenAIGatewayService) latestOpenAITurnAccountForGroup(
 			// fail-closed.
 			reader = nil
 		}
-		if reader != nil {
+		if reader != nil && !authoritativeRead {
 			authoritativeRead = true
 			readCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 			var err error
@@ -279,6 +284,9 @@ func (s *OpenAIGatewayService) latestOpenAITurnAccountForGroup(
 			cancel()
 			if err != nil || latest == nil || latest.ID != selected.ID {
 				return nil, denyOpenAITurn("latest_state_unavailable")
+			}
+			if s.openAITurnAdmissionCacheTTL() > 0 {
+				s.openAITurnAdmissionCache.store(latest, parent)
 			}
 		}
 	} else if s.requireLatestTurnAdmission {
