@@ -90,7 +90,11 @@ func cloneOpenAITurnAdmissionMap(input map[string]any) map[string]any {
 	if !value.IsValid() {
 		return nil
 	}
-	return value.Interface().(map[string]any)
+	cloned, ok := value.Interface().(map[string]any)
+	if !ok {
+		return nil
+	}
+	return cloned
 }
 
 func cloneOpenAITurnAdmissionValue(value reflect.Value, depth int) reflect.Value {
@@ -140,7 +144,7 @@ func cloneOpenAITurnAdmissionValue(value reflect.Value, depth int) reflect.Value
 			}
 		}
 		return result
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if value.IsNil() {
 			return reflect.Zero(value.Type())
 		}

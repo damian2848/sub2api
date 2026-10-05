@@ -139,17 +139,38 @@ func TestOpenAITurnAdmissionLocalCacheDeepClonesJSONValues(t *testing.T) {
 
 	first, _, ok := cache.load(account.ID, time.Minute)
 	require.True(t, ok)
-	first.Credentials["nested"].(map[string]any)["values"].([]any)[0].(map[string]any)["key"] = "mutated"
-	first.Extra["nested"].(map[string]any)["key"] = "mutated"
+	firstCredentialsNested := admissionTestMap(t, first.Credentials["nested"])
+	firstCredentialsValues := admissionTestSlice(t, firstCredentialsNested["values"])
+	admissionTestMap(t, firstCredentialsValues[0])["key"] = "mutated"
+	firstExtraNested := admissionTestMap(t, first.Extra["nested"])
+	firstExtraNested["key"] = "mutated"
 
 	second, _, ok := cache.load(account.ID, time.Minute)
 	require.True(t, ok)
-	require.Equal(t, "original", second.Credentials["nested"].(map[string]any)["values"].([]any)[0].(map[string]any)["key"])
-	require.Equal(t, "original", second.Extra["nested"].(map[string]any)["key"])
-	account.Credentials["nested"].(map[string]any)["values"].([]any)[0].(map[string]any)["key"] = "source-mutated"
+	secondCredentialsNested := admissionTestMap(t, second.Credentials["nested"])
+	secondCredentialsValues := admissionTestSlice(t, secondCredentialsNested["values"])
+	require.Equal(t, "original", admissionTestMap(t, secondCredentialsValues[0])["key"])
+	require.Equal(t, "original", admissionTestMap(t, second.Extra["nested"])["key"])
+	accountCredentialsNested := admissionTestMap(t, account.Credentials["nested"])
+	accountCredentialsValues := admissionTestSlice(t, accountCredentialsNested["values"])
+	admissionTestMap(t, accountCredentialsValues[0])["key"] = "source-mutated"
 	third, _, ok := cache.load(account.ID, time.Minute)
 	require.True(t, ok)
-	require.Equal(t, "original", third.Credentials["nested"].(map[string]any)["values"].([]any)[0].(map[string]any)["key"])
+	thirdCredentialsNested := admissionTestMap(t, third.Credentials["nested"])
+	thirdCredentialsValues := admissionTestSlice(t, thirdCredentialsNested["values"])
+	require.Equal(t, "original", admissionTestMap(t, thirdCredentialsValues[0])["key"])
+}
+
+func admissionTestMap(t *testing.T, value any) map[string]any {
+	result, ok := value.(map[string]any)
+	require.True(t, ok)
+	return result
+}
+
+func admissionTestSlice(t *testing.T, value any) []any {
+	result, ok := value.([]any)
+	require.True(t, ok)
+	return result
 }
 
 func TestOpenAITurnAdmissionExplicitGroupRejectsRemovedMembership(t *testing.T) {
