@@ -17,7 +17,8 @@ test('page multiplex is opt-in and leaves default workers untouched', () => {
 });
 
 test('account submission admission is serial, cancelled waiters do not hold its lease', async () => {
-  const mux = new AccountPageMultiplexer(); const release = await mux.acquireSubmission();
+  const mux = new AccountPageMultiplexer(); assert.equal(mux.pollMs, 600);
+  const release = await mux.acquireSubmission();
   const controller = new AbortController(); const pending = mux.acquireSubmission(controller.signal);
   controller.abort(); await assert.rejects(pending, error => error.code === 'request_cancelled');
   let admitted = false; const next = mux.acquireSubmission().then(value => { admitted = true; return value; });

@@ -8,12 +8,12 @@ export function multiplexEnabled(value = process.env.PRISM_MULTIPLEX_PAGES) {
 // their cache) while one small resident document polls that account's accepted turns. This is NOT
 // shared-context multiplexing: contexts are retained, so only editor-page memory/loading is saved.
 export class AccountPageMultiplexer {
-  constructor({ origin = 'https://prism.openai.com', admissionGuard, metrics, pollMs = 1000,
+  constructor({ origin = 'https://prism.openai.com', admissionGuard, metrics, pollMs = 600,
     onAudit = () => {}, healthMs = 30000, now = Date.now } = {}) {
     this.origin = new URL(origin).origin;
     this.admissionGuard = admissionGuard;
     this.metrics = metrics;
-    this.pollMs = Math.max(250, pollMs || 1000);
+    this.pollMs = Math.max(250, pollMs || 600);
     this.onAudit = onAudit;
     this.healthMs = Math.min(30000, Math.max(250, healthMs)); this.now = now;
     this.sessions = new Set(); this.healthTimer = null; this.healthProbe = null;

@@ -68,7 +68,7 @@ compose file and listed in `.env.prism-browser.example`):
 | `PRISM_TRANSIENT_RETRIES` | `1` | 0-1 | Automatic resubmissions of a request that failed because Prism's own servers returned an HTTP 5xx. `0` turns it off. |
 | `PRISM_TRANSIENT_RETRY_DELAY_SECONDS` | `4` | 0-60 | Pause before the resubmission, so an overloaded Prism has a moment. |
 | `PRISM_TRANSIENT_RETRY_WAIT_SECONDS` | `15` | 0-120 | Longest wait for an idle worker to take the resubmission before the original error is returned. |
-| `PRISM_STATUS_POLL_MS` | `1000` | 0 or 250-10000 | After the page's first successful poll, poll independently at this interval. Failures back off to at most 8000 ms; only three consecutive failures stop independent polling. `0` leaves polling to the page. |
+| `PRISM_STATUS_POLL_MS` | `600` | 0 or 250-10000 | After the page's first successful poll, poll independently at this interval. The first independent poll runs immediately; failures back off to at most 8000 ms; only three consecutive failures stop independent polling. `0` leaves polling to the page. |
 | `PRISM_START_COOLDOWN_SECONDS` | `60` | 0-600 | Minimum pause after a refused start. Admission also waits for the next token. `0` disables this minimum, not token pacing. |
 | `PRISM_PREWARM_CHAT` | `true` | `true` / `false` | After a clean turn the worker opens the next chat tab, closes the older chat tabs and waits for the composer while idle, so the next request only fills it in. Each request used to open a tab that was never closed, so the page grew and preparing a request took 5-9 s after ~16 turns. `false` opens the chat per request. |
 | `PRISM_STREAM_REASONING` | `true` | `true` / `false` | Forward Prism's reasoning summaries and tool progress (see *Progress while Prism works*) to streaming Responses clients. `false` keeps the stream to heartbeats until the answer. |
@@ -124,6 +124,9 @@ successful poll resets that streak. Only three consecutive failures stop our
 poller and leave completion to the page. Page polling errors remain nonfatal
 while our poller is healthy. `upstream_result.own_poll_errors` counts all failed
 independent polls in the turn, including failures before a recovered streak.
+The same audit records `own_poll_first_ms` and `own_poll_interval_ms`; bounded
+samples are also available as `status_poll_first_ms` and
+`status_poll_interval_ms` through the management resource metrics endpoint.
 
 ### Progress while Prism works
 

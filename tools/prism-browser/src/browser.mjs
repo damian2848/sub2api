@@ -50,8 +50,8 @@ export function payloadShape(value, path = '', out = [], depth = 0) {
 
 export const STATUS_PATH = '/api/llm/response_with_tools_status';
 export function statusPollInterval(value = process.env.PRISM_STATUS_POLL_MS) {
-  const parsed = value === undefined || value === '' ? 1000 : Number(value);
-  return Number.isInteger(parsed) && (parsed === 0 || (parsed >= 250 && parsed <= 10000)) ? parsed : 1000;
+  const parsed = value === undefined || value === '' ? 600 : Number(value);
+  return Number.isInteger(parsed) && (parsed === 0 || (parsed >= 250 && parsed <= 10000)) ? parsed : 600;
 }
 
 // Prism keeps every chat tab it opened mounted (hidden) in the page, and each request opens one more,
@@ -444,6 +444,8 @@ export class BrowserSession {
         ? payload.httpStatus : undefined,
       resubmission_requested: resubmissionRequested, completed_by: turn.completedBy,
       own_polls: turn.ownPolls, own_poll_failed: turn.ownPollFailed, own_poll_errors: turn.ownPollErrorTotal || 0,
+      own_poll_first_ms: Number.isFinite(turn.ownPollFirstDelayMs) ? Math.round(turn.ownPollFirstDelayMs) : undefined,
+      own_poll_interval_ms: turn.ownPollIntervals ? Math.round(turn.ownPollIntervalMs / turn.ownPollIntervals) : undefined,
       prism_ms: turn.startedAt ? Math.round(performance.now() - turn.startedAt) : undefined,
       internal_tool_calls: turn.internalTools?.size || 0, internal_tool_names: [...(turn.internalToolNames || [])],
       reasoning_summaries: turn.reasoningSummaries?.size || 0, reasoning_forwarded: turn.notes?.forwarded || 0,
@@ -809,6 +811,8 @@ export class BrowserSession {
     const turn = { request, signal, onText, started: false, submitAllowed: false,
       ownBodies: new Set(), ownPolls: 0, ownPolling: false, ownPollFailed: false,
       ownPollErrors: 0, ownPollErrorTotal: 0, statusTemplate: null, completedBy: null,
+      ownPollFirstAt: 0, ownPollLastAt: 0, ownPollFirstDelayMs: undefined,
+      ownPollIntervals: 0, ownPollIntervalMs: 0,
       releaseSubmission, submitFinished: false, detached: false };
     const checkCurrent = () => {
       aborted(signal);
@@ -953,6 +957,19 @@ export class BrowserSession {
       this.page === page && page && !page.isClosed?.();
     while (live()) {
       const begun = Date.now();
+      const pollAt = performance.now();
+      if (turn.ownPolls === 0) {
+        turn.ownPollFirstAt = pollAt;
+        turn.ownPollFirstDelayMs = turn.startedAt ? pollAt - turn.startedAt : undefined;
+        if (Number.isFinite(turn.ownPollFirstDelayMs)) this.metrics?.record('status_poll_first_ms', turn.ownPollFirstDelayMs,
+          { worker: this.worker, multiplex: this.multiplex });
+      } else if (turn.ownPollLastAt) {
+        turn.ownPollIntervals += 1;
+        turn.ownPollIntervalMs += pollAt - turn.ownPollLastAt;
+        this.metrics?.record('status_poll_interval_ms', pollAt - turn.ownPollLastAt,
+          { worker: this.worker, multiplex: this.multiplex });
+      }
+      turn.ownPollLastAt = pollAt;
       const body = JSON.stringify({ ...turn.statusTemplate, request_id: turn.requestId, turn_state: turn.turnState });
       turn.ownBodies.add(body);
       turn.ownPolls += 1;

@@ -266,7 +266,7 @@ export async function main() {
     onAudit: (event, fields) => { if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event, ...fields })); } });
   const manager = new AccountPoolManager({ dataDir, admissionGuard, metrics, projectIsolation,
     multiplex: effective.multiplex_pages, browserOptions: {
-      pollMs: integer('PRISM_STATUS_POLL_MS', 1000, 0, 10000), httpCache: effective.http_cache,
+      pollMs: integer('PRISM_STATUS_POLL_MS', 600, 0, 10000), httpCache: effective.http_cache,
       prewarm: effective.prewarm_chat },
     projectRegistry: new ProjectRegistry({ dataDir,
       maxSessions: integer('PRISM_MAX_SESSION_PROJECTS', 128, 1, 4096),
@@ -279,7 +279,7 @@ export async function main() {
     transientRetryWaitMs: integer('PRISM_TRANSIENT_RETRY_WAIT_SECONDS', 15, 0, 120) * 1000,
     startCooldownMs: integer('PRISM_START_COOLDOWN_SECONDS', 60, 0, 600) * 1000 });
   // Read by each browser session; validated here so a bad value stops startup. 0 or 250-10000.
-  const statusPollMs = integer('PRISM_STATUS_POLL_MS', 1000, 0, 10000);
+  const statusPollMs = integer('PRISM_STATUS_POLL_MS', 600, 0, 10000);
   if (statusPollMs > 0 && statusPollMs < 250) throw new Error('invalid PRISM_STATUS_POLL_MS');
   await manager.init();
   const restart = new PrismRestartController({ configuration,

@@ -777,7 +777,8 @@ async function pollingTurn(answer, { pollMs = 5 } = {}) {
   const { driver, turn, start } = setup;
   Object.assign(turn, { ownBodies: new Set(), ownPolls: 0, ownPolling: false, ownPollFailed: false,
     ownPollErrors: 0, ownPollErrorTotal: 0, statusTemplate: null,
-    completedBy: null });
+    completedBy: null, ownPollFirstAt: 0, ownPollLastAt: 0, ownPollFirstDelayMs: undefined,
+    ownPollIntervals: 0, ownPollIntervalMs: 0 });
   driver.statusPollMs = pollMs;
   const sent = [];
   driver.page = { isClosed: () => false, async evaluate(_, { path, body }) {
@@ -834,7 +835,12 @@ test('two 503s recover, a success resets the failure streak, and the audit count
   assert.equal(turn.completedBy, 'own_poll');
   assert.equal(turn.ownPollErrors, 0);
   assert.equal(turn.ownPollFailed, false);
-  assert.equal(audits.find(item => item.event === 'upstream_result').own_poll_errors, 3);
+  const result = audits.find(item => item.event === 'upstream_result');
+  assert.equal(result.own_poll_errors, 3);
+  assert.ok(Number.isFinite(result.own_poll_first_ms));
+  assert.ok(Number.isFinite(result.own_poll_interval_ms));
+  assert.ok(result.own_poll_first_ms >= 0);
+  assert.ok(result.own_poll_interval_ms >= 0);
 });
 
 test('consecutive own-poll failures exponentially increase the next interval', async () => {
@@ -931,13 +937,13 @@ test('page polling errors remain nonfatal during our recoverable failure streak'
   assert.deepEqual(outcomes, [{ error: 'prism_upstream_http_error' }]);
 });
 
-test('PRISM_STATUS_POLL_MS accepts 0 or 250-10000 and falls back to 1000', () => {
-  assert.equal(statusPollInterval(undefined), 1000);
-  assert.equal(statusPollInterval(''), 1000);
+test('PRISM_STATUS_POLL_MS accepts 0 or 250-10000 and falls back to 600', () => {
+  assert.equal(statusPollInterval(undefined), 600);
+  assert.equal(statusPollInterval(''), 600);
   assert.equal(statusPollInterval('0'), 0);
   assert.equal(statusPollInterval('250'), 250);
   assert.equal(statusPollInterval('10000'), 10000);
-  for (const bad of ['100', '10001', 'abc', '1.5']) assert.equal(statusPollInterval(bad), 1000, bad);
+  for (const bad of ['100', '10001', 'abc', '1.5']) assert.equal(statusPollInterval(bad), 600, bad);
 });
 
 test('a start Prism refuses at once is a start rejection: no project refresh, no retry, never opens a stream', async () => {

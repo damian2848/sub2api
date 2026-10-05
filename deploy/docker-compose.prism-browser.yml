@@ -51,7 +51,7 @@ services:
       # Minimum pause after Prism refuses a start; token replenishment may take longer.
       PRISM_START_COOLDOWN_SECONDS: "${PRISM_START_COOLDOWN_SECONDS:-60}"
       # Independent poll interval; 0 disables, otherwise 250-10000 milliseconds.
-      PRISM_STATUS_POLL_MS: "${PRISM_STATUS_POLL_MS:-1000}"
+      PRISM_STATUS_POLL_MS: "${PRISM_STATUS_POLL_MS:-600}"
       # Estimated prompt-cache lifetime; 0 disables cache-read estimates.
       PRISM_PROMPT_CACHE_TTL_SECONDS: "${PRISM_PROMPT_CACHE_TTL_SECONDS:-600}"
       PRISM_TRANSIENT_RETRIES: "${PRISM_TRANSIENT_RETRIES:-1}"
