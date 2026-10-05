@@ -271,6 +271,15 @@ the narrowly defined terminal resubmission error after acceptance is unchanged.
 Separately, a start refused before acceptance may be retried once after pacing
 and cooldown when no alternative account is available.
 
+**Project runtime startup limits.** Prism can rate-limit a new project's runtime
+before the editor becomes enabled. The sidecar checks the project creation response
+and the visible editor banner every 250–500 ms, returning a safe 429
+`project_runtime_rate_limited` with `Retry-After` instead of waiting for the full
+editor timeout. The source account is then cooled for 60 seconds in the sidecar;
+existing turns are allowed to finish and no prompt is replayed. A terminal
+`sandbox_reconnecting` result is returned as a 503 without marking it as a generic
+transient retry, because only Prism's own page can safely re-arm that sandbox.
+
 **Start rejections.** When Prism answers the start itself with that error ("Please
 submit prompt again", HTTP 403 inside the payload), the account is over Prism's
 start allowance, not in a broken project state. The sidecar does not refresh the

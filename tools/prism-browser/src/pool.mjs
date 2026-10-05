@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { AccountManager } from './accounts.mjs';
 import { AccountQueue } from './queue.mjs';
 import { BrowserSession, launchBrowser } from './browser.mjs';
-import { PrismError, aborted, pause } from './errors.mjs';
+import { PrismError, aborted, pause, projectRuntimeRateLimitedError } from './errors.mjs';
 import { NativeStartLimiter } from './start-limit.mjs';
 import { ProjectRegistry, freshProjectScope } from './projects.mjs';
 import { AccountPageMultiplexer, multiplexEnabled } from './page-multiplexer.mjs';
@@ -10,7 +10,7 @@ import { AccountPageMultiplexer, multiplexEnabled } from './page-multiplexer.mjs
 export class AccountPoolManager {
   constructor({ dataDir, concurrency = 2, maxWorkers = 32, queueLimit = 8, maxAccounts = 16,
     startLimit = 0, startWindowMs = 65000, transientRetries = 1, transientRetryDelayMs = 4000, transientRetryWaitMs = 15000,
-    startCooldownMs = 60000, startOptions = {}, projectIsolation = false, projectRegistry, admissionGuard, metrics,
+    startCooldownMs = 60000, runtimeCooldownMs = 60000, startOptions = {}, projectIsolation = false, projectRegistry, admissionGuard, metrics,
     browserOptions = {}, multiplex = multiplexEnabled(),
     startLimiterFactory = source => new NativeStartLimiter({ limit: startLimit, windowMs: startWindowMs, ...startOptions,
       onAudit: (event, fields) => {
@@ -30,7 +30,11 @@ export class AccountPoolManager {
     if (!Number.isInteger(startCooldownMs) || startCooldownMs < 0 || startCooldownMs > 600000) {
       throw new Error('invalid_start_cooldown');
     }
+    if (!Number.isInteger(runtimeCooldownMs) || runtimeCooldownMs < 0 || runtimeCooldownMs > 600000) {
+      throw new Error('invalid_runtime_cooldown');
+    }
     this.startCooldownMs = startCooldownMs;
+    this.runtimeCooldownMs = runtimeCooldownMs;
     this.projectIsolation = projectIsolation;
     this.projects = projectRegistry || new ProjectRegistry({ dataDir });
     this.admissionGuard = admissionGuard;
@@ -48,6 +52,7 @@ export class AccountPoolManager {
     this.sessionFactory = sessionFactory;
     this.startLimiterFactory = startLimiterFactory;
     this.startLimiters = new Map();
+    this.runtimeCooldowns = new Map();
     this.browserPromise = null;
     this.drivers = new Set();
     this.accounts = new Map();
@@ -96,6 +101,35 @@ export class AccountPoolManager {
     }
     const driver = this.sessionFactory(browser, heartbeat, source, slot, { ...this.browserOptions,
       admissionGuard: this.admissionGuard, metrics: this.metrics, multiplex: this.multiplex, multiplexer });
+    const runtimeCooldownRemaining = () => {
+      const until = this.runtimeCooldowns.get(source) || 0;
+      const remaining = Math.max(0, until - Date.now());
+      if (!remaining) this.runtimeCooldowns.delete(source);
+      return remaining;
+    };
+    const coolRuntime = error => {
+      const now = Date.now();
+      const activeUntil = this.runtimeCooldowns.get(source) || 0;
+      const until = activeUntil > now ? activeUntil : now + this.runtimeCooldownMs;
+      if (until > now) this.runtimeCooldowns.set(source, until);
+      else this.runtimeCooldowns.delete(source);
+      error.retryAfterSeconds = Math.max(1, Math.ceil((until - Date.now()) / 1000));
+      if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event: 'project_runtime_rate_limit_cooldown',
+        source, worker: slot, cooldown_ms: until - Date.now() }));
+      return error;
+    };
+    const initialize = driver.initialize?.bind(driver);
+    if (initialize) {
+      driver.initialize = async (...args) => {
+        const remaining = runtimeCooldownRemaining();
+        if (remaining) throw projectRuntimeRateLimitedError(Math.ceil(remaining / 1000));
+        try { return await initialize(...args); }
+        catch (error) {
+          if (error instanceof PrismError && error.code === 'project_runtime_rate_limited') throw coolRuntime(error);
+          throw error;
+        }
+      };
+    }
     let limiter = this.startLimiters.get(source);
     if (!limiter) {
       limiter = this.startLimiterFactory(source);
@@ -105,8 +139,12 @@ export class AccountPoolManager {
     driver.generate = async (request, signal, progress) => {
       const failover = request.failover === 'none' ? 'none' : 'available';
       for (let attempt = 0; attempt < 2; attempt += 1) {
+        const runtimeRemaining = runtimeCooldownRemaining();
+        if (runtimeRemaining) throw projectRuntimeRateLimitedError(Math.ceil(runtimeRemaining / 1000));
         const waited = await limiter.acquire(signal, { failover });
         aborted(signal);
+        const runtimeAfterWait = runtimeCooldownRemaining();
+        if (runtimeAfterWait) throw projectRuntimeRateLimitedError(Math.ceil(runtimeAfterWait / 1000));
         if (this.stopping) throw new PrismError('service_stopping', 503);
         const account = this.managers[slot].accounts.get(source);
         if (account?.driver !== driver) throw new PrismError('session_revoked', 409);
@@ -129,6 +167,7 @@ export class AccountPoolManager {
           if (!accepted) limiter.accepted?.();
           return result;
         } catch (error) {
+          if (error instanceof PrismError && error.code === 'project_runtime_rate_limited') throw coolRuntime(error);
           if (error instanceof PrismError && error.code === 'prism_start_rejected') {
             limiter.rejected(this.startCooldownMs);
             error.retryAfterSeconds = Math.max(1, Math.ceil(limiter.waitMs() / 1000));

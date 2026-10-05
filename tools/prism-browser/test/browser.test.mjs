@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runInNewContext } from 'node:vm';
-import { BrowserSession, FALLBACK_MODEL, STATUS_PATH, catalogCollapsed, catalogFromConfig, modelFromLabel, probeModel,
-  statusPollInterval } from '../src/browser.mjs';
-import { PrismError, publicError } from '../src/errors.mjs';
+import { BrowserSession, FALLBACK_MODEL, RUNTIME_RATE_LIMIT, STATUS_PATH, catalogCollapsed, catalogFromConfig,
+  modelFromLabel, probeModel, statusPollInterval, terminalFailureReason } from '../src/browser.mjs';
+import { PrismError, aborted, publicError } from '../src/errors.mjs';
 
 function route(body, path = '/api/llm/response_with_tools_start') {
   const state = { aborted: false, body: null };
@@ -260,6 +260,102 @@ test('closed initialization cannot reserve or continue a project mutation when i
   assert.equal(driver.reserveProject, null);
 });
 
+test('project creation classifies a non-JSON 429 before parsing its body', async () => {
+  let parsed = false;
+  const page = {
+    isClosed: () => false,
+    waitForResponse: () => Promise.resolve({
+      status: () => 429,
+      ok: () => false,
+      async json() { parsed = true; throw new Error('not json'); },
+    }),
+    async goto() {},
+  };
+  const driver = new BrowserSession({}, () => {});
+  driver.context = { async close() {} };
+  driver.page = page;
+  await assert.rejects(driver.initialize(null, () => {}), error => {
+    assert.equal(error.code, 'project_runtime_rate_limited');
+    assert.equal(error.status, 429);
+    assert.equal(error.retryAfterSeconds, 60);
+    return true;
+  });
+  assert.equal(parsed, false);
+  assert.equal(driver.creating, false);
+  assert.equal(driver.bootstrapping, false);
+  assert.equal(driver.projectId, null, 'a rejected project is not published as initialized');
+});
+
+test('composer detects Chinese and English runtime limit banners before a disabled editor wait', async () => {
+  const banners = [
+    '项目运行环境的启动请求受到限流',
+    'Project runtime startup is rate limited',
+  ];
+  for (const banner of banners) {
+    assert.match(banner, RUNTIME_RATE_LIMIT);
+    const driver = new BrowserSession({}, () => {});
+    driver.page = {
+      locator() { return { last: () => ({ async waitFor() { assert.fail('a visible banner must be classified first'); } }) }; },
+      getByText(pattern) {
+        assert.match(banner, pattern);
+        return { first: () => ({ isVisible: async () => true }) };
+      },
+    };
+    await assert.rejects(driver.composer(), error => {
+      assert.equal(error.code, 'project_runtime_rate_limited');
+      assert.equal(error.status, 429);
+      assert.equal(error.retryAfterSeconds, 60);
+      return true;
+    });
+  }
+});
+
+test('a disabled editor does not return, while a ready editor does', async () => {
+  const realNow = Date.now;
+  try {
+    const base = realNow();
+    let calls = 0;
+    Date.now = () => (++calls <= 2 ? base : base + 120001);
+    let functionChecks = 0;
+    const disabled = new BrowserSession({}, () => {});
+    disabled.page = {
+      locator() { return { last: () => ({ async waitFor() {} }) }; },
+      getByText() { return { first: () => ({ isVisible: async () => false }) }; },
+      async waitForFunction() { functionChecks += 1; throw new Error('still disabled'); },
+    };
+    await assert.rejects(disabled.composer(), error => error.code === 'project_editor_unavailable');
+    assert.equal(functionChecks, 1);
+
+    const composer = { ready: true };
+    const ready = new BrowserSession({}, () => {});
+    ready.page = {
+      locator() { return { last: () => composer }; },
+      getByText() { return { first: () => ({ isVisible: async () => false }) }; },
+      async waitForFunction() {},
+    };
+    assert.equal(await ready.composer(), composer);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('composer stale and cancellation guards prevent a late editor from being accepted', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const page = {
+    locator() { return { async waitFor() { assert.fail('cancelled composer must not wait'); } }; },
+    getByText() { return { first: () => ({ isVisible: async () => false }) }; },
+  };
+  const cancelled = new BrowserSession({}, () => {});
+  cancelled.page = page;
+  await assert.rejects(cancelled.composer(() => aborted(controller.signal)), error => error.code === 'request_cancelled');
+
+  const stale = new BrowserSession({}, () => {});
+  stale.page = page;
+  await assert.rejects(stale.composer(() => { throw new PrismError('browser_session_closed', 503); }),
+    error => error.code === 'browser_session_closed');
+});
+
 test('late catalog data cannot restore labels after initialization is closed', async () => {
   const reached = deferred();
   const resume = deferred();
@@ -436,6 +532,32 @@ test('only the current native resubmission terminal error is internally retryabl
     assert.equal(error.retryConversation, retryable);
     assert.deepEqual(publicError(error), { error: {
       message: 'Prism could not complete the generation; try again', type: 'prism_error', code: 'prism_generation_failed' } });
+  }
+});
+
+test('terminal reasons are allowlisted and sandbox reconnect does not become an automatic transient retry', async () => {
+  assert.equal(terminalFailureReason({ reason: 'sandbox_reconnecting' }), 'sandbox_reconnecting');
+  assert.equal(terminalFailureReason({ reason: 'conversation_too_large' }), 'conversation_too_large');
+  assert.equal(terminalFailureReason({ reason: 'project_edit_access_required' }), 'project_edit_access_required');
+  assert.equal(terminalFailureReason({ reason: 'server_error', message: 'secret' }), null);
+  assert.equal(terminalFailureReason({ reason: 'sandbox_reconnecting\nsecret' }), null);
+
+  const cases = [
+    ['sandbox_reconnecting', 'sandbox_reconnecting', 503],
+    ['project_edit_access_required', 'project_edit_access_required', 403],
+  ];
+  for (const [reason, code, status] of cases) {
+    const { driver, turn, start } = await activeTurn();
+    let error;
+    turn.reject = value => { error = value; };
+    await driver.observe(response(start.request(), { ...running, status: 'completed', response: {
+      status: 'error', payload: { reason, message: 'upstream text must not escape' },
+    } }));
+    assert.equal(error.code, code);
+    assert.equal(error.status, status);
+    assert.equal(error.transient, undefined);
+    assert.equal(error.retryConversation, undefined);
+    assert.equal(publicError(error).error.message.includes('upstream text'), false);
   }
 });
 

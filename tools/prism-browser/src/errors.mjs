@@ -64,9 +64,19 @@ const MESSAGES = {
   sandbox_initialization_timeout: 'The Prism sandbox did not become ready in time',
   prism_start_rejected: 'Prism refused to start another generation on this account for now; try again shortly',
   prism_start_limited: 'Prism refused to start another generation on this account for now; try again shortly',
+  project_runtime_rate_limited: 'Prism project runtime startup is rate limited; try again shortly',
+  project_editor_unavailable: 'Prism project editor did not become ready in time',
+  sandbox_reconnecting: 'Prism sandbox is reconnecting; try again shortly',
+  project_edit_access_required: 'Prism does not allow editing this project',
   // The code is OpenAI's, so clients treat it as a context-window error (compact) instead of retrying.
   context_length_exceeded: 'The conversation is too long for Prism; compact it or start a new conversation',
 };
+
+export function projectRuntimeRateLimitedError(retryAfterSeconds = 60) {
+  const error = new PrismError('project_runtime_rate_limited', 429);
+  error.retryAfterSeconds = Math.max(1, Math.ceil(retryAfterSeconds));
+  return error;
+}
 
 export function publicError(error) {
   const safe = error instanceof PrismError ? error : new PrismError('browser_operation_failed');

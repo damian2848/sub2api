@@ -20,11 +20,11 @@ function deferred() {
 }
 
 async function fixture(t, { concurrency = 2, maxWorkers = 32, queueLimit = 8, models, generate, failSlot, identity,
-  startLimiterFactory } = {}) {
+  startLimiterFactory, runtimeCooldownMs } = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), 'prism-pool-test-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const log = { drivers: [], projects: [], probes: [], generations: [], closes: 0 };
-  const settings = { dataDir, projectIsolation: false, concurrency, maxWorkers, queueLimit, startLimiterFactory,
+  const settings = { dataDir, projectIsolation: false, concurrency, maxWorkers, queueLimit, startLimiterFactory, runtimeCooldownMs,
     browserFactory: async () => ({ on() {}, async close() {} }),
     sessionFactory: (_, heartbeat, source, slot) => {
       const closing = deferred();
@@ -590,6 +590,23 @@ test('a start Prism refuses cools the whole source: no retry, and waiting or new
   // When the cooldown is over, starts flow again.
   manager.startLimiters.get('32').blockedUntil = 0;
   assert.equal(await manager.generate('32', request('later')), 'reply:later');
+});
+
+test('a project runtime limit cools every worker of one source without replaying the request', async t => {
+  const calls = [];
+  const { manager } = await fixture(t, { runtimeCooldownMs: 40, generate: ({ request: value }) => {
+    calls.push(value.marker);
+    if (value.marker === 'rate-limited') throw new PrismError('project_runtime_rate_limited', 429);
+    return `reply:${value.marker}`;
+  } });
+  await assert.rejects(manager.generate('32', request('rate-limited')), error =>
+    error.code === 'project_runtime_rate_limited' && error.status === 429 && error.retryAfterSeconds > 0);
+  await assert.rejects(manager.generate('32', request('blocked')), error =>
+    error.code === 'project_runtime_rate_limited' && error.status === 429);
+  assert.deepEqual(calls, ['rate-limited'], 'the cooldown must block the other worker before Prism');
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(await manager.generate('32', request('after-cooldown')), 'reply:after-cooldown');
+  assert.deepEqual(calls, ['rate-limited', 'after-cooldown']);
 });
 
 for (const refusedAgain of [false, true]) test(`without failover a refused start waits for a new token and retries only once (${refusedAgain})`, async t => {

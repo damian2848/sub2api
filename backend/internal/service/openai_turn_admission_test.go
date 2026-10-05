@@ -129,6 +129,29 @@ func TestOpenAITurnAdmissionLocalCache(t *testing.T) {
 	require.NotEqual(t, "https://mutated.example.invalid", second.Credentials["base_url"])
 }
 
+func TestOpenAITurnAdmissionLocalCacheDeepClonesJSONValues(t *testing.T) {
+	account := ticketTestAccount(981)
+	account.Credentials["nested"] = map[string]any{"values": []any{map[string]any{"key": "original"}}}
+	account.Extra = make(map[string]any)
+	account.Extra["nested"] = map[string]any{"key": "original"}
+	cache := openAITurnAdmissionLocalCache{}
+	cache.store(account, nil)
+
+	first, _, ok := cache.load(account.ID, time.Minute)
+	require.True(t, ok)
+	first.Credentials["nested"].(map[string]any)["values"].([]any)[0].(map[string]any)["key"] = "mutated"
+	first.Extra["nested"].(map[string]any)["key"] = "mutated"
+
+	second, _, ok := cache.load(account.ID, time.Minute)
+	require.True(t, ok)
+	require.Equal(t, "original", second.Credentials["nested"].(map[string]any)["values"].([]any)[0].(map[string]any)["key"])
+	require.Equal(t, "original", second.Extra["nested"].(map[string]any)["key"])
+	account.Credentials["nested"].(map[string]any)["values"].([]any)[0].(map[string]any)["key"] = "source-mutated"
+	third, _, ok := cache.load(account.ID, time.Minute)
+	require.True(t, ok)
+	require.Equal(t, "original", third.Credentials["nested"].(map[string]any)["values"].([]any)[0].(map[string]any)["key"])
+}
+
 func TestOpenAITurnAdmissionExplicitGroupRejectsRemovedMembership(t *testing.T) {
 	selected := ticketTestAccount(905)
 	selected.GroupIDs = []int64{9}

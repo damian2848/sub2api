@@ -1,4 +1,4 @@
-import { PrismError, aborted, interruptible } from './errors.mjs';
+import { PrismError, aborted, interruptible, projectRuntimeRateLimitedError } from './errors.mjs';
 import { NativeAttachmentUpload, nativeAttachmentInput } from './browser-attachments.mjs';
 import { httpCacheEnabled, installCachePreservingInterceptor } from './cache-interceptor.mjs';
 import { multiplexEnabled } from './page-multiplexer.mjs';
@@ -60,6 +60,25 @@ export function statusPollInterval(value = process.env.PRISM_STATUS_POLL_MS) {
 export const CHAT_TAB_SELECTOR = '[data-tab-id^="chat:"]';
 // A chat opened while the worker was idle is used only while it is this fresh.
 export const PREPARED_CHAT_MAX_AGE_MS = 10 * 60 * 1000;
+
+// Prism renders this in the project page when its sandbox startup allowance is exhausted. Keep
+// the match narrow and bounded so an unrelated user prompt cannot turn into a rate-limit signal.
+export const RUNTIME_RATE_LIMIT = /项目运行环境的启动请求受到限流|(?:project|sandbox|runtime).{0,80}(?:startup|start).{0,80}rate[ -]?limit/i;
+
+export async function runtimeRateLimitVisible(page) {
+  try {
+    return Boolean(await page.getByText(RUNTIME_RATE_LIMIT).first().isVisible());
+  } catch {
+    return false;
+  }
+}
+
+export function terminalFailureReason(payload = {}) {
+  const reason = typeof payload.reason === 'string' ? payload.reason : '';
+  if (reason === 'sandbox_reconnecting' || reason === 'conversation_too_large' ||
+    reason === 'project_edit_access_required') return reason;
+  return null;
+}
 
 // PRISM_PREWARM_CHAT=false turns off opening the next chat (and closing old chat tabs) between turns.
 export function prewarmEnabled(value = process.env.PRISM_PREWARM_CHAT) {
@@ -420,7 +439,7 @@ export class BrowserSession {
       'Error while processing conversation (403 Forbidden). Please submit prompt again.';
     this.audit('upstream_result', { status: data.response?.status,
       reported_model: payload.model || null,
-      failure_code: /^[a-z_]{1,100}$/.test(payload.reason || '') ? payload.reason : undefined,
+      failure_code: terminalFailureReason(payload) || (payload.reason === 'unknown' ? 'unknown' : undefined),
       payload_http_status: Number.isInteger(payload.httpStatus) && payload.httpStatus >= 100 && payload.httpStatus <= 599
         ? payload.httpStatus : undefined,
       resubmission_requested: resubmissionRequested, completed_by: turn.completedBy,
@@ -430,10 +449,19 @@ export class BrowserSession {
       reasoning_summaries: turn.reasoningSummaries?.size || 0, reasoning_forwarded: turn.notes?.forwarded || 0,
       output_types: outputTypes(payload.output),
       exec_meta_shape: payloadShape(payload.codexExecMeta), debug_shape: payloadShape(payload.codexDebug) });
-    if (data.response?.status !== 'success' && (payload.httpStatus === 413 || payload.reason === 'conversation_too_large')) {
+    const terminalReason = terminalFailureReason(payload);
+    if (data.response?.status !== 'success' && (payload.httpStatus === 413 || terminalReason === 'conversation_too_large')) {
       // Prism refused the size of the conversation. Every account would refuse it the same way, so it is the
       // request's fault: a 400 the client can act on (compact), never a 5xx that is retried or cools accounts down.
       return turn.reject(new PrismError('context_length_exceeded', 400));
+    }
+    if (data.response?.status !== 'success' && terminalReason === 'sandbox_reconnecting') {
+      // Do not turn a sandbox reconnect into a generic resubmission: it may already have
+      // executed. Only the official page can safely reconcile that sandbox state.
+      return turn.reject(new PrismError('sandbox_reconnecting', 503));
+    }
+    if (data.response?.status !== 'success' && terminalReason === 'project_edit_access_required') {
+      return turn.reject(new PrismError('project_edit_access_required', 403));
     }
     if (data.response?.status !== 'success' && isStart && resubmissionRequested) {
       // Refused at the start itself ("please submit prompt again"): Prism's start allowance for the
@@ -596,6 +624,7 @@ export class BrowserSession {
           checkCurrent();
           const response = await creation;
           checkCurrent();
+          if (response.status?.() === 429) throw projectRuntimeRateLimitedError();
           const data = await response.json();
           checkCurrent();
           if (!response.ok() || data.uuid !== this.projectId) throw new PrismError('project_creation_failed');
@@ -742,14 +771,25 @@ export class BrowserSession {
     const page = this.page;
     checkCurrent();
     const composer = page.locator('textarea:visible').last();
-    await composer.waitFor({ state: 'visible', timeout: 30000 });
-    checkCurrent();
-    await page.waitForFunction(() => {
-      const item = Array.from(document.querySelectorAll('textarea')).filter(element => element.getClientRects().length).at(-1);
-      return item && !item.disabled;
-    }, null, { timeout: 120000 });
-    checkCurrent();
-    return composer;
+    const deadline = Date.now() + 120000;
+    while (Date.now() < deadline) {
+      checkCurrent();
+      if (await runtimeRateLimitVisible(page)) throw projectRuntimeRateLimitedError();
+      const timeout = Math.min(500, Math.max(1, deadline - Date.now()));
+      try { await composer.waitFor({ state: 'visible', timeout }); } catch { /* keep polling for the rate-limit banner */ }
+      checkCurrent();
+      if (await runtimeRateLimitVisible(page)) throw projectRuntimeRateLimitedError();
+      try {
+        await page.waitForFunction(() => {
+          const item = Array.from(document.querySelectorAll('textarea')).filter(element => element.getClientRects().length).at(-1);
+          return item && !item.disabled;
+        }, null, { timeout: 500 });
+        checkCurrent();
+        return composer;
+      } catch { /* editor is still loading */ }
+    }
+    if (await runtimeRateLimitVisible(page)) throw projectRuntimeRateLimitedError();
+    throw new PrismError('project_editor_unavailable', 503);
   }
 
   // The model and effort are applied by route() on the native start. This only checks that Prism
