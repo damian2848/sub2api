@@ -274,6 +274,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 
 	if account.IsOpenCodeGo() {
 		mapped := resolveOpenCodeGoMappedModel(account, body, "")
+		if IsOpenCodeUnsupportedModel(mapped) {
+			return nil, writeOpenCodeUnsupportedModelError(c, false, mapped)
+		}
 		switch openCodeGoNativeProtocol(account, mapped) {
 		case APIProtocolAnthropic:
 			return s.forwardResponsesViaNativeAnthropic(ctx, c, account, body, "")

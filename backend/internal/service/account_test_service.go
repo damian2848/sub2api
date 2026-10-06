@@ -474,6 +474,9 @@ func (s *AccountTestService) testOpenCodeGoAccountConnection(c *gin.Context, acc
 		testModelID = DefaultOpenCodeGoTestModel
 	}
 	testModelID = account.GetMappedModel(testModelID)
+	if IsOpenCodeUnsupportedModel(testModelID) {
+		return fmt.Errorf("model %q is not supported on OpenCode standard gateway (gemini models require Google SDK endpoint, jev models require System One endpoint)", testModelID)
+	}
 	proto := account.GetAPIProtocol()
 	switch proto {
 	case APIProtocolChatCompletions, APIProtocolAnthropic, APIProtocolResponses:
