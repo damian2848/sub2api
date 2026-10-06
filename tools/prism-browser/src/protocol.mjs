@@ -174,8 +174,8 @@ function responsesConversation(body, state) {
 
 // Only the policies the adapter really enforces are read: none, required, one named function and
 // parallel_tool_calls=false. Anything else (other shapes such as allowed_tools or custom, a name that is not
-// offered, a wrongly typed value) falls back to auto: unknown tool parameters were never rejected here and
-// a client that sends one keeps working.
+// offered, a wrongly typed value) falls back to auto. Tool arguments are validated after Prism emits them;
+// request-time policy normalisation stays backwards-compatible for clients that send unknown policy shapes.
 function normalizeToolPolicy(body, family, specs) {
   const parallel = body.parallel_tool_calls !== false;
   const choice = body.tool_choice;

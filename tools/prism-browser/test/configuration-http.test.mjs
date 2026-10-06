@@ -23,6 +23,7 @@ async function fixture(t, options = {}) {
     async generate(_, request) { request.onAccepted?.(); request.onReasoning?.('offline reasoning'); return 'offline answer'; },
     ...options.manager };
   const server = createPrismServer({ manager, managementKey, configuration,
+    ...(options.promptCache ? { promptCache: options.promptCache } : {}),
     projectIsolation: defaults.project_isolation, streamReasoning: defaults.stream_reasoning });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
@@ -50,6 +51,71 @@ test('config access is management-only and authentication happens before any con
   assert.equal(calls, 0);
   const response = await fetch(base + '/accounts/32/v1/models', { headers: { Authorization: `Bearer ${managementKey}` } });
   assert.equal(response.status, 401, 'a management credential never authorizes a user request');
+});
+
+test('effective master switch blocks Prism traffic while retaining configuration and journal reconciliation', async t => {
+  const configuration = { effective: { ...defaults, enabled: false }, snapshot() {
+      return { effective: { ...defaults, enabled: false }, desired: { ...defaults, enabled: false },
+        restart_required: false, source: 'saved', apply_mode: 'restart' };
+    }, async put() { return this.snapshot(); }, async reset() { return this.snapshot(); } };
+  const { base, call } = await fixture(t, { configuration, manager: {
+    pending() { return []; }, resolvePending() { return { removed: true }; },
+  } });
+  const blocked = await fetch(base + '/accounts/32/v1/models', { headers: { Authorization: `Bearer ${userKey}` } });
+  assert.equal(blocked.status, 503);
+  assert.equal((await blocked.json()).error.code, 'prism_disabled');
+  const invalidUser = await fetch(base + '/accounts/32/v1/models', { headers: { Authorization: 'Bearer wrong-user-key' } });
+  assert.equal(invalidUser.status, 401);
+  assert.equal((await invalidUser.json()).error.code, 'invalid_api_key');
+  const invalidManagement = await fetch(base + '/internal/accounts/32/status', { headers: { Authorization: 'Bearer wrong-management-key' } });
+  assert.equal(invalidManagement.status, 401);
+  assert.equal((await invalidManagement.json()).error.code, 'invalid_management_key');
+  const disabledStatus = await fetch(base + '/internal/accounts/32/status', { headers: { Authorization: `Bearer ${managementKey}` } });
+  assert.equal(disabledStatus.status, 503);
+  assert.equal((await disabledStatus.json()).error.code, 'prism_disabled');
+  assert.equal((await call('GET')).status, 200);
+  const pending = await fetch(base + '/internal/accounts/32/pending', { headers: { Authorization: `Bearer ${managementKey}` } });
+  assert.equal(pending.status, 200);
+  assert.deepEqual(await pending.json(), { pending_turns: [] });
+});
+
+test('live master switch releases resources on disable and initializes them on enable', async t => {
+  const lifecycle = [];
+  let cacheClears = 0;
+  const { base, call, configuration } = await fixture(t, { promptCache: { clear() { cacheClears += 1; } }, manager: {
+    async setEnabled(enabled) { lifecycle.push(enabled); },
+  } });
+  const disabled = await call('PUT', { ...changed, enabled: false });
+  assert.equal(disabled.status, 200);
+  assert.deepEqual(lifecycle, [false]);
+  assert.equal(cacheClears, 1);
+  const blocked = await fetch(base + '/accounts/32/v1/models', { headers: { Authorization: `Bearer ${userKey}` } });
+  assert.equal(blocked.status, 503);
+  assert.equal((await blocked.json()).error.code, 'prism_disabled');
+
+  const enabled = await call('PUT', { ...changed, enabled: true });
+  assert.equal(enabled.status, 200);
+  assert.deepEqual(lifecycle, [false, true]);
+  assert.equal(cacheClears, 1);
+  assert.equal((await fetch(base + '/accounts/32/v1/models', { headers: { Authorization: `Bearer ${userKey}` } })).status, 200);
+  assert.equal(configuration.snapshot().desired.enabled, true);
+});
+
+test('failed enable keeps the live gate closed until resource initialization succeeds', async t => {
+  let failEnable = false;
+  const { base, call } = await fixture(t, { manager: {
+    async setEnabled(enabled) {
+      if (enabled && failEnable) throw new PrismError('browser_operation_failed', 502);
+    },
+  } });
+  assert.equal((await call('PUT', { ...changed, enabled: false })).status, 200);
+  failEnable = true;
+  const failed = await call('PUT', { ...changed, enabled: true });
+  assert.equal(failed.status, 502);
+  assert.equal((await failed.json()).error.code, 'browser_operation_failed');
+  const blocked = await fetch(base + '/accounts/32/v1/models', { headers: { Authorization: `Bearer ${userKey}` } });
+  assert.equal(blocked.status, 503);
+  assert.equal((await blocked.json()).error.code, 'prism_disabled');
 });
 
 test('GET PUT DELETE expose the exact startup contract and preserve no-store responses', async t => {

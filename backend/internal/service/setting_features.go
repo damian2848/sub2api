@@ -9,10 +9,60 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// PrismEnabledDefault mirrors the sidecar's PRISM_BROWSER_ENABLED fallback.
+// The database setting takes precedence once initialized.
+func PrismEnabledDefault() bool {
+	raw, ok := os.LookupEnv("PRISM_BROWSER_ENABLED")
+	if !ok || strings.TrimSpace(raw) == "" {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "false", "0", "off", "no":
+		return false
+	default:
+		return true
+	}
+}
+
+// GetPrismEnabled reads the live master switch. Missing settings retain the
+// environment default for upgrades; repository failures fail closed so a
+// transient database outage cannot silently re-enable Prism traffic.
+func (s *SettingService) GetPrismEnabled(ctx context.Context) bool {
+	if s == nil || s.settingRepo == nil {
+		return PrismEnabledDefault()
+	}
+	raw, err := s.settingRepo.GetValue(ctx, SettingKeyPrismEnabled)
+	if err != nil {
+		if errors.Is(err, ErrSettingNotFound) {
+			return PrismEnabledDefault()
+		}
+		return false
+	}
+	raw = strings.TrimSpace(raw)
+	// A blank value is equivalent to a missing key for upgrade compatibility.
+	// InitializeDefaultSettings writes the environment-derived value for new
+	// installations, while older databases may contain an empty placeholder.
+	if raw == "" {
+		return PrismEnabledDefault()
+	}
+	return strings.EqualFold(raw, "true")
+}
+
+// SetPrismEnabled persists the live Prism admission switch. It is intentionally
+// a narrow method so the sidecar configuration handler cannot write arbitrary
+// system settings.
+func (s *SettingService) SetPrismEnabled(ctx context.Context, enabled bool) error {
+	if s == nil || s.settingRepo == nil {
+		return errors.New("prism settings repository unavailable")
+	}
+	return s.settingRepo.Set(ctx, SettingKeyPrismEnabled, strconv.FormatBool(enabled))
+}
 
 // IsRegistrationEnabled 检查是否开放注册
 func (s *SettingService) IsRegistrationEnabled(ctx context.Context) bool {

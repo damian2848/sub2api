@@ -53,6 +53,24 @@ test('management and user credentials have separate authority', async t => {
   assert.equal((await post('/internal/accounts/32/bootstrap', { retry_probe: true }, managementKey)).status, 200);
 });
 
+test('pending turn journal is management-only and exposes explicit reconciliation', async t => {
+  const id = '01234567-89ab-4cde-8123-0123456789ab';
+  let resolved;
+  const { base } = await fixture(t, {
+    pending() { return [{ id, state: 'unknown', source: '32' }]; },
+    async resolvePending(source, value) { resolved = { source, value }; return { resolved: true, id: value, source }; },
+  });
+  const unauthorized = await fetch(`${base}/internal/accounts/32/pending`, { headers: { Authorization: `Bearer ${userKey}` } });
+  assert.equal(unauthorized.status, 401);
+  const listing = await fetch(`${base}/internal/accounts/32/pending`, { headers: { Authorization: `Bearer ${managementKey}` } });
+  assert.deepEqual((await listing.json()).pending_turns[0].id, id);
+  const cleared = await fetch(`${base}/internal/accounts/32/pending/${id}`, {
+    method: 'DELETE', headers: { Authorization: `Bearer ${managementKey}` },
+  });
+  assert.equal(cleared.status, 200);
+  assert.deepEqual(resolved, { source: '32', value: id });
+});
+
 test('HTTP body bounds apply and requests Prism cannot serve never reach the browser', async t => {
   let calls = 0;
   const { post } = await fixture(t, { async generate() { calls += 1; return 'unexpected'; } }, { bodyLimit: 4096 });

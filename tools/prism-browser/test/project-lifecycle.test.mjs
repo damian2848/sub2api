@@ -34,10 +34,10 @@ async function fixture(t, { concurrency = 2, generate, transientRetries = 1 } = 
       const driver = { source, slot, closed: false, projectId: null, lastHeartbeat: 0,
         page: { isClosed: () => driver.closed },
         async authenticate() { return 'stable-oauth-user'; },
-        async initialize(existing, created, signal) {
+        async initialize(existing, created, signal, models, options) {
           aborted(signal);
           this.projectId = existing || randomUUID();
-          log.initializations.push({ slot, existing, project: this.projectId });
+          log.initializations.push({ slot, existing, project: this.projectId, ephemeral: options?.ephemeral === true });
           if (!existing) await created(this.projectId);
           aborted(signal);
           if (this.closed) throw new PrismError('browser_session_closed', 503);
@@ -257,6 +257,14 @@ test('consecutive requests of one scope stay on the worker that already holds it
   assert.deepEqual(log.userCalls.map(call => call.slot), [holder, holder, holder, holder], 'no worker switch');
   assert.ok(log.userCalls.every(call => call.project === project));
   assert.equal(log.initializations.length, initializations, 'the prepared project is reused, not reloaded');
+});
+
+test('anonymous isolated scopes mark newly created projects ephemeral while reusable scopes do not', { timeout: 5000 }, async t => {
+  const { manager, log } = await fixture(t);
+  await manager.generate('32', request('reusable', scope('c')));
+  assert.equal(log.initializations.at(-1).ephemeral, false);
+  await manager.generate('32', request('anonymous', requestProjectScope()));
+  assert.equal(log.initializations.at(-1).ephemeral, true);
 });
 
 test('another scope is not pinned to that worker, and a busy holder falls back to a worker that loads the same project', { timeout: 5000 }, async t => {

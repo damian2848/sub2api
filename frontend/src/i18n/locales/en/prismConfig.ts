@@ -10,8 +10,8 @@ export default {
   disabled: 'Disabled',
   configured: 'Configured',
   missing: 'Not configured',
-  connectionHint: 'The address, routing switch and management key come from server deployment configuration. The key is never sent to the browser. This page does not change account credentials or endpoints.',
-  restartHint: 'Saving only updates startup configuration and does not interrupt active requests. Use Restart and apply configuration to restart only the Prism sidecar, not the gateway.',
+  connectionHint: 'The address and management key come from server deployment configuration. The key is never sent to the browser. The master switch controls routing for new requests. Turning it off releases browser resources after active requests get a short drain window; its sidecar startup value follows the next restart.',
+  restartHint: 'Saving updates the master switch and startup configuration. Turning the master switch off stops new requests and releases Prism browser resources; Restart and apply configuration restarts only the Prism sidecar, not the gateway.',
   restart: 'Restart and apply configuration',
   restartTitle: 'Restart the Prism sidecar?',
   restartMessage: 'This restarts only Prism, not the gateway, and applies the saved startup configuration. It may interrupt all in-progress and queued Prism requests. Continue?',
@@ -54,6 +54,7 @@ export default {
     unavailable: 'The Prism sidecar is unavailable. Check the connection, management key and sidecar status.'
   },
   fields: {
+    enabled: { label: 'Prism master switch', hint: 'Allow the gateway to route managed Prism accounts. Turning it off releases browser and account-pool resources; enabling it initializes the shared browser and restores account sessions on demand.' },
     project_isolation: { label: 'Project isolation', hint: 'Use isolated projects for requests without mixing in existing project context.' },
     http_cache: { label: 'HTTP cache', hint: 'Cache reusable static browser resources in the sidecar.' },
     multiplex_pages: { label: 'Submission-page multiplexing (experimental)', hint: 'Release editor pages after submission and track requests in a resident poller. Validate in a controlled rollout first.' },

@@ -44,6 +44,7 @@ export async function interruptible(work, signal, cancel) {
 // Fixed, human-readable reasons for the failures people actually see. They never carry upstream
 // text; any other code is its own message.
 const MESSAGES = {
+  prism_disabled: 'Prism routing is currently disabled',
   prism_upstream_http_error: 'Prism returned a server error while generating (its servers may be overloaded); try again shortly',
   prism_generation_failed: 'Prism could not complete the generation; try again',
   prism_empty_output: 'Prism returned an empty answer',
@@ -70,6 +71,9 @@ const MESSAGES = {
   project_edit_access_required: 'Prism does not allow editing this project',
   // The code is OpenAI's, so clients treat it as a context-window error (compact) instead of retrying.
   context_length_exceeded: 'The conversation is too long for Prism; compact it or start a new conversation',
+  pending_turn_reconciliation_required: 'A previous Prism turn has an unknown result and must be reconciled before submitting another turn',
+  pending_turn_not_found: 'The requested pending Prism turn was not found',
+  pending_turn_active: 'The pending Prism turn is still active and cannot be reconciled yet',
 };
 
 export function projectRuntimeRateLimitedError(retryAfterSeconds = 60) {

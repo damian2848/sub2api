@@ -13,7 +13,7 @@ vi.mock('@/api/admin/prismConfig', async importOriginal => ({
   ...await importOriginal<typeof import('@/api/admin/prismConfig')>(),
   getPrismSettings: vi.fn(), savePrismSettings: vi.fn(), resetPrismSettings: vi.fn(), getPrismRestartStatus: vi.fn(), restartPrismSettings: vi.fn()
 }))
-const options = { project_isolation: false, http_cache: false, multiplex_pages: false, prewarm_chat: true, stream_reasoning: true, memory_limit_mib: 0, memory_reserve_mib: 32 }
+const options = { enabled: true, project_isolation: false, http_cache: false, multiplex_pages: false, prewarm_chat: true, stream_reasoning: true, memory_limit_mib: 0, memory_reserve_mib: 32 }
 const ready: PrismSettings = { gateway: { enabled: true, configured: true, base_url: 'http://prism:8080', management_key_configured: true }, availability: 'ready', configuration: { effective: { ...options }, desired: { ...options }, source: 'environment', apply_mode: 'restart', restart_required: false } }
 const oldRuntime = 'c3cfb0b9-9c3f-48d1-8d7d-3c63a4af12e8'
 const newRuntime = 'ee25a5f8-d522-4bb4-9078-30c1160f21cc'

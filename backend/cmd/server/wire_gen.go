@@ -160,7 +160,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 	codexHarvestNodeRepository := repository.NewCodexHarvestNodeRepository(db)
 	codexHarvestFlowRepository := repository.NewCodexHarvestFlowRepository(db)
 	codexHarvestService := service.ProvideCodexHarvestService(codexHarvestNodeRepository, settingRepository, configConfig, codexHarvestFlowRepository)
-	prismAccountService := service.ProvidePrismAccountService(accountRepository, groupRepository, openAITokenProvider, configConfig)
+	prismAccountService := service.ProvidePrismAccountServiceWithSettings(accountRepository, groupRepository, openAITokenProvider, configConfig, settingService)
 	openAIGatewayDependencies := service.OpenAIGatewayDependencies{
 		Accounts:      accountRepository,
 		Proxies:       proxyRepository,

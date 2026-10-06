@@ -22,6 +22,10 @@ const (
 // PrismConfigurationOptions contains only sidecar startup flags, never gateway
 // connection settings, credentials, file paths, or arbitrary environment keys.
 type PrismConfigurationOptions struct {
+	// Enabled is the Prism master routing switch. It is persisted by the
+	// backend as a live admission gate and mirrored to the sidecar's startup
+	// configuration for restart-safe snapshots.
+	Enabled          bool `json:"enabled"`
 	ProjectIsolation bool `json:"project_isolation"`
 	HTTPCache        bool `json:"http_cache"`
 	MultiplexPages   bool `json:"multiplex_pages"`
@@ -53,7 +57,7 @@ type PrismConfigurationResult struct {
 }
 
 var prismConfigurationOptionKeys = []string{
-	"project_isolation", "http_cache", "multiplex_pages", "prewarm_chat", "stream_reasoning",
+	"enabled", "project_isolation", "http_cache", "multiplex_pages", "prewarm_chat", "stream_reasoning",
 	"memory_limit_mib", "memory_reserve_mib",
 }
 
@@ -156,13 +160,13 @@ func decodePrismConfigurationState(data []byte) (*PrismConfigurationState, error
 	return state, nil
 }
 
-func (s *PrismAccountService) configurationMetadata() *PrismConfigurationResult {
+func (s *PrismAccountService) configurationMetadata(ctx context.Context) *PrismConfigurationResult {
 	result := &PrismConfigurationResult{Availability: "not_configured"}
 	if s == nil {
 		return result
 	}
 	result.Gateway = PrismGatewayConfiguration{
-		Enabled: s.enabled(), BaseURL: s.managementCfg.URL,
+		Enabled: s.globallyEnabled(ctx), BaseURL: s.managementCfg.URL,
 		Configured:              s.managementCfg.URL != "" && s.managementCfg.ManagementKey != "",
 		ManagementKeyConfigured: s.managementCfg.ManagementKey != "",
 	}
@@ -187,7 +191,14 @@ func (s *PrismAccountService) requestConfiguration(ctx context.Context, method s
 	if _, observer := ObserverGroupIDs(ctx); observer {
 		return nil, ErrObserverScope
 	}
-	result := s.configurationMetadata()
+	// Serialize mutations so a concurrent PUT/DELETE cannot persist an older
+	// sidecar response after a newer one. The setting is written only after the
+	// corresponding sidecar request has returned a valid ready state.
+	if method != http.MethodGet && s != nil {
+		s.configuration.Lock()
+		defer s.configuration.Unlock()
+	}
+	result := s.configurationMetadata(ctx)
 	if !result.Gateway.Configured {
 		if method == http.MethodGet {
 			return result, nil
@@ -232,6 +243,16 @@ func (s *PrismAccountService) requestConfiguration(ctx context.Context, method s
 	}
 	if method != http.MethodGet && result.Availability != "ready" {
 		return nil, prismConfigurationUnavailable(result.Availability)
+	}
+	if (method == http.MethodPut || method == http.MethodDelete) && s.settings != nil && result.Configuration != nil {
+		// The sidecar is authoritative for the desired state. In particular,
+		// DELETE may reset to a sidecar environment value that differs from the
+		// backend process environment.
+		enabled := result.Configuration.Desired.Enabled
+		if err := s.settings.SetPrismEnabled(ctx, enabled); err != nil {
+			return nil, prismConfigurationUnavailable("unavailable")
+		}
+		result.Gateway.Enabled = enabled
 	}
 	return result, nil
 }

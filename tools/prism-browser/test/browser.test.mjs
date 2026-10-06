@@ -633,6 +633,59 @@ test('the requested model and effort replace the UI defaults, and unrelated proj
   assert.equal(unrelated.state.aborted, true);
 });
 
+test('the authenticated project route permits deleting only the current project', async () => {
+  const driver = new BrowserSession({}, () => {});
+  driver.projectId = '01234567-89ab-4cde-8123-0123456789ab';
+  const request = path => ({ url: () => `https://prism.openai.com${path}`, method: () => 'DELETE',
+    postDataJSON: () => ({}) });
+  const allowed = { state: {}, request: () => request(`/api/projects/${driver.projectId}`),
+    async abort() { this.state.aborted = true; }, async continue() { this.state.continued = true; } };
+  await driver.route(allowed);
+  assert.equal(allowed.state.aborted, undefined);
+  assert.equal(allowed.state.continued, true);
+  const unrelated = { state: {}, request: () => request('/api/projects/other'),
+    async abort() { this.state.aborted = true; }, async continue() { this.state.continued = true; } };
+  await driver.route(unrelated);
+  assert.equal(unrelated.state.aborted, true);
+});
+
+test('ephemeral project deletion uses the authenticated page and clears only one-shot state', async () => {
+  const driver = new BrowserSession({}, () => {});
+  const project = '01234567-89ab-4cde-8123-0123456789ab';
+  const calls = [];
+  driver.projectId = project;
+  driver.ephemeralProject = true;
+  driver.page = { isClosed: () => false, async evaluate(fn, id) {
+    calls.push(id);
+    return { ok: true, status: 204 };
+  } };
+  assert.equal(await driver.deleteEphemeralProject(), true);
+  assert.deepEqual(calls, [project]);
+  assert.equal(driver.projectId, null);
+  assert.equal(driver.ephemeralProject, false);
+  assert.equal(await driver.deleteEphemeralProject(), false);
+});
+
+test('reusable projects are never deleted by the ephemeral cleanup hook', async () => {
+  const driver = new BrowserSession({}, () => {});
+  driver.projectId = '01234567-89ab-4cde-8123-0123456789ab';
+  driver.page = { isClosed: () => false, async evaluate() { assert.fail('reusable project deleted'); } };
+  assert.equal(await driver.deleteEphemeralProject(), false);
+  assert.equal(driver.projectId, '01234567-89ab-4cde-8123-0123456789ab');
+});
+
+test('context teardown also cleans an ephemeral project after a failed or cancelled turn', async () => {
+  const driver = new BrowserSession({}, () => {});
+  driver.projectId = '01234567-89ab-4cde-8123-0123456789ab';
+  driver.ephemeralProject = true;
+  let deleted = 0;
+  driver.page = { isClosed: () => false, async evaluate() { deleted += 1; return { ok: true, status: 204 }; } };
+  driver.context = { async close() {} };
+  await driver.terminateContext();
+  assert.equal(deleted, 1);
+  assert.equal(driver.projectId, null);
+});
+
 test('select() only checks the catalog and the effort, and never touches the menu', async () => {
   const driver = new BrowserSession({}, () => {});
   driver.labels = catalogFromConfig([{ id: 'gpt-6.1-sol', label: '6.1 Sol' }, { id: 'gpt-6-luna', label: '6 Luna' }]);

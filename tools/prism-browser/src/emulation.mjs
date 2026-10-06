@@ -11,6 +11,7 @@
 // See ../THIRD_PARTY_NOTICES.md for the full license text.
 import { randomBytes } from 'node:crypto';
 import { PrismError } from './errors.mjs';
+import { validateToolArguments } from './tool-validation.mjs';
 
 const rule = '='.repeat(80);
 const LIST_BUDGET = 40000;
@@ -374,10 +375,13 @@ export function parseToolCall(text, tools) {
   if (!call || typeof call !== 'object' || typeof call.name !== 'string') return null;
   const name = call.name.replace(/^functions[./]/, '');
   if (!tools.has(name)) return null;
+  const offered = tools.get(name);
+  const spec = offered && typeof offered === 'object' && (offered.params || offered.name) ? offered : null;
   let args = call.arguments ?? {};
   if (typeof args === 'string') args = looseJSON(args) ?? {};
   if (!args || typeof args !== 'object' || Array.isArray(args)) args = {};
-  return { id: `call_${randomBytes(12).toString('hex')}`, name, arguments: JSON.stringify(args), namespace: tools.get(name) };
+  if (spec && !validateToolArguments(spec, args).valid) invalidToolOutput('prism_invalid_tool_arguments');
+  return { id: `call_${randomBytes(12).toString('hex')}`, name, arguments: JSON.stringify(args), namespace: spec?.ns ?? offered };
 }
 
 // ---- Reply parsing (tag protocol, with the older JSON action format as a fallback) ----
@@ -447,6 +451,8 @@ function buildCall(name, body, tools) {
       args = value;
     }
   }
+  const validation = validateToolArguments(spec, args);
+  if (!validation.valid) invalidToolOutput('prism_invalid_tool_arguments');
   return { id: callId(), name: bare, arguments: JSON.stringify(args), namespace: spec.ns };
 }
 
@@ -461,15 +467,18 @@ function legacyCall(text, tools) {
   const spec = tools.get(name);
   if (!spec) invalidToolOutput('prism_unknown_tool');
   if (spec.raw) {
-    const args = original.arguments;
+    const rawArgs = original.arguments;
     // Retain the older string/one-field-wrapper representation of freeform exec.
-    const input = typeof args === 'string' ? rawInputFrom(args)
-      : typeof args?.input === 'string' ? args.input : rawInputFrom(JSON.stringify(args ?? {}));
-    return { id: callId(), name, arguments: JSON.stringify({ input }), namespace: spec.ns };
+    const input = typeof rawArgs === 'string' ? rawInputFrom(rawArgs)
+      : typeof rawArgs?.input === 'string' ? rawArgs.input : rawInputFrom(JSON.stringify(rawArgs ?? {}));
+    const args = { input };
+    if (!validateToolArguments(spec, args).valid) invalidToolOutput('prism_invalid_tool_arguments');
+    return { id: callId(), name, arguments: JSON.stringify(args), namespace: spec.ns };
   }
   let args = Object.hasOwn(original, 'arguments') ? original.arguments : {};
   if (typeof args === 'string') args = looseJSON(args);
   if (!args || typeof args !== 'object' || Array.isArray(args)) invalidToolOutput('prism_invalid_tool_arguments');
+  if (!validateToolArguments(spec, args).valid) invalidToolOutput('prism_invalid_tool_arguments');
   return { id: callId(), name, arguments: JSON.stringify(args), namespace: spec.ns };
 }
 

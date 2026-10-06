@@ -14,9 +14,14 @@ async function fixture(t, options = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), 'prism-pool-resources-'));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   const sessions = [];
+  const browsers = [];
   const metrics = new RuntimeMetrics();
   const manager = new AccountPoolManager({ dataDir, concurrency: 2, projectIsolation: false, metrics,
-    browserFactory: async () => ({ on() {}, async close() {} }),
+    browserFactory: async () => {
+      const browser = { closed: false, on() {}, async close() { this.closed = true; } };
+      browsers.push(browser);
+      return browser;
+    },
     sessionFactory: (_, heartbeat, source, slot, browserOptions) => {
       const value = { source, slot, browserOptions, lastHeartbeat: 0, closed: false,
         async authenticate() { return 'stable-source-user'; },
@@ -31,8 +36,47 @@ async function fixture(t, options = {}) {
     }, ...options });
   await manager.init();
   t.after(() => manager.close());
-  return { manager, sessions, metrics };
+  return { manager, sessions, browsers, metrics };
 }
+
+test('disabling the pool releases browser resources and enabling it initializes a fresh browser', async t => {
+  const { manager, sessions, browsers } = await fixture(t);
+  await manager.provision('32', creds);
+  assert.equal(browsers.length, 1);
+  assert.equal((await manager.resources()).contexts, 2);
+
+  await manager.setEnabled(false);
+  assert.equal(manager.isEnabled(), false);
+  assert.equal(browsers[0].closed, true);
+  assert.equal(sessions.every(session => session.closed), true);
+  assert.equal((await manager.resources()).contexts, 0);
+  await assert.rejects(manager.provision('32', creds), error => error.code === 'prism_disabled');
+
+  await manager.setEnabled(true);
+  assert.equal(manager.isEnabled(), true);
+  assert.equal(browsers.length, 2);
+  await manager.provision('32', creds);
+  assert.equal((await manager.resources()).contexts, 2);
+  assert.equal(sessions.slice(-2).every(session => !session.closed), true);
+});
+
+test('rapid toggles serialize and the final switch state wins', async t => {
+  let release;
+  const { manager } = await fixture(t, { browserFactory: async () => ({ on() {}, async close() {} }) });
+  const originalRelease = manager.releaseResources.bind(manager);
+  manager.releaseResources = async () => {
+    await new Promise(resolve => { release = resolve; });
+    return originalRelease();
+  };
+  const disabling = manager.setEnabled(false);
+  const enabling = manager.setEnabled(true);
+  const disablingAgain = manager.setEnabled(false);
+  await new Promise(resolve => setImmediate(resolve));
+  release();
+  await Promise.all([disabling, enabling, disablingAgain]);
+  assert.equal(manager.isEnabled(), false);
+  assert.equal(manager.browserPromise, null);
+});
 
 test('resident reservations count toward the global context capacity before authentication', async t => {
   const { manager, sessions } = await fixture(t, { multiplex: true, maxWorkers: 2 });

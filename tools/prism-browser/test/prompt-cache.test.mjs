@@ -40,6 +40,16 @@ test('entries expire after the TTL and the cache can be turned off', () => {
   assert.equal(off.observe('32', tokens(4000)), 0);
 });
 
+test('clear releases all prompt cache entries for a disabled lifecycle', () => {
+  const cache = new PromptCache();
+  cache.record('32', tokens(4000));
+  cache.record('24', tokens(4000));
+  assert.equal(cache.accounts.size, 2);
+  cache.clear();
+  assert.equal(cache.accounts.size, 0);
+  assert.equal(cache.lookup('32', tokens(4000)), 0);
+});
+
 test('the cache keeps at most maxEntries prompts per account, dropping the least recent', () => {
   const cache = new PromptCache({ maxEntries: 2 });
   cache.record('32', `a${tokens(2000)}`);

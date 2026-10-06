@@ -540,6 +540,11 @@ const (
 	// sidebar entry is hidden. Defaults to false (opt-in feature).
 	SettingKeyAvailableChannelsEnabled = "available_channels_enabled"
 
+	// SettingKeyPrismEnabled is the live, DB-backed master switch for Prism
+	// routing and managed-account lifecycle operations. It defaults to the
+	// PRISM_BROWSER_ENABLED environment value when settings are initialized.
+	SettingKeyPrismEnabled = "prism_enabled"
+
 	// SettingKeyPelicanShowcaseEnabled is a DB-backed soft switch for the user-facing
 	// Pelican gallery (scheduled Pelican HTML results of selected groups). When false the
 	// user endpoints return an empty gallery, the sidebar entry is hidden and no new

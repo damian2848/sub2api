@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -33,6 +34,51 @@ func prismConfigurationTestService(t *testing.T, endpoint string) *PrismAccountS
 	})
 	t.Cleanup(svc.Stop)
 	return svc
+}
+
+type prismConfigurationSettingsRepo struct {
+	mu     sync.Mutex
+	values map[string]string
+}
+
+func (r *prismConfigurationSettingsRepo) Get(context.Context, string) (*Setting, error) {
+	return nil, ErrSettingNotFound
+}
+
+func (r *prismConfigurationSettingsRepo) GetValue(_ context.Context, key string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	value, ok := r.values[key]
+	if !ok {
+		return "", ErrSettingNotFound
+	}
+	return value, nil
+}
+
+func (r *prismConfigurationSettingsRepo) Set(_ context.Context, key, value string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.values == nil {
+		r.values = make(map[string]string)
+	}
+	r.values[key] = value
+	return nil
+}
+
+func (r *prismConfigurationSettingsRepo) GetMultiple(context.Context, []string) (map[string]string, error) {
+	return nil, nil
+}
+
+func (r *prismConfigurationSettingsRepo) SetMultiple(context.Context, map[string]string) error {
+	return nil
+}
+
+func (r *prismConfigurationSettingsRepo) GetAll(context.Context) (map[string]string, error) {
+	return nil, nil
+}
+
+func (r *prismConfigurationSettingsRepo) Delete(context.Context, string) error {
+	return nil
 }
 
 func TestPrismConfigurationStrictCompleteOptions(t *testing.T) {
@@ -126,6 +172,36 @@ func TestPrismConfigurationFixedConnectionAndPendingRestart(t *testing.T) {
 	encoded, err := json.Marshal(result)
 	require.NoError(t, err)
 	require.NotContains(t, string(encoded), "private-prism-management-key-canary")
+}
+
+func TestPrismConfigurationResetPersistsSidecarDesiredEnabled(t *testing.T) {
+	// The backend process environment intentionally disagrees with the sidecar's
+	// environment. Reset must persist the state returned by the sidecar rather
+	// than deriving a value from this process's environment.
+	t.Setenv("PRISM_BROWSER_ENABLED", "false")
+	state := prismConfigurationTestState()
+	state.Effective.Enabled = true
+	state.Desired.Enabled = true
+	repo := &prismConfigurationSettingsRepo{values: make(map[string]string)}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodDelete, r.Method)
+		state.Effective.Enabled = true
+		state.Desired.Enabled = true
+		state.RestartRequired = false
+		state.Source = "environment"
+		require.NoError(t, json.NewEncoder(w).Encode(state))
+	}))
+	defer server.Close()
+	svc := NewPrismAccountService(nil, nil, &prismTestTokens{}, PrismRuntimeConfig{
+		URL: server.URL, ManagementKey: "private-prism-management-key-canary",
+	}, &SettingService{settingRepo: repo})
+	t.Cleanup(svc.Stop)
+
+	result, err := svc.ResetConfiguration(context.Background())
+	require.NoError(t, err)
+	require.True(t, result.Configuration.Desired.Enabled)
+	require.True(t, result.Gateway.Enabled)
+	require.Equal(t, "true", repo.values[SettingKeyPrismEnabled])
 }
 
 func TestPrismConfigurationRetainsStartupConnectionWhenRoutingDisabled(t *testing.T) {

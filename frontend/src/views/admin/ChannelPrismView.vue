@@ -25,7 +25,12 @@
         <p class="text-sm text-gray-500">{{ t('prismConfig.source') }}: {{ t('prismConfig.' + settings.configuration.source) }}</p>
         <h3 class="text-lg font-semibold">{{ t('prismConfig.desired') }}</h3>
         <fieldset :disabled="busy" class="min-w-0 space-y-4">
-          <div v-for="key in prismBooleanFields" :key="key" class="rounded-xl border border-gray-200 p-4 dark:border-dark-700">
+          <div class="rounded-xl border border-primary-300 bg-primary-50 p-4 dark:border-primary-700 dark:bg-primary-950/20" data-testid="prism-master-switch">
+            <label class="flex items-center gap-3 text-sm font-semibold"><input v-model="draft.enabled" data-testid="prism-enabled" type="checkbox" role="switch" class="h-4 w-4 rounded text-primary-600" />{{ t('prismConfig.fields.enabled.label') }}</label>
+            <p class="mt-2 text-xs leading-5 text-gray-500">{{ t('prismConfig.fields.enabled.hint') }}</p>
+            <p class="mt-1 text-xs text-gray-500" data-testid="prism-effective-enabled">{{ t('prismConfig.current') }}: {{ t(settings.configuration.effective.enabled ? 'prismConfig.enabled' : 'prismConfig.disabled') }}</p>
+          </div>
+          <div v-for="key in prismBooleanFields.filter(key => key !== 'enabled')" :key="key" class="rounded-xl border border-gray-200 p-4 dark:border-dark-700">
             <label class="flex items-center gap-3 text-sm font-medium"><input v-model="draft[key]" :data-testid="'prism-' + key" type="checkbox" role="switch" class="h-4 w-4 rounded text-primary-600" />{{ t('prismConfig.fields.' + key + '.label') }}</label>
             <p class="mt-2 text-xs leading-5 text-gray-500">{{ t('prismConfig.fields.' + key + '.hint') }}</p>
             <p class="mt-1 text-xs text-gray-500" :data-testid="'prism-effective-' + key">{{ t('prismConfig.current') }}: {{ t(settings.configuration.effective[key] ? 'prismConfig.enabled' : 'prismConfig.disabled') }}</p>

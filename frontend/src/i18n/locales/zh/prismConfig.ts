@@ -10,8 +10,8 @@ export default {
   disabled: '已关闭',
   configured: '已配置',
   missing: '未配置',
-  connectionHint: '地址、路由开关和管理密钥由服务器部署配置提供。密钥不会发送到浏览器；这里不修改账号凭证或端点。',
-  restartHint: '保存只更新启动配置，不会中断当前请求。使用“重启并应用配置”仅重启 Prism 侧车，不重启网关。',
+  connectionHint: '地址和管理密钥由服务器部署配置提供。密钥不会发送到浏览器；下方总开关会控制新请求的 Prism 路由。关闭后会回收浏览器资源，进行中的请求会先尝试收尾；侧车启动值会在下次重启时应用。',
+  restartHint: '保存会更新总开关和启动配置。关闭总开关会停止新请求并回收 Prism 浏览器资源；使用“重启并应用配置”仅重启 Prism 侧车，不重启网关。',
   restart: '重启并应用配置',
   restartTitle: '确认重启 Prism 侧车？',
   restartMessage: '仅重启 Prism，不重启网关，并应用已保存的启动配置。可能中断全部 Prism 正在进行或排队的请求，是否继续？',
@@ -54,6 +54,7 @@ export default {
     unavailable: 'Prism 侧车暂时不可用，请检查连接、管理密钥及侧车状态。'
   },
   fields: {
+    enabled: { label: 'Prism 总开关', hint: '控制网关是否向托管 Prism 账号路由请求。关闭后会回收浏览器和账号池资源，重新开启时初始化共享浏览器并按需恢复账号会话。' },
     project_isolation: { label: '项目隔离', hint: '使用隔离项目执行请求，避免混入已有项目的上下文。' },
     http_cache: { label: 'HTTP 缓存', hint: '缓存侧车浏览器可复用的静态资源。' },
     multiplex_pages: { label: '提交页复用（实验性）', hint: '提交后释放编辑页，由驻留轮询页跟踪请求；建议先受控验证。' },

@@ -28,8 +28,10 @@ export function projectIsolationEnabled(value = process.env.PRISM_PROJECT_ISOLAT
   return ['true', '1', 'on'].includes(String(value ?? '').trim().toLowerCase());
 }
 
-// Bounded, durable mapping of hashed tenant+conversation scopes to projects. Eviction
-// forgets a mapping, never reassigns a project to another scope or deletes upstream files.
+// Bounded, durable mapping of hashed tenant+conversation scopes to reusable projects.
+// Eviction forgets a mapping, never reassigns a project to another scope or deletes
+// the reusable upstream project. One-shot anonymous project cleanup is handled by
+// BrowserSession after the turn settles.
 // Anonymous requests are never persisted or reused. A UUID is persisted before creation
 // may escape the client, and only a successfully initialized project becomes reusable.
 export class ProjectRegistry {
@@ -140,7 +142,7 @@ export class ProjectRegistry {
           await this.persist(source, entries);
         }
         current();
-      }, signal, models);
+      }, signal, models, { ephemeral: !scope.reusable && !projectId });
       current();
       if (!projectId) throw new PrismError('project_creation_failed');
       if (scope.reusable) {

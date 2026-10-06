@@ -6,12 +6,13 @@ import { PrismError, aborted, pause, projectRuntimeRateLimitedError } from './er
 import { NativeStartLimiter } from './start-limit.mjs';
 import { ProjectRegistry, freshProjectScope } from './projects.mjs';
 import { AccountPageMultiplexer, multiplexEnabled } from './page-multiplexer.mjs';
+import { TurnJournal } from './turn-journal.mjs';
 
 export class AccountPoolManager {
   constructor({ dataDir, concurrency = 2, maxWorkers = 32, queueLimit = 8, maxAccounts = 16,
     startLimit = 0, startWindowMs = 65000, transientRetries = 1, transientRetryDelayMs = 4000, transientRetryWaitMs = 15000,
     startCooldownMs = 60000, runtimeCooldownMs = 60000, startOptions = {}, projectIsolation = false, projectRegistry, admissionGuard, metrics,
-    browserOptions = {}, multiplex = multiplexEnabled(),
+    browserOptions = {}, multiplex = multiplexEnabled(), enabled = true, disableDrainMs = 3000,
     startLimiterFactory = source => new NativeStartLimiter({ limit: startLimit, windowMs: startWindowMs, ...startOptions,
       onAudit: (event, fields) => {
         if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event, source, ...fields }));
@@ -37,10 +38,16 @@ export class AccountPoolManager {
     this.runtimeCooldownMs = runtimeCooldownMs;
     this.projectIsolation = projectIsolation;
     this.projects = projectRegistry || new ProjectRegistry({ dataDir });
+    this.turnJournal = new TurnJournal({ dataDir });
     this.admissionGuard = admissionGuard;
     this.metrics = metrics;
     this.browserOptions = browserOptions;
     this.multiplex = multiplex;
+    this.enabled = enabled !== false;
+    this.disableDrainMs = Number.isFinite(disableDrainMs) && disableDrainMs >= 0 ? disableDrainMs : 3000;
+    this.releasePromise = null;
+    this.lifecyclePromise = Promise.resolve();
+    this.lifecycleGeneration = 0;
     this.multiplexers = new Map();
     this.transientRetries = transientRetries;
     this.transientRetryDelayMs = transientRetryDelayMs;
@@ -66,10 +73,15 @@ export class AccountPoolManager {
   }
 
   get primary() { return this.managers[0]; }
-  async init() { await Promise.all(this.managers.map(manager => manager.init())); }
+  isEnabled() { return this.enabled; }
+  async init() {
+    await this.turnJournal.init();
+    await Promise.all(this.managers.map(manager => manager.init()));
+  }
 
   getBrowser() {
     if (this.stopping) return Promise.reject(new PrismError('service_stopping', 503));
+    if (!this.enabled) return Promise.reject(new PrismError('prism_disabled', 503));
     if (!this.browserPromise) this.browserPromise = this.browserFactory().then(browser => {
       if (this.stopping) return browser.close().then(() => { throw new PrismError('service_stopping', 503); });
       browser.on?.('disconnected', () => {
@@ -84,6 +96,7 @@ export class AccountPoolManager {
 
   createDriver(browser, heartbeat, source, slot) {
     if (this.stopping) throw new PrismError('service_stopping', 503);
+    if (!this.enabled) throw new PrismError('prism_disabled', 503);
     const previousMultiplexer = this.multiplexers.get(source);
     if (previousMultiplexer?.closed) this.multiplexers.delete(source);
     const residentReservation = this.multiplex && !this.multiplexers.has(source) ? 1 : 0;
@@ -221,12 +234,18 @@ export class AccountPoolManager {
     const ready = account.workers.filter(worker => this.usable(source, worker));
     const models = [...new Set(ready.flatMap(worker => this.workerStatus(source, worker).models))];
     const heartbeat = Math.max(0, ...ready.map(worker => this.workerStatus(source, worker).last_heartbeat_at || 0));
-    return { ...base, ready: ready.length > 0, models, ...(ready.length ? { phase: 'ready', error_code: undefined } : {}),
+    const pendingTurns = this.turnJournal.initialized ? this.turnJournal.list(source) : [];
+    return { ...base, ready: ready.length > 0, models, pending_turns: pendingTurns,
+      ...(ready.length ? { phase: 'ready', error_code: undefined } : {}),
       last_heartbeat_at: heartbeat || base.last_heartbeat_at,
       concurrency: ready.length, pool_size: this.concurrency, ready_workers: ready.length,
       busy_workers: ready.filter(worker => worker.busy).length, queued: account.queue.pending,
       start_bucket: this.startLimiters.get(source)?.status?.() || null };
   }
+
+  pending(source) { return this.turnJournal.list(source); }
+
+  async resolvePending(source, id) { return this.turnJournal.resolve(source, id); }
 
   async resources() {
     return { memory: await this.admissionGuard?.snapshot() || null, timings: this.metrics?.snapshot() || {},
@@ -240,6 +259,7 @@ export class AccountPoolManager {
   authenticateKey(source, key) { return this.primary.authenticateKey(source, key); }
 
   async provision(source, body, signal) {
+    if (!this.enabled) throw new PrismError('prism_disabled', 503);
     this.primary.validateSession(body);
     this.primary.get(source, true);
     const account = this.runtime(source);
@@ -287,6 +307,7 @@ export class AccountPoolManager {
   }
 
   async bootstrap(source, signal, options = {}) {
+    if (!this.enabled) throw new PrismError('prism_disabled', 503);
     const account = this.runtime(source);
     const version = account.version;
     this.assertCurrent(account, version, signal);
@@ -354,6 +375,7 @@ export class AccountPoolManager {
   }
 
   async generate(source, request, signal, onText) {
+    if (!this.enabled) throw new PrismError('prism_disabled', 503);
     const account = this.runtime(source);
     const version = account.version;
     if (this.projectIsolation) request.projectScope ||= freshProjectScope();
@@ -365,47 +387,101 @@ export class AccountPoolManager {
       onText(value);
       published = true;
     } : undefined;
-    const run = async worker => {
-      worker.busy = true;
-      account.next = (worker.slot + 1) % account.workers.length;
-      const startedAt = performance.now();
-      try {
-        const text = await worker.manager.generate(source, request, signal, progress);
-        this.assertCurrent(account, version, signal);
-        return text;
-      } finally {
-        worker.busy = false;
-        this.metrics?.record('worker_turn_ms', performance.now() - startedAt);
-        if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event: 'request_timing',
-          source, worker: worker.slot, model: request.model, queue_wait_ms: Math.round(startedAt - queuedAt),
-          generation_ms: Math.round(performance.now() - startedAt) }));
-      }
-    };
     return account.queue.run(async () => {
       this.assertCurrent(account, version, signal);
       let worker = this.available(source, account, request.model, request.projectScope);
       if (!worker) throw new PrismError('account_busy', 409);
+      // Reserve the selected worker before the durable write yields.  Otherwise a second
+      // concurrent queue job could select the same worker during journal initialization.
+      worker.busy = true;
       if (scope) account.activeScopes.add(scope);
+      let turn;
+      try { turn = await this.turnJournal.begin(source, request); }
+      catch (error) { worker.busy = false; if (scope) account.activeScopes.delete(scope); throw error; }
+      let submitted = false;
+      const originalSubmitted = request.onSubmitted;
+      const originalTurnState = request.onTurnState;
+      const turnRequest = { ...request,
+        onSubmitted: async details => {
+          submitted = true;
+          await this.turnJournal.submitted(turn, {
+            request_id: details?.request_id,
+            conversation_id: details?.conversation_id,
+          });
+          return originalSubmitted?.(details);
+        },
+        onTurnState: async details => {
+          await this.turnJournal.running(turn, {
+            request_id: details?.request_id,
+            turn_state: details?.turn_state,
+            conversation_id: details?.conversation_id,
+          });
+          return originalTurnState?.(details);
+        },
+      };
+      const run = async worker => {
+        worker.busy = true;
+        account.next = (worker.slot + 1) % account.workers.length;
+        const startedAt = performance.now();
+        try {
+          this.assertCurrent(account, version, signal);
+          const text = await worker.manager.generate(source, turnRequest, signal, progress);
+          this.assertCurrent(account, version, signal);
+          return text;
+        } finally {
+          worker.busy = false;
+          this.metrics?.record('worker_turn_ms', performance.now() - startedAt);
+          if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event: 'request_timing',
+            source, worker: worker.slot, model: request.model, queue_wait_ms: Math.round(startedAt - queuedAt),
+            generation_ms: Math.round(performance.now() - startedAt) }));
+        }
+      };
       this.metrics?.record('queue_wait_ms', performance.now() - queuedAt);
       try {
         for (let attempt = 0; ; attempt += 1) {
           try {
-            return await run(worker);
+            const result = await run(worker);
+            await this.turnJournal.complete(turn);
+            return result;
           } catch (error) {
             // Prism's own servers failed (HTTP 5xx on start or status, or a terminal 5xx) before any text was
             // published: one resubmission, after a short pause, on another worker. Anything else, a second
             // failure, or a request that is already gone surfaces as it is.
-            if (attempt >= this.transientRetries || published || !(error instanceof PrismError) || error.transient !== true) throw error;
-            this.assertCurrent(account, version, signal);
-            await pause(this.transientRetryDelayMs, signal);
-            const next = await this.retryWorker(source, account, version, request.model, worker, signal);
-            if (!next) throw error;
-            if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event: 'transient_retry',
-              source, model: request.model, from_worker: worker.slot, to_worker: next.slot, code: error.code }));
-            worker = next;
+            if (account.version !== version && error instanceof PrismError && error.code === 'account_not_ready') {
+              error = new PrismError('session_revoked', 409);
+            }
+            if (attempt >= this.transientRetries || published || !(error instanceof PrismError) || error.transient !== true) {
+              if (!submitted || error.code === 'prism_start_rejected') await this.turnJournal.clear(turn);
+              else await this.turnJournal.fail(turn, error);
+              throw error;
+            }
+            try {
+              this.assertCurrent(account, version, signal);
+              await pause(this.transientRetryDelayMs, signal);
+              const next = await this.retryWorker(source, account, version, request.model, worker, signal);
+              if (!next) {
+                await this.turnJournal.fail(turn, error);
+                throw error;
+              }
+              if (process.env.PRISM_AUDIT_REQUESTS === 'true') console.log(JSON.stringify({ event: 'transient_retry',
+                source, model: request.model, from_worker: worker.slot, to_worker: next.slot, code: error.code }));
+              await this.turnJournal.attempt(turn);
+              worker = next;
+            } catch (retryError) {
+              // Cancellation, revocation or a retry wait failure after a native
+              // submit is still an unknown upstream outcome. Preserve it for
+              // operator reconciliation instead of allowing an unsafe replay.
+              if (retryError !== error) {
+                if (!submitted) await this.turnJournal.clear(turn);
+                else await this.turnJournal.fail(turn, retryError);
+              }
+              throw retryError;
+            }
           }
         }
-      } finally { if (scope) account.activeScopes.delete(scope); }
+      } finally {
+        if (scope) account.activeScopes.delete(scope);
+      }
     }, signal, { canStart: () => { this.assertCurrent(account, version, signal);
       return !(scope && account.activeScopes.has(scope)) && Boolean(this.available(source, account, request.model, request.projectScope)); } });
   }
@@ -430,8 +506,80 @@ export class AccountPoolManager {
     }, undefined, { priority: true });
   }
 
+  // Disable admission without permanently stopping the pool. Pending work is
+  // cancelled immediately; accepted turns get a short drain window so toggling
+  // the switch does not tear down their browser context halfway through a turn.
+  // Once the window expires, revoke() closes the active sessions and the shared
+  // browser. Account metadata remains loaded so a later provision can initialize
+  // a fresh browser lazily.
+  setEnabled(enabled) {
+    const next = enabled !== false;
+    const generation = ++this.lifecycleGeneration;
+    const operation = this.lifecyclePromise.catch(() => {}).then(async () => {
+      // A newer toggle supersedes queued work. An already-running disable is
+      // allowed to finish its release before the newer request is applied.
+      if (generation !== this.lifecycleGeneration || this.stopping) return;
+      if (next) {
+        this.enabled = true;
+        try {
+          // Recreate the shared browser eagerly when an operator turns Prism on;
+          // account sessions are still provisioned with fresh credentials later.
+          await this.getBrowser();
+        } catch (error) {
+          this.enabled = false;
+          throw error;
+        }
+        return;
+      }
+      this.enabled = false;
+      const release = this.releaseResources();
+      this.releasePromise = release;
+      try { await release; }
+      finally { if (this.releasePromise === release) this.releasePromise = null; }
+    });
+    this.lifecyclePromise = operation.catch(() => {});
+    return operation;
+  }
+
+  async releaseResources() {
+    // Reject queued work while allowing currently running turns to finish.
+    for (const account of this.accounts.values()) {
+      account.queue.cancelPending(new PrismError('prism_disabled', 503));
+    }
+    const deadline = Date.now() + this.disableDrainMs;
+    while ([...this.accounts.values()].some(account => account.queue.running) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))));
+    }
+
+    // Preserve the in-memory credentials long enough for the next provision.
+    // revoke() intentionally clears them from the account runtime and metadata.
+    const sessions = new Map([...this.accounts].map(([source, account]) => [source, account.session && { ...account.session }]));
+    const sources = new Set(this.accounts.keys());
+    for (const manager of this.managers) for (const source of manager.accounts.keys()) sources.add(source);
+    await Promise.allSettled([...sources].map(source => this.revoke(source)));
+    for (const [source, session] of sessions) {
+      const account = this.accounts.get(source);
+      if (account && session) account.session = session;
+    }
+    this.runtimeCooldowns.clear();
+    for (const limiter of this.startLimiters.values()) limiter.close();
+    this.startLimiters.clear();
+    await Promise.allSettled([...this.multiplexers.values()].map(value => value.close()));
+    this.multiplexers.clear();
+    const browser = await this.browserPromise?.catch(() => null);
+    await browser?.close();
+    this.browserPromise = null;
+    this.drivers.clear();
+  }
+
   async close() {
+    ++this.lifecycleGeneration;
+    this.enabled = false;
+    // Mark stopping before waiting on the serialized toggle chain so a shared
+    // Chromium launch resolving during shutdown is closed and rejected.
     this.stopping = true;
+    await this.lifecyclePromise.catch(() => {});
+    await this.releasePromise?.catch(() => {});
     for (const limiter of this.startLimiters.values()) limiter.close();
     for (const account of this.accounts.values()) { account.session = null; account.queue.close(); }
     await Promise.allSettled(this.managers.map(manager => manager.close()));

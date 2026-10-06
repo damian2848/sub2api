@@ -97,6 +97,29 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
   const managementLimit = Math.min(bodyLimit, 128 * 1024);
   const mediaLimits = attachmentLimits({ maxAttachments, maxAttachmentBytes, maxTotalAttachmentBytes });
   restart ||= new PrismRestartController({ configuration });
+  // The sidecar's effective snapshot is the startup default. The master switch
+  // is also live: configuration writes move this admission gate immediately,
+  // while the other startup options still wait for a restart.
+  let liveEnabled = configuration?.effective?.enabled !== false;
+  let lifecyclePromise = Promise.resolve();
+  const applyLifecycle = state => {
+    const enabled = state?.desired?.enabled !== false;
+    const operation = lifecyclePromise.catch(() => {}).then(async () => {
+      if (enabled === liveEnabled && (manager.isEnabled?.() ?? enabled) === enabled) return;
+      // Gate immediately while resource release drains, but only publish an
+      // enabled state after initialization has completed successfully.
+      if (!enabled) {
+        liveEnabled = false;
+        promptCache.clear?.();
+        await manager.setEnabled?.(false);
+        return;
+      }
+      await manager.setEnabled?.(true);
+      liveEnabled = true;
+    });
+    lifecyclePromise = operation.catch(() => {});
+    return operation;
+  };
   const server = createServer(async (req, res) => {
     const controller = new AbortController();
     let timer;
@@ -128,15 +151,22 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
         if (!keyMatches(bearer(req), managementHash)) throw new PrismError('invalid_management_key', 401);
         if (!configuration) throw new PrismError('prism_configuration_unavailable', 503);
         if (req.method === 'GET') return send(res, 200, configuration.snapshot());
-        if (req.method === 'PUT') return send(res, 200,
-          await configuration.put(await readJSON(req, Math.min(managementLimit, CONFIGURATION_BODY_LIMIT))));
-        if (req.method === 'DELETE') return send(res, 200, await configuration.reset());
+        if (req.method === 'PUT') {
+          const state = await configuration.put(await readJSON(req, Math.min(managementLimit, CONFIGURATION_BODY_LIMIT)));
+          await applyLifecycle(state);
+          return send(res, 200, state);
+        }
+        if (req.method === 'DELETE') {
+          const state = await configuration.reset();
+          await applyLifecycle(state);
+          return send(res, 200, state);
+        }
         throw new PrismError('method_not_allowed', 405);
       }
       if (restart.pending) {
         const error = new PrismError('prism_restarting', 503); error.retryAfterSeconds = 3; throw error;
       }
-      const internal = /^\/internal\/accounts\/([1-9][0-9]{0,18})\/(session|bootstrap|status)$/.exec(url.pathname);
+      const internal = /^\/internal\/accounts\/([1-9][0-9]{0,18})\/(session|bootstrap|status|pending)(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
       const user = /^\/accounts\/([1-9][0-9]{0,18})\/v1\/(models|responses|chat\/completions)$/.exec(url.pathname);
       if (!internal && !user) throw new PrismError('route_not_found', 404);
       timer = setTimeout(() => controller.abort(new PrismError('request_timeout', 504)),
@@ -144,7 +174,18 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
       if (internal) {
         if (!keyMatches(bearer(req), managementHash)) throw new PrismError('invalid_management_key', 401);
         const [, source, action] = internal;
+        // The live master switch is evaluated at the sidecar admission boundary
+        // after management auth. Config and restart management are handled
+        // above; pending-turn reconciliation remains available while routing is
+        // off so operators can recover safely.
+        if (!liveEnabled && action !== 'pending') {
+          throw new PrismError('prism_disabled', 503);
+        }
         if (action === 'status' && req.method === 'GET') return send(res, 200, manager.status(source));
+        if (action === 'pending' && !internal[3] && req.method === 'GET') return send(res, 200, { pending_turns: manager.pending(source) });
+        if (action === 'pending' && internal[3] && req.method === 'DELETE') {
+          return send(res, 200, await manager.resolvePending(source, internal[3]));
+        }
         if (action === 'session' && req.method === 'PUT') return send(res, 200,
           await manager.provision(source, await readJSON(req, managementLimit), controller.signal));
         if (action === 'session' && req.method === 'DELETE') return send(res, 200,
@@ -162,6 +203,8 @@ export function createPrismServer({ manager, managementKey, bodyLimit = 8 * 1024
       }
       const [, source, action] = user;
       manager.authenticateKey(source, bearer(req));
+      // Authenticate user credentials before exposing the global switch state.
+      if (!liveEnabled) throw new PrismError('prism_disabled', 503);
       if (action === 'models' && req.method === 'GET') {
         const status = manager.status(source);
         if (!status.ready) throw new PrismError('account_not_ready', 503);
@@ -268,6 +311,7 @@ export async function main() {
     multiplex: effective.multiplex_pages, browserOptions: {
       pollMs: integer('PRISM_STATUS_POLL_MS', 600, 0, 10000), httpCache: effective.http_cache,
       prewarm: effective.prewarm_chat },
+    enabled: effective.enabled,
     projectRegistry: new ProjectRegistry({ dataDir,
       maxSessions: integer('PRISM_MAX_SESSION_PROJECTS', 128, 1, 4096),
       ttlMs: integer('PRISM_SESSION_PROJECT_TTL_SECONDS', 86400, 1, 604800) * 1000 }),
@@ -282,6 +326,9 @@ export async function main() {
   const statusPollMs = integer('PRISM_STATUS_POLL_MS', 600, 0, 10000);
   if (statusPollMs > 0 && statusPollMs < 250) throw new Error('invalid PRISM_STATUS_POLL_MS');
   await manager.init();
+  // An enabled sidecar owns its shared Chromium from boot; disabled instances
+  // stay resource-free until the live switch is turned on.
+  if (effective.enabled) await manager.setEnabled(true);
   const restart = new PrismRestartController({ configuration,
     prepareRestart: supervisor?.prepareRestart, onRestart: supervisor ? () => { void shutdown(true); } : undefined });
   const server = createPrismServer({ manager, managementKey: process.env.PRISM_MANAGEMENT_KEY, restart,

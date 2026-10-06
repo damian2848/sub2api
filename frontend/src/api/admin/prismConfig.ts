@@ -2,6 +2,8 @@ import type { AxiosRequestConfig } from 'axios'
 import { apiClient } from '../client'
 
 export interface PrismStartupConfig {
+  /** Master switch for Prism routing. Applied live; other startup fields wait for restart. */
+  enabled: boolean
   project_isolation: boolean
   http_cache: boolean
   multiplex_pages: boolean
@@ -45,7 +47,7 @@ export interface PrismRestartRequest {
 }
 
 export const prismBooleanFields = [
-  'project_isolation', 'http_cache', 'multiplex_pages', 'prewarm_chat', 'stream_reasoning'
+  'enabled', 'project_isolation', 'http_cache', 'multiplex_pages', 'prewarm_chat', 'stream_reasoning'
 ] as const
 export const prismMemoryFields = ['memory_limit_mib', 'memory_reserve_mib'] as const
 export const prismMemoryMaximum = 1048576
@@ -53,7 +55,7 @@ export const prismMemoryMaximum = 1048576
 export function validPrismStartupConfig(value: unknown): value is PrismStartupConfig {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const config = value as Record<string, unknown>
-  if (Object.keys(config).length !== 7 || !prismBooleanFields.every(key => typeof config[key] === 'boolean')) return false
+  if (Object.keys(config).length !== 8 || !prismBooleanFields.every(key => typeof config[key] === 'boolean')) return false
   if (!prismMemoryFields.every(key => typeof config[key] === 'number' && Number.isInteger(config[key]) && (config[key] as number) >= 0 && (config[key] as number) <= prismMemoryMaximum)) return false
   return config.memory_limit_mib === 0 || (config.memory_limit_mib as number) > (config.memory_reserve_mib as number)
 }

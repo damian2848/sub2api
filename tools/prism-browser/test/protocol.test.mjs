@@ -112,7 +112,8 @@ test('tool call parsing tolerates fences, short leading prose, missing braces an
   assert.deepEqual(JSON.parse(missing.arguments), { cmd: 'ls', max_output_tokens: 1000 });
   assert.deepEqual(JSON.parse(call('{"tool_call":{"name":"exec_command","arguments":"{\\"cmd\\":\\"pwd\\"}"}}').arguments), { cmd: 'pwd' });
   assert.equal(call('{"tool_call":{"name":"exec_command","arguments":{"cmd":"ls"}}} and then I will explain.').type, 'function_call');
-  assert.equal(call('{"tool_call":{"name":"functions.exec_command"}}').arguments, '{}');
+  assert.throws(() => call('{"tool_call":{"name":"functions.exec_command"}}'), error =>
+    error.status === 502 && error.code === 'prism_invalid_tool_arguments');
   // Long prose before the JSON or no JSON at all is plain text; an unknown tool fails safely.
   const prose = 'I will now carefully run the listing command for you: {"tool_call":{"name":"exec_command","arguments":{}}}';
   assert.equal(call(prose).type, 'message');

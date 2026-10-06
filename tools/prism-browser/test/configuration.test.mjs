@@ -8,9 +8,9 @@ import { AccountPoolManager } from '../src/pool.mjs';
 import { CONFIGURATION_BODY_LIMIT, PrismConfigurationStore, configurationFromEnvironment,
   validateConfiguration } from '../src/configuration.mjs';
 
-const defaults = { project_isolation: false, http_cache: false, memory_limit_mib: 0, memory_reserve_mib: 32,
+const defaults = { enabled: true, project_isolation: false, http_cache: false, memory_limit_mib: 0, memory_reserve_mib: 32,
   multiplex_pages: false, prewarm_chat: true, stream_reasoning: true };
-const changed = { project_isolation: true, http_cache: true, memory_limit_mib: 2048, memory_reserve_mib: 64,
+const changed = { enabled: false, project_isolation: true, http_cache: true, memory_limit_mib: 2048, memory_reserve_mib: 64,
   multiplex_pages: true, prewarm_chat: false, stream_reasoning: false };
 const invalid = error => error.code === 'invalid_prism_configuration' && error.status === 400;
 
@@ -23,13 +23,14 @@ async function fixture(t, environment = {}) {
   return { root, dataDir, store, environment };
 }
 
-test('startup configuration preserves the seven environment defaults and normalizes supported env forms', () => {
+test('startup configuration preserves the eight environment defaults and normalizes supported env forms', () => {
   assert.deepEqual(configurationFromEnvironment({}), defaults);
   assert.deepEqual(configurationFromEnvironment({ PRISM_PROJECT_ISOLATION: ' ON ', PRISM_HTTP_CACHE: '1',
     PRISM_MULTIPLEX_PAGES: 'true', PRISM_PREWARM_CHAT: 'off', PRISM_STREAM_REASONING: '0',
-    PRISM_MEMORY_LIMIT_MIB: '2048', PRISM_MEMORY_RESERVE_MIB: '64', PRISM_MANAGEMENT_KEY: 'must-not-be-copied' }), changed);
+    PRISM_MEMORY_LIMIT_MIB: '2048', PRISM_MEMORY_RESERVE_MIB: '64', PRISM_BROWSER_ENABLED: 'off',
+    PRISM_MANAGEMENT_KEY: 'must-not-be-copied' }), changed);
   for (const environment of [{ PRISM_PROJECT_ISOLATION: 'maybe' }, { PRISM_PREWARM_CHAT: 'maybe' },
-    { PRISM_STREAM_REASONING: 'maybe' }, { PRISM_MEMORY_LIMIT_MIB: '-1' },
+    { PRISM_STREAM_REASONING: 'maybe' }, { PRISM_BROWSER_ENABLED: 'maybe' }, { PRISM_MEMORY_LIMIT_MIB: '-1' },
     { PRISM_MEMORY_RESERVE_MIB: '1048577' }, { PRISM_MEMORY_LIMIT_MIB: '32' }]) {
     assert.throws(() => configurationFromEnvironment(environment), invalid);
   }
@@ -82,6 +83,20 @@ test('same-as-effective saved settings have no pending restart and apply only on
   assert.deepEqual(restarted.effective, changed);
   await restarted.init();
   assert.deepEqual(restarted.effective, changed, 'init is not a live reload after startup');
+});
+
+test('startup migrates a schema 1 configuration written before the enabled switch', async t => {
+  const { dataDir, store } = await fixture(t, { PRISM_BROWSER_ENABLED: 'false' });
+  const { enabled: omitted, ...legacy } = changed;
+  await writeFile(store.path, JSON.stringify({ schema: 1, values: legacy }));
+  const restarted = new PrismConfigurationStore({ dataDir, environment: { PRISM_BROWSER_ENABLED: 'false' } });
+  await restarted.init();
+  assert.equal(restarted.effective.enabled, false, 'legacy files inherit the current environment default');
+  assert.deepEqual(restarted.effective, { ...legacy, enabled: false });
+  await writeFile(store.path, JSON.stringify({ schema: 1, values: legacy }));
+  const enabledByEnvironment = new PrismConfigurationStore({ dataDir, environment: { PRISM_BROWSER_ENABLED: 'true' } });
+  await enabledByEnvironment.init();
+  assert.equal(enabledByEnvironment.effective.enabled, true);
 });
 
 test('DELETE restores the original environment as desired and cannot hot-change an effective saved config', async t => {

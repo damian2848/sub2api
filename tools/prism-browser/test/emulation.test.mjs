@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MAX_TOOL_CALLS, NOISE, OUTPUT_RULES_LIMIT, TOOL_INSTRUCTIONS_LIMIT, buildPrompt, clampTranscript, collectTools, elide, envContext, isRawInputSchema,
   looseJSON, outputRules, parseDone, parseReply, parseToolCall, rawInput, rawInputFrom, stripFence, toolPolicyRules, toolProtocol, toolReminder } from '../src/emulation.mjs';
+import { validateJsonSchema, validateLark } from '../src/tool-validation.mjs';
 
 test('collectTools keeps plain functions, walks namespaces, skips custom, web_search and MCP tools', () => {
   const tools = collectTools([
@@ -362,9 +363,43 @@ test('tool policies reject required/forced/parallel violations without returning
 });
 
 test('a tool without parameters may be called with an empty body, as before', () => {
-  const empty = parseReply('<tool_call name="exec_command"></tool_call>', toolSpecs());
-  assert.deepEqual(empty.calls.map(call => [call.name, call.arguments]), [['exec_command', '{}']]);
-  assert.equal(parseReply('<tool_call name="exec_command">\n  \n</tool_call>', toolSpecs()).calls[0].arguments, '{}');
+  const noArgs = new Map(collectTools([{ type: 'function', name: 'no_args', parameters: {} }]).map(spec => [spec.name, spec]));
+  const empty = parseReply('<tool_call name="no_args"></tool_call>', noArgs);
+  assert.deepEqual(empty.calls.map(call => [call.name, call.arguments]), [['no_args', '{}']]);
+  assert.equal(parseReply('<tool_call name="no_args">\n  \n</tool_call>', noArgs).calls[0].arguments, '{}');
+});
+
+test('tool arguments enforce Draft 7 and Draft 2020-12 object constraints before shaping a call', () => {
+  const draft7 = { $schema: 'http://json-schema.org/draft-07/schema#', type: 'object', properties: {
+    command: { type: 'string', minLength: 1 }, count: { type: 'integer', minimum: 1, maximum: 3 },
+  }, required: ['command'], additionalProperties: false };
+  assert.equal(validateJsonSchema({ command: 'ls', count: 2 }, draft7).valid, true);
+  assert.equal(validateJsonSchema({ command: '', count: 2 }, draft7).valid, false);
+  assert.equal(validateJsonSchema({ command: 'ls', count: 4 }, draft7).valid, false);
+  assert.equal(validateJsonSchema({ command: 'ls', other: true }, draft7).valid, false);
+  const draft2020 = { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'object', properties: {
+    mode: { enum: ['read', 'write'] }, payload: { type: 'array', prefixItems: [{ type: 'string' }, { type: 'integer' }], minItems: 2 },
+  }, required: ['mode', 'payload'], allOf: [{ required: ['mode'] }] };
+  assert.equal(validateJsonSchema({ mode: 'read', payload: ['x', 1] }, draft2020).valid, true);
+  assert.equal(validateJsonSchema({ mode: 'delete', payload: ['x', 1] }, draft2020).valid, false);
+  assert.equal(validateJsonSchema({ mode: 'read', payload: ['x', '1'] }, draft2020).valid, false);
+  const specs = new Map(collectTools([{ type: 'function', name: 'run', parameters: draft7 }]).map(spec => [spec.name, spec]));
+  assert.throws(() => parseReply('<tool_call name="run">{"command":"ls","other":true}</tool_call>', specs),
+    error => error.code === 'prism_invalid_tool_arguments');
+  assert.throws(() => parseToolCall('{"tool_call":{"name":"run","arguments":{"other":true}}}', specs),
+    error => error.code === 'prism_invalid_tool_arguments');
+});
+
+test('constrained Lark grammars validate raw and structured tool arguments without executing grammar code', () => {
+  const words = 'start: WORD+\n%import common.WORD\n%import common.WS\n%ignore WS';
+  assert.equal(validateLark('ls -la', words).valid, true);
+  assert.equal(validateLark('ls && rm -rf /', words).valid, false);
+  const raw = { type: 'object', properties: { input: { type: 'string' } }, required: ['input'], 'x-lark': words };
+  const specs = new Map(collectTools([{ type: 'function', name: 'exec', parameters: raw }]).map(spec => [spec.name, spec]));
+  assert.equal(parseReply('<tool_call name="exec">ls -la</tool_call>', specs).calls.length, 1);
+  assert.throws(() => parseReply('<tool_call name="exec">ls && rm -rf /</tool_call>', specs),
+    error => error.code === 'prism_invalid_tool_arguments');
+  assert.equal(validateLark('anything', 'start: missing').valid, false);
 });
 
 test('an unknown tag that only appears inside markdown code is an example, not a call attempt', () => {

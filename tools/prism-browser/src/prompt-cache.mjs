@@ -48,6 +48,10 @@ export class PromptCache {
 
   get enabled() { return this.ttlMs > 0 && this.maxEntries > 0; }
 
+  clear() {
+    this.accounts.clear();
+  }
+
   // Cached tokens for `text` against the account's recent prompts. Does not record anything.
   lookup(key, text, suppliedHashes) {
     if (!this.enabled || typeof text !== 'string') return 0;

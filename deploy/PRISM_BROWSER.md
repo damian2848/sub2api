@@ -206,6 +206,14 @@ Source IDs are positive decimal Sub2API account IDs.
   It also returns `concurrency`, `pool_size`, `ready_workers` (including busy
   workers), `busy_workers` and `queued`.
   It never returns credentials or identifying email addresses.
+- `GET /internal/accounts/:source/pending` lists durable per-turn journal entries.
+  Entries contain only a request hash, model/effort, timestamps and opaque Prism
+  identifiers. A process restart treats every recovered entry as an unknown
+  upstream outcome and new turns return `409 pending_turn_reconciliation_required`;
+  the sidecar never replays one automatically. After checking Prism, an operator
+  may explicitly remove a recovered entry with `DELETE
+  /internal/accounts/:source/pending/:turn_id`. Active in-process entries cannot
+  be removed (`409 pending_turn_active`).
 - `DELETE /internal/accounts/:source/session` immediately blocks the account key,
   cancels waiting requests and closes all its browser contexts. Managed projects
   and stable identity remain, so
@@ -534,9 +542,13 @@ Limitations that remain:
   An unknown tag that only appears inside markdown code is treated as an
   example and stays in the text; a request that offered no tools is never
   parsed for calls. A tool without parameters may be called with an empty body
-  (meaning `{}`); a non-empty body that is not a JSON object is refused.
+  (meaning `{}`); required fields and other declared constraints are enforced
+  before a call is shaped. Function schemas use the Draft 7/2020-12 argument
+  vocabulary supported by the adapter; free-form tools may add an `x-lark`
+  grammar (bounded rules, literals and regular expressions) for raw input.
   Raw-input `exec` and the existing repairable-JSON compatibility remain
-  supported. Full JSON Schema validation of function arguments is still not provided.
+  supported. Any schema or grammar mismatch returns the same redacted 502 and
+  never emits a partial tool call.
 - **Audio and OpenAI file IDs are unsupported.** Audio parts still return
   `400 image_input_not_supported` (the legacy error code); unresolved `file_id`
   returns `400 attachment_file_id_not_supported`. A native WAV upload was
@@ -593,8 +605,9 @@ Trusted channel-monitor probes use a private, stable scope derived from the mana
   and a 24-hour idle TTL (`PRISM_SESSION_PROJECT_TTL_SECONDS`, 1-604800).
   Failed or partially initialized projects do not become reusable. Eviction
   only forgets the mapping: it never reassigns a sandbox to another user or
-  deletes upstream files. Anonymous/evicted remote projects can accumulate;
-  upstream project quota/retention still needs operational monitoring.
+  deletes an upstream reusable project. Anonymous requests use one-shot
+  projects and the sidecar deletes each one after the turn through Prism's
+  authenticated page; a browser failure can still require operational cleanup.
 
 **Worker affinity.** A request whose Key + session scope already has a ready
 project goes to an idle worker that is on that project, so consecutive turns of
@@ -605,7 +618,8 @@ Requests without a scope still rotate over the workers.
 
 **Cost, and what must be true before enabling it.** Every request without a
 reliable session pays a page load, a project creation and a sandbox sync (up to
-120 s); it also leaves a new project in the Prism account. Reusable scopes keep
+120 s), then deletes its one-shot project after the turn when cleanup succeeds.
+Reusable scopes keep
 the prewarmed next chat and avoid that extra preparation on the next turn. Before enabling: (1) read the production audit and confirm Prism's own
 tools (`internal_tool_calls > 0`) are really used, otherwise there is nothing to
 isolate; (2) decide how anonymous traffic is served (today: a fresh project per
@@ -714,38 +728,44 @@ the selected page is mounted, so inactive tabs do not continue polling. Existing
 admin tool URLs redirect to their corresponding tab and preserve query/hash.
 Account management and its per-account BPS, harvest and Prism actions are unchanged.
 
-The **Prism** tab (`/admin/channel-ops/prism`) manages seven non-secret startup
-options: project isolation, HTTP cache, submission-page multiplexing, chat
-prewarm, streamed reasoning, memory limit and memory reserve. Memory values must
-be integers from 0 to 1048576 MiB; a nonzero limit must exceed the reserve. A zero
-limit disables the memory admission guard. URL, routing enabled state and whether
-a management key is configured are read-only deployment metadata. The management
-key and account credentials are never returned to the browser. This global API
-is administrator-only; observer access to existing account-level operations is
-not changed.
+The **Prism** tab (`/admin/channel-ops/prism`) manages the Prism master switch
+and seven other non-secret startup options: project isolation, HTTP cache,
+submission-page multiplexing, chat prewarm, streamed reasoning, memory limit and
+memory reserve. Memory values must be integers from 0 to 1048576 MiB; a nonzero
+limit must exceed the reserve. A zero limit disables the memory admission guard.
+The sidecar URL and whether a management key is configured remain read-only
+deployment metadata. The management key and account credentials are never
+returned to the browser. This global API is administrator-only; observer access
+to existing account-level operations is not changed.
 
 The gateway proxies `GET/PUT/DELETE /api/v1/admin/settings/prism` to the fixed
-deployment sidecar's management-authenticated `/internal/config`. A disabled
-gateway routing switch does not prevent managing a separately configured sidecar.
-The gateway does not save new connection URLs or keys, migrate account endpoints,
-or automatically restart either service on save. An explicit administrator-confirmed
-managed restart is available separately (see below). Older sidecars without this API show an
-unsupported message instead of an editable form with fabricated defaults.
+deployment sidecar's management-authenticated `/internal/config`. The master
+switch is also persisted in the gateway settings store and gates new Prism
+requests immediately; the sidecar keeps the same value in its startup snapshot
+for restart consistency. The gateway does not save new connection URLs or keys,
+migrate account endpoints, or automatically restart either service on save. An
+explicit administrator-confirmed managed restart is available separately (see
+below). Older sidecars without this API show an unsupported message instead of
+an editable form with fabricated defaults.
 
 **Saving is not a hot reload.** The UI shows the immutable currently effective
 configuration and the desired configuration for the next startup separately.
-`PUT` requires all seven options and atomically saves
+`PUT` requires all eight options and atomically saves
 `PRISM_DATA_DIR/runtime-config.json` (normally `/data/runtime-config.json`) as
 `{"schema":1,"values":{...}}`, with private directory/file permissions. Saved
-values override those seven environment options on the next sidecar startup.
+values override those eight environment options on the next sidecar startup.
 The existing `/data` volume must be retained across container recreation. Invalid
 or corrupt saved configuration fails startup closed; repair or remove the file
 with the sidecar stopped rather than silently relying on environment fallback.
 
 After saving, **restart the Prism sidecar** in a normal maintenance window to
-apply the options; do not restart the gateway solely for these options. Saving or
-resetting does not change live browser contexts, interrupt active requests,
-mutate process environment, or immediately enable experimental multiplexing.
+apply startup options; do not restart the gateway solely for these options. The
+master switch gates new requests as soon as it is saved. Turning it off cancels
+queued work, gives active turns a short drain window, then revokes sessions and
+closes browser, page-multiplexer and worker resources; turning it on recreates
+the shared browser and lets the gateway provision sessions again. The other
+startup options still wait for a sidecar restart, and toggling the switch does
+not mutate process environment or immediately enable experimental multiplexing.
 `restart_required` indicates whether desired and effective values differ.
 **Restore deployment environment** deletes the override and restores environment
 values captured at the current sidecar startup as desired. It too requires a

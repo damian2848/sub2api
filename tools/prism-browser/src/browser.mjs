@@ -172,6 +172,10 @@ export class BrowserSession {
     this.contextEpoch = 0;
     this.page = null;
     this.projectId = null;
+    // Anonymous isolated scopes receive a one-shot project. Keep this bit
+    // separate from projectId because reusable scopes are intentionally kept
+    // across turns and must never be deleted here.
+    this.ephemeralProject = false;
     this.creating = false;
     this.bootstrapping = false;
     this.turn = null;
@@ -302,7 +306,8 @@ export class BrowserSession {
       await this.reserveProject?.(this.projectId);
       if (!this.creating) return route.abort();
     } else if (path.startsWith('/api/projects/') && mutation &&
-      (!this.projectId || !path.startsWith(`/api/projects/${this.projectId}/`))) {
+      (!this.projectId || (path !== `/api/projects/${this.projectId}` &&
+        !path.startsWith(`/api/projects/${this.projectId}/`)))) {
       // No request may alter an unrelated project, including its deletion.
       return route.abort();
     }
@@ -339,6 +344,16 @@ export class BrowserSession {
       turn.startRequest = request;
       turn.conversationId = body.conversationId;
       turn.startedAt = performance.now();
+      // Persist the intent before the native request leaves the browser.  A crash after this
+      // point is deliberately treated as an unknown outcome and requires operator reconciliation.
+      try {
+        await turn.request.onSubmitted?.({ conversation_id: turn.conversationId,
+          model: turn.request.model, effort: turn.request.effort });
+      } catch (error) {
+        turn.started = false;
+        turn.reject(error);
+        return route.abort();
+      }
       // prep_ms: from taking the request to Prism's start; submit_ms: from pressing Enter to it (the page's
       // own work, e.g. its Sentinel proof); prewarmed: the chat was opened while the worker was idle.
       const timing = turn.timing;
@@ -417,6 +432,12 @@ export class BrowserSession {
     if (data.request_id) turn.requestId = data.request_id;
     if (data.turn_state) turn.turnState = data.turn_state;
     if (data.conversation_id) turn.conversationId = data.conversation_id;
+    try {
+      await turn.request.onTurnState?.({ request_id: turn.requestId, turn_state: turn.turnState,
+        conversation_id: turn.conversationId, status: data.status });
+    } catch (error) {
+      return turn.reject(error);
+    }
     this.trackProgress(turn, data.codex_live_progress);
     const terminal = ['completed', 'error', 'failed'].includes(data.status);
     // Prism accepted the start (it is running, or already finished successfully): a streaming
@@ -555,7 +576,7 @@ export class BrowserSession {
     }
   }
 
-  async initialize(projectId, onProjectCreated, signal, previousModels = []) {
+  async initialize(projectId, onProjectCreated, signal, previousModels = [], { ephemeral = false } = {}) {
     const epoch = this.contextEpoch;
     // A project refresh may begin while the idle prewarm promise is still waiting for
     // its composer.  Never let that promise keep mutating the page we are about to
@@ -596,6 +617,7 @@ export class BrowserSession {
     } catch (error) { releasePreparation?.(); throw error; }
     // A null means a NEW isolated project, not reuse of the previous scope's project UUID.
     this.projectId = projectId || null;
+    this.ephemeralProject = Boolean(ephemeral && !projectId);
     const initializationGeneration = this.pageGeneration;
     const checkCurrent = () => {
       aborted(signal);
@@ -656,6 +678,12 @@ export class BrowserSession {
         }
       }, signal, () => this.contextEpoch === epoch ? this.close() : undefined);
       return [...this.labels.keys()];
+    } catch (error) {
+      // A newly created anonymous project has no registry entry to clean up.
+      // Try while the authenticated page (or resident carrier) still exists;
+      // cleanup is best effort so the original initialization error survives.
+      await this.deleteEphemeralProject();
+      throw error;
     } finally {
       releasePreparation?.();
       this.metrics?.record('project_prepare', performance.now() - preparationAt, { worker: this.worker, multiplex: this.multiplex });
@@ -884,6 +912,12 @@ export class BrowserSession {
       }
       throw error instanceof PrismError ? error : new PrismError(`browser_ui_${stage}_failed`);
     } finally {
+      // Successful turns keep their context warm, so terminateContext() is not
+      // reached. Remove one-shot projects after every settled turn (including
+      // failures and cancellation); reusable project scopes leave their mapping
+      // and upstream project.
+      const ephemeral = this.ephemeralProject;
+      if (ephemeral) await this.deleteEphemeralProject();
       turn.releaseSubmission?.(); turn.releaseSubmission = null;
       this.multiplexer?.cancel(turn);
       if (this.turn === turn) this.turn = null;
@@ -891,7 +925,7 @@ export class BrowserSession {
       // Skip opening one for it; reusable conversations and legacy shared projects keep the warm path.
       const reusableScope = request.projectScope?.reusable !== false;
       // Only after a clean turn: a failed one may still be stopping, or be followed by a page reload.
-      if (succeeded && reusableScope && this.page === page && !this.turn) this.schedulePrepare();
+      if (succeeded && !ephemeral && reusableScope && this.page === page && !this.turn) this.schedulePrepare();
     }
   }
 
@@ -995,6 +1029,39 @@ export class BrowserSession {
     }
   }
 
+  // Delete a project created for an anonymous isolated scope. The request must
+  // originate in Prism's authenticated page so its Sentinel/session wrapper is
+  // present; a Node-side HTTP request would be rejected by Prism. A resident
+  // multiplexer page is a valid carrier after the submission page detaches.
+  async deleteEphemeralProject() {
+    const projectId = this.projectId;
+    if (!this.ephemeralProject || !uuidPattern.test(projectId || '')) return false;
+    const page = this.page && !this.page.isClosed?.() ? this.page : this.multiplexer?.page;
+    if (!page || page.isClosed?.()) return false;
+    try {
+      const result = await page.evaluate(async id => {
+        try {
+          const response = await fetch(`/api/projects/${encodeURIComponent(id)}`, {
+            method: 'DELETE', credentials: 'same-origin', signal: AbortSignal.timeout(15000) });
+          return { ok: response.ok, status: response.status };
+        } catch { return { ok: false, status: 0 }; }
+      }, projectId);
+      if (!result?.ok && result?.status !== 404) {
+        this.audit('project_delete_failed', { status: Number.isInteger(result?.status) ? result.status : 0 });
+        return false;
+      }
+      this.audit('project_deleted', { project_id_present: true, status: result.status });
+      if (this.projectId === projectId) {
+        this.projectId = null;
+        this.ephemeralProject = false;
+      }
+      return true;
+    } catch (error) {
+      this.audit('project_delete_failed', { error_type: error?.constructor?.name });
+      return false;
+    }
+  }
+
   async stop() {
     const turn = this.turn;
     if (!turn?.started || turn.completed || (!turn.detached && (!this.page || this.page.isClosed()))) return;
@@ -1046,6 +1113,7 @@ export class BrowserSession {
   }
 
   async terminateContext() {
+    await this.deleteEphemeralProject();
     this.contextEpoch += 1;
     this.multiplexer?.unregister?.(this);
     const context = this.context;

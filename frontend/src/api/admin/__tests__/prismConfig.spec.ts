@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getPrismSettings, savePrismSettings, resetPrismSettings, getPrismRestartStatus, restartPrismSettings, validPrismStartupConfig, type PrismStartupConfig } from '../prismConfig'
 const client = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), delete: vi.fn(), post: vi.fn() }))
 vi.mock('@/api/client', () => ({ apiClient: client }))
-const config: PrismStartupConfig = { project_isolation: false, http_cache: false, multiplex_pages: false, prewarm_chat: true, stream_reasoning: true, memory_limit_mib: 0, memory_reserve_mib: 32 }
+const config: PrismStartupConfig = { enabled: true, project_isolation: false, http_cache: false, multiplex_pages: false, prewarm_chat: true, stream_reasoning: true, memory_limit_mib: 0, memory_reserve_mib: 32 }
 const ready = { gateway: { enabled: true, configured: true, base_url: 'http://prism:8080', management_key_configured: true }, availability: 'ready', configuration: { effective: config, desired: config, source: 'environment', apply_mode: 'restart', restart_required: false } }
 beforeEach(() => { vi.resetAllMocks(); for (const method of Object.values(client)) method.mockResolvedValue({ data: structuredClone(ready) }) })
 describe('Prism configuration API', () => {

@@ -8,7 +8,7 @@ vi.mock('@/stores/auth', () => ({ useAuthStore: () => state.auth }))
 vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
 vi.mock('@/api/client', () => ({ apiClient: {} }))
 vi.mock('@/api/admin/prismConfig', async importOriginal => ({ ...await importOriginal<typeof import('@/api/admin/prismConfig')>(), getPrismSettings: vi.fn(), savePrismSettings: vi.fn(), resetPrismSettings: vi.fn() }))
-const options = { project_isolation: false, http_cache: false, multiplex_pages: false, prewarm_chat: true, stream_reasoning: true, memory_limit_mib: 0, memory_reserve_mib: 32 }
+const options = { enabled: true, project_isolation: false, http_cache: false, multiplex_pages: false, prewarm_chat: true, stream_reasoning: true, memory_limit_mib: 0, memory_reserve_mib: 32 }
 const ready: PrismSettings = { gateway: { enabled: true, configured: true, base_url: 'http://prism:8080', management_key_configured: true }, availability: 'ready', configuration: { effective: { ...options }, desired: { ...options }, source: 'environment', apply_mode: 'restart', restart_required: false } }
 function mountPage() { return mount(ChannelPrismView, { global: { stubs: { RouterLink: { template: '<a><slot /></a>' }, ConfirmDialog: { props: ['show'], emits: ['confirm', 'cancel'], template: '<div v-if="show" data-testid="confirmation"><button data-testid="confirm" @click="$emit(\'confirm\')" /><button data-testid="cancel" @click="$emit(\'cancel\')" /></div>' } } } }) }
 beforeEach(() => {
@@ -23,10 +23,12 @@ describe('ChannelPrismView', () => {
     expect(w.find('[data-testid="prism-restart-required"]').exists()).toBe(false)
     expect(w.get('[data-testid="prism-save"]').attributes('disabled')).toBeDefined()
     await w.get('[data-testid="prism-http_cache"]').setValue(true)
+    await w.get('[data-testid="prism-enabled"]').setValue(false)
     await w.get('form').trigger('submit'); await flushPromises()
-    expect(savePrismSettings).toHaveBeenCalledWith({ ...options, http_cache: true }, expect.any(AbortSignal))
+    expect(savePrismSettings).toHaveBeenCalledWith({ ...options, enabled: false, http_cache: true }, expect.any(AbortSignal))
     expect(w.get('[data-testid="prism-restart-required"]').text()).toBe('prismConfig.pending')
     expect(w.get('[data-testid="prism-effective-http_cache"]').text()).toContain('prismConfig.disabled')
+    expect(w.get('[data-testid="prism-effective-enabled"]').text()).toContain('prismConfig.enabled')
     expect(w.get<HTMLInputElement>('[data-testid="prism-http_cache"]').element.checked).toBe(true)
     expect(w.text()).toContain('prismConfig.savedNotice'); w.unmount()
   })

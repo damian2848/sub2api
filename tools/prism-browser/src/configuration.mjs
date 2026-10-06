@@ -6,6 +6,10 @@ import { PrismError } from './errors.mjs';
 
 export const CONFIGURATION_BODY_LIMIT = 4096;
 const fields = {
+  // Master routing switch. The gateway also persists this value in its
+  // settings table for live request admission; the sidecar keeps it here so
+  // the admin configuration snapshot remains complete across restarts.
+  enabled: ['PRISM_BROWSER_ENABLED', true],
   project_isolation: ['PRISM_PROJECT_ISOLATION', false],
   http_cache: ['PRISM_HTTP_CACHE', false],
   memory_limit_mib: ['PRISM_MEMORY_LIMIT_MIB', 0],
@@ -17,7 +21,7 @@ const fields = {
 const keys = Object.keys(fields);
 const invalid = () => new PrismError('invalid_prism_configuration', 400);
 
-// The API and saved file contain only these seven nonsecret startup settings.
+// The API and saved file contain only these eight nonsecret startup settings.
 // A full replacement prevents partial updates from accidentally inheriting stale UI state.
 export function validateConfiguration(value) {
   if (!value || Array.isArray(value) || typeof value !== 'object' ||
@@ -65,7 +69,7 @@ async function syncDirectory(path) {
   } finally { await directory.close(); }
 }
 
-async function readSavedConfiguration(path) {
+async function readSavedConfiguration(path, enabledFallback = true) {
   let file;
   try {
     file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
@@ -90,7 +94,20 @@ async function readSavedConfiguration(path) {
     catch { throw invalid(); }
     if (!saved || Array.isArray(saved) || typeof saved !== 'object' || !Object.hasOwn(saved, 'schema') || saved.schema !== 1 ||
       Object.keys(saved).length !== 2 || !Object.hasOwn(saved, 'values')) throw invalid();
-    const value = validateConfiguration(saved.values);
+    let value;
+    try {
+      value = validateConfiguration(saved.values);
+    } catch (error) {
+      // schema:1 files written before the master switch was introduced contain
+      // the original seven startup fields. Migrate those files in memory and
+      // use the current environment default for the new field; malformed or
+      // partially matching files still fail closed below.
+      const legacyKeys = keys.filter(key => key !== 'enabled');
+      const savedKeys = Object.keys(saved.values || {});
+      if (savedKeys.length !== legacyKeys.length || legacyKeys.some(key => !Object.hasOwn(saved.values || {}, key)) ||
+        savedKeys.some(key => !legacyKeys.includes(key))) throw error;
+      value = validateConfiguration({ ...saved.values, enabled: enabledFallback });
+    }
     await file.chmod(0o600);
     return value;
   } finally { await file.close(); }
@@ -117,7 +134,7 @@ export class PrismConfigurationStore {
   async init() {
     if (this.#initialized) return this.snapshot();
     await privateDirectory(this.dataDir);
-    const saved = await readSavedConfiguration(this.path);
+    const saved = await readSavedConfiguration(this.path, this.#environment.enabled);
     if (saved) {
       this.#effective = saved;
       this.#desired = saved;

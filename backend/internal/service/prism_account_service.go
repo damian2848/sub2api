@@ -84,10 +84,11 @@ type prismSyncStamp struct {
 }
 
 type PrismAccountService struct {
-	repo   AccountRepository
-	admin  PrismAccountCreator
-	tokens PrismTokenProvider
-	cfg    PrismRuntimeConfig
+	repo     AccountRepository
+	admin    PrismAccountCreator
+	tokens   PrismTokenProvider
+	settings *SettingService
+	cfg      PrismRuntimeConfig
 	// managementCfg is the immutable startup connection used by global settings.
 	// It is kept even when the gateway's Prism routing is disabled.
 	managementCfg PrismRuntimeConfig
@@ -96,6 +97,7 @@ type PrismAccountService struct {
 	cancel        context.CancelFunc
 	mu            sync.Mutex
 	create        sync.Mutex
+	configuration sync.Mutex
 	jobs          map[int64]bool
 	pending       map[int64]bool
 	queue         []int64
@@ -105,7 +107,7 @@ type PrismAccountService struct {
 	start         sync.Once
 }
 
-func NewPrismAccountService(repo AccountRepository, admin PrismAccountCreator, tokens PrismTokenProvider, cfg PrismRuntimeConfig) *PrismAccountService {
+func NewPrismAccountService(repo AccountRepository, admin PrismAccountCreator, tokens PrismTokenProvider, cfg PrismRuntimeConfig, settings ...*SettingService) *PrismAccountService {
 	ctx, cancel := context.WithCancel(context.Background())
 	u, err := url.Parse(strings.TrimRight(cfg.URL, "/"))
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") ||
@@ -114,20 +116,35 @@ func NewPrismAccountService(repo AccountRepository, admin PrismAccountCreator, t
 	} else {
 		cfg.URL = u.String()
 	}
-	return &PrismAccountService{repo: repo, admin: admin, tokens: tokens, cfg: cfg, managementCfg: cfg,
+	var settingService *SettingService
+	if len(settings) > 0 {
+		settingService = settings[0]
+	}
+	return &PrismAccountService{repo: repo, admin: admin, tokens: tokens, settings: settingService, cfg: cfg, managementCfg: cfg,
 		ctx: ctx, cancel: cancel, jobs: make(map[int64]bool), pending: make(map[int64]bool), synced: make(map[int64]prismSyncStamp),
 		client: &http.Client{Timeout: 270 * time.Second,
 			Transport:     &http.Transport{Proxy: nil, MaxIdleConnsPerHost: 4},
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
 }
 
+// ProvidePrismAccountService preserves the four-argument provider used by
+// older tests and integrations. The production wire graph uses the extended
+// provider below so the live settings store is available to gateway routing.
 func ProvidePrismAccountService(repo AccountRepository, groups GroupRepository, tokens *OpenAITokenProvider, cfg *config.Config) *PrismAccountService {
+	return ProvidePrismAccountServiceWithSettings(repo, groups, tokens, cfg, nil)
+}
+
+func ProvidePrismAccountServiceWithSettings(repo AccountRepository, groups GroupRepository, tokens *OpenAITokenProvider, cfg *config.Config, settings *SettingService) *PrismAccountService {
 	runtimeConfig := PrismRuntimeConfig{URL: os.Getenv("PRISM_BROWSER_BASE_URL"), ManagementKey: os.Getenv("PRISM_MANAGEMENT_KEY")}
 	// API-key creation uses repository/group policy only; the full admin service
 	// depends on the gateway that consumes this service.
 	creator := &adminServiceImpl{accountRepo: repo, groupRepo: groups, cfg: cfg}
-	s := NewPrismAccountService(repo, creator, tokens, runtimeConfig)
-	if strings.EqualFold(os.Getenv("PRISM_BROWSER_ENABLED"), "false") {
+	s := NewPrismAccountService(repo, creator, tokens, runtimeConfig, settings)
+	// Keep the historical four-argument/unit-test behavior when no settings
+	// service is wired. In production the DB-backed switch is authoritative and
+	// must be able to re-enable routing live even when the environment default
+	// is false.
+	if settings == nil && strings.EqualFold(os.Getenv("PRISM_BROWSER_ENABLED"), "false") {
 		// Routing remains disabled, but administrators can still inspect and save
 		// the sidecar's next-start configuration through the fixed connection.
 		s.cfg.URL = ""
@@ -138,6 +155,23 @@ func ProvidePrismAccountService(repo AccountRepository, groups GroupRepository, 
 
 func (s *PrismAccountService) enabled() bool {
 	return s != nil && s.cfg.URL != "" && s.cfg.ManagementKey != "" && s.tokens != nil
+}
+
+// globallyEnabled is the live backend admission gate. A missing settings
+// service keeps direct/unit-test construction compatible with the environment
+// based behavior; a configured but unreadable settings store fails closed.
+func (s *PrismAccountService) globallyEnabled(ctx context.Context) bool {
+	if s == nil || !s.enabled() {
+		return false
+	}
+	if s.settings == nil {
+		return true
+	}
+	return s.settings.GetPrismEnabled(ctx)
+}
+
+func prismDisabledError() error {
+	return infraerrors.New(http.StatusServiceUnavailable, "PRISM_DISABLED", "Prism routing is currently disabled")
 }
 
 func (a *Account) IsManagedPrismAccount() bool {
@@ -180,7 +214,13 @@ func (s *PrismAccountService) source(ctx context.Context, id int64) (*Account, e
 }
 
 func (s *PrismAccountService) Create(ctx context.Context, sourceID int64, name string, groupIDs []int64) (*Account, *PrismStatus, error) {
-	if !s.enabled() {
+	if !s.globallyEnabled(ctx) {
+		if s != nil && s.settings != nil && !s.enabled() {
+			return nil, nil, infraerrors.New(http.StatusServiceUnavailable, "PRISM_NOT_CONFIGURED", "The Prism browser service is not configured")
+		}
+		if s != nil && s.enabled() {
+			return nil, nil, prismDisabledError()
+		}
 		return nil, nil, infraerrors.New(http.StatusServiceUnavailable, "PRISM_NOT_CONFIGURED", "The Prism browser service is not configured")
 	}
 	s.create.Lock()
@@ -308,14 +348,17 @@ func (s *PrismAccountService) managed(ctx context.Context, id int64) (*Account, 
 }
 
 func (s *PrismAccountService) Status(ctx context.Context, id int64) (*PrismStatus, error) {
+	if s == nil || !s.enabled() {
+		return nil, infraerrors.New(http.StatusServiceUnavailable, "PRISM_NOT_CONFIGURED", "The Prism browser service is not configured")
+	}
+	if s.settings != nil && !s.settings.GetPrismEnabled(ctx) {
+		return nil, prismDisabledError()
+	}
 	a, err := s.managed(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	status := s.storedStatus(a)
-	if !s.enabled() {
-		return status, nil
-	}
 	if !a.IsActive() {
 		status.Phase, status.Ready, status.ErrorCode = "disabled", false, "PRISM_ACCOUNT_DISABLED"
 		return status, nil
@@ -339,7 +382,10 @@ func (s *PrismAccountService) Status(ctx context.Context, id int64) (*PrismStatu
 }
 
 func (s *PrismAccountService) Reconnect(ctx context.Context, id int64) (*PrismStatus, error) {
-	if !s.enabled() {
+	if !s.globallyEnabled(ctx) {
+		if s != nil && s.enabled() && s.settings != nil {
+			return nil, prismDisabledError()
+		}
 		return nil, infraerrors.New(http.StatusServiceUnavailable, "PRISM_NOT_CONFIGURED", "The Prism browser service is not configured")
 	}
 	a, err := s.managed(ctx, id)
@@ -429,7 +475,10 @@ func prismTokenClaims(token string) map[string]any {
 }
 
 func (s *PrismAccountService) syncSession(ctx context.Context, a, source *Account, force bool) error {
-	if !s.enabled() {
+	if !s.globallyEnabled(ctx) {
+		if s != nil && s.settings != nil && s.enabled() {
+			return prismDisabledError()
+		}
 		return infraerrors.New(http.StatusServiceUnavailable, "PRISM_NOT_CONFIGURED", "The managed Prism endpoint is unavailable")
 	}
 	lock, _ := s.locks.LoadOrStore(source.ID, &sync.Mutex{})
@@ -514,6 +563,12 @@ func (s *PrismAccountService) syncSession(ctx context.Context, a, source *Accoun
 func (s *PrismAccountService) EnsureSession(ctx context.Context, a *Account) error {
 	if !a.IsManagedPrismAccount() {
 		return nil
+	}
+	if !s.globallyEnabled(ctx) {
+		if s != nil && s.enabled() && s.settings != nil {
+			return prismDisabledError()
+		}
+		return infraerrors.New(http.StatusServiceUnavailable, "PRISM_NOT_CONFIGURED", "The Prism browser service is not configured")
 	}
 	fresh, err := s.repo.GetByID(ctx, a.ID)
 	if err != nil || !fresh.IsManagedPrismAccount() || !fresh.IsActive() || !fresh.Schedulable {
@@ -612,6 +667,11 @@ func (s *PrismAccountService) applyRuntimeStatus(status *PrismStatus, runtime pr
 }
 
 func (s *PrismAccountService) syncAccount(ctx context.Context, id int64, retryProbe bool) {
+	// A switch change must stop background provisioning too; otherwise a queued
+	// refresh could continue creating sessions after the gateway was disabled.
+	if !s.globallyEnabled(ctx) {
+		return
+	}
 	a, err := s.repo.GetByID(ctx, id)
 	if err != nil || !a.IsManagedPrismAccount() {
 		return
@@ -703,6 +763,9 @@ func (s *PrismAccountService) syncAccount(ctx context.Context, id int64, retryPr
 
 func (s *PrismAccountService) schedule(id int64, retryProbe bool) {
 	if !s.enabled() {
+		return
+	}
+	if s.settings != nil && !s.settings.GetPrismEnabled(s.ctx) {
 		return
 	}
 	s.mu.Lock()
