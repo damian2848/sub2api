@@ -24,6 +24,20 @@ const channelMonitorV2HasFinalOpsErrorSQL = `EXISTS (
 const channelMonitorV2APISuccessFilterUL = `COALESCE(ul.api_success, ul.actual_cost > 0) AND NOT ` + channelMonitorV2HasFinalOpsErrorSQL + ` AND COALESCE(ul.request_type, 0) NOT IN (4, 6)`
 const channelMonitorV2GatewayFailureCategorySQL = `CASE WHEN COALESCE(ul.stream, FALSE) OR COALESCE(ul.request_type, 0) IN (2, 3) THEN 'transport_or_stream' ELSE 'other' END`
 
+// Local user/business rejections remain in Ops history, but cannot measure
+// channel health. Preserve provider evidence and platform capacity failures.
+// The routing/model_not_found branch supports rows written before client
+// attribution was introduced, without rewriting production history.
+const channelMonitorClientRejectionSQL = `(COALESCE(current_error.is_business_limited, FALSE)
+  AND (COALESCE(current_error.error_owner, '') = 'client'
+    OR (COALESCE(current_error.error_owner, '') = 'platform' AND current_error.error_phase = 'routing'
+      AND current_error.error_type = 'model_not_found'
+      AND current_error.account_id IS NULL))
+  AND COALESCE(current_error.upstream_status_code, 0) = 0
+  AND COALESCE(current_error.error_source, '') <> 'upstream_http'
+  AND CASE WHEN jsonb_typeof(current_error.upstream_errors) = 'array'
+    THEN jsonb_array_length(current_error.upstream_errors) = 0 ELSE TRUE END)`
+
 const channelMonitorV2ModelSQL = `COALESCE(NULLIF(TRIM(ul.requested_model), ''), NULLIF(TRIM(ul.model), ''), 'unknown')`
 
 // Tiered retention balances UI windows against storage:
@@ -293,6 +307,7 @@ WITH dedup AS (
     COALESCE(current_error.group_id, 0) AS group_id,
     COALESCE(NULLIF(TRIM(current_error.requested_model), ''), NULLIF(TRIM(current_error.model), ''), 'unknown') AS model,
     current_error.source, current_error.user_id, current_error.error_type, current_error.error_owner, COALESCE(current_error.status_code, 0) AS status_code,
+    ` + channelMonitorClientRejectionSQL + ` AS client_rejection,
     COALESCE(current_error.upstream_status_code, 0) AS upstream_status_code,
     lower(CONCAT_WS(' ', current_error.error_type, current_error.error_source, current_error.error_message, current_error.upstream_error_message, current_error.upstream_error_detail, current_error.error_body)) AS text,
     (CASE WHEN jsonb_typeof(current_error.upstream_errors) = 'array' THEN jsonb_array_length(current_error.upstream_errors) > 0 ELSE FALSE END
@@ -334,7 +349,7 @@ WITH dedup AS (
     WHEN status_code >= 500 OR error_type = 'internal' OR error_owner = 'system' THEN 'internal'
     ELSE 'other' END AS category
   FROM dedup
-  WHERE bucket_start >= $1 AND bucket_start < $2
+  WHERE bucket_start >= $1 AND bucket_start < $2 AND NOT client_rejection
 ), usage_failures AS (
   -- A recorded failure is still a real failed request when asynchronous ops
   -- telemetry was dropped. Only explicit false markers qualify; unknown legacy

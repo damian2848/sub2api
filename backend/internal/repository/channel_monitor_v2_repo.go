@@ -763,6 +763,7 @@ func (r *channelMonitorV2Repository) GetErrors(ctx context.Context, filter servi
 func (r *channelMonitorV2Repository) loadErrorDetails(ctx context.Context, filter service.ChannelMonitorV2Filter, cfg service.ChannelMonitorV2Config) (map[string][]service.ChannelMonitorV2ErrorDetail, error) {
 	errorPlatform := `lower(CASE WHEN g.platform = 'composite' THEN COALESCE(NULLIF(TRIM(a.platform), ''), NULLIF(NULLIF(lower(TRIM(current_error.platform)), ''), 'composite'), 'unknown') ELSE COALESCE(NULLIF(TRIM(current_error.platform), ''), 'unknown') END)`
 	conditions := []string{
+		"NOT " + channelMonitorClientRejectionSQL,
 		"current_error.created_at >= $1",
 		"current_error.created_at < $2",
 		"current_error.source IN ('business', 'probe')",
