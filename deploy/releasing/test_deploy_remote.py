@@ -28,6 +28,7 @@ class RolloutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=OUT) as root:
             result = d.configuration_expected({'PRISM_HTTP_CACHE': 'true', 'PRISM_MEMORY_LIMIT_MIB': '256',
                                                'PRISM_MEMORY_RESERVE_MIB': '64', 'PRISM_PREWARM_CHAT': 'false'}, Path(root))
+            self.assertTrue(result['effective']['enabled'])
             self.assertTrue(result['effective']['http_cache'])
             self.assertEqual(result['effective']['memory_limit_mib'], 256)
             self.assertEqual(result['effective']['memory_reserve_mib'], 64)
@@ -36,6 +37,30 @@ class RolloutTests(unittest.TestCase):
             self.assertFalse(result['restart_required'])
             with self.assertRaises(RuntimeError):
                 d.configuration_expected({'PRISM_MEMORY_LIMIT_MIB': '10'}, Path(root))
+
+    def test_configuration_migrates_legacy_saved_switch(self):
+        with tempfile.TemporaryDirectory(dir=OUT) as root:
+            p = Path(root)
+            legacy = {field: default for field, (_, default) in d.CONFIG_FIELDS.items() if field != 'enabled'}
+            legacy['http_cache'] = True
+            (p / 'runtime-config.json').write_text(json.dumps({'schema': 1, 'values': legacy}))
+            actual = d.configuration_expected({'PRISM_BROWSER_ENABLED': 'false'}, p)
+            self.assertFalse(actual['effective']['enabled'])
+            self.assertTrue(actual['effective']['http_cache'])
+            self.assertEqual(actual['effective'], {**legacy, 'enabled': False})
+            self.assertEqual(actual['source'], 'saved')
+
+    def test_configuration_rejects_partial_or_unknown_saved_switch(self):
+        with tempfile.TemporaryDirectory(dir=OUT) as root:
+            p = Path(root)
+            legacy = {field: default for field, (_, default) in d.CONFIG_FIELDS.items() if field != 'enabled'}
+            for values in [
+                {**legacy, 'enabled': True, 'unknown': False},
+                {key: value for key, value in legacy.items() if key != 'http_cache'},
+            ]:
+                (p / 'runtime-config.json').write_text(json.dumps({'schema': 1, 'values': values}))
+                with self.assertRaises(RuntimeError):
+                    d.configuration_expected({}, p)
 
     def test_configuration_saved_override(self):
         with tempfile.TemporaryDirectory(dir=OUT) as root:

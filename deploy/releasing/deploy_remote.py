@@ -41,6 +41,10 @@ BASELINE_MIGRATIONS = {}
 SIDECAR_CMD_OVERRIDE = None
 CODE_PATHS = ['package.json', 'package-lock.json', 'THIRD_PARTY_NOTICES.md', 'src']
 CONFIG_FIELDS = {
+    # The master switch was added after schema:1 was already in use.  The
+    # sidecar treats a legacy seven-field file as inheriting this environment
+    # default, then exposes the migrated eight-field snapshot.
+    'enabled': ('PRISM_BROWSER_ENABLED', True),
     'project_isolation': ('PRISM_PROJECT_ISOLATION', False),
     'http_cache': ('PRISM_HTTP_CACHE', False),
     'memory_limit_mib': ('PRISM_MEMORY_LIMIT_MIB', 0),
@@ -246,7 +250,24 @@ def configuration_expected(environment, data_dir):
         body = json.loads(saved.read_text())
         require(body.get('schema') == 1 and set(body) == {'schema', 'values'}, 'Saved Prism configuration schema changed')
         expected = body['values']
-        require(isinstance(expected, dict) and set(expected) == set(CONFIG_FIELDS), 'Saved Prism configuration fields changed')
+        require(isinstance(expected, dict), 'Saved Prism configuration fields changed')
+        fields = set(CONFIG_FIELDS)
+        legacy_fields = fields - {'enabled'}
+        saved_fields = set(expected)
+        if saved_fields == legacy_fields:
+            # Prism migrates schema:1 files written before the master switch
+            # by taking the new field from its current environment default.
+            # Mirror that behavior so the stopped-data verification predicts
+            # the exact snapshot the candidate sidecar will publish.
+            name, default = CONFIG_FIELDS['enabled']
+            raw = str(environment.get(name, '')).strip().lower()
+            if not raw:
+                expected = {**expected, 'enabled': default}
+            else:
+                require(raw in ('true', 'false', '1', '0', 'on', 'off'), 'Prism boolean tuning is invalid')
+                expected = {**expected, 'enabled': raw in ('true', '1', 'on')}
+        else:
+            require(saved_fields == fields, 'Saved Prism configuration fields changed')
         origin = 'saved'
     else:
         expected = {}
