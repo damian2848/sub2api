@@ -781,7 +781,7 @@ func (s *OpenCodeGoUsageService) refreshLoadedAccount(ctx context.Context, accou
 		return s.persistFailure(ctx, account, intervalMinutes, now, resp.StatusCode, "unauthorized", retryAfter(resp.Header, now), true)
 	}
 	if resp.StatusCode == http.StatusForbidden {
-		return s.persistFailure(ctx, account, intervalMinutes, now, resp.StatusCode, "OpenCode Go subscription required (403)", retryAfter(resp.Header, now), false)
+		return s.persistFailure(ctx, account, intervalMinutes, now, resp.StatusCode, "forbidden", retryAfter(resp.Header, now), false)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return s.persistFailure(ctx, account, intervalMinutes, now, resp.StatusCode, "http_error", retryAfter(resp.Header, now), false)

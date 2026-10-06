@@ -320,7 +320,7 @@ func TestOpenCodeGoUsageRefresh401Unauthorized(t *testing.T) {
 	require.True(t, openCodeGoUsageAutoRefreshEnabled(account))
 }
 
-func TestOpenCodeGoUsageRefresh403SubscriptionRequired(t *testing.T) {
+func TestOpenCodeGoUsageRefresh403Forbidden(t *testing.T) {
 	account := openCodeGoUsageAccount(7)
 	repo := &openCodeGoUsageTestRepo{accounts: map[int64]*Account{7: account}}
 	stub := &openCodeGoUsageHTTPStub{status: http.StatusForbidden}
@@ -330,7 +330,7 @@ func TestOpenCodeGoUsageRefresh403SubscriptionRequired(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, OpenCodeGoUsageStatusFailed, state.Snapshot.Status)
 	require.Equal(t, http.StatusForbidden, state.Snapshot.HTTPStatus)
-	require.Equal(t, "OpenCode Go subscription required (403)", state.Snapshot.LastError)
+	require.Equal(t, "forbidden", state.Snapshot.LastError)
 	require.Equal(t, 1, state.Snapshot.FailureCount)
 }
 

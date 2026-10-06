@@ -490,7 +490,8 @@ export default {
         refreshSuccess: 'OpenCode Go 用量已刷新',
         refreshFailed: '刷新 OpenCode Go 用量失败',
         errors: {
-          OPENCODE_GO_USAGE_REFRESH_RATE_LIMITED: '刷新过于频繁，请在 {retry_after_seconds} 秒后重试。'
+          OPENCODE_GO_USAGE_REFRESH_RATE_LIMITED: '刷新过于频繁，请在 {retry_after_seconds} 秒后重试。',
+          forbidden: '上游返回 403：可能是订阅缺失/失效，也可能是 WAF 或访问策略拦截，请结合网络路径与 HTTP 状态排查。'
         }
       },
       types: {
