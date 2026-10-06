@@ -416,6 +416,25 @@ def command_matches(name, now, original):
     return True
 
 
+def host_config_matches(now, original):
+    """Compare immutable Docker host settings across a Compose recreation.
+
+    Docker versions serialize an unset DNS override as either ``null`` or an
+    empty list.  Both mean "use the daemon defaults"; all other HostConfig
+    differences remain fail-closed so a rollout cannot silently alter resource
+    or network policy.
+    """
+    if now == original:
+        return True
+    left, right = copy.deepcopy(now), copy.deepcopy(original)
+    for field in ('Dns', 'DnsOptions', 'DnsSearch'):
+        if left.get(field) is None:
+            left[field] = []
+        if right.get(field) is None:
+            right[field] = []
+    return left == right
+
+
 def verify_migrations(before, after, *, rolled_back=False):
     require(all(after.get(name) == checksum for name, checksum in before.items()),
             'An existing database migration disappeared or changed checksum')
@@ -636,7 +655,8 @@ def rollout(args, state):
             require(now['State'].get('Health', {}).get('Status') == 'healthy', 'Candidate app or Prism is unhealthy')
             require(base.environment(now) == base.environment(original) and now['Mounts'] == original['Mounts'],
                     'Candidate changed existing environment or mounts')
-            require(now['HostConfig'] == original['HostConfig'], 'Candidate changed service resource/network configuration')
+            require(host_config_matches(now['HostConfig'], original['HostConfig']),
+                    'Candidate changed service resource/network configuration')
             require(command_matches(name, now, original), 'Candidate changed a runtime command/user/port default')
         require(file_sha(f"/proc/{current['State']['Pid']}/exe") == binary_sha and
                 base.binary_metadata(['docker', 'exec', APP, '/app/sub2api']) == expected_metadata,

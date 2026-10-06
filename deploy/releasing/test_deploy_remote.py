@@ -142,6 +142,16 @@ class RolloutTests(unittest.TestCase):
             self.assertFalse(d.command_matches(d.SIDECAR, new | {'Config': new['Config'] | {'User': 'root'}}, old))
             self.assertFalse(d.command_matches(d.APP, new, old), 'the app command may never change')
 
+    def test_host_config_accepts_docker_dns_null_list_normalization_only(self):
+        original = {'NetworkMode': 'host', 'Dns': [], 'DnsOptions': [], 'DnsSearch': [],
+                    'PortBindings': {}, 'ShmSize': 67108864}
+        recreated = {**original, 'Dns': None, 'DnsOptions': None, 'DnsSearch': None}
+        self.assertTrue(d.host_config_matches(recreated, original))
+        changed = {**recreated, 'ShmSize': 128 * 1024 * 1024}
+        self.assertFalse(d.host_config_matches(changed, original))
+        changed = {**recreated, 'PortBindings': {'8319/tcp': [{'HostIp': '0.0.0.0', 'HostPort': '8319'}]}}
+        self.assertFalse(d.host_config_matches(changed, original))
+
     def test_missing_ledger_is_never_statically_referenced(self):
         queries = []
         def fake_sql(query, **_kwargs):
