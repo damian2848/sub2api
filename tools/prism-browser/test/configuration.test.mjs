@@ -30,10 +30,12 @@ test('startup configuration preserves the eight environment defaults and normali
     PRISM_MEMORY_LIMIT_MIB: '2048', PRISM_MEMORY_RESERVE_MIB: '64', PRISM_BROWSER_ENABLED: 'off',
     PRISM_MANAGEMENT_KEY: 'must-not-be-copied' }), changed);
   for (const environment of [{ PRISM_PROJECT_ISOLATION: 'maybe' }, { PRISM_PREWARM_CHAT: 'maybe' },
-    { PRISM_STREAM_REASONING: 'maybe' }, { PRISM_BROWSER_ENABLED: 'maybe' }, { PRISM_MEMORY_LIMIT_MIB: '-1' },
+    { PRISM_STREAM_REASONING: 'maybe' }, { PRISM_MEMORY_LIMIT_MIB: '-1' },
     { PRISM_MEMORY_RESERVE_MIB: '1048577' }, { PRISM_MEMORY_LIMIT_MIB: '32' }]) {
     assert.throws(() => configurationFromEnvironment(environment), invalid);
   }
+  assert.equal(configurationFromEnvironment({ PRISM_BROWSER_ENABLED: 'maybe' }).enabled, false,
+    'the master switch fails closed when its environment value is malformed');
 });
 
 test('full configuration requires typed allowed fields and a usable enabled memory budget', () => {

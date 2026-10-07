@@ -23,10 +23,12 @@ func PrismEnabledDefault() bool {
 		return true
 	}
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "false", "0", "off", "no":
-		return false
-	default:
+	case "true", "1", "on":
 		return true
+	default:
+		// Match the sidecar's fail-closed master switch behavior. Unknown
+		// values must not silently re-enable request admission.
+		return false
 	}
 }
 

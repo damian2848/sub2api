@@ -18,6 +18,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestPrismEnabledDefaultFailsClosedForUnknownEnvironmentValues(t *testing.T) {
+	for value, expected := range map[string]bool{
+		"": true, "true": true, "1": true, "on": true,
+		"false": false, "0": false, "off": false, "no": false, "maybe": false,
+	} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("PRISM_BROWSER_ENABLED", value)
+			require.Equal(t, expected, PrismEnabledDefault())
+		})
+	}
+	t.Setenv("PRISM_BROWSER_ENABLED", " ")
+	require.True(t, PrismEnabledDefault(), "blank values retain the enabled default")
+}
+
 func prismConfigurationTestOptions() PrismConfigurationOptions {
 	return PrismConfigurationOptions{PrewarmChat: true, StreamReasoning: true, MemoryReserveMiB: 32}
 }

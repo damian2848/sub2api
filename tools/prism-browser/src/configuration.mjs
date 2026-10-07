@@ -47,8 +47,12 @@ export function configurationFromEnvironment(environment = process.env) {
     const text = raw === undefined ? '' : String(raw).trim().toLowerCase();
     if (!text) value[key] = fallback;
     else if (typeof fallback === 'boolean') {
-      if (!['true', 'false', '1', '0', 'on', 'off'].includes(text)) throw invalid();
-      value[key] = ['true', '1', 'on'].includes(text);
+      if (!['true', 'false', '1', '0', 'on', 'off'].includes(text)) {
+        // The master switch is a safety boundary.  A malformed value must
+        // never make the gateway admit traffic while the sidecar is down.
+        if (key === 'enabled') value[key] = false;
+        else throw invalid();
+      } else value[key] = ['true', '1', 'on'].includes(text);
     } else value[key] = Number(text);
   }
   return validateConfiguration(value);
