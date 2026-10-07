@@ -32,6 +32,11 @@ type OpenAIWSTransportMetricsSnapshot struct {
 	TransportReuseRatio    float64 `json:"transport_reuse_ratio"`
 }
 
+// openAIWSPreparedJSON is borrowed, valid JSON from our encoder. WriteJSON must
+// consume it synchronously and must not retain it. Keep this private rather than
+// treating arbitrary json.RawMessage values as prevalidated JSON.
+type openAIWSPreparedJSON []byte
+
 // openAIWSClientConn 抽象 WS 客户端连接，便于替换底层实现。
 type openAIWSClientConn interface {
 	WriteJSON(ctx context.Context, value any) error
@@ -308,6 +313,9 @@ func (c *coderOpenAIWSClientConn) WriteJSON(ctx context.Context, value any) erro
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if payload, ok := value.(openAIWSPreparedJSON); ok {
+		return c.conn.Write(ctx, coderws.MessageText, payload)
 	}
 	return wsjson.Write(ctx, c.conn, value)
 }
