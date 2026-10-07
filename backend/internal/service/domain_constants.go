@@ -581,6 +581,12 @@ const (
 	// not stop or otherwise change already loaded plugin runtimes.
 	SettingKeyPluginManagementEnabled = "plugin_management_enabled"
 
+	// SettingKeySupportTicketEnabled is a DB-backed soft switch for support tickets
+	// ("网站工单"). When false both user and admin endpoints answer
+	// SUPPORT_TICKET_DISABLED and the sidebar entries are hidden; stored tickets
+	// are kept. Defaults to false (opt-in feature).
+	SettingKeySupportTicketEnabled = "support_ticket_enabled"
+
 	// SettingKeyUpstreamBillingProbeSettings stores the global enable switch and interval
 	// for probing remote Sub2API API-key billing metadata.
 	SettingKeyUpstreamBillingProbeSettings = "upstream_billing_probe_settings"

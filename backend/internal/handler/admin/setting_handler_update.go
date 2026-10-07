@@ -376,6 +376,10 @@ type UpdateSettingsRequest struct {
 	// Plugin management menu visibility switch; plugin runtime is unaffected.
 	PluginManagementEnabled *bool `json:"plugin_management_enabled"`
 
+	// Support tickets switch + form config
+	SupportTicketEnabled *bool                        `json:"support_ticket_enabled"`
+	SupportTicket        *service.SupportTicketConfig `json:"support_ticket_config"`
+
 	// Affiliate (邀请返利) feature switch
 	AffiliateEnabled *bool `json:"affiliate_enabled"`
 
@@ -2279,6 +2283,18 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 			}
 			return previousSettings.PluginManagementEnabled
 		}(),
+		SupportTicketEnabled: func() bool {
+			if req.SupportTicketEnabled != nil {
+				return *req.SupportTicketEnabled
+			}
+			return previousSettings.SupportTicketEnabled
+		}(),
+		SupportTicket: func() service.SupportTicketConfig {
+			if req.SupportTicket != nil {
+				return *req.SupportTicket
+			}
+			return previousSettings.SupportTicket
+		}(),
 		AffiliateEnabled: func() bool {
 			if req.AffiliateEnabled != nil {
 				return *req.AffiliateEnabled
@@ -2737,6 +2753,9 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		ModelPlazaRequireAuth:   updatedSettings.ModelPlazaRequireAuth,
 		ModelPlazaDescription:   updatedSettings.ModelPlazaDescription,
 		PluginManagementEnabled: updatedSettings.PluginManagementEnabled,
+
+		SupportTicketEnabled: updatedSettings.SupportTicketEnabled,
+		SupportTicket:        updatedSettings.SupportTicket,
 
 		AffiliateEnabled: updatedSettings.AffiliateEnabled,
 

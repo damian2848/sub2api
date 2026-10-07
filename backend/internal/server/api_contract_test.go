@@ -1039,6 +1039,12 @@ func TestAPIContracts(t *testing.T) {
 					"model_plaza_require_auth": false,
 					"model_plaza_description": "",
 					"plugin_management_enabled": false,
+					"support_ticket_enabled": false,
+					"support_ticket_config": {
+						"categories": ["账户与充值", "API 使用问题", "模型与渠道", "建议与反馈", "其他"],
+						"max_open_per_user": 5,
+						"notice": ""
+					},
 					"risk_control_enabled": false,
 					"cyber_policy_user_allowlist": "",
 					"cyber_session_block_enabled": false,
@@ -1393,6 +1399,12 @@ func TestAPIContracts(t *testing.T) {
 					"model_plaza_require_auth": false,
 					"model_plaza_description": "",
 					"plugin_management_enabled": false,
+					"support_ticket_enabled": false,
+					"support_ticket_config": {
+						"categories": ["账户与充值", "API 使用问题", "模型与渠道", "建议与反馈", "其他"],
+						"max_open_per_user": 5,
+						"notice": ""
+					},
 					"risk_control_enabled": false,
 					"cyber_policy_user_allowlist": "",
 					"cyber_session_block_enabled": false,

@@ -219,6 +219,9 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyModelPlazaDescription:   "",
 		SettingKeyPluginManagementEnabled: "false",
 
+		// Support tickets (default disabled; opt-in). A missing config means the defaults.
+		SettingKeySupportTicketEnabled: "false",
+
 		// Affiliate (邀请返利) feature (default disabled; opt-in)
 		SettingKeyAffiliateEnabled:              "false",
 		SettingKeyAffiliateAdminRechargeEnabled: strconv.FormatBool(AdminRechargeRebateEnabledDefault),
@@ -871,6 +874,14 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	result.ModelPlazaRequireAuth = settings[SettingKeyModelPlazaRequireAuth] == "true"
 	result.ModelPlazaDescription = settings[SettingKeyModelPlazaDescription]
 	result.PluginManagementEnabled = settings[SettingKeyPluginManagementEnabled] == "true"
+
+	// Support tickets (default: disabled; strict true). A corrupt config is shown as the
+	// defaults so the admin page still loads; the runtime reader fails closed on it.
+	result.SupportTicketEnabled = settings[SettingKeySupportTicketEnabled] == "true"
+	result.SupportTicket = DefaultSupportTicketConfig()
+	if ticketConfig, err := parseSupportTicketConfig(settings[SettingKeySupportTicketConfig]); err == nil {
+		result.SupportTicket = ticketConfig
+	}
 
 	// Affiliate (邀请返利) feature (default: disabled; strict true)
 	result.AffiliateEnabled = settings[SettingKeyAffiliateEnabled] == "true"

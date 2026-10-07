@@ -11,6 +11,7 @@ import type {
   NotifyEmailEntry,
 } from "@/types";
 import type { RechargeBonusTier } from "@/utils/rechargeBonus";
+import type { SupportTicketConfig } from "@/api/supportTickets";
 
 export interface DefaultSubscriptionSetting {
   group_id: number;
@@ -760,6 +761,10 @@ export interface SystemSettings {
   model_plaza_description: string;
   plugin_management_enabled: boolean;
 
+  // Support tickets (网站工单) switch + form config
+  support_ticket_enabled: boolean;
+  support_ticket_config: SupportTicketConfig;
+
   // Affiliate (邀请返利) feature switch
   affiliate_enabled: boolean;
 
@@ -1101,6 +1106,10 @@ export interface UpdateSettingsRequest {
   model_plaza_require_auth?: boolean;
   model_plaza_description?: string;
   plugin_management_enabled?: boolean;
+
+  // Support tickets (网站工单) switch + form config
+  support_ticket_enabled?: boolean;
+  support_ticket_config?: SupportTicketConfig;
 
   // Affiliate (邀请返利) feature switch
   affiliate_enabled?: boolean;

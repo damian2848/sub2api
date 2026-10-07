@@ -514,6 +514,15 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyModelPlazaDescription] = settings.ModelPlazaDescription
 	updates[SettingKeyPluginManagementEnabled] = strconv.FormatBool(settings.PluginManagementEnabled)
 
+	// Support tickets switch + form config
+	updates[SettingKeySupportTicketEnabled] = strconv.FormatBool(settings.SupportTicketEnabled)
+	ticketConfig, ticketConfigErr := NormalizeSupportTicketConfig(settings.SupportTicket)
+	if ticketConfigErr != nil {
+		return nil, infraerrors.BadRequest("INVALID_SUPPORT_TICKET_CONFIG", ticketConfigErr.Error())
+	}
+	ticketConfigJSON, _ := json.Marshal(ticketConfig)
+	updates[SettingKeySupportTicketConfig] = string(ticketConfigJSON)
+
 	// Affiliate (邀请返利) feature switch
 	updates[SettingKeyAffiliateEnabled] = strconv.FormatBool(settings.AffiliateEnabled)
 

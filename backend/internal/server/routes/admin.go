@@ -59,6 +59,7 @@ func RegisterAdminRoutes(
 
 		// 公告管理
 		registerAnnouncementRoutes(admin, h)
+		registerSupportTicketRoutes(admin, h)
 
 		// OpenAI OAuth
 		registerOpenAIOAuthRoutes(admin, h)
@@ -513,6 +514,20 @@ func registerAnnouncementRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		announcements.PUT("/:id", h.Admin.Announcement.Update)
 		announcements.DELETE("/:id", h.Admin.Announcement.Delete)
 		announcements.GET("/:id/read-status", h.Admin.Announcement.ListReadStatus)
+	}
+}
+
+// registerSupportTicketRoutes serves the admin side of support tickets. The
+// service answers SUPPORT_TICKET_DISABLED while the feature switch is off.
+func registerSupportTicketRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	tickets := admin.Group("/support-tickets")
+	{
+		tickets.GET("", h.SupportTicket.AdminList)
+		tickets.GET("/summary", h.SupportTicket.AdminSummary)
+		tickets.GET("/:id", h.SupportTicket.AdminGet)
+		tickets.POST("/:id/messages", h.SupportTicket.AdminReply)
+		tickets.POST("/:id/status", h.SupportTicket.AdminSetStatus)
+		tickets.DELETE("/:id", h.SupportTicket.AdminDelete)
 	}
 }
 
