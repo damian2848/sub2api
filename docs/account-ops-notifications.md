@@ -64,3 +64,17 @@ USD 金额使用 `$`，其他单位按原单位显示。OAuth 的余额显示剩
 原有邮件配置可继续读取。回退二进制不会撤销新增字段、设置或阈值记录；若需要完全恢复迁移前状态，使用对应数据库与二进制备份。通知总开关、机器人与阈值均由管理员配置。
 
 机器人协议参考：[企业微信群机器人](https://developer.work.weixin.qq.com/document/path/91770)、[钉钉自定义机器人](https://open.dingtalk.com/document/robots/custom-robot-access)、[飞书自定义机器人](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)。
+
+## 界面示例
+
+以下图片由隔离浏览器和虚构 API 响应生成；所有账号、邮箱、余额和通知记录都是示例，未调用真实接收端。
+
+| 原界面 | 规则与通道 |
+| --- | --- |
+| ![原账号运维界面](screenshots/account-ops-monitoring/account-ops-before.png) | ![通知通道与账号规则](screenshots/account-ops-monitoring/account-ops-settings.png) |
+
+![默认提醒记录页签](screenshots/account-ops-monitoring/account-ops-records.png)
+
+![独立账号规则抽屉](screenshots/account-ops-monitoring/account-ops-rule.png)
+
+![统一新增通知通道](screenshots/account-ops-monitoring/account-ops-add-channel.png)

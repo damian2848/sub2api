@@ -109,7 +109,7 @@ func (s *AccountOpsService) sendRobot(ctx context.Context, w AccountOpsWebhook, 
 	if err != nil {
 		return errors.New("robot request failed")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return errors.New("robot HTTP failure")
 	}

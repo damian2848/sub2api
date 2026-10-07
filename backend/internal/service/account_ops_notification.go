@@ -80,9 +80,10 @@ func (s *AccountOpsService) notificationMessage(e *AccountOpsEvent) accountOpsMe
 		body += "<p>此提醒基于上游失败响应，不代表已查询到准确余额。</p>"
 	}
 	robotReason := "上游账户余额不足"
-	if e.Kind == "weekly_quota" {
+	switch e.Kind {
+	case "weekly_quota":
 		robotReason = "上游账户周额度已用尽"
-	} else if e.Kind == "quota_threshold" {
+	case "quota_threshold":
 		robotReason = "上游账户额度不足"
 	}
 	if e.Phase == "recovery" {

@@ -49,23 +49,25 @@ func TestAccountOpsRobotNotificationContainsFourFields(t *testing.T) {
 					var content string
 					title := "Sub2API · " + tc.title
 					if provider == "feishu" {
-						card := payload["card"].(map[string]any)
-						header := card["header"].(map[string]any)
-						require.Equal(t, title, header["title"].(map[string]any)["content"])
+						card := requireOpsType[map[string]any](t, payload["card"])
+						header := requireOpsType[map[string]any](t, card["header"])
+						require.Equal(t, title, requireOpsType[map[string]any](t, header["title"])["content"])
 						if tc.phase == "recovery" {
 							require.Equal(t, "green", header["template"])
 						}
-						elements := card["elements"].([]any)
+						elements := requireOpsType[[]any](t, card["elements"])
 						require.Len(t, elements, 1)
-						content = elements[0].(map[string]any)["text"].(map[string]any)["content"].(string)
+						element := requireOpsType[map[string]any](t, elements[0])
+						text := requireOpsType[map[string]any](t, element["text"])
+						content = requireOpsType[string](t, text["content"])
 					} else {
-						markdown := payload["markdown"].(map[string]any)
+						markdown := requireOpsType[map[string]any](t, payload["markdown"])
 						key := "content"
 						if provider == "dingtalk" {
 							key = "text"
 							require.Equal(t, title, markdown["title"])
 						}
-						content = markdown[key].(string)
+						content = requireOpsType[string](t, markdown[key])
 						heading, fields, ok := strings.Cut(content, "\n")
 						require.True(t, ok)
 						require.Equal(t, "### "+title, heading)
@@ -163,11 +165,11 @@ func TestAccountOpsRobotSigningAndBusinessCodes(t *testing.T) {
 					ts := r.URL.Query().Get("timestamp")
 					require.NotEmpty(t, ts)
 					h := hmac.New(sha256.New, []byte("fake-secret"))
-					h.Write([]byte(ts + "\nfake-secret"))
+					_, _ = h.Write([]byte(ts + "\nfake-secret"))
 					require.Equal(t, base64.StdEncoding.EncodeToString(h.Sum(nil)), r.URL.Query().Get("sign"))
 				}
 				if provider == "feishu" {
-					ts := p["timestamp"].(string)
+					ts := requireOpsType[string](t, p["timestamp"])
 					h := hmac.New(sha256.New, []byte(ts+"\nfake-secret"))
 					require.Equal(t, base64.StdEncoding.EncodeToString(h.Sum(nil)), p["sign"])
 				}
@@ -185,7 +187,8 @@ func TestAccountOpsRobotSigningAndBusinessCodes(t *testing.T) {
 func TestAccountOpsChannelRetrySkipsSuccessfulDestinations(t *testing.T) {
 	settings := &accountOpsSettingsStub{}
 	sender := &accountOpsSenderStub{}
-	svc := NewAccountOpsService(settings, &accountOpsRepoStub{}, sender)
+	repo := &accountOpsRepoStub{}
+	svc := NewAccountOpsService(settings, repo, sender)
 	svc.SetNotificationDependencies(nil, opsTestEncryptor{}, true, "Asia/Shanghai")
 	cfg := defaultAccountOpsConfig()
 	cfg.Enabled = true
@@ -200,14 +203,14 @@ func TestAccountOpsChannelRetrySkipsSuccessfulDestinations(t *testing.T) {
 	})}
 	e := &AccountOpsEvent{AccountID: 7, Kind: "balance_low", Attempts: 1}
 	svc.deliverEvent(context.Background(), e)
-	require.Equal(t, "failed", svc.repo.(*accountOpsRepoStub).state)
+	require.Equal(t, "failed", repo.state)
 	require.Equal(t, 1, sender.calls)
 	body = `{"code":0}`
 	e.Attempts = 2
 	svc.deliverEvent(context.Background(), e)
 	require.Equal(t, 1, sender.calls)
 	require.Equal(t, 2, calls)
-	require.Equal(t, "sent", svc.repo.(*accountOpsRepoStub).state)
+	require.Equal(t, "sent", repo.state)
 }
 
 func TestAccountOpsProviderRequiresExplicitNumericZero(t *testing.T) {
@@ -283,4 +286,11 @@ func TestAccountOpsRecoveryDuringRateWaitStopsDelivery(t *testing.T) {
 	svc.deliverEvent(context.Background(), event)
 	require.Zero(t, calls)
 	require.Equal(t, "resolved", repo.state)
+}
+
+func requireOpsType[T any](t *testing.T, value any) T {
+	t.Helper()
+	result, ok := value.(T)
+	require.True(t, ok, "unexpected payload type %T", value)
+	return result
 }

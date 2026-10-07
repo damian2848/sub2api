@@ -17,7 +17,8 @@ func TestAccountOpsFreshBalanceBoundary(t *testing.T) {
 	require.Equal(t, "ok", item.BalanceStatus)
 	require.NotNil(t, item.Balance)
 	require.Equal(t, 0.0, *item.Balance)
-	snapshot := a.Extra[UpstreamBillingProbeExtraKey].(*UpstreamBillingProbeSnapshot)
+	snapshot, ok := a.Extra[UpstreamBillingProbeExtraKey].(*UpstreamBillingProbeSnapshot)
+	require.True(t, ok)
 	snapshot.Balance.Status = "failed"
 	require.Nil(t, opsBalanceAccount(a, now).Balance)
 	snapshot.Balance.Status = "ok"
@@ -66,6 +67,8 @@ func TestAccountOpsDeliveryRechecksAmountUnitTypeIdentityAndRules(t *testing.T) 
 	received := now.Add(-time.Minute)
 	fresh := now.Add(time.Hour)
 	a := &Account{ID: 1, Name: "key", Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "fake-key"}, Extra: map[string]any{UpstreamBillingProbeExtraKey: &UpstreamBillingProbeSnapshot{Status: "ok", Balance: &UpstreamBalanceSnapshot{Status: "ok", ReceivedAt: &received, FreshUntil: &fresh, Data: map[string]any{"remaining": 5.0, "unit": "USD"}}}}}
+	snapshot, ok := a.Extra[UpstreamBillingProbeExtraKey].(*UpstreamBillingProbeSnapshot)
+	require.True(t, ok)
 	accounts := &opsAccountsStub{account: a}
 	repo := &accountOpsRepoStub{}
 	sender := &accountOpsSenderStub{}
@@ -83,9 +86,9 @@ func TestAccountOpsDeliveryRechecksAmountUnitTypeIdentityAndRules(t *testing.T) 
 	svc.deliverEvent(context.Background(), e)
 	require.Equal(t, 1, sender.calls)
 	for _, change := range []func(){func() {
-		a.Extra[UpstreamBillingProbeExtraKey].(*UpstreamBillingProbeSnapshot).Balance.Data["remaining"] = 5.1
+		snapshot.Balance.Data["remaining"] = 5.1
 	}, func() {
-		a.Extra[UpstreamBillingProbeExtraKey].(*UpstreamBillingProbeSnapshot).Balance.Data["unit"] = "CNY"
+		snapshot.Balance.Data["unit"] = "CNY"
 	}, func() { a.Type = AccountTypeOAuth }, func() { a.Credentials["api_key"] = "rotated-fake-key" }, func() {
 		cfg.BalanceThresholds[0].Enabled = false
 		cfg.Enabled = false
@@ -93,7 +96,7 @@ func TestAccountOpsDeliveryRechecksAmountUnitTypeIdentityAndRules(t *testing.T) 
 	}} {
 		a.Type = AccountTypeAPIKey
 		a.Credentials["api_key"] = "fake-key"
-		b := a.Extra[UpstreamBillingProbeExtraKey].(*UpstreamBillingProbeSnapshot).Balance
+		b := snapshot.Balance
 		b.Data["remaining"] = 5.0
 		b.Data["unit"] = "USD"
 		change()

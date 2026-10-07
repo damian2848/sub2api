@@ -79,7 +79,7 @@ func (r *newAPIAuthorizationRepository) Save(ctx context.Context, p *service.New
 	if e != nil {
 		return e
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, e = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, p.SiteURL+":"+strconv.FormatInt(p.UserID, 10)); e != nil {
 		return e
 	}
@@ -119,13 +119,16 @@ func (r *newAPIAuthorizationRepository) Save(ctx context.Context, p *service.New
 	for rows.Next() {
 		var aid int64
 		if e = rows.Scan(&aid); e != nil {
-			rows.Close()
+			_ = rows.Close()
 			return e
 		}
 		changed = append(changed, aid)
 	}
 	e = rows.Err()
-	rows.Close()
+	closeErr := rows.Close()
+	if e == nil {
+		e = closeErr
+	}
 	if e != nil {
 		return e
 	}
@@ -152,7 +155,7 @@ func (r *newAPIAuthorizationRepository) Unbind(ctx context.Context, id int64) er
 	if e != nil {
 		return e
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, e = tx.ExecContext(ctx, `UPDATE accounts SET extra=COALESCE(extra,'{}'::jsonb)-'upstream_billing_provider'-'upstream_billing_probe',updated_at=NOW() WHERE id=$1 AND deleted_at IS NULL`, id); e != nil {
 		return e
 	}
@@ -169,7 +172,7 @@ func (r *newAPIAuthorizationRepository) WriteSnapshot(ctx context.Context, a *se
 	if e != nil {
 		return e
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var revision int64
 	if e = tx.QueryRowContext(ctx, `SELECT revision FROM new_api_site_authorizations WHERE id=$1 FOR SHARE`, b.Profile.ID).Scan(&revision); e != nil {
 		return e

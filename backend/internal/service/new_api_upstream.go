@@ -147,7 +147,7 @@ func (s *UpstreamBillingProbeService) newAPIRequest(ctx context.Context, a *Acco
 	if resp == nil || resp.Body == nil {
 		return newAPIError("empty_response")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return newAPIError("http_error")
 	}
@@ -243,7 +243,7 @@ func (s *UpstreamBillingProbeService) fetchNewAPI(ctx context.Context, a *Accoun
 			if page.P == nil {
 				page.P = page.Page
 			}
-			if page.Total == nil || page.P == nil || page.PageSize == nil || (*page.P != p && !(iteration == 0 && p == 0 && *page.P == 1)) || *page.PageSize <= 0 || *page.PageSize > 100 || *page.Total < 0 || *page.Total > 10000 || len(page.Items) > *page.PageSize || (expectedTotal >= 0 && expectedTotal != *page.Total) {
+			if page.Total == nil || page.P == nil || page.PageSize == nil || (*page.P != p && (iteration != 0 || p != 0 || *page.P != 1)) || *page.PageSize <= 0 || *page.PageSize > 100 || *page.Total < 0 || *page.Total > 10000 || len(page.Items) > *page.PageSize || (expectedTotal >= 0 && expectedTotal != *page.Total) {
 				return nil, newAPIError("invalid_inventory_pagination")
 			}
 			items = page.Items

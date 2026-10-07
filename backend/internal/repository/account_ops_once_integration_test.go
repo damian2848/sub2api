@@ -235,7 +235,8 @@ func TestAccountOpsOnceScopedConfigUpdatesAcrossReplicas(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_, err := a.SaveNotificationSettings(ctx, service.AccountOpsNotificationSettings{Recipient: "new@example.test", BalanceLow: true, WeeklyQuota: true, CooldownMinutes: 90})
+		recipient, interval, on, off := "new@example.test", 90, true, false
+		_, err := a.SaveNotificationSettings(ctx, service.AccountOpsNotificationSettings{Enabled: &off, Recipient: &recipient, BalanceLow: &on, WeeklyQuota: &on, CooldownMinutes: &interval})
 		errs <- err
 	}()
 	go func() {
@@ -381,7 +382,8 @@ func TestAccountOpsOnceConfigAndOutboxRollbackTogether(t *testing.T) {
 	defer func() {
 		_, _ = integrationDB.ExecContext(ctx, `DROP TRIGGER once_fail_update ON account_ops_threshold_events;DROP FUNCTION once_fail_update()`)
 	}()
-	_, err = svc.SaveNotificationSettings(ctx, service.AccountOpsNotificationSettings{Recipient: "after@example.test", BalanceLow: true, CooldownMinutes: 90})
+	recipient, interval, on, off := "after@example.test", 90, true, false
+	_, err = svc.SaveNotificationSettings(ctx, service.AccountOpsNotificationSettings{Enabled: &off, Recipient: &recipient, BalanceLow: &on, CooldownMinutes: &interval})
 	require.Error(t, err)
 	after, readErr := settings.GetValue(ctx, key)
 	require.NoError(t, readErr)

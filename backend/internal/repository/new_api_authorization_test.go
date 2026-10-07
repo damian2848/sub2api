@@ -12,7 +12,7 @@ import (
 func TestNewAPIAuthorizationSaveRollsBackChangedAccount(t *testing.T) {
 	db, m, e := sqlmock.New()
 	require.NoError(t, e)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	r := NewNewAPIAuthorizationRepository(db)
 	m.ExpectBegin()
 	m.ExpectExec("SELECT pg_advisory_xact_lock").WillReturnResult(sqlmock.NewResult(0, 1))
@@ -26,7 +26,7 @@ func TestNewAPIAuthorizationSaveRollsBackChangedAccount(t *testing.T) {
 func TestNewAPIGetBindingNeverSerializesSecret(t *testing.T) {
 	db, m, e := sqlmock.New()
 	require.NoError(t, e)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	m.ExpectQuery("SELECT b.account_id").WithArgs(int64(1)).WillReturnRows(sqlmock.NewRows([]string{"account_id", "token_id", "fingerprint", "group", "id", "site_url", "user_id", "revision", "access_token_ciphertext"}))
 	b, e := NewNewAPIAuthorizationRepository(db).GetBinding(context.Background(), 1)
 	require.NoError(t, e)
@@ -36,7 +36,7 @@ func TestNewAPIGetBindingNeverSerializesSecret(t *testing.T) {
 func TestNewAPISnapshotRejectsRotatedAuthorizationBeforeAccountWrite(t *testing.T) {
 	db, m, e := sqlmock.New()
 	require.NoError(t, e)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	r := NewNewAPIAuthorizationRepository(db)
 	m.ExpectBegin()
 	m.ExpectQuery("SELECT revision FROM new_api_site_authorizations").WithArgs(int64(8)).WillReturnRows(sqlmock.NewRows([]string{"revision"}).AddRow(2))
@@ -48,7 +48,7 @@ func TestNewAPISnapshotRejectsRotatedAuthorizationBeforeAccountWrite(t *testing.
 func TestNewAPIUnbindOnlyRequestedAccountAndOutboxAtomic(t *testing.T) {
 	db, m, e := sqlmock.New()
 	require.NoError(t, e)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	r := NewNewAPIAuthorizationRepository(db)
 	m.ExpectBegin()
 	m.ExpectExec("UPDATE accounts SET extra").WithArgs(int64(1)).WillReturnResult(sqlmock.NewResult(0, 1))
