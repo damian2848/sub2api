@@ -492,7 +492,9 @@ func writeGeneratedAdminCredentials(admin AdminConfig, emailGenerated, passwordG
 	dataDir := GetDataDir()
 	path := filepath.Join(dataDir, generatedAdminCredentialsFile)
 	var content strings.Builder
-	content.WriteString("# Generated during first-run admin bootstrap. Save securely, then delete this file.\n")
+	if _, err := content.WriteString("# Generated during first-run admin bootstrap. Save securely, then delete this file.\n"); err != nil {
+		return "", fmt.Errorf("failed to build generated admin credentials: %w", err)
+	}
 	if emailGenerated {
 		fmt.Fprintf(&content, "ADMIN_EMAIL=%s\n", admin.Email)
 	}
