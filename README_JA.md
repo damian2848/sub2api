@@ -165,10 +165,10 @@ docker compose logs -f sub2api
 
 **スクリプトの動作内容:**
 - `docker-compose.local.yml`（`docker-compose.yml` として保存）と `.env.example` をダウンロード
-- セキュアな認証情報（JWT_SECRET、TOTP_ENCRYPTION_KEY、POSTGRES_PASSWORD）を自動生成
+- セキュアな認証情報（JWT_SECRET、TOTP_ENCRYPTION_KEY、POSTGRES_PASSWORD）と管理者ログイン用メールアドレスを自動生成
 - 自動生成されたシークレットで `.env` ファイルを作成
 - データディレクトリを作成（バックアップ・移行が容易なローカルディレクトリを使用）
-- 生成された認証情報を参照用に表示
+- `.env` をモード `600` で保存し、シークレットの値は表示しない
 
 #### 手動デプロイ
 
@@ -201,7 +201,8 @@ TOTP_ENCRYPTION_KEY=your_totp_key_here
 
 # オプション: 管理者アカウント
 ADMIN_EMAIL=
-# 初回起動時に空欄なら認証情報を自動生成します。指定するパスワードは8〜72バイトにしてください。
+# 初回起動時に空欄ならログイン用メールアドレスを自動生成します。
+# 生成された認証情報は data/admin-credentials.txt（モード0600）に一度だけ保存されます。
 ADMIN_PASSWORD=
 
 # オプション: カスタムポート
@@ -251,10 +252,9 @@ docker compose -f docker-compose.local.yml logs -f sub2api
 
 ブラウザで `http://YOUR_SERVER_IP:8080` を開いてください。
 
-管理者メールアドレス（ログインユーザー名）またはパスワードが自動生成された場合は、ログで確認できます:
-```bash
-docker compose -f docker-compose.local.yml logs sub2api | grep "Generated admin"
-```
+`ADMIN_EMAIL` または `ADMIN_PASSWORD` を空欄にした場合、生成された認証情報は
+`data/admin-credentials.txt`（モード `0600`）に一度だけ保存されます。ファイルをローカルで読み取り、
+安全に保存した後で削除してください。生成されたパスワードはアプリケーションログに出力されません。
 
 #### アップグレード
 

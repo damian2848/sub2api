@@ -101,7 +101,7 @@ chmod +x docker-deploy.sh
 - Automatically generates secure secrets (JWT_SECRET, TOTP_ENCRYPTION_KEY, POSTGRES_PASSWORD) and an admin login email
 - Creates `.env` file with generated secrets
 - Creates necessary data directories (data/, postgres_data/, redis_data/)
-- **Displays generated credentials** (POSTGRES_PASSWORD, JWT_SECRET, etc.)
+- Saves `.env` with mode `600` without printing any secret values
 
 **After running the script:**
 ```bash
@@ -111,8 +111,9 @@ docker compose -f docker-compose.local.yml up -d
 # View logs
 docker compose -f docker-compose.local.yml logs -f sub2api
 
-# If admin email/password were auto-generated, find them in logs:
-docker compose -f docker-compose.local.yml logs sub2api | grep "Generated admin"
+# If ADMIN_EMAIL or ADMIN_PASSWORD was left empty, read the generated credentials once:
+# cat data/admin-credentials.txt
+# The file is mode 600; save the values securely, then delete it.
 
 # Access Web UI
 # http://localhost:8080
@@ -144,7 +145,7 @@ mkdir -p data postgres_data redis_data
 # Start all services using local directory version
 docker compose -f docker-compose.local.yml up -d
 
-# View logs (check for auto-generated admin email and password)
+# View application logs (generated admin passwords are never logged)
 docker compose -f docker-compose.local.yml logs -f sub2api
 
 # Access Web UI
@@ -173,10 +174,9 @@ When using Docker Compose with `AUTO_SETUP=true`:
 
 2. No manual Setup Wizard needed - just configure `.env` and start
 
-3. If `ADMIN_EMAIL` or `ADMIN_PASSWORD` is not set, check logs for the generated credentials:
-   ```bash
-   docker compose logs sub2api | grep "Generated admin"
-   ```
+3. If `ADMIN_EMAIL` or `ADMIN_PASSWORD` is not set, read the generated credentials from
+   `data/admin-credentials.txt` (mode `0600`), save them securely, and delete the file. The
+   generated password is never written to application logs.
 
 ### Startup and Database Recovery
 
@@ -290,7 +290,7 @@ docker compose down -v
 | `TOTP_ENCRYPTION_KEY` | **Recommended** | *(auto-generated)* | TOTP encryption key (fixed for persistent 2FA) |
 | `SERVER_PORT` | No | `8080` | Server port |
 | `ADMIN_EMAIL` | No | *(auto-generated)* | Admin login email |
-| `ADMIN_PASSWORD` | No | *(auto-generated)* | Admin password (8-72 bytes when set) |
+| `ADMIN_PASSWORD` | No | *(auto-generated)* | Admin password (saved once to `data/admin-credentials.txt`, mode 0600) |
 | `TZ` | No | `Asia/Shanghai` | Timezone |
 | `UPDATE_GITHUB_TOKEN` | No | *(empty)* | Token for `api.github.com` release checks only; asset downloads remain anonymous. |
 | `GEMINI_OAUTH_CLIENT_ID` | No | *(builtin)* | Google OAuth client ID (Gemini OAuth). Leave empty to use the built-in Gemini CLI client. |

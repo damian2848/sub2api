@@ -142,19 +142,12 @@ main() {
     chmod 600 .env
     echo ""
 
-    # Display completion message
+    # Display completion message without exposing credentials in terminal output.
     echo "=========================================="
     echo "  Preparation Complete!"
     echo "=========================================="
     echo ""
-    echo "Generated secure credentials:"
-    echo "  POSTGRES_PASSWORD:     ${POSTGRES_PASSWORD}"
-    echo "  JWT_SECRET:            ${JWT_SECRET}"
-    echo "  TOTP_ENCRYPTION_KEY:   ${TOTP_ENCRYPTION_KEY}"
-    echo "  ADMIN_EMAIL:           ${ADMIN_EMAIL}"
-    echo ""
-    print_warning "These credentials have been saved to .env file."
-    print_warning "Please keep them secure and do not share publicly!"
+    print_success "Generated credentials were saved to .env (mode 600); secret values are not printed."
     echo ""
     echo "Directory structure:"
     echo "  docker-compose.yml        - Docker Compose configuration"
@@ -175,8 +168,8 @@ main() {
     echo "  4. Access Web UI:"
     echo "     http://localhost:8080"
     echo ""
-    print_info "If admin password is not set in .env, it will be auto-generated."
-    print_info "Check logs for the generated admin password on first startup."
+    print_info "If ADMIN_PASSWORD is empty, the first startup writes the generated admin credentials to data/admin-credentials.txt (mode 600)."
+    print_info "Read that file once, save the credentials securely, then delete it; the password is never written to logs."
     echo ""
 }
 

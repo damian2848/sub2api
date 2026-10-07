@@ -600,7 +600,8 @@ func TestBootstrapAdminUserRejectsWeakPasswordWithoutInsert(t *testing.T) {
 }
 
 func TestBootstrapAdminUserCreatesAdminWithGeneratedCredentials(t *testing.T) {
-	t.Parallel()
+	dataDir := t.TempDir()
+	t.Setenv("DATA_DIR", dataDir)
 
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -625,6 +626,22 @@ func TestBootstrapAdminUserCreatesAdminWithGeneratedCredentials(t *testing.T) {
 	}
 	if len(cfg.Admin.Password) != 32 {
 		t.Fatalf("admin password length = %d, want generated 32", len(cfg.Admin.Password))
+	}
+	credentialsPath := filepath.Join(dataDir, generatedAdminCredentialsFile)
+	credentials, err := os.ReadFile(credentialsPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", credentialsPath, err)
+	}
+	if got := string(credentials); !strings.Contains(got, "ADMIN_EMAIL="+cfg.Admin.Email+"\n") ||
+		!strings.Contains(got, "ADMIN_PASSWORD="+cfg.Admin.Password+"\n") {
+		t.Fatalf("generated credentials file does not contain the generated values: %q", got)
+	}
+	info, err := os.Stat(credentialsPath)
+	if err != nil {
+		t.Fatalf("Stat(%q) error = %v", credentialsPath, err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("generated credentials file mode = %o, want 600", got)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("database expectations not met: %v", err)

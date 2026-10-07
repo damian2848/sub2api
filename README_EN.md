@@ -173,7 +173,7 @@ docker compose logs -f sub2api
 - Generates secure credentials (JWT_SECRET, TOTP_ENCRYPTION_KEY, POSTGRES_PASSWORD) and an admin login email
 - Creates `.env` file with auto-generated secrets
 - Creates data directories (uses local directories for easy backup/migration)
-- Displays generated credentials for your reference
+- Saves `.env` with mode `600` without printing any secret values
 
 #### Manual Deployment
 
@@ -206,7 +206,8 @@ TOTP_ENCRYPTION_KEY=your_totp_key_here
 
 # Optional: Admin account
 ADMIN_EMAIL=
-# Leave empty to generate credentials on first startup. A supplied password must be 8-72 bytes.
+# Leave empty to generate a random login email on first startup.
+# Generated credentials are written once to data/admin-credentials.txt (mode 0600).
 ADMIN_PASSWORD=
 
 # Optional: Custom port
@@ -256,10 +257,9 @@ docker compose -f docker-compose.local.yml logs -f sub2api
 
 Open `http://YOUR_SERVER_IP:8080` in your browser.
 
-If the admin email (login username) or password was auto-generated, find them in logs:
-```bash
-docker compose -f docker-compose.local.yml logs sub2api | grep "Generated admin"
-```
+If `ADMIN_EMAIL` or `ADMIN_PASSWORD` was left empty, the generated values are written once to
+`data/admin-credentials.txt` with mode `0600`. Read that file locally, save the credentials securely,
+then delete it. The generated password is never written to application logs.
 
 #### Upgrade
 

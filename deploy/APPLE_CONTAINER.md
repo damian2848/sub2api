@@ -41,11 +41,9 @@ nano .env
 ./apple-container.sh status
 ```
 
-Open `http://localhost:8080`. If `ADMIN_EMAIL` or `ADMIN_PASSWORD` is empty, retrieve the generated credentials with:
-
-```bash
-./apple-container.sh logs app
-```
+Open `http://localhost:8080`. If `ADMIN_EMAIL` or `ADMIN_PASSWORD` is empty, read the generated
+credentials from `data/admin-credentials.txt` (mode `0600`), save them securely, and delete the file.
+The generated password is never written to application logs.
 
 The env file uses literal `KEY=value` syntax. Do not use Compose expressions such as `${VALUE:-default}`, and do not quote values unless the quote characters are part of the intended value. `BIND_HOST` must be an IPv4 address, and `SERVER_PORT` must be between 1025 and 65535.
 
