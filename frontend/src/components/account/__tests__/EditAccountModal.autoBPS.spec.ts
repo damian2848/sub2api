@@ -11,11 +11,12 @@ const mocks = vi.hoisted(() => ({
   createPlan: vi.fn(),
   updatePlan: vi.fn(),
   showError: vi.fn(),
-  showWarning: vi.fn()
+  showWarning: vi.fn(),
+  publicSettings: { excel_bps_enabled: true }
 }))
 
 vi.mock('@/stores/app', () => ({
-  useAppStore: () => ({ showError: mocks.showError, showSuccess: vi.fn(), showInfo: vi.fn(), showWarning: mocks.showWarning })
+  useAppStore: () => ({ showError: mocks.showError, showSuccess: vi.fn(), showInfo: vi.fn(), showWarning: mocks.showWarning, cachedPublicSettings: mocks.publicSettings })
 }))
 
 vi.mock('@/stores/auth', () => ({
@@ -91,9 +92,29 @@ async function submit(wrapper: ReturnType<typeof mountModal>) {
 
 const toggleSelector = '[data-testid="account-auto-bps-toggle"]'
 
+describe('EditAccountModal global BPS switch', () => {
+  beforeEach(() => {
+    Object.values(mocks).forEach(mock => {
+      if (typeof mock === 'function') mock.mockReset()
+    })
+    mocks.listByAccount.mockResolvedValue([])
+  })
+
+  it('hides BPS account settings when the global switch is off', () => {
+    mocks.publicSettings = { excel_bps_enabled: false }
+    const wrapper = mountModal()
+    expect(wrapper.find('[data-testid="excel-bps-all-models"]').exists()).toBe(false)
+    wrapper.unmount()
+    mocks.publicSettings = { excel_bps_enabled: true }
+  })
+})
+
 describe('EditAccountModal auto BPS switch', () => {
   beforeEach(() => {
-    Object.values(mocks).forEach(mock => mock.mockReset())
+    Object.values(mocks).forEach(mock => {
+      if (typeof mock === 'function') mock.mockReset()
+    })
+    mocks.publicSettings.excel_bps_enabled = true
     mocks.updateAccount.mockImplementation(async (_id: number, payload: Record<string, unknown>) => ({ ...buildOAuthAccount(), ...payload }))
     mocks.listByAccount.mockResolvedValue([])
     mocks.createPlan.mockImplementation(async (request: Record<string, unknown>) => ({ ...buildRule(), ...request, id: 40 }))

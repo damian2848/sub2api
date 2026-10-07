@@ -399,6 +399,7 @@ export function deriveWeChatConnectStoredMode(
  * System settings interface
  */
 export interface SystemSettings {
+	excel_bps_enabled: boolean;
   // Registration settings
   registration_enabled: boolean;
   email_verify_enabled: boolean;
@@ -790,6 +791,7 @@ export interface SystemSettings {
 }
 
 export interface UpdateSettingsRequest {
+	excel_bps_enabled?: boolean;
   registration_enabled?: boolean;
   email_verify_enabled?: boolean;
   registration_email_suffix_whitelist?: string[];

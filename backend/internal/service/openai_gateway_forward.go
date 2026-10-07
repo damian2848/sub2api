@@ -53,6 +53,14 @@ func normalizeOpenAIResponsesNamespaces(c *gin.Context, account *Account, body [
 	return body, nil
 }
 
+func (s *OpenAIGatewayService) excelBPSGloballyEnabled(ctx context.Context) bool {
+	if s == nil || s.settingService == nil {
+		return true
+	}
+	enabled, err := s.settingService.GetProtocolFeatureEnabled(ctx, SettingKeyExcelBPSEnabled)
+	return err == nil && enabled
+}
+
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (result *OpenAIForwardResult, resultErr error) {
 	defer func() {
@@ -120,11 +128,12 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 
 	modelForBPS := gjson.GetBytes(body, "model").String()
+	// A BPS-only probe must not spend a native request when the global switch is off.
 	if c.GetBool(bpsAccountProbeRequiredContextKey) &&
-		(!account.IsExcelBPSEnabledForModel(modelForBPS) || account.excelBPSNativeFallbackReason(body) != "") {
+		(!account.IsExcelBPSEnabledForModel(modelForBPS) || account.excelBPSNativeFallbackReason(body) != "" || !s.excelBPSGloballyEnabled(ctx)) {
 		return nil, errors.New("bps probe path is unavailable")
 	}
-	if account.IsExcelBPSEnabledForModel(modelForBPS) {
+	if account.IsExcelBPSEnabledForModel(modelForBPS) && s.excelBPSGloballyEnabled(ctx) {
 		return s.forwardExcelBPS(ctx, c, account, body, startTime)
 	}
 

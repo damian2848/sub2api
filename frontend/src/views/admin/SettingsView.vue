@@ -7354,8 +7354,20 @@
         </div>
         <!-- /Tab: Login Agreement -->
 
-	        <!-- Tab: Features (功能开关) -->
+        <!-- Tab: Features (功能开关) -->
         <div v-show="activeTab === 'features'" class="space-y-6">
+        <div class="card" data-testid="protocol-feature-switches">
+          <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.settings.features.protocolSwitches.title') }}</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.settings.features.protocolSwitches.description') }}</p>
+          </div>
+          <div class="space-y-5 p-6">
+            <div class="flex items-center justify-between gap-4">
+              <span id="settings-excel-bps-enabled-label" class="font-medium text-gray-900 dark:text-white">{{ t('admin.settings.features.protocolSwitches.excelBps') }}</span>
+              <Toggle v-model="form.excel_bps_enabled" aria-labelledby="settings-excel-bps-enabled-label" data-testid="excel-bps-enabled-toggle" />
+            </div>
+          </div>
+        </div>
         <div class="card" data-testid="request-capture-settings">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
             <h2 id="settings-section-request-capture" tabindex="-1" class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.requestCapture.title') }}</h2>
@@ -9998,6 +10010,7 @@ type SettingsForm = Omit<
 const schedulingThresholdPlatforms = SCHEDULING_THRESHOLD_PLATFORMS;
 
 const form = reactive<SettingsForm>({
+  excel_bps_enabled: true,
   registration_enabled: true,
   email_verify_enabled: false,
   registration_email_suffix_whitelist: [],
@@ -11409,6 +11422,7 @@ async function loadSettings() {
     form.channel_monitor_hide_user_ranking = Boolean(
       settings.channel_monitor_hide_user_ranking
     );
+    form.excel_bps_enabled = settings.excel_bps_enabled !== false;
     form.login_agreement_updated_at =
       settings.login_agreement_updated_at || "2026-03-31";
     form.login_agreement_documents =
@@ -11847,6 +11861,7 @@ async function saveSettings() {
     }
 
     const payload: UpdateSettingsRequest = {
+      excel_bps_enabled: form.excel_bps_enabled,
       registration_enabled: form.registration_enabled,
       email_verify_enabled: form.email_verify_enabled,
       registration_email_suffix_whitelist:

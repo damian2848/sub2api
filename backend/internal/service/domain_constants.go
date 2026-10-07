@@ -522,6 +522,9 @@ const (
 	// Default false (keep the current ranking tab). Admin endpoints always keep it.
 	SettingKeyChannelMonitorHideUserRanking = "channel_monitor_hide_user_ranking"
 
+	// Protocol-wide BPS switch; defaults on so existing BPS accounts keep working.
+	SettingKeyExcelBPSEnabled = "excel_bps_enabled"
+
 	// SettingKeyGrokDefaultTextModel is the fallback Grok text model for empty
 	// request models and built-in Grok aliases (e.g. "grok" → this id). Default grok-4.5.
 	SettingKeyGrokDefaultTextModel = "grok_default_text_model"

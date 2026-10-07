@@ -405,6 +405,7 @@ const baseSettingsResponse = {
   doc_url: "",
   home_content: "",
   compact_home_enabled: false,
+  excel_bps_enabled: true,
   excel_bps_image_mode: 'native',
   excel_bps_image_relay_enabled: true,
   excel_bps_image_base_url: '',
@@ -915,6 +916,21 @@ describe("admin SettingsView payment visible method controls", () => {
     });
     expect(showError).not.toHaveBeenCalled();
     expect(showSuccess).toHaveBeenCalledWith('admin.settings.settingsSaved');
+    wrapper.unmount();
+  });
+
+  it("saves the BPS protocol switch", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    const tab = wrapper.findAll('button').find((node) => node.text().includes('admin.settings.tabs.features'));
+    await tab?.trigger('click');
+    const protocolSwitches = wrapper.get('[data-testid="protocol-feature-switches"]');
+    expect(protocolSwitches.findAll('input')).toHaveLength(1);
+    await protocolSwitches.get('input').setValue(false);
+    await wrapper.find('form').trigger('submit.prevent');
+    await flushPromises();
+    expect(updateSettings.mock.calls[0]?.[0]).toMatchObject({ excel_bps_enabled: false });
+    expect(updateSettings.mock.calls[0]?.[0]).not.toHaveProperty('prism_browser_enabled');
     wrapper.unmount();
   });
 

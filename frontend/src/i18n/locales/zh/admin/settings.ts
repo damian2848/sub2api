@@ -14,6 +14,11 @@ export default {
         payment: '支付设置',
       },
       features: {
+        protocolSwitches: {
+          title: '协议功能',
+          description: '关闭后立即停止使用对应协议，并隐藏账号编辑中的相关选项。',
+          excelBps: 'Excel / BPS 协议',
+        },
         excelBpsImages: {
           mode: '图片传输方式',
           modeRelay: '临时 HTTPS 中转（默认）',

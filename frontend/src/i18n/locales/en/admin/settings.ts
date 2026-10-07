@@ -14,6 +14,11 @@ export default {
         payment: 'Payment',
       },
       features: {
+        protocolSwitches: {
+          title: 'Protocol features',
+          description: 'Turning a protocol off stops using it immediately and hides its options in account editors.',
+          excelBps: 'Excel / BPS protocol',
+        },
         excelBpsImages: {
           mode: 'Image transport',
           modeRelay: 'Temporary HTTPS relay (default)',
