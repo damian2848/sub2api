@@ -11,6 +11,7 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 REPO="${RELEASE_REPO:-damian2848/sub2api}"; REMOTE=fork
+here="$(git rev-parse --show-toplevel)/deploy/releasing"
 
 [ $# -eq 2 ] || { sed -n '2,12p' "$0"; exit 2; }
 version="$1"; notes="$2"
@@ -55,9 +56,11 @@ problems=0
 case "$ci_done" in completed/success|none) ;; *) echo "CI FAILED on the published commit: $ci_done  (the release page is already public)" >&2; problems=1;; esac
 [ "$problems" = 0 ] || exit 1
 
-# The published release must be what the notes promised: 10 assets, headings intact, not a draft.
+# The published release must be what the workflow promised: every platform archive, re-login runtime and
+# optional Prism source package, with headings intact and not a draft. Keep this list in one tested helper so
+# adding an asset to release.yml cannot leave this post-publish check stale.
 gh release view "$tag" --repo "$REPO" --json assets,isDraft,body \
   --jq '{draft:.isDraft, assets:(.assets|length), headings:(.body|test("## ")), names:[.assets[].name]}'
-n="$(gh release view "$tag" --repo "$REPO" --json assets --jq '.assets|length')"
-[ "$n" = 10 ] || { echo "expected 10 assets, found $n" >&2; exit 1; }
+asset_names="$(gh release view "$tag" --repo "$REPO" --json assets --jq '.assets[].name')"
+python3 "$here/release_assets.py" "$version" <<<"$asset_names"
 echo "released $tag ($sha)"
