@@ -34,6 +34,9 @@ func pelicanTestOptionsFromContext(ctx context.Context) (pelicanTestOptions, boo
 }
 
 func isQualityObservation(ctx context.Context) bool {
+	if isControlledExperiment(ctx) {
+		return true
+	}
 	options, _ := pelicanTestOptionsFromContext(ctx)
 	return options.observeOnly
 }

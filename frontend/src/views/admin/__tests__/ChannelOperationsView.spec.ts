@@ -26,7 +26,7 @@ function page(name: string) {
 }
 
 async function workspace(path = 'bps') {
-  const children = ['bps', 'harvest', 'prism', 'smart/quality', 'smart/priority', 'smart/alerts', 'credentials', 'credentials/legacy', 'pelican']
+  const children = ['bps', 'harvest', 'prism', 'smart/quality', 'smart/priority', 'smart/experiments', 'smart/alerts', 'credentials', 'credentials/legacy', 'pelican']
     .map(section => ({ path: section, component: page(section), props: { embedded: true } }))
   const router = createRouter({
     history: createMemoryHistory(),

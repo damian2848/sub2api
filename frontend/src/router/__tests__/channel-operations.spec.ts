@@ -23,6 +23,7 @@ const legacyRoutes = [
   ['/admin/account-quality', 'AdminAccountQuality', 'smart/quality'],
   ['/admin/priority-scheduling', 'AdminPriorityScheduling', 'smart/priority'],
   ['/admin/account-ops', 'AdminAccountOps', 'smart/alerts'],
+  ['/admin/controlled-experiments', 'AdminControlledExperiments', 'smart/experiments'],
   ['/admin/token-guard-v2', 'AdminTokenGuardV2', 'credentials'],
   ['/admin/token-guard', 'AdminTokenGuard', 'credentials/legacy'],
   ['/admin/pelican-tests', 'AdminPelicanTests', 'pelican'],
@@ -54,7 +55,7 @@ describe('channel operations routes', () => {
 
   it('inherits admin-only access for every module, including direct deep links', () => {
     const instance = router()
-    for (const section of ['bps', 'harvest', 'prism', 'smart/quality', 'smart/priority', 'smart/alerts', 'credentials', 'credentials/legacy', 'pelican']) {
+    for (const section of ['bps', 'harvest', 'prism', 'smart/quality', 'smart/priority', 'smart/experiments', 'smart/alerts', 'credentials', 'credentials/legacy', 'pelican']) {
       const resolved = instance.resolve(`${CHANNEL_OPERATIONS_PATH}/${section}`)
       expect(resolved.matched).toHaveLength(2)
       expect(resolved.meta.requiresAuth).toBe(true)
@@ -65,7 +66,7 @@ describe('channel operations routes', () => {
   it('embeds all reused business pages and keeps their components lazily loaded', () => {
     const hub = channelOperationsRoutes[0]
     const sections = hub.children?.filter(child => child.component && !['bps', 'prism'].includes(child.path)) ?? []
-    expect(sections).toHaveLength(7)
+    expect(sections).toHaveLength(8)
     for (const section of sections) {
       expect(section.props).toEqual({ embedded: true })
       expect(typeof section.component).toBe('function')

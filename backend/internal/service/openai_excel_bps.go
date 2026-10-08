@@ -527,7 +527,7 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 		raw, readErr := io.ReadAll(io.LimitReader(resp.Body, maxRejectionBytes+1))
 		_ = resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(raw))
-		if retryBody, retry := prepareExcelBPSInvalidEncryptedRetry(upstreamBody, raw); retry && readErr == nil && len(raw) <= maxRejectionBytes && ctx.Err() == nil {
+		if retryBody, retry := prepareExcelBPSInvalidEncryptedRetry(upstreamBody, raw); !isControlledExperiment(ctx) && retry && readErr == nil && len(raw) <= maxRejectionBytes && ctx.Err() == nil {
 			retryReq, retryErr := newExcelBPSRequest(requestCtx, retryBody, token, accountID)
 			if retryErr != nil {
 				return fail(502, "basispoints_transport_error", "Excel BPS recovery request could not be prepared")
@@ -627,6 +627,9 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 	// disconnects or a later stream/protocol error prevents normal completion.
 	s.UpdateCodexUsageSnapshotFromHeaders(ctx, account.ID, resp.Header)
 	converted := bridge.StreamWithRepairs(requestCtx, resp.Body, func(repairCtx context.Context, failed map[string]any, validation error) (map[string]any, error) {
+		if isControlledExperiment(ctx) {
+			return nil, errors.New("controlled experiment disables BPS tool repair submissions")
+		}
 		correctedBody, err := basispoints.BuildToolRepairRequest(upstreamBody, failed, validation)
 		if err != nil {
 			return nil, err
@@ -669,6 +672,9 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 		retry, err := newExcelBPSRequest(repairCtx, repairBody, token, accountID)
 		if err != nil {
 			return nil, err
+		}
+		if isControlledExperiment(ctx) {
+			return nil, errors.New("controlled experiment disables BPS correction submissions")
 		}
 		repaired, err := s.httpUpstream.Do(retry, proxyURL, account.ID, account.Concurrency)
 		if err != nil {
