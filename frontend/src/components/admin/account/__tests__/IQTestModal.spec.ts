@@ -2,13 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import IQTestModal from '../IQTestModal.vue'
 
-const { probeOpenAICodexState, getPrismStatus } = vi.hoisted(() => ({ probeOpenAICodexState: vi.fn(), getPrismStatus: vi.fn() }))
+const { probeOpenAICodexState, getPrismStatus, getAvailableModels, getModelReasoning } = vi.hoisted(() => ({
+  probeOpenAICodexState: vi.fn(), getPrismStatus: vi.fn(), getAvailableModels: vi.fn(), getModelReasoning: vi.fn()
+}))
 
 vi.mock('@/api/admin', () => ({ adminAPI: { accounts: { getPrismStatus } } }))
 
 vi.mock('@/api/admin/accounts', async () => {
   const actual = await vi.importActual<typeof import('@/api/admin/accounts')>('@/api/admin/accounts')
-  return { ...actual, probeOpenAICodexState }
+  return { ...actual, probeOpenAICodexState, getAvailableModels, getModelReasoning }
 })
 
 vi.mock('vue-i18n', async () => {
@@ -65,6 +67,8 @@ function mountModal(account: Record<string, unknown> = {}) {
 
 describe('IQTestModal', () => {
   beforeEach(() => {
+    getAvailableModels.mockReset().mockResolvedValue([])
+    getModelReasoning.mockReset().mockRejectedValue(new Error('unavailable'))
     localStorage.clear()
     localStorage.setItem('auth_token', 'test-token')
     global.fetch = vi.fn(() => Promise.resolve(streamResponse([
@@ -145,6 +149,20 @@ describe('IQTestModal', () => {
     await (wrapper.vm as any).startTest()
     await flushPromises()
     expect(JSON.parse((global.fetch as any).mock.calls[0][1].body)).toMatchObject({ reasoning_effort: 'xhigh' })
+    wrapper.unmount()
+  })
+  it('offers catalog models and the selected model reasoning levels', async () => {
+    getAvailableModels.mockResolvedValue([{ id: 'gpt-6-astra', display_name: 'GPT-6 Astra' }, { id: 'gpt-5.5' }])
+    getModelReasoning.mockResolvedValue({ supported_reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_reasoning_level: 'high' })
+    const wrapper = mountModal()
+    await flushPromises()
+    expect((wrapper.vm as any).modelOptions).toEqual([
+      { value: 'gpt-6-astra', label: 'GPT-6 Astra' },
+      { value: 'gpt-5.5', label: 'gpt-5.5' }
+    ])
+    expect(getModelReasoning).toHaveBeenCalledWith(42, 'gpt-6-astra')
+    expect((wrapper.vm as any).reasoningOptions.map((o: { value: string }) => o.value)).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
+    expect((wrapper.vm as any).reasoningEffort).toBe('high')
     wrapper.unmount()
   })
   it('persists manual timing and model snapshots independently of later form edits', async () => {

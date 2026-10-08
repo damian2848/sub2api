@@ -362,7 +362,8 @@ const prompt = ref(questionPrompt('candy'))
 const defaultModel = computed(() => props.account?.platform === 'anthropic' ? 'claude-opus-5-5' : 'gpt-6-astra')
 const modelId = ref(defaultModel.value)
 const reasoningEffort = ref('medium')
-const reasoningLevels = ref<string[]>(['low', 'medium', 'high'])
+const DEFAULT_REASONING_LEVELS = ['low', 'medium', 'high', 'xhigh']
+const reasoningLevels = ref<string[]>([...DEFAULT_REASONING_LEVELS])
 const availableModels = ref<Array<{ id: string; display_name?: string }>>([])
 const modelOptions = computed(() => availableModels.value.map((model) => ({ value: model.id, label: model.display_name || model.id })))
 const parallelCount = ref<string | number>(1)
@@ -449,8 +450,7 @@ function selectQuestion(value: string | number | boolean | null) {
   questionKind.value = value
   prompt.value = questionPrompt(value)
 }
-const PRISM_REASONING_LEVELS = ['low', 'medium', 'high', 'xhigh']
-const reasoningOptions = computed(() => (isPrism.value ? PRISM_REASONING_LEVELS : reasoningLevels.value).map((value) => ({
+const reasoningOptions = computed(() => (isPrism.value ? DEFAULT_REASONING_LEVELS : reasoningLevels.value).map((value) => ({
   value,
   label: ({ low: t('admin.accounts.pelicanTest.reasoningLow'), medium: t('admin.accounts.pelicanTest.reasoningMedium'), high: t('admin.accounts.pelicanTest.reasoningHigh'), none: t('admin.accounts.pelicanTest.reasoningNone'), minimal: t('admin.accounts.pelicanTest.reasoningMinimal'), xhigh: t('admin.accounts.pelicanTest.reasoningXHigh'), max: t('admin.accounts.pelicanTest.reasoningMax'), ultra: t('admin.accounts.pelicanTest.reasoningUltra') } as Record<string, string>)[value] || value
 })))
@@ -484,7 +484,8 @@ async function loadReasoning() {
     reasoningLevels.value = result.supported_reasoning_levels.length > 0 ? result.supported_reasoning_levels : ['none']
     reasoningEffort.value = reasoningLevels.value.includes(result.default_reasoning_level) ? result.default_reasoning_level : reasoningLevels.value[0]
   } catch {
-    reasoningLevels.value = ['low', 'medium', 'high']
+    if (token !== reasoningLoadToken) return
+    reasoningLevels.value = [...DEFAULT_REASONING_LEVELS]
     if (!reasoningLevels.value.includes(reasoningEffort.value)) reasoningEffort.value = 'medium'
   }
 }
