@@ -32,6 +32,7 @@
             </div>
             <button type="button" class="btn btn-secondary" :disabled="form.routes.length >= 4" @click="form.routes.push({ account_id: 0, channel: 'native_http' })">{{ t('controlledExperiments.addRoute') }}</button>
             <p class="text-xs leading-5 text-gray-500">{{ t('controlledExperiments.channelHint') }}</p>
+            <p v-if="form.routes.some(route => route.channel === 'native_ws')" class="rounded-lg bg-amber-50 p-3 text-sm leading-6 text-amber-800 dark:bg-amber-900/20 dark:text-amber-200" data-testid="experiment-ws-prerequisite">{{ t('controlledExperiments.wsPrerequisiteHint') }}</p>
           </fieldset>
           <fieldset>
             <legend class="mb-3 text-sm font-semibold">{{ t('controlledExperiments.tasks') }} · {{ t('controlledExperiments.selected', { count: selectedTasks.length }) }}</legend>
@@ -77,7 +78,11 @@
               <h3 class="font-semibold">{{ routeLabel(summary.route_index) }}</h3>
               <p class="mt-2 break-words text-xs text-gray-500" data-testid="experiment-frozen-route">{{ t('controlledExperiments.mappedModel') }}: {{ report.run.spec.routes[summary.route_index].mapped_model }} · {{ t('controlledExperiments.parentAccount') }}: {{ report.run.spec.routes[summary.route_index].parent_account_id ?? '—' }} · {{ t('controlledExperiments.proxy') }}: {{ report.run.spec.routes[summary.route_index].proxy_id ?? '—' }}</p>
               <p class="mt-1 text-sm text-gray-500">{{ t('controlledExperiments.eligibility') }} · {{ stateLabel(summary.eligibility) }}</p>
-              <p v-if="preflightFor(summary.route_index)" class="mt-2 break-words text-xs text-gray-500">{{ t('controlledExperiments.preflight') }}: {{ preflightFor(summary.route_index)?.reason }} · {{ t('controlledExperiments.catalog') }}: {{ preflightFor(summary.route_index)?.catalog }}</p>
+              <p v-if="preflightFor(summary.route_index)" class="mt-2 break-words text-xs text-gray-500">{{ t('controlledExperiments.preflight') }}: {{ preflightLabel(preflightFor(summary.route_index)?.reason || '') }} · {{ t('controlledExperiments.catalog') }}: {{ preflightFor(summary.route_index)?.catalog }}</p>
+              <div v-if="preflightFor(summary.route_index)?.available === false" class="mt-3 rounded-lg bg-amber-50 p-3 text-sm leading-6 text-amber-800 dark:bg-amber-900/20 dark:text-amber-200" data-testid="experiment-route-blocked">
+                <p class="font-medium">{{ t('controlledExperiments.routeNotExecuted') }}</p>
+                <p v-if="preflightFor(summary.route_index)?.reason === 'websocket_not_enabled'">{{ t('controlledExperiments.wsPrerequisiteHint') }}</p>
+              </div>
               <dl class="mt-4 grid grid-cols-2 gap-4 text-sm">
                 <div><dt class="text-gray-500">{{ t('controlledExperiments.completed') }}</dt><dd class="mt-1 text-lg font-semibold">{{ summary.completed_calls }} / {{ summary.calls }}</dd></div>
                 <div><dt class="text-gray-500">{{ t('controlledExperiments.score') }}</dt><dd class="mt-1 text-lg font-semibold" data-testid="experiment-score">{{ percentage(summary.mean_score) }}</dd></div>
@@ -140,6 +145,7 @@ function selectAll() { form.task_ids = splitTasks.value.map(task => task.id) }
 watch(() => form.split, selectAll)
 function stateLabel(state: string) { const key = `controlledExperiments.state.${state}`; return te(key) ? t(key) : state }
 function channelLabel(channel: string) { const key = `controlledExperiments.${channel}`; return te(key) ? t(key) : channel }
+function preflightLabel(reason: string) { const key = `controlledExperiments.preflightReason.${reason}`; return te(key) ? t(key) : reason }
 function percentage(value: number | null | undefined) { return value == null ? '—' : `${(value * 100).toFixed(1)}%` }
 function date(value: string) { return new Date(value).toLocaleString() }
 function routeLabel(index: number) { const route = report.value?.run.spec.routes[index]; return route ? `${index + 1} · #${route.account_id} ${route.account_name} · ${channelLabel(route.channel)}` : String(index + 1) }

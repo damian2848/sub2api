@@ -72,6 +72,24 @@ describe('ControlledExperimentsView', () => {
     expect(wrapper.get('[data-testid="experiment-start"]').text()).toContain('"count":5')
   })
 
+  it('explains WS prerequisites and distinguishes a skipped channel from a submitted test', async () => {
+    const data = report('completed')
+    data.run.spec.routes[0].channel = 'native_ws'
+    data.preflight = [{ route_index: 0, available: false, reason: 'websocket_not_enabled', catalog: 'unknown' }]
+    data.routes[0].eligibility = 'preflight_blocked'
+    api.list.mockResolvedValue([data.run]); api.report.mockResolvedValue(data)
+    wrapper = mountView(); await flushPromises()
+    const channel = wrapper.findAll('select').find(select => select.find('option[value="native_ws"]').exists())!
+    await channel.setValue('native_ws')
+    expect(wrapper.get('[data-testid="experiment-ws-prerequisite"]').text()).toContain('controlledExperiments.wsPrerequisiteHint')
+    const blocked = wrapper.get('[data-testid="experiment-route-blocked"]').text()
+    expect(blocked).toContain('controlledExperiments.routeNotExecuted')
+    expect(blocked).toContain('controlledExperiments.wsPrerequisiteHint')
+    expect(wrapper.text()).toContain('controlledExperiments.preflightReason.websocket_not_enabled')
+    expect(wrapper.get('[data-testid="experiment-score"]').text()).toBe('—')
+    expect(api.start).not.toHaveBeenCalled()
+  })
+
   it('switches split tasks and displays a budget below the complete plan', async () => {
     wrapper = mountView(); await flushPromises()
     await wrapper.get('[data-testid="experiment-split"]').setValue('confirm')
