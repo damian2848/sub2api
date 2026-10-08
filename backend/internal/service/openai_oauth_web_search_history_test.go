@@ -40,6 +40,15 @@ func TestOAuthWebSearchHistoryToolAcrossPaths(t *testing.T) {
 		}, false},
 		{"API key websocket", func(b []byte) ([]byte, bool, error) {
 			return normalizeOpenAIResponsesWebSocketCompatibilityBody(b, &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, false)
+		}, true},
+		{"API key passthrough compact", func(b []byte) ([]byte, bool, error) {
+			return normalizeOpenAIResponsesCompatibilityBodyWithOptions(b, &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, openAIResponsesCompatibilityOptions{Compact: true})
+		}, false},
+		{"DeepSeek API key websocket", func(b []byte) ([]byte, bool, error) {
+			return normalizeOpenAIResponsesWebSocketCompatibilityBody(b, &Account{
+				Platform: PlatformOpenAI, Type: AccountTypeAPIKey,
+				Credentials: map[string]any{"base_url": "https://api.deepseek.com"},
+			}, false)
 		}, false},
 	}
 	for _, tt := range tests {
@@ -146,4 +155,28 @@ func TestEnsureOpenAIOAuthWebSearchToolForHistoryDoesNotShareToolMap(t *testing.
 	require.True(t, ok)
 	require.NotContains(t, secondTools[0], "external_web_access")
 	require.NotContains(t, openAIWebSearchHistoryTool, "external_web_access")
+}
+
+func TestShouldDeclareOpenAIWebSearchToolForHistory(t *testing.T) {
+	prism := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Extra: map[string]any{
+		"provider_preset": PrismProviderPreset, PrismSourceAccountKey: int64(1),
+	}}
+	tests := []struct {
+		name    string
+		account *Account
+		model   string
+		want    bool
+	}{
+		{"nil", nil, "gpt-5.5", false},
+		{"OAuth", &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}, "gpt-5.5", true},
+		{"API key relay", &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, "gpt-5.5", true},
+		{"API key mapped to DeepSeek", &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, "deepseek-v4-pro", false},
+		{"managed Prism", prism, "gpt-5.5", false},
+		{"Grok", &Account{Platform: PlatformGrok, Type: AccountTypeAPIKey}, "grok-4", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, shouldDeclareOpenAIWebSearchToolForHistory(tt.account, tt.model))
+		})
+	}
 }

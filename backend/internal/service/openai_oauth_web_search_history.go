@@ -21,6 +21,24 @@ import (
 // all, also pin tool_choice to "none" so the injected tool cannot be invoked
 // and the request keeps its no-tools semantics.
 
+// shouldDeclareOpenAIWebSearchToolForHistory reports whether the account's
+// upstream needs the injected declaration. OpenAI API key accounts are
+// included because they are commonly relays in front of the same ChatGPT
+// Codex OAuth pool (verified against a sub2api relay), except upstreams that
+// are not that endpoint: managed Prism, the Copilot SDK adapter and DeepSeek.
+func shouldDeclareOpenAIWebSearchToolForHistory(account *Account, requestedModel string) bool {
+	if account == nil {
+		return false
+	}
+	if account.IsOpenAIOAuthLike() {
+		return true
+	}
+	return account.IsOpenAIApiKey() &&
+		!account.IsManagedPrismAccount() &&
+		!account.IsCopilotSDKEnabled() &&
+		!isDeepSeekResponsesUpstream(account, requestedModel)
+}
+
 const (
 	openAIWebSearchCallItemType      = "web_search_call"
 	openAIAdditionalToolsItemType    = "additional_tools"

@@ -283,6 +283,19 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
 	}
 	SetActualOpenAIUpstreamEndpoint(c, openAIResponsesUpstreamEndpoint)
+	// OAuth accounts get this in the Codex transform / passthrough
+	// normalization; API key relays have neither on the non-passthrough path.
+	if account.IsOpenAIApiKey() && !compactPath && shouldDeclareOpenAIWebSearchToolForHistory(account, reqModel) {
+		webSearchBody, webSearchChanged, webSearchErr := ensureOpenAIOAuthWebSearchToolForHistoryBody(body, responsesLite)
+		if webSearchErr != nil {
+			return nil, webSearchErr
+		}
+		if webSearchChanged {
+			body = webSearchBody
+			originalBody = webSearchBody
+			requestView = newOpenAIRequestView(body)
+		}
+	}
 	if account.IsOpenAI() && (account.IsOpenAIApiKey() || account.IsOpenAIOAuthLike()) {
 		normalizedReasoningBody, reasoningChanged, reasoningErr := normalizeOpenAIResponsesReasoningContentReplay(body)
 		if reasoningErr != nil {

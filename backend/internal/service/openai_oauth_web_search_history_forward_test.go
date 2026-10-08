@@ -69,3 +69,37 @@ func TestForward_OAuthWebSearchHistoryDeclaresTool(t *testing.T) {
 		})
 	}
 }
+
+// TestForward_APIKeyWebSearchHistoryDeclaresTool covers OpenAI API key relays
+// (e.g. another sub2api in front of a Codex OAuth pool), which forward the
+// same history to the same ChatGPT endpoint and fail the same way.
+func TestForward_APIKeyWebSearchHistoryDeclaresTool(t *testing.T) {
+	for _, passthrough := range []bool{false, true} {
+		t.Run(map[bool]string{false: "standard", true: "passthrough"}[passthrough], func(t *testing.T) {
+			s := newAstraOAuthSetup(t, passthrough)
+			s.account.Type = AccountTypeAPIKey
+			s.account.Credentials = map[string]any{"api_key": "sk-relay", "base_url": "https://relay.example.com/v1"}
+			inner := `{"id":"resp_test","model":"gpt-5.5","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`
+			s.upstream.resp = &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(codexCompletedSSE(inner))),
+			}
+			body, err := sjson.SetRawBytes([]byte(openAIWebSearchHistoryCompactionBody), "input.-1", []byte(`{"type":"compaction_trigger"}`))
+			require.NoError(t, err)
+
+			_, err = s.svc.Forward(context.Background(), s.c, s.account, body)
+			require.NoError(t, err)
+			require.NotNil(t, s.upstream.lastReq)
+			require.True(t, strings.HasPrefix(s.upstream.lastReq.URL.String(), "https://relay.example.com/"))
+
+			forwarded := s.upstream.lastBody
+			tools := gjson.GetBytes(forwarded, "tools").Array()
+			require.Len(t, tools, 1)
+			require.Equal(t, "web_search", tools[0].Get("type").String())
+			require.Equal(t, "none", gjson.GetBytes(forwarded, "tool_choice").String())
+			items := gjson.GetBytes(forwarded, "input").Array()
+			require.Equal(t, "compaction_trigger", items[len(items)-1].Get("type").String())
+		})
+	}
+}

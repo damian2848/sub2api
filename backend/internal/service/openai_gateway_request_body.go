@@ -1525,14 +1525,14 @@ func normalizeOpenAIResponsesCompatibilityBodyWithOptions(body []byte, account *
 			normalized = next
 			changed = true
 		}
-		if !opts.Compact {
-			webSearchBody, webSearchChanged, err := ensureOpenAIOAuthWebSearchToolForHistoryBody(normalized, responsesLite)
-			if err != nil {
-				return body, false, fmt.Errorf("normalize websocket body: %w", err)
-			}
-			normalized = webSearchBody
-			changed = changed || webSearchChanged
+	}
+	if !opts.Compact && shouldDeclareOpenAIWebSearchToolForHistory(account, gjson.GetBytes(normalized, "model").String()) {
+		webSearchBody, webSearchChanged, err := ensureOpenAIOAuthWebSearchToolForHistoryBody(normalized, responsesLite)
+		if err != nil {
+			return body, false, fmt.Errorf("normalize websocket body: %w", err)
 		}
+		normalized = webSearchBody
+		changed = changed || webSearchChanged
 	}
 	needsOrphanCleanup := account != nil && account.IsOpenAIOAuthLike() &&
 		gjson.GetBytes(normalized, "input").IsArray()
