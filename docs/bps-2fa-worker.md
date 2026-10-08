@@ -4,6 +4,25 @@
 
 本改动新增显式的隔离 CLI，复用 `process_password_claim` 和现有 toSub2 运行时。普通队列任务默认仍为 Codex；本改动没有增加管理 UI、修改数据库、让现有队列自动选择 Excel，或部署生产 worker。
 
+## 为什么旧 OAuth 凭据不能直接转换
+
+本 PR 不提供“仅凭原 Codex access token / refresh token，直接转换为 Excel/BPS Token”的功能。区别在于凭据所属的 OAuth 客户端与授权会话，不能按账号是否开启 2FA 来判断 Token 是否兼容。
+
+- Codex 与 Excel 使用不同的 `client_id` 和注册授权流程。修改本地账号字段或 BPS 请求头，不会改变已签发 Token 的签名内容或服务端授权记录；直接改 JWT 内容会使原签名不再匹配。
+- refresh token 用于续签其配套授权，不能自行改成另一个客户端的授权。本次已测试“旧 Codex RT + Excel client ID”，返回 HTTP 401 / `invalid_client`。尚未验证到官方允许的 Codex → Excel Token 交换方式。
+- 同账号、同工作区、同代理配置下，原 Codex Token 调 BPS 返回 403，重新完成官方 Excel 授权所得的会话则能完整生成。该对照证明凭据来源影响本次准入，但没有单独隔离出 `client_id`、scope 或其它会话字段中哪一项是 BPS 的决定性检查，不能把 403 直接解释为账号封禁。
+
+| 已有材料 | 本次支持的处理方式 |
+| --- | --- |
+| 只有原 Codex AT/RT，无法再次完成账号认证 | 不支持直接转换；不能仅改 client ID、scope、Cookie 或请求头 |
+| 用户能完成官方 Excel 登录 | 重新进行 Excel OAuth，获取官方签发的新凭据；账号无需因这项授权而强制开启 2FA |
+| 邮箱、密码及 TOTP 密钥 | 使用本 PR worker 自动完成 Excel 登录及 2FA 验证，再取得新凭据；这条路径已实测成功 |
+| 已有有效的官方 Excel OAuth 会话 | 保留配套 AT/RT/ID Token、client ID、工作区和有效期，按 Excel 方式导入/刷新，无须重复转换 |
+
+因此，“2FA 转换”在本 PR 中指**用密码/TOTP 自动重新登录并换取 Excel 授权**，不指用 TOTP 给旧 Token 重签名。没有开启 2FA 的账号仍可通过官方登录完成授权；本 PR 真实自动化验证覆盖的是密码 + TOTP 账号，不能将其推广为所有无 TOTP/邮箱验证码流程都已验证。
+
+同一用户的 Codex 与 Excel 会话应分别保存，不混用新旧 RT 或客户端编号。成功重新登录只确认 BPS 可调用，仍不代表可以取得 Codex 门票或保证模型质量。
+
 ## 使用
 
 先准备 root 或操作者所有、0600 的 JSON 输入文件，父目录 0700。字段示例中的值均为假值：
