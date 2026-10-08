@@ -21,11 +21,12 @@ func buildControlledReport(run *ControlledExperiment, attempts []*ControlledAtte
 		}
 		r := &report.Routes[a.RouteIndex]
 		r.Calls++
-		if a.Status == "completed" {
+		switch a.Status {
+		case "completed":
 			r.CompletedCalls++
-		} else if a.Status == "unknown" || a.Status == "reserved" {
+		case "unknown", "reserved":
 			r.UnknownCalls++
-		} else {
+		default:
 			r.ProtocolFailures++
 		}
 		if a.Diagnostic.CostUSD != nil {

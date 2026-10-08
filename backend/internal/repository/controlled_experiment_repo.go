@@ -50,7 +50,7 @@ func (r *controlledExperimentRepository) List(ctx context.Context, before int64,
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	items := make([]*service.ControlledExperiment, 0)
 	for rows.Next() {
 		run, err := scanControlledRun(rows)
@@ -99,7 +99,7 @@ func (r *controlledExperimentRepository) Reserve(ctx context.Context, attempt *s
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var status string
 	var calls, limit int
 	var active bool
@@ -148,7 +148,7 @@ func (r *controlledExperimentRepository) Attempts(ctx context.Context, id int64)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	items := make([]*service.ControlledAttempt, 0)
 	for rows.Next() {
 		var raw []byte
@@ -190,7 +190,7 @@ func (r *controlledExperimentRepository) RecoverExpired(ctx context.Context) err
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err = tx.ExecContext(ctx, `UPDATE controlled_experiments SET status='interrupted',stop_reason='lease_expired_no_replay',finished_at=NOW(),lease_until=NULL WHERE status IN ('running','stop_requested') AND lease_until<NOW()`); err != nil {
 		return err
 	}

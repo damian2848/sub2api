@@ -116,9 +116,9 @@ func controlledTestSSE(events ...any) []byte {
 	var out strings.Builder
 	for _, event := range events {
 		data, _ := json.Marshal(event)
-		out.WriteString("data: ")
-		out.Write(data)
-		out.WriteString("\n\n")
+		_, _ = out.WriteString("data: ")
+		_, _ = out.Write(data)
+		_, _ = out.WriteString("\n\n")
 	}
 	return []byte(out.String())
 }

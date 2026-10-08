@@ -38,7 +38,7 @@ func TestControlledExperimentPostgresBudgetAndRecovery(t *testing.T) {
 	u.RawQuery = query.Encode()
 	isolated, err := sql.Open("postgres", u.String())
 	require.NoError(t, err)
-	defer isolated.Close()
+	t.Cleanup(func() { require.NoError(t, isolated.Close()) })
 	migration, err := os.ReadFile(filepath.Join("..", "..", "migrations", "268_controlled_experiments.sql"))
 	require.NoError(t, err)
 	_, err = isolated.ExecContext(ctx, string(migration))

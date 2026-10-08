@@ -129,7 +129,7 @@ func validateControlledSQL(query string) error {
 	grammar := " select with as exists in over filter and or not where when then else on by from join having case distinct materialized "
 	for i, token := range tokens {
 		for _, word := range denied {
-			if token == word && !(token == "replace" && i+1 < len(tokens) && tokens[i+1] == "(") {
+			if token == word && (token != "replace" || i+1 >= len(tokens) || tokens[i+1] != "(") {
 				return errors.New("prohibited SQL keyword")
 			}
 		}
@@ -169,7 +169,7 @@ func controlledSQLCTEColumns(tokens []string, index int) bool {
 			return next < len(tokens) && tokens[next] == "("
 		}
 		if column {
-			if len(token) == 0 || !(token[0] >= 'a' && token[0] <= 'z' || token[0] == '_') {
+			if len(token) == 0 || (token[0] < 'a' || token[0] > 'z') && token[0] != '_' {
 				return false
 			}
 		} else if token != "," {
@@ -190,13 +190,13 @@ func controlledSQLRows(parent context.Context, tables map[string][][]any, query 
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(1)
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	names := make([]string, 0, len(tables))
 	for name := range tables {
 		names = append(names, name)
@@ -244,7 +244,7 @@ func controlledSQLRows(parent context.Context, tables map[string][][]any, query 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	columns, err := rows.Columns()
 	if err != nil {
 		return nil, err
