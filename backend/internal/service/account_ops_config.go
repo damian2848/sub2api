@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ErrAccountOpsConfigValidation identifies static, safe input validation failures.
@@ -23,14 +25,16 @@ func accountOpsConfigValidation(message string) error {
 }
 
 type AccountOpsWebhook struct {
-	ID                                string `json:"id"`
-	Provider                          string `json:"provider"`
-	Enabled                           bool   `json:"enabled"`
-	URLConfigured                     bool   `json:"url_configured"`
-	SecretConfigured                  bool   `json:"secret_configured"`
-	URL                               string `json:"url,omitempty"`
-	Secret                            string `json:"secret,omitempty"`
-	ClearSecret                       bool   `json:"clear_secret,omitempty"`
+	ID                                string  `json:"id"`
+	Name                              *string `json:"name,omitempty"`
+	Provider                          string  `json:"provider"`
+	Enabled                           bool    `json:"enabled"`
+	URLConfigured                     bool    `json:"url_configured"`
+	SecretConfigured                  bool    `json:"secret_configured"`
+	URL                               string  `json:"url,omitempty"`
+	Secret                            string  `json:"secret,omitempty"`
+	ClearSecret                       bool    `json:"clear_secret,omitempty"`
+	MessageTemplate                   *string `json:"message_template,omitempty"`
 	urlCipher, secretCipher, revision string
 }
 type AccountOpsBalanceRule struct {
@@ -60,18 +64,22 @@ type AccountOpsDetails struct {
 	ObservedAt       *time.Time `json:"observed_at,omitempty"`
 }
 type AccountOpsDelivery struct {
-	Provider   string     `json:"provider"`
+	Provider string `json:"provider"`
+	// Emit an empty name so receipt retries can clear a previous custom label.
+	Name       string     `json:"name"`
 	Status     string     `json:"status"`
 	Attempts   int        `json:"attempts"`
 	LastSentAt *time.Time `json:"last_sent_at,omitempty"`
 }
 type storedOpsWebhook struct {
-	ID           string `json:"id"`
-	Provider     string `json:"provider"`
-	Enabled      bool   `json:"enabled"`
-	URLCipher    string `json:"url_cipher"`
-	SecretCipher string `json:"secret_cipher,omitempty"`
-	Revision     string `json:"revision"`
+	ID              string  `json:"id"`
+	Name            *string `json:"name,omitempty"`
+	Provider        string  `json:"provider"`
+	Enabled         bool    `json:"enabled"`
+	URLCipher       string  `json:"url_cipher"`
+	SecretCipher    string  `json:"secret_cipher,omitempty"`
+	Revision        string  `json:"revision"`
+	MessageTemplate *string `json:"message_template,omitempty"`
 }
 type storedOpsConfig struct {
 	AccountOpsConfig
@@ -127,11 +135,17 @@ func (c AccountOpsConfig) public() AccountOpsConfig {
 	return c
 }
 func validateAccountOpsURL(provider, raw string) error {
+	if provider == "custom" {
+		return validateAccountOpsCustomURL(raw)
+	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" || u.Port() != "" {
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Fragment != "" || strings.Contains(raw, "#") || u.Port() != "" || u.RawPath != "" {
 		return errors.New("invalid official robot HTTPS URL")
 	}
-	q := u.Query()
+	q, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return errors.New("invalid official robot HTTPS URL")
+	}
 	valid := false
 	switch provider {
 	case "wecom":
@@ -147,16 +161,24 @@ func validateAccountOpsURL(provider, raw string) error {
 	return nil
 }
 func validateAccountOpsExtras(c AccountOpsConfig) error {
+	if err := validateAccountOpsChannelName(c.EmailName); err != nil {
+		return err
+	}
 	if len(c.Webhooks) > 5 || len(c.BalanceThresholds)+len(c.QuotaThresholds) > 1000 {
 		return errors.New("too many robot destinations or balance rules")
 	}
 	ids := map[string]bool{}
 	for _, w := range c.Webhooks {
+		if w.Name != nil {
+			if err := validateAccountOpsChannelName(*w.Name); err != nil {
+				return err
+			}
+		}
 		if !opsID.MatchString(w.ID) || ids[w.ID] {
 			return errors.New("robot IDs must be unique and valid")
 		}
 		ids[w.ID] = true
-		if w.Provider != "wecom" && w.Provider != "dingtalk" && w.Provider != "feishu" {
+		if w.Provider != "wecom" && w.Provider != "dingtalk" && w.Provider != "feishu" && w.Provider != "custom" {
 			return errors.New("unsupported robot provider")
 		}
 		if len(w.URL) > 2048 || len(w.Secret) > 512 {
@@ -167,8 +189,15 @@ func validateAccountOpsExtras(c AccountOpsConfig) error {
 				return err
 			}
 		}
-		if w.Provider == "wecom" && (w.Secret != "" || w.SecretConfigured || w.secretCipher != "") {
-			return errors.New("WeCom does not support signing secrets")
+		if (w.Provider == "wecom" || w.Provider == "custom") && (w.Secret != "" || w.SecretConfigured || w.secretCipher != "") {
+			return errors.New("this webhook provider does not support signing secrets")
+		}
+		if w.Provider == "custom" {
+			if _, err := parseAccountOpsTemplate(opsTemplateValue(w.MessageTemplate)); err != nil {
+				return err
+			}
+		} else if opsTemplateValue(w.MessageTemplate) != "" {
+			return errors.New("message templates require a custom webhook")
 		}
 	}
 	accounts := map[int64]bool{}
@@ -186,6 +215,14 @@ func validateAccountOpsExtras(c AccountOpsConfig) error {
 	}
 	return nil
 }
+
+func validateAccountOpsChannelName(name string) error {
+	if !utf8.ValidString(name) || utf8.RuneCountInString(strings.TrimSpace(name)) > 80 || strings.ContainsFunc(name, unicode.IsControl) {
+		return errors.New("channel names must be at most 80 characters and contain no control characters")
+	}
+	return nil
+}
+
 func (s *AccountOpsService) SetNotificationDependencies(accounts AccountRepository, enc SecretEncryptor, fixed bool, timezone string) {
 	s.accounts = accounts
 	s.encryptor = enc
@@ -228,7 +265,7 @@ func (s *AccountOpsService) loadConfig(ctx context.Context) (AccountOpsConfig, e
 	}
 	c.Webhooks = nil
 	for _, w := range st.StoredWebhooks {
-		c.Webhooks = append(c.Webhooks, AccountOpsWebhook{ID: w.ID, Provider: w.Provider, Enabled: w.Enabled, URLConfigured: w.URLCipher != "", SecretConfigured: w.SecretCipher != "", urlCipher: w.URLCipher, secretCipher: w.SecretCipher, revision: w.Revision})
+		c.Webhooks = append(c.Webhooks, AccountOpsWebhook{ID: w.ID, Name: w.Name, Provider: w.Provider, Enabled: w.Enabled, URLConfigured: w.URLCipher != "", SecretConfigured: w.SecretCipher != "", MessageTemplate: w.MessageTemplate, urlCipher: w.URLCipher, secretCipher: w.SecretCipher, revision: w.Revision})
 	}
 	if err = ValidateAccountOpsConfig(c); err != nil {
 		return defaultAccountOpsConfig(), errors.New("invalid stored notification configuration")
@@ -246,12 +283,6 @@ func (s *AccountOpsService) saveConfigWithRuleScope(ctx context.Context, c Accou
 	if len(c.Webhooks) > 5 || len(c.BalanceThresholds)+len(c.QuotaThresholds) > 1000 {
 		return accountOpsConfigValidation("too many robot destinations or threshold rules")
 	}
-	for i := range c.Webhooks {
-		c.Webhooks[i].URL = strings.TrimSpace(c.Webhooks[i].URL)
-	}
-	if inputErr := validateAccountOpsExtras(c); inputErr != nil {
-		return accountOpsConfigValidation(inputErr.Error())
-	}
 	old, err := s.loadConfig(ctx)
 	if err != nil {
 		return err
@@ -265,6 +296,37 @@ func (s *AccountOpsService) saveConfigWithRuleScope(ctx context.Context, c Accou
 		w := &c.Webhooks[i]
 		w.URL = strings.TrimSpace(w.URL)
 		prev, ok := byID[w.ID]
+		if w.Name == nil {
+			w.Name = prev.Name
+		}
+		if w.Provider == "" || w.Provider == "auto" {
+			if w.URL != "" {
+				w.Provider, err = detectAccountOpsProvider(w.URL)
+				if err != nil {
+					return accountOpsConfigValidation(err.Error())
+				}
+			} else if ok {
+				w.Provider = prev.Provider
+			} else {
+				return accountOpsConfigValidation("webhook URL is required for a new destination")
+			}
+		}
+		if w.MessageTemplate == nil && prev.Provider == w.Provider {
+			w.MessageTemplate = prev.MessageTemplate
+		}
+	}
+	if inputErr := validateAccountOpsExtras(c); inputErr != nil {
+		return accountOpsConfigValidation(inputErr.Error())
+	}
+	c.EmailName = strings.TrimSpace(c.EmailName)
+	for i := range c.Webhooks {
+		w := &c.Webhooks[i]
+		if w.Name != nil {
+			name := strings.TrimSpace(*w.Name)
+			w.Name = &name
+		}
+		w.URL = strings.TrimSpace(w.URL)
+		prev, ok := byID[w.ID]
 		w.urlCipher = ""
 		w.secretCipher = ""
 		w.revision = ""
@@ -275,7 +337,7 @@ func (s *AccountOpsService) saveConfigWithRuleScope(ctx context.Context, c Accou
 			w.secretCipher = prev.secretCipher
 			w.revision = prev.revision
 		}
-		changed := !ok || prev.Provider != w.Provider
+		changed := !ok || prev.Provider != w.Provider || opsTemplateValue(prev.MessageTemplate) != opsTemplateValue(w.MessageTemplate)
 		if w.URL != "" || w.Secret != "" || w.ClearSecret {
 			if !s.EncryptionKeyConfigured() {
 				return errors.New("a fixed encryption key is required for robot credentials")
@@ -284,6 +346,15 @@ func (s *AccountOpsService) saveConfigWithRuleScope(ctx context.Context, c Accou
 		if w.URL != "" {
 			if err = validateAccountOpsURL(w.Provider, w.URL); err != nil {
 				return accountOpsConfigValidation(err.Error())
+			}
+			if w.secretCipher != "" && w.Secret == "" && !w.ClearSecret {
+				previousURL, decryptErr := s.encryptor.Decrypt(prev.urlCipher)
+				if decryptErr != nil {
+					return errors.New("robot credential decryption failed")
+				}
+				if previousURL != w.URL {
+					w.secretCipher = ""
+				}
 			}
 			w.urlCipher, err = s.encryptor.Encrypt(w.URL)
 			if err != nil {
@@ -354,7 +425,7 @@ func (s *AccountOpsService) saveConfigWithRuleScope(ctx context.Context, c Accou
 	st := storedOpsConfig{AccountOpsConfig: c}
 	st.Webhooks = []AccountOpsWebhook{}
 	for _, w := range c.Webhooks {
-		st.StoredWebhooks = append(st.StoredWebhooks, storedOpsWebhook{w.ID, w.Provider, w.Enabled, w.urlCipher, w.secretCipher, w.revision})
+		st.StoredWebhooks = append(st.StoredWebhooks, storedOpsWebhook{ID: w.ID, Name: w.Name, Provider: w.Provider, Enabled: w.Enabled, URLCipher: w.urlCipher, SecretCipher: w.secretCipher, Revision: w.revision, MessageTemplate: w.MessageTemplate})
 	}
 	raw, err := json.Marshal(st)
 	if err != nil {

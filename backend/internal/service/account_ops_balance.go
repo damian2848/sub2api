@@ -245,18 +245,24 @@ func (s *AccountOpsService) thresholdAccounts(ctx context.Context, apiOnly bool)
 }
 func (s *AccountOpsService) validateBalanceRules(ctx context.Context, rules []AccountOpsBalanceRule) error {
 	for _, r := range rules {
-		if s.accounts == nil {
-			return errors.New("account repository unavailable")
-		}
-		a, err := s.accounts.GetByID(ctx, r.AccountID)
-		if err != nil && !errors.Is(err, ErrAccountNotFound) {
-			return errors.New("balance account lookup unavailable")
-		}
-		if errors.Is(err, ErrAccountNotFound) || a == nil || a.Type != AccountTypeAPIKey {
-			return accountOpsConfigValidation("balance rules require a live API key account")
+		if _, err := s.balanceRuleAccount(ctx, r.AccountID); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+func (s *AccountOpsService) balanceRuleAccount(ctx context.Context, id int64) (*Account, error) {
+	if s.accounts == nil {
+		return nil, errors.New("account repository unavailable")
+	}
+	a, err := s.accounts.GetByID(ctx, id)
+	if err != nil && !errors.Is(err, ErrAccountNotFound) {
+		return nil, errors.New("balance account lookup unavailable")
+	}
+	if errors.Is(err, ErrAccountNotFound) || a == nil || a.Type != AccountTypeAPIKey {
+		return nil, accountOpsConfigValidation("balance rules require a live API key account")
+	}
+	return a, nil
 }
 func (s *AccountOpsService) validateQuotaRules(ctx context.Context, rules []AccountOpsQuotaRule) error {
 	for _, r := range rules {

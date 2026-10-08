@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"encoding/json"
 	"errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -123,17 +124,19 @@ func (h *AccountOpsHandler) SaveNotificationSettings(c *gin.Context) {
 func (h *AccountOpsHandler) SaveWebhook(c *gin.Context) {
 	// Scope-only DTO excludes ID, configured indicators, and all other categories.
 	var v struct {
-		Provider    string `json:"provider"`
-		Enabled     bool   `json:"enabled"`
-		URL         string `json:"url"`
-		Secret      string `json:"secret"`
-		ClearSecret bool   `json:"clear_secret"`
+		Name            *string `json:"name"`
+		Provider        string  `json:"provider"`
+		Enabled         bool    `json:"enabled"`
+		URL             string  `json:"url"`
+		Secret          string  `json:"secret"`
+		ClearSecret     bool    `json:"clear_secret"`
+		MessageTemplate *string `json:"message_template"`
 	}
 	if c.ShouldBindJSON(&v) != nil {
 		response.BadRequest(c, "Invalid robot configuration")
 		return
 	}
-	cfg, err := h.svc.SaveWebhook(c.Request.Context(), c.Param("id"), service.AccountOpsWebhook{Provider: v.Provider, Enabled: v.Enabled, URL: v.URL, Secret: v.Secret, ClearSecret: v.ClearSecret})
+	cfg, err := h.svc.SaveWebhook(c.Request.Context(), c.Param("id"), service.AccountOpsWebhook{Name: v.Name, Provider: v.Provider, Enabled: v.Enabled, URL: v.URL, Secret: v.Secret, ClearSecret: v.ClearSecret, MessageTemplate: v.MessageTemplate})
 	h.scopedResult(c, cfg, err)
 }
 func (h *AccountOpsHandler) DeleteWebhook(c *gin.Context) {
@@ -152,6 +155,37 @@ func (h *AccountOpsHandler) SaveRule(c *gin.Context) {
 		return
 	}
 	cfg, err := h.svc.SaveRule(c.Request.Context(), id, v)
+	h.scopedResult(c, cfg, err)
+}
+func (h *AccountOpsHandler) SaveRulesBatch(c *gin.Context) {
+	var v struct {
+		AccountIDs json.RawMessage `json:"account_ids"`
+		Rule       json.RawMessage `json:"rule"`
+		Groups     json.RawMessage `json:"groups"`
+	}
+	if c.ShouldBindJSON(&v) != nil {
+		response.BadRequest(c, "Invalid batch threshold rule")
+		return
+	}
+	var groups []service.AccountOpsRuleGroup
+	if v.Groups != nil {
+		if v.AccountIDs != nil || v.Rule != nil {
+			response.BadRequest(c, "Use either groups or account_ids and rule")
+			return
+		}
+		if json.Unmarshal(v.Groups, &groups) != nil {
+			response.BadRequest(c, "Invalid batch threshold groups")
+			return
+		}
+	} else {
+		var group service.AccountOpsRuleGroup
+		if json.Unmarshal(v.AccountIDs, &group.AccountIDs) != nil || json.Unmarshal(v.Rule, &group.Rule) != nil {
+			response.BadRequest(c, "Invalid batch threshold rule")
+			return
+		}
+		groups = []service.AccountOpsRuleGroup{group}
+	}
+	cfg, err := h.svc.SaveRuleGroupsBatch(c.Request.Context(), groups)
 	h.scopedResult(c, cfg, err)
 }
 func (h *AccountOpsHandler) DeleteRule(c *gin.Context) {

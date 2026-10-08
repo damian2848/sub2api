@@ -12,14 +12,14 @@ import AccountOpsChannelFields from './AccountOpsChannelFields.vue'
 import { saveAccountOpsWebhook } from '@/api/admin/accountOps'
 import type { AccountOpsConfig, AccountOpsWebhook } from '@/api/admin/accountOps'
 import { extractApiErrorMessage } from '@/utils/apiError'
-const props = defineProps<{ show: boolean; hook: AccountOpsWebhook | null; encryptionConfigured: boolean; testingId?: string | null; initialProvider?: AccountOpsWebhook['provider'] }>()
+const props = defineProps<{ show: boolean; hook: AccountOpsWebhook | null; encryptionConfigured: boolean; testingId?: string | null }>()
 const emit = defineEmits<{ (event: 'close'): void; (event: 'saved', config: AccountOpsConfig): void; (event: 'error', message: string): void; (event: 'test', id: string): void }>()
 const { t } = useI18n(), fields = ref<InstanceType<typeof AccountOpsChannelFields> | null>(null), draft = ref<AccountOpsWebhook[]>([]), busy = ref(false)
 let sequence = 0
-watch(() => [props.show, props.hook?.id, props.initialProvider] as const, () => {
+watch(() => [props.show, props.hook?.id] as const, () => {
   sequence++; fields.value?.clearInputs(); busy.value = false
   const id = props.hook?.id ?? Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('')
-  draft.value = [{ id, provider: props.hook?.provider ?? props.initialProvider ?? 'wecom', enabled: props.hook?.enabled ?? true, url_configured: props.hook?.url_configured ?? false, secret_configured: props.hook?.secret_configured ?? false }]
+  draft.value = [{ id, name: props.hook?.name ?? '', provider: props.hook?.provider ?? 'custom', enabled: props.hook?.enabled ?? true, url_configured: props.hook?.url_configured ?? false, secret_configured: props.hook?.secret_configured ?? false, message_template: props.hook?.message_template ?? '' }]
 }, { immediate: true, flush: 'pre' })
 const close = () => { sequence++; fields.value?.clearInputs(); busy.value = false; emit('close') }
 onBeforeUnmount(() => { sequence++; fields.value?.clearInputs() })

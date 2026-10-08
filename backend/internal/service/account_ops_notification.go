@@ -12,7 +12,10 @@ import (
 	"time"
 )
 
-type accountOpsMessage struct{ title, robotTitle, plain, markdown, html, color string }
+type accountOpsMessage struct {
+	title, robotTitle, plain, markdown, html, color string
+	account, balance, threshold, observedTime       string
+}
 
 func (s *AccountOpsService) notificationMessage(e *AccountOpsEvent) accountOpsMessage {
 	reason := "上游余额不足"
@@ -140,7 +143,7 @@ func (s *AccountOpsService) compactRobotMessage(e *AccountOpsEvent, title string
 	if e.Phase == "recovery" {
 		color = "green"
 	}
-	return accountOpsMessage{title: title, robotTitle: title, plain: strings.Join(plain, "\n"), markdown: markdown, color: color}
+	return accountOpsMessage{title: title, robotTitle: title, plain: strings.Join(plain, "\n"), markdown: markdown, color: color, account: account, balance: balance, threshold: threshold, observedTime: fields[3][1]}
 }
 
 func opsRobotAmount(value float64, unit string) string {
@@ -312,6 +315,7 @@ func (s *AccountOpsService) deliverNotification(ctx context.Context, e *AccountO
 			} else {
 				for _, current := range latest.Webhooks {
 					if current.ID == w.ID && current.Provider == w.Provider && current.revision == w.revision && current.Enabled {
+						w = current
 						unchanged = true
 						break
 					}
@@ -349,6 +353,12 @@ func (s *AccountOpsService) deliverNotification(ctx context.Context, e *AccountO
 			}
 			cancel()
 			out.Provider = w.Provider
+			out.Name = ""
+			if w.Provider == "email" {
+				out.Name = c.EmailName
+			} else if w.Name != nil {
+				out.Name = *w.Name
+			}
 			out.Attempts++
 			out.Status = "sent"
 			if err != nil {

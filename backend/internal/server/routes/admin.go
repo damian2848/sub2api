@@ -832,6 +832,7 @@ func registerScheduledTestRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	admin.PUT("/account-ops/notification-settings", h.Admin.AccountOps.SaveNotificationSettings)
 	admin.PUT("/account-ops/webhooks/:id", h.Admin.AccountOps.SaveWebhook)
 	admin.DELETE("/account-ops/webhooks/:id", h.Admin.AccountOps.DeleteWebhook)
+	admin.PUT("/account-ops/rules/batch", h.Admin.AccountOps.SaveRulesBatch)
 	admin.PUT("/account-ops/rules/:id", h.Admin.AccountOps.SaveRule)
 	admin.DELETE("/account-ops/rules/:id", h.Admin.AccountOps.DeleteRule)
 	admin.GET("/account-ops/alerts", h.Admin.AccountOps.List)

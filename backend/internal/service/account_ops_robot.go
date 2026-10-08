@@ -17,6 +17,8 @@ import (
 	"time"
 )
 
+var accountOpsHTTPClient = newSSRFSafeHTTPClient(12 * time.Second)
+
 func opsSign(key, msg string) string {
 	h := hmac.New(sha256.New, []byte(key))
 	_, _ = h.Write([]byte(msg))
@@ -65,6 +67,11 @@ func (s *AccountOpsService) sendRobot(ctx context.Context, w AccountOpsWebhook, 
 	}
 	payload := map[string]any{}
 	switch w.Provider {
+	case "custom":
+		payload, err = accountOpsCustomPayload(opsTemplateValue(w.MessageTemplate), message)
+		if err != nil {
+			return errors.New("invalid webhook message template")
+		}
 	case "wecom":
 		payload = map[string]any{"msgtype": "markdown", "markdown": map[string]any{"content": message.markdown}}
 	case "dingtalk":
@@ -101,7 +108,7 @@ func (s *AccountOpsService) sendRobot(ctx context.Context, w AccountOpsWebhook, 
 	req.Header.Set("Content-Type", "application/json")
 	client := s.robotClient
 	if client == nil {
-		client = &http.Client{Timeout: 12 * time.Second}
+		client = accountOpsHTTPClient
 	}
 	guarded := *client
 	guarded.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -110,6 +117,12 @@ func (s *AccountOpsService) sendRobot(ctx context.Context, w AccountOpsWebhook, 
 		return errors.New("robot request failed")
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if w.Provider == "custom" {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return errors.New("webhook HTTP failure")
+		}
+		return nil
+	}
 	if resp.StatusCode != http.StatusOK {
 		return errors.New("robot HTTP failure")
 	}

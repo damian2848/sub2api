@@ -2,6 +2,11 @@
   <BaseDialog :show="show" :title="t(config.recipient ? 'accountOps.editEmail' : 'accountOps.addEmail')" width="normal" @close="close">
     <form id="account-ops-email-form" class="space-y-4" @submit.prevent="save">
       <fieldset :disabled="busy" class="space-y-4">
+        <label class="block space-y-2 text-sm" for="account-ops-email-name">
+          <span>{{ t('accountOps.channelName') }}</span>
+          <input id="account-ops-email-name" v-model.trim="name" type="text" maxlength="80" autocomplete="off" :placeholder="t('accountOps.channelNamePlaceholder')" class="input w-full" />
+          <span class="block text-xs text-gray-500">{{ t('accountOps.channelNameHint') }}</span>
+        </label>
         <label class="block space-y-2 text-sm" for="account-ops-email">
           <span>{{ t('accountOps.recipient') }}</span>
           <input id="account-ops-email" v-model.trim="recipient" type="email" maxlength="254" required autocomplete="email" placeholder="ops@example.com" class="input w-full" />
@@ -30,14 +35,15 @@ import { extractApiErrorMessage } from '@/utils/apiError'
 const props = defineProps<{ show: boolean; config: AccountOpsConfig; smtpConfigured: boolean }>()
 const emit = defineEmits<{ (event: 'close'): void; (event: 'saved', config: AccountOpsConfig): void; (event: 'error', message: string): void }>()
 const { t } = useI18n()
-const busy = ref(false), recipient = ref('')
+const busy = ref(false), recipient = ref(''), name = ref('')
 let sequence = 0
 watch(() => props.show, () => {
   sequence++
   busy.value = false
   recipient.value = props.show ? props.config.recipient : ''
+  name.value = props.show ? props.config.email_name ?? '' : ''
 }, { immediate: true })
-const close = () => { sequence++; busy.value = false; recipient.value = ''; emit('close') }
+const close = () => { sequence++; busy.value = false; recipient.value = ''; name.value = ''; emit('close') }
 onBeforeUnmount(() => { sequence++; recipient.value = '' })
 async function save() {
   if (busy.value) return
@@ -45,7 +51,7 @@ async function save() {
   const current = sequence
   busy.value = true
   try {
-    const config = await saveAccountOpsNotificationSettings({ recipient: recipient.value })
+    const config = await saveAccountOpsNotificationSettings({ recipient: recipient.value, email_name: name.value })
     if (current === sequence) { emit('saved', config); close() }
   } catch (e) {
     if (current === sequence) emit('error', extractApiErrorMessage(e, t('accountOps.saveFailed')))

@@ -1,5 +1,5 @@
 <template>
-  <BaseDialog :show="show" :title="t('accountOps.editRule')" placement="right" width="normal" @close="close">
+  <BaseDialog :show="show" :title="t('accountOps.editRule')" width="normal" @close="close">
     <form v-if="account" id="account-ops-rule-form" class="space-y-5" @submit.prevent="save">
       <div><p class="font-medium text-gray-900 dark:text-gray-100">{{ account.account_name }}</p><p class="mt-1 text-xs text-gray-500">{{ account.platform }} · {{ account.type === 'apikey' ? 'API Key' : 'OAuth' }} · #{{ account.account_id }}</p></div>
       <fieldset :disabled="busy" class="space-y-5">

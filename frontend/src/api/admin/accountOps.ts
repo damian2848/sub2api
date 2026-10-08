@@ -1,19 +1,23 @@
 import { apiClient } from '../client'
-export type AccountOpsWebhookProvider = 'wecom' | 'dingtalk' | 'feishu'
+export type AccountOpsWebhookProvider = 'wecom' | 'dingtalk' | 'feishu' | 'custom'
 export interface AccountOpsWebhook {
   id: string
+  name?: string
   provider: AccountOpsWebhookProvider
   enabled: boolean
   url_configured?: boolean
   secret_configured?: boolean
+  message_template?: string
 }
 export interface AccountOpsWebhookInput {
   id: string
-  provider: AccountOpsWebhookProvider
+  name?: string
+  provider?: AccountOpsWebhookProvider | 'auto'
   enabled: boolean
   url?: string
   secret?: string
   clear_secret?: boolean
+  message_template?: string
 }
 export interface AccountOpsBalanceThreshold {
   account_id: number
@@ -53,6 +57,7 @@ export interface AccountOpsThresholdAccount {
 export interface AccountOpsConfig {
   enabled: boolean
   recipient: string
+  email_name?: string
   balance_low: boolean
   weekly_quota: boolean
   cooldown_minutes: number
@@ -79,9 +84,9 @@ export interface AccountOpsEvent {
   next_send_at: string
   attempts: number
   details?: { balance?: number; threshold?: number; unit?: string; used_percent?: number; threshold_percent?: number; window?: string; observed_at?: string; resets_at?: string }
-  deliveries?: Record<string, { provider: string; status: 'sent' | 'failed'; attempts: number; last_sent_at?: string }>
+  deliveries?: Record<string, { provider: string; name?: string; status: 'sent' | 'failed'; attempts: number; last_sent_at?: string }>
 }
-export type AccountOpsNotificationSettings = Partial<Pick<AccountOpsConfig, 'enabled' | 'recipient' | 'balance_low' | 'weekly_quota' | 'cooldown_minutes'>>
+export type AccountOpsNotificationSettings = Partial<Pick<AccountOpsConfig, 'enabled' | 'recipient' | 'email_name' | 'balance_low' | 'weekly_quota' | 'cooldown_minutes'>>
 export interface AccountOpsRuleInput {
   metric: 'balance' | 'quota'
   enabled: boolean
@@ -97,6 +102,16 @@ export async function saveAccountOpsNotificationSettings(settings: AccountOpsNot
 }
 export async function saveAccountOpsRule(id: number, rule: AccountOpsRuleInput): Promise<AccountOpsConfig> {
   return (await apiClient.put(`/admin/account-ops/rules/${id}`, rule)).data
+}
+export async function saveAccountOpsRulesBatch(accountIds: number[], rule: AccountOpsRuleInput): Promise<AccountOpsConfig> {
+  return (await apiClient.put('/admin/account-ops/rules/batch', { account_ids: accountIds, rule })).data
+}
+export interface AccountOpsRuleBatchGroup {
+  account_ids: number[]
+  rule: AccountOpsRuleInput
+}
+export async function saveAccountOpsRuleGroups(groups: AccountOpsRuleBatchGroup[]): Promise<AccountOpsConfig> {
+  return (await apiClient.put('/admin/account-ops/rules/batch', { groups })).data
 }
 export async function deleteAccountOpsRule(id: number, metric: 'balance' | 'quota'): Promise<AccountOpsConfig> {
   return (await apiClient.delete(`/admin/account-ops/rules/${id}`, { params: { metric } })).data

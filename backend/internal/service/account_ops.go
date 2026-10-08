@@ -16,6 +16,7 @@ const accountOpsSettingsKey = "account_ops_notifications_v1"
 type AccountOpsConfig struct {
 	Enabled           bool                    `json:"enabled"`
 	Recipient         string                  `json:"recipient"`
+	EmailName         string                  `json:"email_name,omitempty"`
 	BalanceLow        bool                    `json:"balance_low"`
 	WeeklyQuota       bool                    `json:"weekly_quota"`
 	CooldownMinutes   int                     `json:"cooldown_minutes"`
