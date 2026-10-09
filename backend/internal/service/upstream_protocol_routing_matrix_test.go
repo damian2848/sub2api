@@ -3,11 +3,16 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
-	"sort"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -17,14 +22,13 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// 上游协议分流矩阵：经真实入口（Forward / ForwardAsChatCompletions /
-// ForwardAsAnthropic）遍历 平台 × api_protocol × 探针 × 账号类型 × 接入模式 ×
-// protocol_rules × 入站 × 模型，从录制到的上游 URL 与请求体推断实际走的协议
-// 与是否做了 Responses 形状转换，并与 legacyUpstreamRouting（统一判定前三个
-// 入口各自的分流顺序）逐条比对。
-//
-// 设置 ROUTING_MATRIX_DUMP=<path> 时把全部观测（含 URL、上游模型、错误）按行
-// 写入文件，便于在两个版本间直接 diff。
+// The fixture is captured through the real gateway entry points on this main
+// revision, before provider profiles and resolveUpstreamProtocol were added.
+// Expected results never call routing helpers from the implementation under test.
+// Regenerate with python3 testdata/record_upstream_protocol_routing_main.py, which exports
+// this pinned revision before compiling and recording the same matrix driver.
+const routingMatrixMainRevision = "5fc0e486c3f6a8a191b8bd140f39b60457f611cf"
+const routingMatrixGoldenPath = "testdata/upstream_protocol_routing_main_golden.json"
 
 type routingMatrixIngress struct {
 	name          string
@@ -72,25 +76,28 @@ type routingMatrixCase struct {
 	mode        string
 	accountType string
 	probe       string
+	addresses   string
 	rules       bool
 	ingress     routingMatrixIngress
 	model       string
 }
 
 func (tc routingMatrixCase) key() string {
-	return fmt.Sprintf("%s|proto=%s|mode=%s|type=%s|probe=%s|rules=%t|%s|%s",
-		tc.platform, tc.apiProtocol, tc.mode, tc.accountType, tc.probe, tc.rules, tc.ingress.name, tc.model)
+	return fmt.Sprintf("%s|proto=%s|mode=%s|type=%s|probe=%s|addresses=%s|rules=%t|%s|%s",
+		tc.platform, tc.apiProtocol, tc.mode, tc.accountType, tc.probe, tc.addresses, tc.rules, tc.ingress.name, tc.model)
 }
 
 func (tc routingMatrixCase) account() *Account {
-	credentials := map[string]any{
-		"api_key":  "sk-test",
-		"base_url": "http://base.example",
-		"api_base_urls": map[string]any{
+	credentials := map[string]any{"api_key": "sk-test"}
+	if tc.addresses == "base" || tc.addresses == "both" {
+		credentials["base_url"] = "http://base.example"
+	}
+	if tc.addresses == "split" || tc.addresses == "both" {
+		credentials["api_base_urls"] = map[string]any{
 			APIProtocolChatCompletions: "http://cc.example",
 			APIProtocolResponses:       "http://responses.example",
 			APIProtocolAnthropic:       "http://anthropic.example",
-		},
+		}
 	}
 	if tc.apiProtocol != "" {
 		credentials["api_protocol"] = tc.apiProtocol
@@ -104,6 +111,12 @@ func (tc routingMatrixCase) account() *Account {
 			map[string]any{"pattern": "gpt-*", "protocol": APIProtocolResponses},
 		}
 	}
+	if tc.platform == PlatformOpenCodeGo {
+		credentials["model_mapping"] = map[string]any{
+			"mapped-gpt":         "gpt-5.6-luna",
+			"mapped-unsupported": "gemini-3.8-flash",
+		}
+	}
 	extra := map[string]any{}
 	switch tc.probe {
 	case "yes":
@@ -112,13 +125,8 @@ func (tc routingMatrixCase) account() *Account {
 		extra[openai_compat.ExtraKeyResponsesSupported] = false
 	}
 	return &Account{
-		ID:          801,
-		Name:        "routing-matrix",
-		Platform:    tc.platform,
-		Type:        tc.accountType,
-		Concurrency: 1,
-		Credentials: credentials,
-		Extra:       extra,
+		ID: 801, Name: "routing-matrix", Platform: tc.platform, Type: tc.accountType,
+		Concurrency: 1, Credentials: credentials, Extra: extra,
 	}
 }
 
@@ -135,21 +143,24 @@ func (tc routingMatrixCase) body() []byte {
 
 func routingMatrixCases() []routingMatrixCase {
 	var cases []routingMatrixCase
-	protocols := []string{"", APIProtocolAdaptive, APIProtocolChatCompletions, APIProtocolAnthropic, APIProtocolResponses}
+	protocols := []string{"", APIProtocolAdaptive, APIProtocolChatCompletions, APIProtocolAnthropic, APIProtocolResponses, "invalid"}
 	types := []string{AccountTypeAPIKey, AccountTypeUpstream, AccountTypeOAuth}
 	probes := []string{"", "yes", "no"}
+	addresses := []string{"none", "base", "split", "both"}
 	add := func(platform string, modes, models []string, rulesOptions []bool, probeOptions, typeOptions []string, ingresses []routingMatrixIngress) {
 		for _, proto := range protocols {
 			for _, mode := range modes {
 				for _, accountType := range typeOptions {
 					for _, probe := range probeOptions {
-						for _, rules := range rulesOptions {
-							for _, ingress := range ingresses {
-								for _, model := range models {
-									cases = append(cases, routingMatrixCase{
-										platform: platform, apiProtocol: proto, mode: mode, accountType: accountType,
-										probe: probe, rules: rules, ingress: ingress, model: model,
-									})
+						for _, address := range addresses {
+							for _, rules := range rulesOptions {
+								for _, ingress := range ingresses {
+									for _, model := range models {
+										cases = append(cases, routingMatrixCase{
+											platform: platform, apiProtocol: proto, mode: mode, accountType: accountType,
+											probe: probe, addresses: address, rules: rules, ingress: ingress, model: model,
+										})
+									}
 								}
 							}
 						}
@@ -159,202 +170,181 @@ func routingMatrixCases() []routingMatrixCase {
 		}
 	}
 	all := routingMatrixIngresses()
-	add(PlatformKimi, []string{AccountModePayG}, []string{"kimi-k2"}, []bool{false}, probes, types, all)
-	add(PlatformZhipu, []string{AccountModePayG}, []string{"glm-4.7"}, []bool{false}, probes, types, all)
-	add(PlatformDeepseek, []string{AccountModePayG}, []string{"deepseek-chat"}, []bool{false}, probes, types, all)
-	add(PlatformOpenAI, []string{""}, []string{"gpt-5"}, []bool{false}, probes, types, all)
-	add(PlatformOpenCodeGo, []string{AccountModeGo, AccountModeZen},
-		[]string{"gpt-5.6-luna", "minimax-m3", "glm-5.3", "claude-sonnet-4"},
+	modes := []string{"", AccountModePayG, AccountModeCoding, "invalid"}
+	for _, provider := range []struct{ platform, model string }{
+		{PlatformKimi, "kimi-k2"}, {PlatformZhipu, "glm-4.7"},
+		{PlatformDeepseek, "deepseek-chat"}, {PlatformMiniMax, "minimax-m3"},
+	} {
+		add(provider.platform, modes, []string{provider.model, " " + provider.model + " "}, []bool{false}, probes, types, all)
+	}
+	add(PlatformOpenAI, []string{""}, []string{"gpt-5", " gpt-5 "}, []bool{false}, probes, types, all)
+	add(PlatformOpenCodeGo, []string{"", AccountModeGo, AccountModeZen, "invalid"},
+		[]string{"gpt-5.6-luna", "minimax-m3", "glm-5.3", "claude-sonnet-4", "qwen3.8-max", "qwen3.8-flash",
+			"gemini-3.8-flash", "jev-1.13", " opencode/gpt-5.6-luna ", "mapped-gpt", "mapped-unsupported"},
 		[]bool{false, true}, []string{"", "no"}, []string{AccountTypeAPIKey, AccountTypeUpstream}, all)
-	// Grok 仅 /v1/messages 经统一判定；另两个入口在判定前走 Grok 专属链路。
-	add(PlatformGrok, []string{""}, []string{"grok-4"}, []bool{false}, probes, types, all[3:])
+	// Grok has its own Responses and Chat Completions implementations; only the
+	// Messages entry uses the routing logic covered by this compatibility matrix.
+	add(PlatformGrok, []string{""}, []string{"grok-4", " grok-4 "}, []bool{false}, probes, types, all[3:])
 	return cases
 }
 
+type routingUpstreamRequest struct {
+	URL              string `json:"url"`
+	Authorization    string `json:"authorization,omitempty"`
+	APIKey           string `json:"api_key,omitempty"`
+	AnthropicVersion string `json:"anthropic_version,omitempty"`
+	BodyKind         string `json:"body_kind"`
+	Model            string `json:"model"`
+}
+
 type routingObservation struct {
-	urls      []string
-	lastBody  []byte
-	errText   string
-	panicText string
-}
-
-func (o routingObservation) protocol() string {
-	if len(o.urls) == 0 {
-		return ""
-	}
-	last := o.urls[len(o.urls)-1]
-	switch {
-	case strings.HasSuffix(last, "/chat/completions"):
-		return APIProtocolChatCompletions
-	case strings.HasSuffix(last, "/messages"):
-		return APIProtocolAnthropic
-	case strings.HasSuffix(last, "/responses"):
-		return APIProtocolResponses
-	default:
-		return "other:" + last
-	}
-}
-
-// bodyKind 报告最后一个上游请求体的形状：Chat Completions 上游收到 messages
-// 说明 Responses 形状请求体已被转换，收到 input 说明原样透传。
-func (o routingObservation) bodyKind() string {
-	switch {
-	case gjson.GetBytes(o.lastBody, "messages").Exists():
-		return "messages"
-	case gjson.GetBytes(o.lastBody, "input").Exists():
-		return "input"
-	default:
-		return "other"
-	}
+	Requests           []routingUpstreamRequest `json:"upstream,omitempty"`
+	Error              string                   `json:"error,omitempty"`
+	Panic              string                   `json:"panic,omitempty"`
+	Status             int                      `json:"status"`
+	ClientErrorType    string                   `json:"client_error_type,omitempty"`
+	ClientErrorCode    string                   `json:"client_error_code,omitempty"`
+	ClientErrorMessage string                   `json:"client_error_message,omitempty"`
 }
 
 func (o routingObservation) String() string {
-	if o.panicText != "" {
-		return "panic: " + o.panicText
-	}
-	if len(o.urls) == 0 {
-		return "no-upstream: " + o.errText
-	}
-	return fmt.Sprintf("urls=%s body=%s model=%s",
-		strings.Join(o.urls, ","), o.bodyKind(), gjson.GetBytes(o.lastBody, "model").String())
+	data, _ := json.Marshal(o)
+	return string(data)
 }
 
 func observeRouting(tc routingMatrixCase) (obs routingObservation) {
 	upstream := &httpUpstreamRecorder{err: errors.New("stop after capture")}
 	svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
 	body := tc.body()
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, tc.ingress.path, bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
 	defer func() {
 		if r := recover(); r != nil {
-			obs.panicText = fmt.Sprint(r)
+			obs.Panic = fmt.Sprint(r)
 		}
-		for _, req := range upstream.requests {
-			obs.urls = append(obs.urls, req.URL.String())
+		for i, req := range upstream.requests {
+			kind := "other"
+			switch {
+			case gjson.GetBytes(upstream.bodies[i], "messages").Exists():
+				kind = "messages"
+			case gjson.GetBytes(upstream.bodies[i], "input").Exists():
+				kind = "input"
+			}
+			obs.Requests = append(obs.Requests, routingUpstreamRequest{
+				URL: req.URL.String(), Authorization: req.Header.Get("Authorization"),
+				APIKey: req.Header.Get("X-Api-Key"), AnthropicVersion: req.Header.Get("Anthropic-Version"),
+				BodyKind: kind, Model: gjson.GetBytes(upstream.bodies[i], "model").String(),
+			})
 		}
-		obs.lastBody = upstream.lastBody
+		obs.Status = c.Writer.Status()
+		obs.ClientErrorType = gjson.Get(recorder.Body.String(), "error.type").String()
+		obs.ClientErrorCode = gjson.Get(recorder.Body.String(), "error.code").String()
+		obs.ClientErrorMessage = gjson.Get(recorder.Body.String(), "error.message").String()
 	}()
-	err := tc.ingress.forward(svc, adaptiveProtocolTestContext(tc.ingress.path, body), tc.account(), body)
+	err := tc.ingress.forward(svc, c, tc.account(), body)
 	if err != nil {
-		obs.errText = err.Error()
+		obs.Error = err.Error()
 	}
 	return obs
 }
 
-// legacyOpenCodeProtocol 复述统一判定前 OpenCode 的分流（原 openCodeGoNativeProtocol）：
-// 显式协议 → 账号 protocol_rules（已配置但未命中为 Chat Completions）→ 接入模式的内置规则表。
-func legacyOpenCodeProtocol(account *Account, model string) string {
-	switch proto := account.GetAPIProtocol(); proto {
-	case APIProtocolChatCompletions, APIProtocolAnthropic, APIProtocolResponses:
-		return proto
-	}
-	if rules, configured := account.configuredProtocolRules(); configured {
-		return matchProtocolRules(model, rules)
-	}
-	if account.IsOpenCodeZen() {
-		return matchProtocolRules(model, DefaultOpenCodeZenProtocolRules())
-	}
-	return matchProtocolRules(model, DefaultOpenCodeGoProtocolRules())
+// Cases share many outcomes. Store each distinct observation once, then one
+// observation index per case in routingMatrixCases order. The key digest detects
+// any change to case identity or ordering, so matrix edits require a new capture.
+type routingMatrixGolden struct {
+	SourceRevision string               `json:"source_revision"`
+	CaseCount      int                  `json:"case_count"`
+	CaseKeysSHA256 string               `json:"case_keys_sha256"`
+	Observations   []routingObservation `json:"observations"`
+	Results        []int                `json:"results"`
 }
 
-// legacyUpstreamRouting 复述统一判定前三个入口各自的分流顺序，返回预期的上游协议
-// 以及 Chat Completions 上游是否先把 Responses 形状请求体转换成 messages。
-func legacyUpstreamRouting(account *Account, ingress routingMatrixIngress, model string) (string, bool) {
-	openCode := account.IsOpenCodeGo()
-	var openCodeProto string
-	if openCode {
-		openCodeProto = legacyOpenCodeProtocol(account, model)
+func routingMatrixCaseDigest(cases []routingMatrixCase) string {
+	var keys strings.Builder
+	for _, tc := range cases {
+		keys.WriteString(tc.key())
+		keys.WriteByte('\n')
 	}
-	switch ingress.name {
-	case "responses":
-		if openCode && openCodeProto != APIProtocolResponses {
-			return openCodeProto, false
-		}
-		if account.IsAnthropicProtocol() {
-			return APIProtocolAnthropic, false
-		}
-		// 有意差异：adaptive 且供应商无原生 Responses 端点时，统一判定对任何账号类型
-		// 都回落 Chat Completions（旧 /v1/responses 入口对非 API Key 账号会误发到
-		// 不存在的 /responses；Chat Completions 入口本就如此处理）。
-		if account.IsAdaptiveAPIProtocol() && !account.SupportsNativeCNResponses() {
-			return APIProtocolChatCompletions, false
-		}
-		if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
-			return APIProtocolChatCompletions, false
-		}
-		return APIProtocolResponses, false
-	case "chat", "chat_responses_shape":
-		shape := ingress.responsesBody
-		if openCode && openCodeProto != APIProtocolResponses {
-			return openCodeProto, shape
-		}
-		if account.IsAdaptiveAPIProtocol() && !openCode {
-			if !shape {
-				return APIProtocolChatCompletions, false
-			}
-			if !account.SupportsNativeCNResponses() {
-				return APIProtocolChatCompletions, true
-			}
-		}
-		if account.IsAnthropicProtocol() {
-			return APIProtocolAnthropic, false
-		}
-		if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
-			return APIProtocolChatCompletions, false
-		}
-		return APIProtocolResponses, false
-	case "messages":
-		if openCode {
-			if openCodeProto != APIProtocolResponses {
-				return openCodeProto, false
-			}
-		} else if account.IsAnthropicProtocol() || account.IsAdaptiveAPIProtocol() {
-			return APIProtocolAnthropic, false
-		}
-		if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {
-			return APIProtocolChatCompletions, false
-		}
-		return APIProtocolResponses, false
-	}
-	panic("unknown ingress " + ingress.name)
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(keys.String())))
 }
 
-func TestUpstreamProtocolRoutingMatrixMatchesLegacy(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-
+func captureRoutingMatrixGolden() routingMatrixGolden {
 	cases := routingMatrixCases()
-	observations := make([]routingObservation, len(cases))
-	dump := make([]string, 0, len(cases))
-	for i, tc := range cases {
-		observations[i] = observeRouting(tc)
-		dump = append(dump, tc.key()+" => "+observations[i].String())
-	}
-	if path := os.Getenv("ROUTING_MATRIX_DUMP"); path != "" {
-		sort.Strings(dump)
-		require.NoError(t, os.WriteFile(path, []byte(strings.Join(dump, "\n")+"\n"), 0o644))
-	}
-
-	compared := 0
-	for i, tc := range cases {
-		obs := observations[i]
-		if tc.accountType == AccountTypeAPIKey && tc.platform != PlatformGrok {
-			require.NotEmpty(t, obs.urls, "API Key 账号应到达上游：%s\n%s", tc.key(), obs)
+	golden := routingMatrixGolden{SourceRevision: routingMatrixMainRevision, CaseCount: len(cases), CaseKeysSHA256: routingMatrixCaseDigest(cases)}
+	indexByObservation := make(map[string]int)
+	for _, tc := range cases {
+		obs := observeRouting(tc)
+		key := obs.String()
+		index, ok := indexByObservation[key]
+		if !ok {
+			index = len(golden.Observations)
+			golden.Observations = append(golden.Observations, obs)
+			indexByObservation[key] = index
 		}
-		if obs.panicText != "" || len(obs.urls) == 0 {
-			// 请求在到达上游前就失败（凭证/类型不适配），无法从 URL 推断协议；
-			// 这类组合由 ROUTING_MATRIX_DUMP 的跨版本 diff 覆盖。
+		golden.Results = append(golden.Results, index)
+	}
+	return golden
+}
+
+// Zhipu has no Responses endpoint. The refactor routes adaptive /responses to
+// Chat Completions even for unsupported upstream/oauth account types. Both
+// versions reject these accounts before transport, with these exact errors.
+// Only this complete before/after observation is permitted; other no-upstream
+// results and new panics still fail the golden comparison.
+func matchesKnownZhipuNonAPIKeyDifference(tc routingMatrixCase, want, got routingObservation) bool {
+	if tc.platform != PlatformZhipu || tc.apiProtocol != APIProtocolAdaptive || tc.ingress.name != "responses" {
+		return false
+	}
+	var oldError string
+	switch tc.accountType {
+	case AccountTypeUpstream:
+		oldError = "unsupported account type: upstream"
+	case AccountTypeOAuth:
+		oldError = "access_token not found in credentials"
+	default:
+		return false
+	}
+	return reflect.DeepEqual(want, routingObservation{Error: oldError, Status: http.StatusOK}) &&
+		reflect.DeepEqual(got, routingObservation{Error: "account 801 missing api_key", Status: http.StatusOK})
+}
+
+func TestUpstreamProtocolRoutingMatrixMatchesMainGolden(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	data, err := os.ReadFile(routingMatrixGoldenPath)
+	require.NoError(t, err)
+	var golden routingMatrixGolden
+	require.NoError(t, json.Unmarshal(data, &golden))
+	cases := routingMatrixCases()
+	require.Equal(t, routingMatrixMainRevision, golden.SourceRevision)
+	require.Equal(t, len(cases), golden.CaseCount)
+	require.Equal(t, routingMatrixCaseDigest(cases), golden.CaseKeysSHA256)
+	require.Len(t, golden.Results, len(cases))
+
+	var differences []string
+	mismatched := 0
+	knownDifferences := 0
+	for i, tc := range cases {
+		index := golden.Results[i]
+		require.GreaterOrEqual(t, index, 0)
+		require.Less(t, index, len(golden.Observations))
+		want := golden.Observations[index]
+		got := observeRouting(tc)
+		if reflect.DeepEqual(want, got) {
 			continue
 		}
-		compared++
-		account := tc.account()
-		model := resolveMappedUpstreamModel(account, tc.body(), "")
-		wantProto, wantConverted := legacyUpstreamRouting(account, tc.ingress, model)
-		require.Equal(t, wantProto, obs.protocol(), "%s\n%s", tc.key(), obs)
-		if wantProto == APIProtocolChatCompletions && tc.ingress.name == "chat_responses_shape" {
-			wantKind := "input"
-			if wantConverted {
-				wantKind = "messages"
-			}
-			require.Equal(t, wantKind, obs.bodyKind(), "%s\n%s", tc.key(), obs)
+		if matchesKnownZhipuNonAPIKeyDifference(tc, want, got) {
+			knownDifferences++
+			continue
+		}
+		mismatched++
+		if len(differences) < 12 {
+			differences = append(differences, fmt.Sprintf("%s\nmain: %s\ncurrent: %s", tc.key(), want, got))
 		}
 	}
-	require.Positive(t, compared)
+	require.Zero(t, mismatched, "routing differs from main %s in %d cases:\n%s", golden.SourceRevision, mismatched, strings.Join(differences, "\n"))
+	// 2 account types × 4 modes × 3 probe states × 4 address configurations ×
+	// 2 model spellings. A disappeared or expanded exception requires review.
+	require.Equal(t, 192, knownDifferences, "unexpected change to the declared Zhipu non-API-Key difference")
 }
