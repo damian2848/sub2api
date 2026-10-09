@@ -40,6 +40,15 @@ RUN NODE_EXECUTABLE=/runtime/node TOSUB2_PYTHON=/runtime/python /runtime/node /s
     && OPENAI_TOTP_JOURNAL_DIR=/tmp/totp-smoke NODE_EXECUTABLE=/runtime/node /runtime/python -c 'import sys; sys.path.insert(0,"/runtime"); from openai_totp_rotation import Journal; j=Journal(); j.save(dict(task_id=1,account_id=1,login_email="demo@example.test",password="synthetic",totp_secret="OLD"),"NEW","session"); assert j.call({"action":"list"})[0]["candidate"]=="NEW"; j.acknowledge(1); assert Journal().call({"action":"list"})[0]["database_acknowledged"]' \
     && touch /verified
 
+FROM ubuntu:24.04 AS ubuntu-test
+COPY --from=runtime /out/ /runtime/
+COPY tools/reauth-runtime/smoke.mjs /smoke.mjs
+RUN ln -s /runtime /current \
+    && NODE_EXECUTABLE=/current/node TOSUB2_PYTHON=/current/python /current/node /smoke.mjs \
+    && OPENAI_TOTP_JOURNAL_DIR=/tmp/totp-smoke NODE_EXECUTABLE=/current/node /current/python -c 'import sys; sys.path.insert(0,"/current"); from openai_totp_rotation import Journal; j=Journal(); j.save(dict(task_id=1,account_id=1,login_email="demo@example.test",password="synthetic",totp_secret="OLD"),"NEW","session"); assert j.call({"action":"list"})[0]["candidate"]=="NEW"' \
+    && touch /ubuntu-verified
+
 FROM scratch AS artifact
 COPY --from=runtime /out/ /
 COPY --from=portable-test /verified /portable-verified
+COPY --from=ubuntu-test /ubuntu-verified /ubuntu-verified

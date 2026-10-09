@@ -47,13 +47,14 @@ while queue:
             queue.append(dependency)
 loader = next(lib.glob("ld-linux*.so.*"))
 for name, binary in (("python", "python-root/bin/python3"), ("node", "node.bin")):
+    # The bundled loader scopes library lookup to this executable. Exporting it
+    # would also load the bundled libc into a host shell launched by Python.
     script = out / name
     script.write_text(
         '#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
         'export PYTHONHOME="$root/python-root"\n'
         'export SSL_CERT_FILE="$root/ca-certificates.crt"\n'
         'export CURL_CA_BUNDLE="$root/ca-certificates.crt"\n'
-        'export LD_LIBRARY_PATH="$root/lib"\n'
         f'exec "$root/lib/{loader.name}" --library-path "$root/lib" "$root/{binary}" "$@"\n'
     )
     script.chmod(0o755)
