@@ -607,6 +607,34 @@ describe('PaymentView WeChat JSAPI flow', () => {
     }
   })
 
+  it('shows the recharge form while a resumed order is still waiting for the provider', async () => {
+    let resolveOrder!: (value: ReturnType<typeof jsapiOrderFixture>) => void
+    createOrder.mockImplementation(() => new Promise(resolve => { resolveOrder = resolve }))
+    bridgeInvoke.mockImplementation((_action, _payload, callback) => {
+      callback({ err_msg: 'get_brand_wcpay_request:cancel' })
+    })
+
+    const wrapper = shallowMount(PaymentView, {
+      global: {
+        stubs: {
+          AppLayout: { template: '<div><slot /></div>' },
+          Teleport: true,
+          Transition: false,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(createOrder).toHaveBeenCalledOnce()
+    expect(wrapper.findComponent(AmountInput).exists()).toBe(true)
+    expect(wrapper.findAll('button').some(button => button.attributes('disabled') !== undefined)).toBe(true)
+
+    resolveOrder(jsapiOrderFixture('resume-token-123'))
+    await flushPromises()
+    expect(showError).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('resets payment state and redirects to /payment/result after JSAPI reports success', async () => {
     createOrder.mockResolvedValue(jsapiOrderFixture('resume-token-123'))
     bridgeInvoke.mockImplementation((_action, _payload, callback) => {

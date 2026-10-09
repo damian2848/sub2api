@@ -124,8 +124,11 @@ export default defineConfig(({ mode }) => {
               return 'vendor-vue'
             }
 
-            // UI 工具库（较大，单独分离）
-            if (id.includes('/@vueuse/') || id.includes('/xlsx/')) {
+            // 导出库仅在导出时下载，不能和页面常用的 VueUse 合包。
+            if (id.includes('/xlsx/')) {
+              return 'vendor-xlsx'
+            }
+            if (id.includes('/@vueuse/')) {
               return 'vendor-ui'
             }
 
@@ -142,6 +145,15 @@ export default defineConfig(({ mode }) => {
             // Stripe 仅在支付流程中按需加载，避免进入首页公共依赖。
             if (id.includes('/@stripe/stripe-js/')) {
               return 'vendor-stripe'
+            }
+
+            // 保持动态导入的功能库独立，避免被公共 vendor 包提前下载和执行。
+            if (id.includes('/@airwallex/')) return 'vendor-airwallex'
+            if (id.includes('/qrcode/')) return 'vendor-qrcode'
+            if (id.includes('/driver.js/')) return 'vendor-onboarding'
+            if (id.includes('/marked/')) return 'vendor-markdown'
+            if (id.includes('/vue-draggable-plus/') || id.includes('/sortablejs/')) {
+              return 'vendor-draggable'
             }
 
             // 其他小型第三方库合并

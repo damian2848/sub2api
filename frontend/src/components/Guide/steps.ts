@@ -1,4 +1,4 @@
-import { DriveStep } from 'driver.js'
+import type { DriveStep } from 'driver.js'
 
 /**
  * 管理员完整引导流程
