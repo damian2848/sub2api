@@ -85,6 +85,18 @@ export function isKnownPlatform(platform: string | null | undefined): boolean {
   return !!getPlatformSpec(platform)
 }
 
+/** 与后端 buildUpstreamModelsRequest 支持的平台保持一致。 */
+export function supportsUpstreamModelSync(platform: string | null | undefined): boolean {
+  const spec = getPlatformSpec(platform?.trim().toLowerCase())
+  if (!spec) return false
+  return !!spec.multi_protocol || ['anthropic', 'openai', 'gemini', 'antigravity', 'grok'].includes(spec.id)
+}
+
+/** 清单中声明了定价目录 provider 的平台才支持同步定价模型。 */
+export function supportsPricingModelSync(platform: string | null | undefined): boolean {
+  return !!getPlatformSpec(platform?.trim().toLowerCase())?.litellm_provider?.trim()
+}
+
 /** 平台展示名；未登记的值原样返回。 */
 export function platformDisplayName(platform: string | null | undefined): string {
   return getPlatformSpec(platform)?.display_name ?? platform ?? ''
