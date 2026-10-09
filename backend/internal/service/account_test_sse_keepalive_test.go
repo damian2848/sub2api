@@ -103,7 +103,8 @@ func TestAccountTestKeepaliveCancelsOnWriteFailure(t *testing.T) {
 			c, _ := newCompactBridgeTestContext(t, false)
 			stop := startAccountTestSSEKeepalive(c, keepaliveTestInterval)
 			defer stop()
-			w := c.Writer.(*accountTestKeepaliveWriter)
+			w, ok := c.Writer.(*accountTestKeepaliveWriter)
+			require.True(t, ok, "account test writer must serialize keepalive and business events")
 			w.k.mu.Lock()
 			broken := &failingAccountTestWriter{ResponseWriter: w.ResponseWriter}
 			w.ResponseWriter = broken
