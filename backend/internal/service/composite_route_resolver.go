@@ -33,6 +33,10 @@ func (r *CompositeRouteResolver) ListExactPublicModels(ctx context.Context, grou
 	}
 	models := make([]string, 0, len(routes))
 	for _, route := range routes {
+		// TypeSafe routes serve only System One, including legacy any routes.
+		if route.TargetPlatform == PlatformTypeSafe && endpoint != "" {
+			continue
+		}
 		if route.Enabled && route.MatchType == CompositeRouteMatchExact &&
 			(endpoint == "" || normalizeCompositeRouteEndpoint(route.Endpoint) == CompositeRouteEndpointAny || normalizeCompositeRouteEndpoint(route.Endpoint) == endpoint) {
 			if model := strings.TrimSpace(route.PublicModel); model != "" {

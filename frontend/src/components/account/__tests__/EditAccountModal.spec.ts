@@ -13,7 +13,8 @@ import {
   setPlatformCatalog
 } from '@/constants/platformCatalog'
 
-const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
+const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode, showErrorMock } = vi.hoisted(() => ({
+  showErrorMock: vi.fn(),
   updateAccountMock: vi.fn(),
   checkMixedChannelRiskMock: vi.fn(),
   authIsSimpleMode: { value: true }
@@ -21,7 +22,7 @@ const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.ho
 
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
-    showError: vi.fn(),
+    showError: showErrorMock,
     showSuccess: vi.fn(),
     showInfo: vi.fn()
   })
@@ -380,6 +381,7 @@ describe('EditAccountModal', () => {
   })
 
   beforeEach(() => {
+    showErrorMock.mockReset()
     authIsSimpleMode.value = true
   })
 
@@ -1465,6 +1467,7 @@ describe('EditAccountModal', () => {
     checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
 
     const wrapper = mountModal(account)
+    await flushPromises()
     const adaptiveButton = wrapper
       .findAll('button')
       .find(button => button.text().includes('admin.accounts.cnProviders.apiProtocol.adaptive'))
@@ -1472,6 +1475,7 @@ describe('EditAccountModal', () => {
     await adaptiveButton!.trigger('click')
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
 
+    expect(showErrorMock.mock.calls).toEqual([])
     expect(updateAccountMock).toHaveBeenCalledTimes(1)
     expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).toMatchObject({
       api_protocol: 'adaptive',
