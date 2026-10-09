@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { openJournal } from './openai_totp_journal.mjs'
 
 function setup(t) {
@@ -44,4 +46,28 @@ test('disk corruption fails authentication without returning guessed credentials
 test('unsafe directory permissions fail before writing credentials', t => {
   const root = setup(t); fs.chmodSync(root, 0o755)
   assert.throws(() => openJournal(root), /unsafe_journal_directory/)
+})
+test('CLI invoked through a current symlink executes journal operations', t => {
+  const root = setup(t)
+  const release = path.join(root, 'release with spaces')
+  fs.mkdirSync(release)
+  const script = 'openai_totp_journal.mjs'
+  fs.copyFileSync(fileURLToPath(new URL(`./${script}`, import.meta.url)), path.join(release, script))
+  const current = path.join(root, 'current')
+  fs.symlinkSync(release, current, 'dir')
+  const journal = path.join(root, 'recovery')
+  const invoke = input => spawnSync(process.execPath, [path.join(current, script)], {
+    input: JSON.stringify(input), encoding: 'utf8',
+    env: { ...process.env, OPENAI_TOTP_JOURNAL_DIR: journal }
+  })
+  const check = invoke({ action: 'check' })
+  assert.equal(check.status, 0, check.stderr)
+  assert.deepEqual(JSON.parse(check.stdout), { ok: true })
+  assert.equal(fs.statSync(path.join(journal, 'key.bin')).mode & 0o777, 0o600)
+  const record = { task_id: 11, candidate: 'SYNTHETIC-SECRET' }
+  const write = invoke({ action: 'write', record })
+  assert.equal(write.status, 0, write.stderr)
+  const list = invoke({ action: 'list' })
+  assert.equal(list.status, 0, list.stderr)
+  assert.deepEqual(JSON.parse(list.stdout), [record])
 })

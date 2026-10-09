@@ -2,6 +2,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 
 function syncDirectory(dir) {
   const fd = fs.openSync(dir, 'r')
@@ -53,7 +54,7 @@ export function openJournal(root) {
   return { write, read, list: () => fs.readdirSync(root).filter(x => /^\d+\.sealed$/.test(x)).map(x => read(Number(x.split('.')[0]))) }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === new URL(import.meta.url).pathname) {
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const raw = fs.readFileSync(0, 'utf8')
     if (raw.length > 1024 * 1024) throw Error('oversized_input')
