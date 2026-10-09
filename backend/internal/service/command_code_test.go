@@ -98,7 +98,7 @@ func TestAccountTestService_CommandCodeUsesModelCatalog(t *testing.T) {
 		APIProtocolResponses:       base,
 	}
 	url := buildOpenAIModelsURL(base)
-	upstreamModelProtocols.store(modelProtocolCatalogKey(account, base, url),
+	upstreamModelProtocols.store(modelProtocolCatalogKey(account, url),
 		map[string][]string{"vendor/responses-only": {APIProtocolResponses}}, nil, time.Now())
 	svc, upstream := adaptiveCNAccountTestService(account, adaptiveCNResponsesTestResponse())
 	svc.openaiGatewayService = &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}

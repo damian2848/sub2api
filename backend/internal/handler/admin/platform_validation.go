@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"fmt"
+
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/gin-gonic/gin/binding"
 	"github.com/go-playground/validator/v10"
@@ -13,12 +15,16 @@ import (
 func init() {
 	engine, ok := binding.Validator.Engine().(*validator.Validate)
 	if !ok {
-		return
+		panic("platform validation requires a go-playground validator engine")
 	}
-	_ = engine.RegisterValidation("group_platform", func(fl validator.FieldLevel) bool {
+	if err := engine.RegisterValidation("group_platform", func(fl validator.FieldLevel) bool {
 		return domain.IsGroupPlatform(fl.Field().String())
-	})
-	_ = engine.RegisterValidation("concrete_platform", func(fl validator.FieldLevel) bool {
+	}); err != nil {
+		panic(fmt.Errorf("register group_platform validation: %w", err))
+	}
+	if err := engine.RegisterValidation("concrete_platform", func(fl validator.FieldLevel) bool {
 		return domain.IsConcretePlatform(fl.Field().String())
-	})
+	}); err != nil {
+		panic(fmt.Errorf("register concrete_platform validation: %w", err))
+	}
 }

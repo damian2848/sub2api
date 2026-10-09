@@ -426,9 +426,9 @@ func (s *RateLimitService) handleUpstreamErrorAfterStreakReset(ctx context.Conte
 			return disable
 		}
 	}
-	// Cline 积分、花费上限与 ClinePass 超限同样按文案区分，只冷却对应的钱包
-	// （见 ratelimit_cline.go）。
-	if account.IsCline() && (statusCode == http.StatusBadRequest || statusCode == http.StatusPaymentRequired ||
+	// Cline 积分、花费上限与 ClinePass 超限按结构化错误区分，只冷却对应的钱包。
+	// 400 是请求错误，不能因回显的模型名或请求内容触发钱包冷却。
+	if account.IsCline() && (statusCode == http.StatusPaymentRequired ||
 		statusCode == http.StatusForbidden || statusCode == http.StatusTooManyRequests) {
 		if s.handleClineError(ctx, account, statusCode, responseBody, upstreamMsg) {
 			return false

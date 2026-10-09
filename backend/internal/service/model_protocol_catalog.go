@@ -23,12 +23,12 @@ import (
 // 按模型分流时据此判断模型是否支持入站协议：支持就同协议直通，省去一次协议转换
 // （见 modelProtocolSet）。
 //
-// 缓存范围：官方默认地址的目录与账号无关，按地址全进程共享；自定义上游的目录可能随
-// Key、租户或请求头不同，按账号隔离（见 modelProtocolCatalogKey）。
+// 缓存范围：所有目录均按账号和地址隔离，包括官方默认地址。目录可能随 Key、租户
+// 或请求头不同，鉴权失败的刷新退避也不能影响其他账号（见 modelProtocolCatalogKey）。
 //
 // 刷新在后台进行：过期时继续使用旧目录。目录从未加载成功时，首批请求最多等待
-// modelProtocolCatalogFirstLoadWait，让冷启动也按目录分流，而不是先走一次协议转换；
-// 超时或失败则回落内置规则，失败退避期内不再等待。
+// modelProtocolCatalogFirstLoadWait，各请求共用本轮刷新开始时的截止时间，并响应请求
+// 取消。超时后同一轮刷新中的后续请求立即回落内置规则，失败退避期内不再等待。
 
 const (
 	modelProtocolCatalogTTL           = 30 * time.Minute
@@ -46,13 +46,13 @@ type modelProtocolCatalogEntry struct {
 	refreshing bool
 	// done 在进行中的刷新结束时关闭。
 	done chan struct{}
+	// firstLoadDeadline 是本轮冷启动刷新共享的等待截止时间。
+	firstLoadDeadline time.Time
 }
 
 type modelProtocolCatalog struct {
 	mu      sync.Mutex
 	entries map[string]*modelProtocolCatalogEntry
-	// firstLoadWait 覆盖 modelProtocolCatalogFirstLoadWait（测试用）。
-	firstLoadWait time.Duration
 }
 
 // upstreamModelProtocols 是全进程共享的模型协议目录。
@@ -72,8 +72,11 @@ func (c *modelProtocolCatalog) entryLocked(key string) *modelProtocolCatalogEntr
 
 // lookup 返回 key 目录中 model 支持的协议；目录尚未就绪或模型不在目录中时返回 nil。
 // 目录缺失或过期、且不在刷新中也不在失败退避期时，异步调用 refresh（由其调用 store）；
-// 目录从未加载成功且刷新进行中时，最多等待 firstLoadWait。
-func (c *modelProtocolCatalog) lookup(key, model string, now time.Time, refresh func()) []string {
+// 目录从未加载成功且刷新进行中时，只等待本轮冷启动窗口的剩余时间。
+func (c *modelProtocolCatalog) lookup(ctx context.Context, key, model string, now time.Time, refresh func()) []string {
+	if ctx.Err() != nil {
+		return nil
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry := c.entryLocked(key)
@@ -81,24 +84,25 @@ func (c *modelProtocolCatalog) lookup(key, model string, now time.Time, refresh 
 	if stale && !entry.refreshing && !now.Before(entry.retryAt) && refresh != nil {
 		entry.refreshing = true
 		entry.done = make(chan struct{})
+		if entry.models == nil {
+			entry.firstLoadDeadline = now.Add(modelProtocolCatalogFirstLoadWait)
+		}
 		go refresh()
 	}
-	if entry.models == nil && entry.refreshing {
-		wait := c.firstLoadWait
-		if wait <= 0 {
-			wait = modelProtocolCatalogFirstLoadWait
-		}
+	if entry.models == nil && entry.refreshing && now.Before(entry.firstLoadDeadline) {
 		done := entry.done
+		deadline := entry.firstLoadDeadline
 		c.mu.Unlock()
-		timer := time.NewTimer(wait)
+		timer := time.NewTimer(time.Until(deadline))
 		select {
 		case <-done:
 		case <-timer.C:
+		case <-ctx.Done():
 		}
 		timer.Stop()
 		c.mu.Lock()
 	}
-	if entry.models == nil {
+	if entry.models == nil || ctx.Err() != nil {
 		return nil
 	}
 	return entry.models[strings.ToLower(strings.TrimSpace(model))]
@@ -170,7 +174,7 @@ func parseModelProtocolCatalog(body []byte) (map[string][]string, error) {
 
 // modelCatalogProtocols 返回上游模型目录中 model 支持的协议；平台不提供目录、账号固定了
 // 上游协议或目录尚未就绪时返回 nil。
-func (s *OpenAIGatewayService) modelCatalogProtocols(account *Account, model string) []string {
+func (s *OpenAIGatewayService) modelCatalogProtocols(ctx context.Context, account *Account, model string) []string {
 	if s == nil || s.httpUpstream == nil || strings.TrimSpace(model) == "" || !account.routesByModel() {
 		return nil
 	}
@@ -185,14 +189,14 @@ func (s *OpenAIGatewayService) modelCatalogProtocols(account *Account, model str
 		return nil
 	}
 	url := buildOpenAIModelsURL(base)
-	key := modelProtocolCatalogKey(account, base, url)
+	key := modelProtocolCatalogKey(account, url)
 	headers := modelProtocolCatalogHeaders(account, url)
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
 	accountID, concurrency := account.ID, account.Concurrency
-	return upstreamModelProtocols.lookup(key, model, time.Now(), func() {
+	return upstreamModelProtocols.lookup(ctx, key, model, time.Now(), func() {
 		ctx, cancel := context.WithTimeout(context.Background(), modelProtocolCatalogTimeout)
 		defer cancel()
 		models, err := s.fetchModelProtocolCatalog(ctx, url, headers, proxyURL, accountID, concurrency)
@@ -205,13 +209,9 @@ func (s *OpenAIGatewayService) modelCatalogProtocols(account *Account, model str
 	})
 }
 
-// modelProtocolCatalogKey 返回目录的缓存键：账号使用平台官方默认地址时按地址共享，
-// 自定义上游按账号隔离，避免一个账号的目录或鉴权失败影响同地址的其他账号。
-func modelProtocolCatalogKey(account *Account, base, url string) string {
-	official := account.providerProfile().DefaultBaseURL(account.GetCredential("account_mode"), APIProtocolChatCompletions)
-	if official != "" && strings.EqualFold(strings.TrimRight(base, "/"), strings.TrimRight(official, "/")) {
-		return url
-	}
+// modelProtocolCatalogKey 按账号和地址隔离目录及刷新退避，避免一个账号的目录或
+// 鉴权失败影响同地址的其他账号。
+func modelProtocolCatalogKey(account *Account, url string) string {
 	return fmt.Sprintf("%s#account=%d", url, account.ID)
 }
 
@@ -258,6 +258,6 @@ func (s *OpenAIGatewayService) fetchModelProtocolCatalog(ctx context.Context, ur
 
 // resolveUpstreamProtocolFor 是网关入口使用的 resolveUpstreamProtocol：按模型分流且平台
 // 提供模型目录时，带上目录中该模型支持的协议。
-func (s *OpenAIGatewayService) resolveUpstreamProtocolFor(account *Account, inbound, model string) string {
-	return resolveUpstreamProtocol(account, inbound, model, s.modelCatalogProtocols(account, model))
+func (s *OpenAIGatewayService) resolveUpstreamProtocolFor(ctx context.Context, account *Account, inbound, model string) string {
+	return resolveUpstreamProtocol(account, inbound, model, s.modelCatalogProtocols(ctx, account, model))
 }

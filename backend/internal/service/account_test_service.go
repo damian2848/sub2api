@@ -497,7 +497,7 @@ func (s *AccountTestService) testModelRoutedAccountConnection(c *gin.Context, ac
 	// 与网关同一判定（含上游模型目录）；测试没有入站协议，取模型的首选协议。
 	protocol := account.resolveModelRoutedProtocol(testModelID)
 	if s.openaiGatewayService != nil {
-		protocol = s.openaiGatewayService.resolveUpstreamProtocolFor(account, "", testModelID)
+		protocol = s.openaiGatewayService.resolveUpstreamProtocolFor(c.Request.Context(), account, "", testModelID)
 	}
 	switch protocol {
 	case APIProtocolAnthropic:

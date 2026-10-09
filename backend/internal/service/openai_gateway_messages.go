@@ -75,7 +75,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	if account.IsOpenCodeGo() && IsOpenCodeUnsupportedModel(routingModel) {
 		return nil, writeOpenCodeUnsupportedModelError(c, true, routingModel)
 	}
-	switch s.resolveUpstreamProtocolFor(account, APIProtocolAnthropic, routingModel) {
+	switch s.resolveUpstreamProtocolFor(ctx, account, APIProtocolAnthropic, routingModel) {
 	case APIProtocolAnthropic:
 		// 上游为供应商原生 Anthropic 端点：/v1/messages 零转换直通（仅模型名映射 +
 		// 少量 body 清洗），完整保留 thinking / tool_use / cache 语义。

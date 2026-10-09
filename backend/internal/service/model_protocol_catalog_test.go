@@ -3,11 +3,15 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/require"
@@ -41,74 +45,155 @@ func TestParseModelProtocolCatalog(t *testing.T) {
 }
 
 func TestModelProtocolCatalogLookupRefreshesInBackground(t *testing.T) {
-	catalog := modelProtocolCatalog{firstLoadWait: 20 * time.Millisecond}
-	const url = "https://catalog.example/v1/models"
-	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
-	var refreshes atomic.Int32
-	started := make(chan struct{}, 4)
-	refresh := func() { refreshes.Add(1); started <- struct{}{} }
+	synctest.Test(t, func(t *testing.T) {
+		var catalog modelProtocolCatalog
+		const key = "https://catalog.example/v1/models"
+		now := time.Now()
+		models, err := parseModelProtocolCatalog([]byte(commandCodeModelsSample))
+		require.NoError(t, err)
+		catalog.store(key, models, nil, now)
+		var refreshes atomic.Int32
+		refresh := func() { refreshes.Add(1) }
 
-	// 未就绪且刷新迟迟不返回：等待上限后返回 nil；刷新期间不重复触发。
-	require.Nil(t, catalog.lookup(url, "gpt-5.5", now, refresh))
-	<-started
-	require.Nil(t, catalog.lookup(url, "gpt-5.5", now, refresh))
-	require.EqualValues(t, 1, refreshes.Load())
+		require.Equal(t, []string{APIProtocolChatCompletions, APIProtocolResponses}, catalog.lookup(t.Context(), key, "ZAI-ORG/GLM-5.3", now, refresh))
+		require.Nil(t, catalog.lookup(t.Context(), key, "unknown-model", now, refresh))
+		require.Zero(t, refreshes.Load())
 
-	models, err := parseModelProtocolCatalog([]byte(commandCodeModelsSample))
-	require.NoError(t, err)
-	catalog.store(url, models, nil, now)
-	require.Equal(t, []string{APIProtocolChatCompletions, APIProtocolResponses}, catalog.lookup(url, "ZAI-ORG/GLM-5.3", now, refresh))
-	require.Nil(t, catalog.lookup(url, "unknown-model", now, refresh))
-	require.EqualValues(t, 1, refreshes.Load())
-
-	// 过期后继续返回旧目录，同时后台刷新；失败时保留旧目录并退避。
-	later := now.Add(modelProtocolCatalogTTL)
-	require.NotNil(t, catalog.lookup(url, "gpt-5.5", later, refresh))
-	<-started
-	require.EqualValues(t, 2, refreshes.Load())
-	catalog.store(url, nil, errors.New("boom"), later)
-	require.NotNil(t, catalog.lookup(url, "gpt-5.5", later.Add(time.Minute), refresh))
-	require.EqualValues(t, 2, refreshes.Load(), "failure backoff suppresses refresh")
-	require.NotNil(t, catalog.lookup(url, "gpt-5.5", later.Add(modelProtocolCatalogRetryBackoff), refresh))
-	<-started
-	require.EqualValues(t, 3, refreshes.Load())
+		// A stale catalog is returned immediately while one refresh runs in the background.
+		time.Sleep(modelProtocolCatalogTTL) // synctest advances virtual time.
+		later := time.Now()
+		require.NotNil(t, catalog.lookup(t.Context(), key, "gpt-5.5", later, refresh))
+		require.Equal(t, later, time.Now(), "a stale result must not wait for refresh")
+		synctest.Wait()
+		require.EqualValues(t, 1, refreshes.Load())
+		require.NotNil(t, catalog.lookup(t.Context(), key, "gpt-5.5", later, refresh))
+		require.EqualValues(t, 1, refreshes.Load(), "concurrent stale reads share one refresh")
+		catalog.store(key, nil, errors.New("boom"), later)
+		require.NotNil(t, catalog.lookup(t.Context(), key, "gpt-5.5", later.Add(time.Minute), refresh))
+		require.EqualValues(t, 1, refreshes.Load(), "failure backoff preserves the old catalog")
+		require.NotNil(t, catalog.lookup(t.Context(), key, "gpt-5.5", later.Add(modelProtocolCatalogRetryBackoff), refresh))
+		synctest.Wait()
+		require.EqualValues(t, 2, refreshes.Load())
+	})
 }
 
-// 冷启动：目录从未加载时首批请求等待进行中的刷新，按目录分流；刷新失败则立即回落，
-// 退避期内不再等待。
+func TestModelProtocolCatalogFirstLoadSharesWaitDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var catalog modelProtocolCatalog
+		const key = "https://catalog.example/v1/models"
+		models := map[string][]string{"gpt-5.5": {APIProtocolResponses}}
+		release := make(chan struct{})
+		var refreshes atomic.Int32
+		refresh := func() {
+			refreshes.Add(1)
+			<-release
+			catalog.store(key, models, nil, time.Now())
+		}
+		type result struct {
+			protocols []string
+			elapsed   time.Duration
+		}
+		first, second := make(chan result, 1), make(chan result, 1)
+		lookup := func(done chan<- result) {
+			start := time.Now()
+			protocols := catalog.lookup(t.Context(), key, "gpt-5.5", start, refresh)
+			done <- result{protocols, time.Since(start)}
+		}
+		start := time.Now()
+		go lookup(first)
+		synctest.Wait()
+		time.Sleep(modelProtocolCatalogFirstLoadWait / 2) // Virtual time only.
+		go lookup(second)
+		synctest.Wait()
+		time.Sleep(modelProtocolCatalogFirstLoadWait / 2)
+		synctest.Wait()
+
+		r1, r2 := <-first, <-second
+		require.Nil(t, r1.protocols)
+		require.Nil(t, r2.protocols)
+		require.Equal(t, modelProtocolCatalogFirstLoadWait, r1.elapsed)
+		require.Equal(t, modelProtocolCatalogFirstLoadWait/2, r2.elapsed, "a later caller waits only for the remaining shared window")
+		require.Equal(t, modelProtocolCatalogFirstLoadWait, time.Since(start))
+		require.Nil(t, catalog.lookup(t.Context(), key, "gpt-5.5", time.Now(), refresh))
+		require.Equal(t, modelProtocolCatalogFirstLoadWait, time.Since(start), "later calls fall back immediately while the same refresh continues")
+		require.EqualValues(t, 1, refreshes.Load())
+
+		close(release)
+		synctest.Wait()
+		require.Equal(t, models["gpt-5.5"], catalog.lookup(t.Context(), key, "gpt-5.5", time.Now(), refresh), "a late successful refresh still populates the cache")
+	})
+}
+
 func TestModelProtocolCatalogFirstLoadWaitsForRefresh(t *testing.T) {
-	const key = "https://catalog.example/v1/models"
-	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
-	models, err := parseModelProtocolCatalog([]byte(commandCodeModelsSample))
-	require.NoError(t, err)
+	synctest.Test(t, func(t *testing.T) {
+		const key = "https://catalog.example/v1/models"
+		models, err := parseModelProtocolCatalog([]byte(commandCodeModelsSample))
+		require.NoError(t, err)
+		var loaded modelProtocolCatalog
+		release := make(chan struct{})
+		result := make(chan []string, 1)
+		go func() {
+			result <- loaded.lookup(t.Context(), key, "gpt-5.5", time.Now(), func() {
+				<-release
+				loaded.store(key, models, nil, time.Now())
+			})
+		}()
+		synctest.Wait()
+		close(release)
+		synctest.Wait()
+		require.Equal(t, []string{APIProtocolChatCompletions, APIProtocolResponses}, <-result)
 
-	loaded := modelProtocolCatalog{firstLoadWait: 5 * time.Second}
-	require.Equal(t, []string{APIProtocolChatCompletions, APIProtocolResponses}, loaded.lookup(key, "gpt-5.5", now, func() {
-		time.Sleep(10 * time.Millisecond)
-		loaded.store(key, models, nil, now)
-	}))
-
-	failing := modelProtocolCatalog{firstLoadWait: 5 * time.Second}
-	var refreshes atomic.Int32
-	refresh := func() {
-		refreshes.Add(1)
-		failing.store(key, nil, errors.New("boom"), now)
-	}
-	start := time.Now()
-	require.Nil(t, failing.lookup(key, "gpt-5.5", now, refresh))
-	require.Nil(t, failing.lookup(key, "gpt-5.5", now.Add(time.Minute), refresh))
-	require.Less(t, time.Since(start), time.Second, "a failed first load must not hold requests")
-	require.EqualValues(t, 1, refreshes.Load())
+		var failing modelProtocolCatalog
+		var refreshes atomic.Int32
+		refresh := func() {
+			refreshes.Add(1)
+			failing.store(key, nil, errors.New("boom"), time.Now())
+		}
+		start := time.Now()
+		require.Nil(t, failing.lookup(t.Context(), key, "gpt-5.5", start, refresh))
+		require.Nil(t, failing.lookup(t.Context(), key, "gpt-5.5", start.Add(time.Minute), refresh))
+		require.Equal(t, start, time.Now(), "a failed first load and its backoff must not hold requests")
+		require.EqualValues(t, 1, refreshes.Load())
+	})
 }
 
-// 缓存范围与请求头：官方默认地址按地址共享，自定义上游按账号隔离；请求头与转发一致。
+func TestModelProtocolCatalogFirstLoadWaitRespondsToCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var catalog modelProtocolCatalog
+		const key = "https://catalog.example/v1/models"
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		release := make(chan struct{})
+		models := map[string][]string{"gpt-5.5": {APIProtocolResponses}}
+		result := make(chan []string, 1)
+		start := time.Now()
+		go func() {
+			result <- catalog.lookup(ctx, key, "gpt-5.5", start, func() {
+				<-release
+				catalog.store(key, models, nil, time.Now())
+			})
+		}()
+		synctest.Wait()
+		cancel()
+		synctest.Wait()
+		require.Nil(t, <-result)
+		require.Equal(t, start, time.Now(), "cancellation releases the caller without waiting for the cold-start deadline")
+
+		// The caller's cancellation must not cancel the background refresh for future requests.
+		close(release)
+		synctest.Wait()
+		require.Equal(t, models["gpt-5.5"], catalog.lookup(t.Context(), key, "gpt-5.5", time.Now(), nil))
+	})
+}
+
+// 官方默认地址和自定义上游均按账号隔离；请求头与转发一致。
 func TestModelProtocolCatalogKeyAndHeaders(t *testing.T) {
 	official := commandCodeTestAccount(21)
 	base := official.GetCNProtocolBaseURL(APIProtocolChatCompletions)
 	url := buildOpenAIModelsURL(base)
 	require.Equal(t, "https://api.commandcode.ai/provider/v1/models", url)
-	require.Equal(t, url, modelProtocolCatalogKey(official, base, url))
-	require.Equal(t, url, modelProtocolCatalogKey(commandCodeTestAccount(22), base+"/", url))
+	require.Equal(t, url+"#account=21", modelProtocolCatalogKey(official, url))
+	require.Equal(t, url+"#account=22", modelProtocolCatalogKey(commandCodeTestAccount(22), url))
 
 	headers := modelProtocolCatalogHeaders(official, url)
 	require.Equal(t, "Bearer user_test_key", headers.Get("Authorization"))
@@ -120,10 +205,77 @@ func TestModelProtocolCatalogKeyAndHeaders(t *testing.T) {
 	custom.Credentials["header_overrides"] = map[string]any{"X-Tenant": "t-1"}
 	customBase := custom.GetCNProtocolBaseURL(APIProtocolChatCompletions)
 	customURL := buildOpenAIModelsURL(customBase)
-	require.Equal(t, customURL+"#account=23", modelProtocolCatalogKey(custom, customBase, customURL))
+	require.Equal(t, customURL+"#account=23", modelProtocolCatalogKey(custom, customURL))
 	headers = modelProtocolCatalogHeaders(custom, customURL)
 	require.Equal(t, "t-1", getHeaderRaw(headers, "x-tenant"))
 	require.Empty(t, headers.Get("User-Agent"))
+}
+
+type modelCatalogAccountUpstream struct {
+	HTTPUpstream
+	mu            sync.Mutex
+	requests      []*http.Request
+	failureStatus int
+	failureErr    error
+}
+
+func (u *modelCatalogAccountUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	u.mu.Lock()
+	u.requests = append(u.requests, req)
+	u.mu.Unlock()
+	if req.Header.Get("Authorization") == "Bearer invalid-key" {
+		if u.failureErr != nil {
+			return nil, u.failureErr
+		}
+		return newJSONResponse(u.failureStatus, `{"error":"invalid credentials"}`), nil
+	}
+	endpoint := "/chat/completions"
+	if getHeaderRaw(req.Header, "x-tenant") == "responses-tenant" {
+		endpoint = "/responses"
+	}
+	return newJSONResponse(http.StatusOK, fmt.Sprintf(`{"data":[{"id":"vendor/model","supported_endpoints":[%q]}]}`, endpoint)), nil
+}
+
+func TestModelProtocolCatalogOfficialAccountsAreIsolated(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		err    error
+	}{
+		{name: "unauthorized", status: http.StatusUnauthorized},
+		{name: "forbidden", status: http.StatusForbidden},
+		{name: "transport", err: errors.New("upstream connection failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := &modelCatalogAccountUpstream{failureStatus: tc.status, failureErr: tc.err}
+			svc := &OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}
+			id := time.Now().UnixNano()
+			bad, chat, responses := commandCodeTestAccount(id), commandCodeTestAccount(id+1), commandCodeTestAccount(id+2)
+			bad.Credentials["api_key"] = "invalid-key"
+			responses.Credentials["header_override_enabled"] = true
+			responses.Credentials["header_overrides"] = map[string]any{"X-Tenant": "responses-tenant"}
+			url := buildOpenAIModelsURL(bad.GetCNProtocolBaseURL(APIProtocolChatCompletions))
+			t.Cleanup(func() {
+				upstreamModelProtocols.mu.Lock()
+				defer upstreamModelProtocols.mu.Unlock()
+				for _, account := range []*Account{bad, chat, responses} {
+					delete(upstreamModelProtocols.entries, modelProtocolCatalogKey(account, url))
+				}
+			})
+
+			require.Nil(t, svc.modelCatalogProtocols(t.Context(), bad, "vendor/model"))
+			require.Equal(t, APIProtocolChatCompletions, svc.resolveUpstreamProtocolFor(t.Context(), chat, APIProtocolResponses, "vendor/model"), "a healthy account fetches its own catalog despite another account's backoff")
+			require.Equal(t, APIProtocolResponses, svc.resolveUpstreamProtocolFor(t.Context(), responses, APIProtocolChatCompletions, "vendor/model"), "successful catalogs stay isolated when headers select different tenants")
+			require.Equal(t, []string{APIProtocolChatCompletions}, svc.modelCatalogProtocols(t.Context(), chat, "vendor/model"))
+			require.Nil(t, svc.modelCatalogProtocols(t.Context(), bad, "vendor/model"))
+			upstream.mu.Lock()
+			defer upstream.mu.Unlock()
+			require.Len(t, upstream.requests, 3, "each healthy account fetches once; the failed account remains in its own backoff")
+			for _, req := range upstream.requests {
+				require.Equal(t, url, req.URL.String(), "all accounts use the same official model-list URL")
+			}
+		})
+	}
 }
 
 func TestCommandCodeModelProtocolSetUsesCatalog(t *testing.T) {
@@ -190,7 +342,7 @@ func TestCommandCodeGatewayPassesThroughCatalogProtocols(t *testing.T) {
 			APIProtocolAnthropic:       base + "/provider",
 		}
 		url := buildOpenAIModelsURL(base + "/provider/v1")
-		key := modelProtocolCatalogKey(account, base+"/provider/v1", url)
+		key := modelProtocolCatalogKey(account, url)
 		if catalog != nil {
 			upstreamModelProtocols.store(key, catalog, nil, time.Now())
 		} else {
@@ -252,9 +404,9 @@ func TestCommandCodeGatewayFetchesModelCatalog(t *testing.T) {
 	both := []string{APIProtocolChatCompletions, APIProtocolResponses}
 
 	first, second := newAccount(13), newAccount(14)
-	require.Equal(t, both, svc.modelCatalogProtocols(first, "deepseek/deepseek-v4-flash"))
-	require.Equal(t, both, svc.modelCatalogProtocols(first, "deepseek/deepseek-v4-flash"))
-	require.Equal(t, both, svc.modelCatalogProtocols(second, "deepseek/deepseek-v4-flash"))
+	require.Equal(t, both, svc.modelCatalogProtocols(t.Context(), first, "deepseek/deepseek-v4-flash"))
+	require.Equal(t, both, svc.modelCatalogProtocols(t.Context(), first, "deepseek/deepseek-v4-flash"))
+	require.Equal(t, both, svc.modelCatalogProtocols(t.Context(), second, "deepseek/deepseek-v4-flash"))
 
 	upstream.mu.Lock()
 	defer upstream.mu.Unlock()
