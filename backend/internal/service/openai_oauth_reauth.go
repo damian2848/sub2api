@@ -188,6 +188,7 @@ type OpenAIOAuthReauthService struct {
 	worker                  *reauthruntime.Manager
 	workerToken             string
 	workerLastSeen          atomic.Int64
+	totpWorkerLastSeen      atomic.Int64
 	repo                    OpenAIOAuthReauthRepository
 	accounts                OpenAIOAuthReauthAccountReader
 	credentialUpdater       OpenAIOAuthReauthCredentialUpdater
@@ -445,6 +446,9 @@ func (s *OpenAIOAuthReauthService) SaveCredentialConfig(ctx context.Context, acc
 		}
 	}
 	stored := &OpenAIOAuthReauthStoredConfig{AccountID: accountID, LoginEmail: email, CredentialMode: mode, Engine: engine, ProxySource: proxySource, ProxyID: proxyID, UpdatedAt: time.Now()}
+	if existing != nil {
+		stored.UpdatedAt = existing.UpdatedAt
+	}
 	if existing != nil && existing.CredentialMode == mode {
 		stored.PasswordCiphertext = existing.PasswordCiphertext
 		stored.TOTPSecretCiphertext = existing.TOTPSecretCiphertext
@@ -493,6 +497,9 @@ func (s *OpenAIOAuthReauthService) SaveCredentialConfig(ctx context.Context, acc
 		}
 	}
 	if err := s.repo.UpsertConfig(ctx, stored); err != nil {
+		if infraerrors.Code(err) == 409 {
+			return nil, err
+		}
 		return nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_REAUTH_CONFIG_SAVE_FAILED", "failed to save re-login configuration")
 	}
 	return s.configView(ctx, stored)

@@ -192,3 +192,8 @@ issues/
 !docs/typesafe-jev.md
 !docs/screenshots/usage-tps-single-token/
 !docs/screenshots/support-tickets/
+
+!docs/openai-2fa-rotation.md
+!docs/screenshots/2fa-rotation/
+**/totp-recovery/
+**/*.sealed
