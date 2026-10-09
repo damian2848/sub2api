@@ -192,6 +192,14 @@ issues/
 !docs/screenshots/pelican-showcase-api-ui/
 
 !docs/typesafe-jev.md
+
+# Upstream regional egress guide
+!/docs/upstream-regional-routing.md
+
+!docs/harvest-gateway-borrow.md
+!docs/screenshots/harvest-gateway-borrow/
+!docs/screenshots/channel-monitor-v3/
+!docs/screenshots/monitor-client-rejections/
 !docs/screenshots/usage-tps-single-token/
 !docs/screenshots/support-tickets/
 !docs/screenshots/pelican-showcase-notice/
