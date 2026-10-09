@@ -88,6 +88,10 @@ func Prepare(raw []byte, scope string, replay *ReplayCache) ([]byte, *Bridge, er
 }
 
 func prepare(raw []byte, scope string, replay *ReplayCache, nativeToolImages map[string]bool) ([]byte, *Bridge, error) {
+	return prepareWithInheritedCatalog(raw, scope, replay, nativeToolImages, false)
+}
+
+func prepareWithInheritedCatalog(raw []byte, scope string, replay *ReplayCache, nativeToolImages map[string]bool, inherited bool) ([]byte, *Bridge, error) {
 	var source object
 	if err := decode(raw, &source); err != nil || source == nil {
 		return nil, nil, fmt.Errorf("invalid Basispoints request JSON")
@@ -140,21 +144,9 @@ func prepare(raw []byte, scope string, replay *ReplayCache, nativeToolImages map
 	}
 	var catalog []any
 	if text(choice) != "none" {
-		catalog, err = b.collectTools(source["tools"], "")
+		catalog, err = b.collectClientCatalog(source, inherited)
 		if err != nil {
 			return nil, nil, err
-		}
-		if input, ok := source["input"].([]any); ok {
-			for _, raw := range input {
-				item, _ := raw.(object)
-				if text(item["type"]) == "additional_tools" {
-					additional, err := b.collectTools(item["tools"], "")
-					if err != nil {
-						return nil, nil, err
-					}
-					catalog = append(catalog, additional...)
-				}
-			}
 		}
 	}
 	var input []any
