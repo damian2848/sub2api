@@ -196,6 +196,19 @@ func TestProtocolFeatureSwitchesApplyImmediately(t *testing.T) {
 	require.False(t, gateway.excelBPSGloballyEnabled(ctx))
 }
 
+func TestExcelBPSGlobalSwitchKeepsRoutingWhenUnreadable(t *testing.T) {
+	ctx := context.Background()
+	repo := &excelBPSImageSettingsRepo{values: map[string]string{SettingKeyExcelBPSEnabled: "false"}}
+	gateway := &OpenAIGatewayService{settingService: NewSettingService(repo, &config.Config{})}
+	require.False(t, gateway.excelBPSGloballyEnabled(ctx), "a readable off switch disables BPS")
+
+	repo.err = errors.New("settings store unavailable")
+	require.True(t, gateway.excelBPSGloballyEnabled(ctx), "a read failure must not move BPS accounts to the native channel")
+	enabled, err := gateway.settingService.GetProtocolFeatureEnabled(ctx, SettingKeyExcelBPSEnabled)
+	require.Error(t, err)
+	require.False(t, enabled)
+}
+
 func TestExcelBPSImageLimitsHotReload(t *testing.T) {
 	t.Setenv("DATA_DIR", t.TempDir())
 	ctx := context.Background()

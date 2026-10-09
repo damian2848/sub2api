@@ -53,12 +53,19 @@ func normalizeOpenAIResponsesNamespaces(c *gin.Context, account *Account, body [
 	return body, nil
 }
 
+// excelBPSGloballyEnabled reports the BPS protocol master switch. An unreadable
+// switch keeps BPS routing: treating a transient settings error as "off" would
+// silently send BPS-designated accounts (usually moved off because the native
+// channel is degraded) back through the native channel.
 func (s *OpenAIGatewayService) excelBPSGloballyEnabled(ctx context.Context) bool {
 	if s == nil || s.settingService == nil {
 		return true
 	}
 	enabled, err := s.settingService.GetProtocolFeatureEnabled(ctx, SettingKeyExcelBPSEnabled)
-	return err == nil && enabled
+	if err != nil {
+		return true
+	}
+	return enabled
 }
 
 // Forward forwards request to OpenAI API
