@@ -13,7 +13,7 @@ func TestNewEncryptedAssignmentsFailBeforeOmission(t *testing.T) {
 			if top {
 				item["encrypted_content"] = "SYNTHETIC_PRIVATE_PAYLOAD"
 			} else {
-				item["content"] = append(item["content"].([]any), object{"type": "encrypted_content", "data": "SYNTHETIC_PRIVATE_PAYLOAD"})
+				item["content"] = append(mustTestValue[[]any](t, item["content"]), object{"type": "encrypted_content", "data": "SYNTHETIC_PRIVATE_PAYLOAD"})
 			}
 			source := testSource()
 			input := []any{item}
@@ -64,7 +64,7 @@ func TestCollaborationPromptHidesOnlyEncryptionAnnotation(t *testing.T) {
 			t.Fatal("plaintext prompt still requests encryption")
 		}
 		parameters := bridge.tools["collaboration."+name].Parameters
-		if parameters["properties"].(object)["message"].(object)["encrypted"] != true {
+		if mustTestValue[object](t, mustTestValue[object](t, parameters["properties"])["message"])["encrypted"] != true {
 			t.Fatal("original validation schema mutated")
 		}
 		after, _ := json.Marshal(source)
