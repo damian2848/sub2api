@@ -260,6 +260,9 @@ func (b *Bridge) collectTools(value any, namespace string) ([]any, error) {
 			return nil, err
 		}
 		b.tools[key] = tool{Name: name, Namespace: namespace, Kind: kind, Definition: definition, Parameters: parameters, Schema: schema, Catalog: item}
+		if kind == "function" {
+			entry["parameters"] = plaintextPromptParameters(name, namespace, parameters)
+		}
 		catalog = append(catalog, entry)
 	}
 	return catalog, nil
