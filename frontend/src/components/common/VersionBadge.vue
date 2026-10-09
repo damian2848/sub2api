@@ -766,8 +766,8 @@ async function handleUpdate() {
     // Clear version cache to reflect update completed
     appStore.clearVersionCache()
   } catch (error: unknown) {
-    const err = error as { response?: { data?: { message?: string } }; message?: string }
-    updateError.value = err.response?.data?.message || err.message || t('version.updateFailed')
+    const err = error as { message?: string; reason?: string }
+    updateError.value = err.message || t('version.updateFailed')
   } finally {
     updating.value = false
   }
@@ -804,9 +804,8 @@ async function loadRollbackVersions() {
     const data = await getRollbackVersions()
     rollbackVersions.value = data.versions || []
   } catch (error: unknown) {
-    const err = error as { response?: { data?: { message?: string } }; message?: string }
-    rollbackVersionsError.value =
-      err.response?.data?.message || err.message || t('version.loadVersionsFailed')
+    const err = error as { message?: string }
+    rollbackVersionsError.value = err.message || t('version.loadVersionsFailed')
   } finally {
     rollbackVersionsLoading.value = false
   }
@@ -841,8 +840,8 @@ async function handleRollback() {
     // Clear version cache so the next check reflects the rolled-back version
     appStore.clearVersionCache()
   } catch (error: unknown) {
-    const err = error as { response?: { data?: { message?: string } }; message?: string }
-    rollbackError.value = err.response?.data?.message || err.message || t('version.rollbackFailed')
+    const err = error as { message?: string }
+    rollbackError.value = err.message || t('version.rollbackFailed')
   } finally {
     rollingBack.value = false
   }
