@@ -202,7 +202,7 @@ describe('IQTestModal', () => {
     const wrapper = mountModal()
     await flushPromises()
     expect((wrapper.vm as any).modelOptions).toEqual([
-      { value: 'gpt-6-astra', label: 'GPT-6 Astra' },
+      { value: 'gpt-6-astra', label: 'gpt-6-astra (GPT-6 Astra)' },
       { value: 'gpt-5.5', label: 'gpt-5.5' }
     ])
     expect(getModelReasoning).toHaveBeenCalledWith(42, 'gpt-6-astra')

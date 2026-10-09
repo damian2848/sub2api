@@ -68,7 +68,8 @@ describe('ChannelOperationsView', () => {
   it('keeps the parent module selected across smart and credential subpages', async () => {
     const { router, wrapper } = await workspace('smart/priority')
     expect(wrapper.get('[data-tab="smart"]').attributes('aria-current')).toBe('page')
-    expect(wrapper.get('[data-testid="channel-operations-sections"]').findAll('a')).toHaveLength(3)
+    expect(wrapper.get('[data-testid="channel-operations-sections"]').findAll('a')).toHaveLength(4)
+    expect(wrapper.get('a[href="/admin/channel-ops/smart/experiments"]').exists()).toBe(true)
     expect(wrapper.get('a[href="/admin/channel-ops/smart/priority"]').attributes('aria-current')).toBe('page')
     await router.push(`${CHANNEL_OPERATIONS_PATH}/credentials/legacy`)
     await flushPromises()
