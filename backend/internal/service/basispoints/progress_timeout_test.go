@@ -17,7 +17,7 @@ func TestProgressTimeoutStopsSilenceAndUpstreamComments(t *testing.T) {
 		stop := make(chan struct{})
 		go func() {
 			defer close(done)
-			defer w.Close()
+			defer func() { _ = w.Close() }()
 			if !comments {
 				<-stop
 				return
@@ -49,9 +49,9 @@ func TestProgressTimeoutStopsSilenceAndUpstreamComments(t *testing.T) {
 func TestProgressTimeoutAllowsFragmentedDataAndDownstreamPause(t *testing.T) {
 	r, w := io.Pipe()
 	body := WithProgressTimeout(context.Background(), r, 70*time.Millisecond)
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	go func() {
-		defer w.Close()
+		defer func() { _ = w.Close() }()
 		for _, s := range []string{`data: {"type":`, `"response.output_text.delta",`, `"delta":"hello"}`, "\n\n"} {
 			time.Sleep(25 * time.Millisecond)
 			if _, err := io.WriteString(w, s); err != nil {
@@ -64,7 +64,7 @@ func TestProgressTimeoutAllowsFragmentedDataAndDownstreamPause(t *testing.T) {
 		t.Fatalf("fragmented data stalled: %s %v", raw, err)
 	}
 	body = WithProgressTimeout(context.Background(), io.NopCloser(strings.NewReader("data: first\ndata: second\n")), 30*time.Millisecond)
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	buf := make([]byte, 12)
 	if _, err = body.Read(buf); err != nil {
 		t.Fatal(err)
@@ -78,9 +78,9 @@ func TestProgressTimeoutAllowsFragmentedDataAndDownstreamPause(t *testing.T) {
 func TestProgressTimeoutCancellationAndDisabledMode(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	r, w := io.Pipe()
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 	body := WithProgressTimeout(ctx, r, time.Second)
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 	go func() { time.Sleep(20 * time.Millisecond); cancel() }()
 	_, err := io.ReadAll(body)
 	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrStreamProgressTimeout) {

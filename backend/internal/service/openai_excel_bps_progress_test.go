@@ -15,7 +15,7 @@ import (
 
 func TestExcelBPSProgressTimeoutPreservesUsageAndDoesNotReplay(t *testing.T) {
 	r, w := io.Pipe()
-	defer w.Close()
+	defer func() { _ = w.Close() }()
 	upstream := &httpUpstreamRecorder{resp: &http.Response{StatusCode: 200, Header: http.Header{}, Body: r}}
 	svc := openAIClientToolsTestService(upstream)
 	svc.cfg.Gateway.ExcelBPSStreamDataIntervalTimeout = 1
