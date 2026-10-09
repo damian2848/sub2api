@@ -110,7 +110,7 @@ func TestDuplicateToolContractConflictsStillFailAtomically(t *testing.T) {
 			default:
 				conflicting[field] = true
 			}
-			source["tools"] = append(source["tools"].([]any), execToolNamespace(conflicting))
+			source["tools"] = append(mustTestValue[[]any](t, source["tools"]), execToolNamespace(conflicting))
 			source["input"] = []any{message("user", "Continue")}
 			raw, _ := json.Marshal(source)
 			_, _, err := PrepareWithCatalog(raw, "scope", nil, cache)

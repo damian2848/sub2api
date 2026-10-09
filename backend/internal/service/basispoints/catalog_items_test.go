@@ -17,13 +17,13 @@ func TestLoadedCatalogToolsAndSchemaPrecedence(t *testing.T) {
 		source["input"] = []any{object{"type": "additional_tools", "tools": []any{old}}, object{"type": "tool_search_output", "tools": []any{current}}, message("user", "continue")}
 		if explicit {
 			source["tools"] = []any{current}
-			source["input"].([]any)[1] = object{"type": "tool_search_output", "tools": []any{old}}
+			mustTestValue[[]any](t, source["input"])[1] = object{"type": "tool_search_output", "tools": []any{old}}
 		}
 		body, bridge := mustPrepare(t, source, "scope", nil)
 		if len(bridge.tools) != 1 {
 			t.Fatal("loaded declaration missing")
 		}
-		for _, raw := range body["input"].([]any) {
+		for _, raw := range mustTestValue[[]any](t, body["input"]) {
 			item, _ := raw.(object)
 			if isCatalogItem(text(item["type"])) {
 				t.Fatal("catalog leaked into history")
@@ -71,7 +71,7 @@ func TestLoadedCatalogChoiceNoneAndInvalidSelectedSchema(t *testing.T) {
 		t.Fatal("catalog leaked")
 	}
 	delete(source, "tool_choice")
-	source["input"].([]any)[0].(object)["tools"] = []any{object{"type": "function", "name": "read_file", "parameters": "invalid"}}
+	mustTestValue[object](t, mustTestValue[[]any](t, source["input"])[0])["tools"] = []any{object{"type": "function", "name": "read_file", "parameters": "invalid"}}
 	raw, _ := json.Marshal(source)
 	if _, _, err := Prepare(raw, "scope", nil); err == nil {
 		t.Fatal("invalid selected schema accepted")
