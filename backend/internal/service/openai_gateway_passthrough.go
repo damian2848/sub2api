@@ -2624,6 +2624,9 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 		return nil, writeErr
 	}
 	finalResponse, ok := extractCodexFinalResponse(bodyText)
+	if !ok && terminalOK {
+		finalResponse, ok = extractOpenAINonCompletedTerminalResponse(terminalType, terminalPayload)
+	}
 
 	usage := s.parseSSEUsageFromBody(bodyText)
 	if ok {
