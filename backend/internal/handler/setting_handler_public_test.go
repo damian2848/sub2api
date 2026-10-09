@@ -82,6 +82,40 @@ func TestSettingHandler_GetPublicSettings_ExposesForceEmailOnThirdPartySignup(t 
 	require.True(t, resp.Data.ForceEmailOnThirdPartySignup)
 }
 
+func TestSettingHandler_GetPublicSettings_ExposesExcelBPSSwitch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	// The master switch defaults to on, so a missing row and an explicit "true"
+	// must both read as enabled; only an explicit "false" disables BPS.
+	for name, tc := range map[string]struct {
+		values map[string]string
+		want   bool
+	}{
+		"missing row keeps BPS on": {values: map[string]string{}, want: true},
+		"explicit true":            {values: map[string]string{service.SettingKeyExcelBPSEnabled: "true"}, want: true},
+		"explicit false":           {values: map[string]string{service.SettingKeyExcelBPSEnabled: "false"}, want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := NewSettingHandler(service.NewSettingService(&settingHandlerPublicRepoStub{values: tc.values}, &config.Config{}), "test-version")
+
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/settings/public", nil)
+
+			h.GetPublicSettings(c)
+
+			require.Equal(t, http.StatusOK, recorder.Code)
+			var resp struct {
+				Data struct {
+					ExcelBPSEnabled bool `json:"excel_bps_enabled"`
+				} `json:"data"`
+			}
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &resp))
+			require.Equal(t, tc.want, resp.Data.ExcelBPSEnabled)
+		})
+	}
+}
+
 func TestSettingHandler_GetPublicSettings_ExposesTencentCaptchaConfiguration(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
