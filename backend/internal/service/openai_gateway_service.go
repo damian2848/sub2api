@@ -498,6 +498,7 @@ type OpenAIGatewayService struct {
 	deferredService        *DeferredService
 	openAITokenProvider    *OpenAITokenProvider
 	prismAccounts          *PrismAccountService
+	excelOAuthReauth       *OpenAIOAuthReauthService
 	grokTokenProvider      *GrokTokenProvider
 	toolCorrector          *CodexToolCorrector
 	openaiWSResolver       OpenAIWSProtocolResolver
