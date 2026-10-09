@@ -47,16 +47,25 @@
       <div class="card p-6">
         <div ref="stripeMount" class="min-h-[200px]"></div>
         <p v-if="error" class="mt-4 text-sm text-red-600 dark:text-red-400">{{ error }}</p>
-        <button class="btn btn-stripe mt-6 w-full py-3 text-base" :disabled="submitting || !ready" @click="handlePay">
+        <button class="btn btn-stripe mt-6 w-full py-3 text-base" :disabled="locked || !ready" @click="handlePay">
           <span v-if="submitting" class="flex items-center justify-center gap-2">
             <span class="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"></span>
             {{ t('common.processing') }}
           </span>
-          <span v-else>{{ t('payment.stripePay') }}</span>
+          <span v-else>{{ t(pending ? 'payment.qr.waitingPayment' : 'payment.stripePay') }}</span>
         </button>
+        <StripeWalletPanel
+          v-if="showStatus"
+          :action="walletAction"
+          :order="order"
+          :formatted-amount="paymentAmountSymbol + payAmount.toFixed(2)"
+          :remaining-ms="remainingMs"
+          :expired="expired"
+          :terminal-status="terminalStatus"
+        />
       </div>
       <!-- Cancel order -->
-      <button class="btn btn-secondary w-full" :disabled="cancelling" @click="handleCancel">
+      <button class="btn btn-secondary w-full" :disabled="cancelling || submitting" @click="handleCancel">
         {{ cancelling ? t('common.processing') : t('payment.qr.cancelOrder') }}
       </button>
     </template>
@@ -64,19 +73,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted, nextTick } from 'vue'
+import { computed, ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRouter } from 'vue-router'
 import { extractI18nErrorMessage } from '@/utils/apiError'
 import { paymentAPI } from '@/api/payment'
 import { useAppStore } from '@/stores'
-import { getPaymentPopupFeatures } from '@/components/payment/providerConfig'
 import { currencySymbol } from '@/components/payment/currency'
-import type { Stripe, StripeElements } from '@stripe/stripe-js'
+import type { PaymentOrder } from '@/types/payment'
+import StripeWalletPanel from './StripeWalletPanel.vue'
+import { useStripeCheckout } from './useStripeCheckout'
 import Icon from '@/components/icons/Icon.vue'
-
-// Stripe payment methods that open a popup (redirect or QR code)
-const POPUP_METHODS = new Set(['alipay', 'wechat_pay'])
 
 const props = defineProps<{
   orderId: number
@@ -91,110 +97,54 @@ const props = defineProps<{
 const emit = defineEmits<{ success: []; done: []; back: []; redirect: [orderId: number, payUrl: string] }>()
 
 const { t } = useI18n()
-const router = useRouter()
 const appStore = useAppStore()
 
 const stripeMount = ref<HTMLElement | null>(null)
 const loading = ref(true)
 const initError = ref('')
-const error = ref('')
-const submitting = ref(false)
 const cancelling = ref(false)
-const success = ref(false)
-const ready = ref(false)
-const selectedType = ref('')
 const creditedAmountSymbol = currencySymbol('USD')
 const paymentAmountSymbol = computed(() => currencySymbol(props.currency))
 
-let stripeInstance: Stripe | null = null
-let elementsInstance: StripeElements | null = null
+const order = ref<PaymentOrder | null>(null)
+const {
+  error, submitting, succeeded: success, ready, pending, walletAction,
+  remainingMs, expired, terminalStatus, locked, showStatus, initialize, pay,
+} = useStripeCheckout({
+  orderId: () => props.orderId,
+  clientSecret: () => props.clientSecret,
+  order,
+  onSuccess: () => emit('success'),
+})
+let disposed = false
 
 onMounted(async () => {
   try {
+    const { data } = await paymentAPI.getOrder(props.orderId)
+    if (disposed) return
+    order.value = data
     const { loadStripe } = await import('@stripe/stripe-js/pure')
     const stripe = await loadStripe(props.publishableKey)
+    if (disposed) return
     if (!stripe) { initError.value = t('payment.stripeLoadFailed'); return }
 
-    stripeInstance = stripe
     loading.value = false
     await nextTick()
-    if (!stripeMount.value) return
+    if (disposed || !stripeMount.value) return
 
-    const isDark = document.documentElement.classList.contains('dark')
-    const elements = stripe.elements({
-      clientSecret: props.clientSecret,
-      appearance: { theme: isDark ? 'night' : 'stripe', variables: { borderRadius: '8px' } },
-    })
-    elementsInstance = elements
-    const paymentElement = elements.create('payment', {
-      layout: 'tabs',
-      paymentMethodOrder: ['alipay', 'wechat_pay', 'card', 'link'],
-    } as Record<string, unknown>)
-    paymentElement.mount(stripeMount.value)
-    paymentElement.on('ready', () => { ready.value = true })
-    paymentElement.on('change', (event: { value: { type: string } }) => {
-      selectedType.value = event.value.type
-    })
+    initialize(stripe, stripeMount.value)
   } catch (err: unknown) {
-    initError.value = extractI18nErrorMessage(err, t, 'payment.errors', t('payment.stripeLoadFailed'))
+    if (!disposed) initError.value = extractI18nErrorMessage(err, t, 'payment.errors', t('payment.stripeLoadFailed'))
   } finally {
-    loading.value = false
+    if (!disposed) loading.value = false
   }
 })
 
 async function handlePay() {
-  if (!stripeInstance || !elementsInstance || submitting.value) return
-
-  // Alipay / WeChat Pay: open popup for redirect or QR display
-  if (POPUP_METHODS.has(selectedType.value)) {
-    const popupUrl = router.resolve({
-      path: '/payment/stripe-popup',
-      query: {
-        order_id: String(props.orderId),
-        method: selectedType.value,
-        amount: String(props.payAmount),
-      },
-    }).href
-    const popup = window.open(popupUrl, 'paymentPopup', getPaymentPopupFeatures())
-
-    const onReady = (event: MessageEvent) => {
-      if (event.source !== popup || event.data?.type !== 'STRIPE_POPUP_READY') return
-      window.removeEventListener('message', onReady)
-      popup?.postMessage({
-        type: 'STRIPE_POPUP_INIT',
-        clientSecret: props.clientSecret,
-        publishableKey: props.publishableKey,
-      }, window.location.origin)
-    }
-    window.addEventListener('message', onReady)
-
-    emit('redirect', props.orderId, popupUrl)
-    return
-  }
-
-  // Card / Link: confirm inline
-  submitting.value = true
-  error.value = ''
-  try {
-    const { error: stripeError } = await stripeInstance.confirmPayment({
-      elements: elementsInstance,
-      confirmParams: {
-        return_url: window.location.origin + '/payment/result?order_id=' + props.orderId + '&status=success',
-      },
-      redirect: 'if_required',
-    })
-    if (stripeError) {
-      error.value = stripeError.message || t('payment.result.failed')
-    } else {
-      success.value = true
-      emit('success')
-    }
-  } catch (err: unknown) {
-    error.value = extractI18nErrorMessage(err, t, 'payment.errors', t('payment.result.failed'))
-  } finally {
-    submitting.value = false
-  }
+  if (!cancelling.value) await pay()
 }
+
+onUnmounted(() => { disposed = true })
 
 async function handleCancel() {
   if (!props.orderId || cancelling.value) return

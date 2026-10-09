@@ -480,6 +480,14 @@ export default {
       REFUND_FAILED: '退款失败',
     },
     airwallexPay: 'Airwallex 支付',
+    stripeInline: {
+      paymentInfo: '支付信息',
+      alipayHint: '使用支付宝扫码打开支付页面，按页面提示完成付款。',
+      openPaymentPage: '打开支付页面',
+      orderTimeRemaining: '订单剩余时间',
+      qrUnavailable: '二维码暂时无法显示，请返回充值页重试。',
+      failedHint: '支付未完成，请返回充值页重新创建订单。',
+    },
     stripePay: '立即支付',
     stripeSuccessProcessing: '支付成功，正在处理订单...',
     stripePopup: {

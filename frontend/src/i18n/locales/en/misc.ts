@@ -456,6 +456,14 @@ export default {
       REFUND_FAILED: 'Refund failed.',
     },
     airwallexPay: 'Airwallex Payment',
+    stripeInline: {
+      paymentInfo: 'Payment details',
+      alipayHint: 'Scan with Alipay to open the payment page, then follow the instructions to pay.',
+      openPaymentPage: 'Open payment page',
+      orderTimeRemaining: 'Order time remaining',
+      qrUnavailable: 'The QR code could not be displayed. Return to recharge and try again.',
+      failedHint: 'Payment was not completed. Return to recharge and create a new order.',
+    },
     stripePay: 'Pay Now',
     stripeSuccessProcessing: 'Payment successful, processing your order...',
     stripePopup: {
