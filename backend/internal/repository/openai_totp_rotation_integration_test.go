@@ -32,6 +32,9 @@ func TestTOTPRotationAtomicActivationAndExclusion(t *testing.T) {
 	ctx, repo, cfg := totpRotationFixture(t)
 	r, err := repo.CreateTOTPRotation(ctx, cfg.AccountID, "snapshot", cfg.UpdatedAt)
 	require.NoError(t, err)
+	latest, err := repo.GetLatestTask(ctx, cfg.AccountID)
+	require.NoError(t, err)
+	require.Nil(t, latest, "2FA reservations must not appear as OAuth re-login results")
 	_, err = repo.CreateTask(ctx, cfg.AccountID, "snapshot")
 	require.Error(t, err)
 	// Legacy re-login workers cannot consume or expire the reserved task.

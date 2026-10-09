@@ -115,6 +115,7 @@ func (r *openAIOAuthReauthRepository) GetLatestTask(ctx context.Context, account
 			created_at, updated_at, finished_at
 		FROM openai_oauth_reauth_tasks
 		WHERE account_id = $1
+        AND NOT EXISTS (SELECT 1 FROM openai_totp_rotations rotation WHERE rotation.task_id=openai_oauth_reauth_tasks.id)
 		ORDER BY created_at DESC, id DESC
 		LIMIT 1
 	`, accountID)
