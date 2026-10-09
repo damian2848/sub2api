@@ -13,14 +13,6 @@
         <button class="btn btn-primary mt-6" @click="router.push('/purchase')">{{ t('payment.result.backToRecharge') }}</button>
       </div>
       <template v-else>
-        <!-- 金额头部 -->
-        <div v-if="order" class="card overflow-hidden">
-          <div class="bg-gradient-to-br from-[#635bff] to-[#4f46e5] px-6 py-6 text-center">
-            <p class="text-sm font-medium text-indigo-200">{{ t('payment.actualPay') }}</p>
-            <p class="mt-1 text-3xl font-bold text-white">{{ formatGatewayAmount(order.pay_amount) }}</p>
-          </div>
-        </div>
-
         <!-- 成功状态 -->
         <template v-if="stripeSuccess">
           <div class="card p-6 text-center">
@@ -36,26 +28,25 @@
 
         <!-- 扫码区域保留在支付按钮下方 -->
         <template v-else>
-          <div class="card p-6">
-            <div v-if="showPaymentElement" id="stripe-payment-element" class="min-h-[200px]"></div>
-            <p v-if="stripeError" class="mt-4 text-sm text-red-600 dark:text-red-400">{{ stripeError }}</p>
-            <button class="btn btn-stripe mt-6 w-full py-3 text-base" :disabled="locked || (showPaymentElement && !stripeReady)" @click="pay(directMethod)">
-              <span v-if="stripeSubmitting" class="flex items-center justify-center gap-2">
-                <span class="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"></span>
-                {{ t('common.processing') }}
-              </span>
-              <span v-else>{{ t(pending ? 'payment.qr.waitingPayment' : 'payment.stripePay') }}</span>
-            </button>
-            <StripeWalletPanel
-              v-if="showStatus"
-              :action="walletAction"
-              :order="order"
-              :formatted-amount="formatGatewayAmount(order?.pay_amount || 0)"
-              :remaining-ms="remainingMs"
-              :expired="expired"
-              :terminal-status="terminalStatus"
-            />
-          </div>
+          <StripeCheckoutForm
+            :order="order"
+            :formatted-amount="formatGatewayAmount(order?.pay_amount || 0)"
+            :has-payment-element="showPaymentElement"
+            :ready="stripeReady"
+            :locked="locked"
+            :submitting="stripeSubmitting"
+            :pending="pending"
+            :show-status="showStatus"
+            :method="directMethod || selectedType"
+            :action="walletAction"
+            :error="stripeError"
+            :remaining-ms="remainingMs"
+            :expired="expired"
+            :terminal-status="terminalStatus"
+            @pay="pay(directMethod)"
+          >
+            <div id="stripe-payment-element" :class="!stripeReady ? 'min-h-[144px]' : ''"></div>
+          </StripeCheckoutForm>
           <div class="text-center">
             <button class="btn btn-secondary" @click="router.push('/purchase')">{{ t('payment.result.backToRecharge') }}</button>
           </div>
@@ -77,7 +68,7 @@ import { PAYMENT_RECOVERY_STORAGE_KEY, readPaymentRecoverySnapshot } from '@/com
 import type { PaymentOrder } from '@/types/payment'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Icon from '@/components/icons/Icon.vue'
-import StripeWalletPanel from '@/components/payment/StripeWalletPanel.vue'
+import StripeCheckoutForm from '@/components/payment/StripeCheckoutForm.vue'
 import { useStripeCheckout } from '@/components/payment/useStripeCheckout'
 
 const i18n = useI18n()
@@ -98,7 +89,7 @@ const showPaymentElement = ref(false)
 
 const {
   error: stripeError, submitting: stripeSubmitting, succeeded: stripeSuccess, ready: stripeReady,
-  pending, walletAction, remainingMs, expired, terminalStatus, locked, showStatus, initialize, pay,
+  pending, selectedType, walletAction, remainingMs, expired, terminalStatus, locked, showStatus, initialize, pay,
 } = useStripeCheckout({
   orderId: () => Number(route.query.order_id),
   clientSecret: () => String(route.query.client_secret || ''),

@@ -458,6 +458,7 @@ export default {
     airwallexPay: 'Airwallex Payment',
     stripeInline: {
       paymentInfo: 'Payment details',
+      autoUpdate: 'This page updates automatically after payment',
       alipayHint: 'Scan with Alipay to open the payment page, then follow the instructions to pay.',
       openPaymentPage: 'Open payment page',
       orderTimeRemaining: 'Order time remaining',

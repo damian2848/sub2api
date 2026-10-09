@@ -36,34 +36,24 @@
       </div>
     </template>
     <template v-else>
-      <!-- Amount -->
-      <div class="card overflow-hidden">
-        <div class="bg-gradient-to-br from-[#635bff] to-[#4f46e5] px-6 py-5 text-center">
-          <p class="text-sm font-medium text-indigo-200">{{ t('payment.actualPay') }}</p>
-          <p class="mt-1 text-3xl font-bold text-white">{{ paymentAmountSymbol }}{{ payAmount.toFixed(2) }}</p>
-        </div>
-      </div>
-      <!-- Stripe Payment Element -->
-      <div class="card p-6">
-        <div ref="stripeMount" class="min-h-[200px]"></div>
-        <p v-if="error" class="mt-4 text-sm text-red-600 dark:text-red-400">{{ error }}</p>
-        <button class="btn btn-stripe mt-6 w-full py-3 text-base" :disabled="locked || !ready" @click="handlePay">
-          <span v-if="submitting" class="flex items-center justify-center gap-2">
-            <span class="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"></span>
-            {{ t('common.processing') }}
-          </span>
-          <span v-else>{{ t(pending ? 'payment.qr.waitingPayment' : 'payment.stripePay') }}</span>
-        </button>
-        <StripeWalletPanel
-          v-if="showStatus"
-          :action="walletAction"
-          :order="order"
-          :formatted-amount="paymentAmountSymbol + payAmount.toFixed(2)"
-          :remaining-ms="remainingMs"
-          :expired="expired"
-          :terminal-status="terminalStatus"
-        />
-      </div>
+      <StripeCheckoutForm
+        :order="order"
+        :formatted-amount="paymentAmountSymbol + payAmount.toFixed(2)"
+        :ready="ready"
+        :locked="locked"
+        :submitting="submitting"
+        :pending="pending"
+        :show-status="showStatus"
+        :method="selectedType"
+        :action="walletAction"
+        :error="error"
+        :remaining-ms="remainingMs"
+        :expired="expired"
+        :terminal-status="terminalStatus"
+        @pay="handlePay"
+      >
+        <div ref="stripeMount" :class="!ready ? 'min-h-[144px]' : ''"></div>
+      </StripeCheckoutForm>
       <!-- Cancel order -->
       <button class="btn btn-secondary w-full" :disabled="cancelling || submitting" @click="handleCancel">
         {{ cancelling ? t('common.processing') : t('payment.qr.cancelOrder') }}
@@ -80,7 +70,7 @@ import { paymentAPI } from '@/api/payment'
 import { useAppStore } from '@/stores'
 import { currencySymbol } from '@/components/payment/currency'
 import type { PaymentOrder } from '@/types/payment'
-import StripeWalletPanel from './StripeWalletPanel.vue'
+import StripeCheckoutForm from './StripeCheckoutForm.vue'
 import { useStripeCheckout } from './useStripeCheckout'
 import Icon from '@/components/icons/Icon.vue'
 
@@ -108,7 +98,7 @@ const paymentAmountSymbol = computed(() => currencySymbol(props.currency))
 
 const order = ref<PaymentOrder | null>(null)
 const {
-  error, submitting, succeeded: success, ready, pending, walletAction,
+  error, submitting, succeeded: success, ready, pending, selectedType, walletAction,
   remainingMs, expired, terminalStatus, locked, showStatus, initialize, pay,
 } = useStripeCheckout({
   orderId: () => props.orderId,

@@ -482,6 +482,7 @@ export default {
     airwallexPay: 'Airwallex 支付',
     stripeInline: {
       paymentInfo: '支付信息',
+      autoUpdate: '支付完成后，此页面将自动更新',
       alipayHint: '使用支付宝扫码打开支付页面，按页面提示完成付款。',
       openPaymentPage: '打开支付页面',
       orderTimeRemaining: '订单剩余时间',

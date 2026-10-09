@@ -99,12 +99,49 @@ export function useStripeCheckout(options: {
     stripe = instance
     syncOrderStatus()
     if (!target || succeeded.value) return
+    const dark = document.documentElement.classList.contains('dark')
+    const border = dark ? '#334155' : '#e2e8f0'
+    const surface = dark ? '#1e293b' : '#f8fafc'
+    const text = dark ? '#f1f5f9' : '#0f172a'
     elements = stripe.elements({
       clientSecret: options.clientSecret(),
       paymentMethodCreation: 'manual',
       appearance: {
-        theme: document.documentElement.classList.contains('dark') ? 'night' : 'stripe',
-        variables: { borderRadius: '8px' },
+        theme: 'flat',
+        variables: {
+          fontFamily: 'system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif',
+          fontSizeBase: '14px',
+          fontLineHeight: '1.5',
+          borderRadius: '12px',
+          spacingUnit: '4px',
+          tabSpacing: '12px',
+          colorPrimary: '#0d9488',
+          colorBackground: surface,
+          colorText: text,
+          colorTextSecondary: dark ? '#94a3b8' : '#64748b',
+          colorTextPlaceholder: dark ? '#94a3b8' : '#64748b',
+          colorDanger: dark ? '#f87171' : '#dc2626',
+          iconColor: dark ? '#94a3b8' : '#64748b',
+        },
+        rules: {
+          '.Tab': {
+            backgroundColor: surface, border: `1px solid ${border}`,
+            boxShadow: 'none', padding: '14px 16px',
+          },
+          '.Tab:hover': { borderColor: dark ? '#64748b' : '#94a3b8' },
+          '.Tab:focus': { boxShadow: '0 0 0 2px rgba(13, 148, 136, 0.25)' },
+          '.Tab--selected': {
+            backgroundColor: dark ? '#123539' : '#f0fdfa',
+            borderColor: '#0d9488', boxShadow: 'none',
+          },
+          '.TabLabel': { color: text, fontWeight: '500' },
+          '.TabLabel--selected': { color: text, fontWeight: '600' },
+          '.Block': {
+            backgroundColor: surface, border: 'none', boxShadow: 'none', padding: '14px',
+          },
+          '.Input': { border: `1px solid ${border}`, boxShadow: 'none' },
+          '.Input:focus': { borderColor: '#0d9488', boxShadow: '0 0 0 2px rgba(13, 148, 136, 0.15)' },
+        },
       },
     })
     paymentElement = elements.create('payment', {
@@ -232,5 +269,5 @@ export function useStripeCheckout(options: {
     paymentElement?.destroy()
   })
 
-  return { error, submitting, ready, succeeded, pending, walletAction, terminalStatus, remainingMs, expired, locked, showStatus, initialize, pay }
+  return { error, submitting, ready, succeeded, pending, selectedType, walletAction, terminalStatus, remainingMs, expired, locked, showStatus, initialize, pay }
 }
