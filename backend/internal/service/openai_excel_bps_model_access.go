@@ -91,7 +91,7 @@ func (s *OpenAIGatewayService) FetchExcelBPSModelsList(ctx context.Context, acco
 		return nil, err
 	}
 	if s == nil || s.httpUpstream == nil || account == nil || !account.IsOpenAI() || !account.IsExcelBPSEnabled() {
-		return nil, fmt.Errorf("Excel BPS model discovery is unavailable")
+		return nil, fmt.Errorf("excel BPS model discovery is unavailable")
 	}
 	token, err := s.getExcelBPSAccessToken(ctx, account)
 	if err != nil {
@@ -99,7 +99,7 @@ func (s *OpenAIGatewayService) FetchExcelBPSModelsList(ctx context.Context, acco
 	}
 	accountID := excelBPSAccountID(account, token)
 	if accountID == "" {
-		return nil, fmt.Errorf("Excel BPS model discovery requires an account ID")
+		return nil, fmt.Errorf("excel BPS model discovery requires an account ID")
 	}
 	request, err := newExcelBPSRequest(ctx, nil, token, accountID)
 	if err != nil {
@@ -127,7 +127,7 @@ func (s *OpenAIGatewayService) FetchExcelBPSModelsList(ctx context.Context, acco
 		if account.IsExcelBPSMihomoEnabled() {
 			proxy, lease, err = s.excelBPSAcquireFor(account)(fetchCtx, fmt.Sprintf("transient:bps-models:%d", account.ID))
 			if err != nil {
-				return nil, fmt.Errorf("Excel BPS discovery proxy is unavailable")
+				return nil, fmt.Errorf("excel BPS discovery proxy is unavailable")
 			}
 			defer lease.Release()
 		}
@@ -140,7 +140,7 @@ func (s *OpenAIGatewayService) FetchExcelBPSModelsList(ctx context.Context, acco
 			return nil, infraerrors.New(502, "EXCEL_BPS_MODELS_UPSTREAM_FAILED", "Excel BPS model discovery request failed")
 		}
 		if response == nil || response.Body == nil {
-			return nil, fmt.Errorf("Excel BPS model discovery returned no response")
+			return nil, fmt.Errorf("excel BPS model discovery returned no response")
 		}
 		defer func() { _ = response.Body.Close() }()
 		stop := context.AfterFunc(fetchCtx, func() { _ = response.Body.Close() })
@@ -150,7 +150,7 @@ func (s *OpenAIGatewayService) FetchExcelBPSModelsList(ctx context.Context, acco
 		}
 		raw, err := io.ReadAll(io.LimitReader(response.Body, openAIModelsCacheBodyLimit+1))
 		if err != nil || len(raw) > openAIModelsCacheBodyLimit {
-			return nil, fmt.Errorf("Excel BPS model catalog could not be read")
+			return nil, fmt.Errorf("excel BPS model catalog could not be read")
 		}
 		body, err := excelBPSAccessModelsBody(raw)
 		if err != nil {
@@ -180,7 +180,7 @@ func (s *OpenAIGatewayService) FetchExcelBPSModelsList(ctx context.Context, acco
 		}
 		manifest, ok := result.Val.(*OpenAIModelsResponse)
 		if !ok || manifest == nil {
-			return nil, fmt.Errorf("Excel BPS model discovery returned no catalog")
+			return nil, fmt.Errorf("excel BPS model discovery returned no catalog")
 		}
 		return openAIModelsResponseForClient(manifest, ""), nil
 	}
