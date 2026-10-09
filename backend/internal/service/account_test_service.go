@@ -371,9 +371,19 @@ func createTestPayload(modelID string) (map[string]any, error) {
 // modelID is optional - if empty, defaults to claude.DefaultTestModel
 // mode is optional - "compact" routes OpenAI accounts to the /responses/compact probe path
 // opts is optional media (image/audio data URLs for real generation / STT).
-func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int64, modelID string, prompt string, mode string, opts ...AccountTestOptions) error {
+func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int64, modelID string, prompt string, mode string, opts ...AccountTestOptions) (testErr error) {
 	initAccountTestLogger(c, accountID, modelID, mode)
 	ctx := c.Request.Context()
+	// 测试可能在响应头或正文到来前长时间等待；所有协议共用同一段下游保活生命周期。
+	stopKeepalive := startAccountTestSSEKeepalive(c, 10*time.Second)
+	defer func() {
+		// 即使完成事件写入失败，也不能把已断开的请求判成成功测试。
+		if testErr == nil {
+			testErr = c.Request.Context().Err()
+		}
+		stopKeepalive()
+	}()
+	ctx = c.Request.Context()
 	testOpts := firstAccountTestOptions(opts)
 
 	// Get account
