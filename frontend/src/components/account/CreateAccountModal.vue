@@ -440,7 +440,7 @@
             </div>
           </button>
 
-          <button type="button" data-testid="openai-bps-oauth"
+          <button v-if="globalBpsEnabled" type="button" data-testid="openai-bps-oauth"
             @click="accountCategory = 'oauth-based'; openaiTwoFA = false; openaiBPSOAuth = true"
             :class="['flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
               isOpenAIBPSOAuth ? 'border-green-500 bg-green-50 dark:bg-green-900/20' : 'border-gray-200 hover:border-green-300 dark:border-dark-600']">
@@ -4242,14 +4242,15 @@ interface TempUnschedRuleForm {
 // State
 const step = ref(1)
 const openaiTwoFA = ref(false)
+const globalBpsEnabled = computed(() => appStore.cachedPublicSettings?.excel_bps_enabled !== false)
 const openaiBPSOAuth = ref(false)
 const bpsOAuthModels = ref<string[]>([...DEFAULT_EXCEL_BPS_MODELS])
-const isOpenAIBPSOAuth = computed(() => form.platform === 'openai' && accountCategory.value === 'oauth-based' && openaiBPSOAuth.value)
+// An Excel-session account cannot work while the BPS master switch is off.
+const isOpenAIBPSOAuth = computed(() => globalBpsEnabled.value && form.platform === 'openai' && accountCategory.value === 'oauth-based' && openaiBPSOAuth.value)
 const twoFABusy = ref(false)
 const isOpenAITwoFA = computed(() => form.platform === 'openai' && accountCategory.value === 'oauth-based' && openaiTwoFA.value)
 // 「降智后自动开启 BPS」：OpenAI OAuth / 2FA 添加时可选，账号建好后按这里的设置给每个新账号建一条质量运维规则。
 const autoBPS = useAccountAutoBPS()
-const globalBpsEnabled = computed(() => appStore.cachedPublicSettings?.excel_bps_enabled !== false)
 const autoBPSAvailable = computed(() => globalBpsEnabled.value && form.platform === 'openai' && accountCategory.value === 'oauth-based' && !isOpenAIBPSOAuth.value)
 const submitting = ref(false)
 const accountCategory = ref<'oauth-based' | 'apikey' | 'bedrock' | 'service_account'>('oauth-based') // UI selection for account category

@@ -21,6 +21,7 @@ const {
   createOpenAICodexPATMock,
   createCredentialOperationsMock,
   authIsSimpleMode,
+  publicSettings,
 } = vi.hoisted(() => ({
   createAccountMock: vi.fn(),
   generateAuthUrlMock: vi.fn(),
@@ -33,6 +34,7 @@ const {
   createOpenAICodexPATMock: vi.fn(),
   createCredentialOperationsMock: vi.fn(),
   authIsSimpleMode: { value: true },
+  publicSettings: { value: undefined as Record<string, unknown> | undefined },
 }))
 
 vi.mock('@/stores/app', () => ({
@@ -40,6 +42,9 @@ vi.mock('@/stores/app', () => ({
     showError: vi.fn(),
     showSuccess: vi.fn(),
     showWarning: showWarningMock,
+    get cachedPublicSettings() {
+      return publicSettings.value
+    },
   }),
 }))
 
@@ -316,6 +321,17 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expectWSAcceleration(payload.extra, clicks === 1)
     expect(wrapper.emitted('created')).toHaveLength(1)
     expect(wrapper.emitted('close')).toHaveLength(1)
+  })
+
+  it('hides the BPS OAuth entry while the BPS master switch is off', async () => {
+    publicSettings.value = { excel_bps_enabled: false }
+    try {
+      const wrapper = await prepareWSAcceleration(0)
+      expect(wrapper.find('[data-testid="openai-bps-oauth"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="openai-two-fa"]').exists()).toBe(true)
+    } finally {
+      publicSettings.value = undefined
+    }
   })
 
   it('creates BPS OAuth through the Excel client and enables only the selected BPS models', async () => {
