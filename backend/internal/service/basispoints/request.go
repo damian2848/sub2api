@@ -190,7 +190,7 @@ func prepare(raw []byte, scope string, replay *ReplayCache, nativeToolImages map
 			"Call one client tool at a time, including update_plan through this transport. After receiving its result continue the task; do not repeat completed calls. " +
 			"Tool results replayed under run_officejs are the named client tool's results. When a tool is needed, emit its call in this response instead of only announcing it. " +
 			"Do not call other native tools or claim that shell, filesystem or workspace access is unavailable when a suitable catalog tool exists. " +
-			"If no tool is needed, answer as assistant text. Client tool catalog:\n" + describeCatalog(catalog) +
+			"If no tool is needed, answer as assistant text. " + schemaNotation + "\nClient tool catalog:\n" + describeCatalog(catalog) +
 			"\nEnd of catalog. Invoke native run_officejs once. Follow each tool's specified transport: FUNCTION uses a JSON envelope; FUNCTION_CODE uses raw code plus metadata JSON in extended_summary; FUNCTION_CMD uses raw cmd plus metadata JSON; CUSTOM uses its exact marker and raw input. No Office code is executed by the proxy."
 		protocol += b.toolExamples()
 	}
