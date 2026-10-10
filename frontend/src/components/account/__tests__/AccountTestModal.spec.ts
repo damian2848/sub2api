@@ -253,3 +253,25 @@ describe('AccountTestModal', () => {
     expect(wrapper.text()).toContain('已通过 /v1/chat/completions 验证')
   })
 })
+
+
+describe('Excel authorization model errors', () => {
+  it('shows the authorization state, blocks an empty test and allows reloading', async () => {
+    getAvailableModelsMock.mockReset()
+    getAvailableModelsMock.mockRejectedValueOnce({reason: 'OPENAI_EXCEL_AUTH_VERIFICATION_REQUIRED', message: 'private error must not be rendered'})
+    const wrapper = mount(AccountTestModal, {props: {show: false, account: buildAccount()}, global: {stubs: {BaseDialog: BaseDialogStub, Select: SelectStub, TextArea: TextAreaStub, Icon: true}}})
+    await wrapper.setProps({show: true})
+    await flushPromises()
+    expect(wrapper.get('[role="alert"]').text()).toContain('admin.accounts.excelAuthErrors.OPENAI_EXCEL_AUTH_VERIFICATION_REQUIRED')
+    expect(wrapper.text()).not.toContain('private error')
+    expect(wrapper.get('[role="alert"] a').attributes('href')).toBe('/admin/token-guard-v2')
+    const start = wrapper.findAll('button').find(b => b.text().includes('admin.accounts.startTest'))!
+    expect(start.attributes('disabled')).toBeDefined()
+    getAvailableModelsMock.mockResolvedValueOnce([{id:'gpt-6-astra',display_name:'Astra'}])
+    await wrapper.get('[role="alert"] button').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    expect(start.attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
+})

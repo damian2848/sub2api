@@ -1,5 +1,16 @@
 export default {
     accounts: {
+      "modelsLoadFailed": "Could not load models. Please retry.",
+      "retryModels": "Reload models",
+      "openCredentialOperations": "Open Credential Operations",
+      "excelAuthErrors": {
+        "OPENAI_EXCEL_AUTH_PENDING": "Excel authorization is in progress. Reload models after it completes.",
+        "OPENAI_EXCEL_AUTH_FAILED": "Excel authorization failed. Review the Excel task in Credential Operations before retrying.",
+        "OPENAI_EXCEL_AUTH_VERIFICATION_REQUIRED": "Excel login requires a security check. Review authorization in Credential Operations.",
+        "OPENAI_EXCEL_AUTH_CONFIG_REQUIRED": "Configure an Excel login in Credential Operations and complete authorization.",
+        "OPENAI_EXCEL_AUTH_REQUIRED": "Authorize Excel in Credential Operations first.",
+        "OPENAI_EXCEL_AUTH_UNAVAILABLE": "Excel authorization status is unavailable. Please retry later."
+      },
       title: 'Account Management',
       description: 'Manage AI platform accounts and credentials',
       createAccount: 'Create Account',

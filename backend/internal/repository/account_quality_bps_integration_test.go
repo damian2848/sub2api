@@ -25,6 +25,10 @@ func newQualityBPSFixture(t *testing.T, extra string, policy *service.QualityPol
 	ctx := context.Background()
 	f := &qualityBPSFixture{t: t, plans: NewScheduledTestPlanRepository(integrationDB)}
 	require.NoError(t, integrationDB.QueryRowContext(ctx, `INSERT INTO accounts(name,platform,type,status,schedulable,extra) VALUES('quality-bps','openai','oauth','active',true,$1::jsonb) RETURNING id`, extra).Scan(&f.account))
+	// This fixture represents accounts already authorized for BPS; tests below
+	// explicitly remove the grant when exercising preparation failures.
+	_, grantErr := integrationDB.ExecContext(ctx, `INSERT INTO openai_excel_oauth_credentials(account_id,credentials_ciphertext) VALUES($1,'test-encrypted-grant')`, f.account)
+	require.NoError(t, grantErr)
 	t.Cleanup(func() {
 		_, _ = integrationDB.ExecContext(ctx, `DELETE FROM scheduler_outbox WHERE account_id=$1`, f.account)
 		_, _ = integrationDB.ExecContext(ctx, `DELETE FROM scheduled_test_plans WHERE account_id=$1`, f.account)
@@ -301,4 +305,13 @@ func TestQualityEnableBPSRestoreAfterAccountEditorSave(t *testing.T) {
 	require.True(t, account.IsExcelBPSEnabledForModel("gpt-6-astra"))
 	require.NoError(t, repo.Update(context.Background(), account))
 	require.Equal(t, "restored", f.apply("passed"))
+}
+
+func TestQualityEnableBPSRequiresExcelAuthorization(t *testing.T) {
+	f := newQualityBPSFixture(t, `{}`, &service.QualityPolicy{Action: service.QualityActionEnableBPS, BPS: &service.QualityBPSPolicy{FailureThreshold: 1, AllModels: true}})
+	f.exec(`DELETE FROM openai_excel_oauth_credentials WHERE account_id=$1`)
+	require.Equal(t, "bps_auth_required", f.apply("failed"))
+	require.NotEqual(t, true, f.extra()["openai_excel_bps"])
+	f.exec(`INSERT INTO openai_excel_oauth_credentials(account_id,credentials_ciphertext) VALUES($1,'test-encrypted-grant')`)
+	require.Equal(t, "bps_enabled", f.apply("failed"))
 }

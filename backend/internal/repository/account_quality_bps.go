@@ -119,6 +119,18 @@ func applyQualityBPSOutcome(ctx context.Context, tx *sql.Tx, plan *service.Sched
 		return "no_change", nil
 	}
 
+	if !account.IsExcelOAuth() {
+		var ready bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM openai_excel_oauth_credentials WHERE account_id=$1 AND credentials_ciphertext<>'')`, plan.AccountID).Scan(&ready); err != nil {
+			return "", err
+		}
+		if !ready {
+			if err := qualityBPSSaveStreak(ctx, tx, plan.ID, state, hasState); err != nil {
+				return "", err
+			}
+			return "bps_auth_required", nil
+		}
+	}
 	set := map[string]json.RawMessage{}
 	var remove []string
 	for key, value := range service.QualityBPSExtra(policy) {

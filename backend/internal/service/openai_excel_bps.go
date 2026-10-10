@@ -378,8 +378,9 @@ func (s *OpenAIGatewayService) forwardExcelBPS(ctx context.Context, c *gin.Conte
 		if isExcelBPSClientCancellation(c, err) {
 			return clientCanceled()
 		}
-		if infraerrors.Reason(err) == "OPENAI_EXCEL_AUTH_PENDING" {
-			return fail(503, "basispoints_auth_pending", "Excel authorization is pending; see Credential Operations")
+		if IsExcelAuthorizationError(err) {
+			code := "basispoints_auth_" + strings.ToLower(strings.TrimPrefix(infraerrors.Reason(err), "OPENAI_EXCEL_AUTH_"))
+			return fail(503, code, infraerrors.Message(err))
 		}
 		return fail(502, "basispoints_auth_unavailable", "Excel OAuth credential is unavailable; see Credential Operations")
 	}

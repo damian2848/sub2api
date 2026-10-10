@@ -106,3 +106,15 @@ func (r *openAIOAuthReauthRepository) DeleteExcelCredentials(ctx context.Context
 	_, err := r.db.ExecContext(ctx, `DELETE FROM openai_excel_oauth_credentials WHERE account_id=$1 AND credentials_ciphertext=$2`, id, expected)
 	return err
 }
+
+func (r *openAIOAuthReauthRepository) GetLatestExcelTask(ctx context.Context, accountID int64) (*service.OpenAIOAuthReauthTaskRecord, error) {
+	row := r.db.QueryRowContext(ctx, `SELECT id,account_id,status,stage,COALESCE(worker_id,''),COALESCE(auth_session_id,''),
+ expected_credentials_hash,COALESCE(error_message,''),attempt,created_at,updated_at,finished_at,oauth_profile
+ FROM openai_oauth_reauth_tasks WHERE account_id=$1 AND oauth_profile='excel'
+ ORDER BY created_at DESC,id DESC LIMIT 1`, accountID)
+	record, err := scanOpenAIOAuthReauthTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return record, err
+}

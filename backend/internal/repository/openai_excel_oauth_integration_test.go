@@ -125,3 +125,17 @@ func TestExcelOAuthIntegrationQueueCoversExistingSwitchAndCooldown(t *testing.T)
 	require.NoError(t, err)
 	require.NotContains(t, ids, cfg.AccountID)
 }
+
+func TestLatestExcelAuthorizationIgnoresNewerCodexTask(t *testing.T) {
+	ctx, repo, cfg := totpRotationFixture(t)
+	task, err := repo.CreateExcelTask(ctx, cfg.AccountID, "test-snapshot")
+	require.NoError(t, err)
+	_, err = integrationDB.ExecContext(ctx, `UPDATE openai_oauth_reauth_tasks SET status='failed',stage='failed',error_message='reason=security_check' WHERE id=$1`, task.ID)
+	require.NoError(t, err)
+	_, err = repo.CreateTask(ctx, cfg.AccountID, "new-codex-snapshot")
+	require.NoError(t, err)
+	latest, err := repo.GetLatestExcelTask(ctx, cfg.AccountID)
+	require.NoError(t, err)
+	require.Equal(t, task.ID, latest.ID)
+	require.Equal(t, "failed", latest.Status)
+}

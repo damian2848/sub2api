@@ -19,6 +19,7 @@ import (
 // The repository finalizes the shared login task in the same transaction.
 type OpenAIExcelOAuthRepository interface {
 	CreateExcelTask(context.Context, int64, string) (*OpenAIOAuthReauthTaskRecord, error)
+	GetLatestExcelTask(context.Context, int64) (*OpenAIOAuthReauthTaskRecord, error)
 	GetExcelCredentials(context.Context, int64) (string, error)
 	ApplyExcelCredentials(context.Context, *OpenAIOAuthReauthTaskRecord, map[string]any, string) (bool, error)
 	ReplaceExcelCredentials(context.Context, int64, string, string) (bool, error)
@@ -279,7 +280,7 @@ func (s *OpenAIOAuthReauthService) readExcelGrant(ctx context.Context, account *
 		if account.GetCredential("client_id") == openai.ExcelClientID {
 			return "", nil, nil, errExcelLegacyCredentials
 		}
-		return "", nil, nil, infraerrors.ServiceUnavailable("OPENAI_EXCEL_AUTH_PENDING", "Excel authorization is pending; see Credential Operations")
+		return "", nil, nil, s.missingExcelAuthorization(ctx, account.ID)
 	}
 	plain, err := s.encryptor.Decrypt(ciphertext)
 	if err != nil {
@@ -338,4 +339,85 @@ func (s *OpenAIOAuthReauthService) invalidateExcelAccessToken(ctx context.Contex
 		return nil
 	}
 	return repo.DeleteExcelCredentials(ctx, id, ciphertext)
+}
+
+// Missing grants are not necessarily queued. Read only the Excel task so a
+// newer Codex login cannot hide an Excel failure. Never expose raw worker errors.
+func (s *OpenAIOAuthReauthService) missingExcelAuthorization(ctx context.Context, id int64) error {
+	repo, ok := s.repo.(OpenAIExcelOAuthRepository)
+	if !ok {
+		return infraerrors.ServiceUnavailable("OPENAI_EXCEL_AUTH_UNAVAILABLE", "Excel authorization status is unavailable")
+	}
+	task, err := repo.GetLatestExcelTask(ctx, id)
+	if err != nil {
+		return infraerrors.ServiceUnavailable("OPENAI_EXCEL_AUTH_UNAVAILABLE", "Excel authorization status is unavailable; retry later")
+	}
+	if task != nil {
+		switch task.Status {
+		case "queued", "running", "callback_processing":
+			return infraerrors.ServiceUnavailable("OPENAI_EXCEL_AUTH_PENDING", "Excel authorization is in progress; see Credential Operations")
+		case "failed":
+			if strings.Contains(task.Error, "reason=security_check") || strings.Contains(task.Error, "reason=additional_verification") {
+				return infraerrors.ServiceUnavailable("OPENAI_EXCEL_AUTH_VERIFICATION_REQUIRED", "Excel login requires a security check; complete authorization in Credential Operations")
+			}
+			return infraerrors.ServiceUnavailable("OPENAI_EXCEL_AUTH_FAILED", "Excel authorization failed; review the Excel task in Credential Operations before retrying")
+		}
+	}
+	config, err := s.repo.GetConfig(ctx, id)
+	if err != nil {
+		return infraerrors.ServiceUnavailable("OPENAI_EXCEL_AUTH_UNAVAILABLE", "Excel authorization configuration is unavailable; retry later")
+	}
+	if config == nil || config.CredentialMode != OpenAIOAuthReauthModePasswordTOTP || config.PasswordCiphertext == "" {
+		return infraerrors.ServiceUnavailable("OPENAI_EXCEL_AUTH_CONFIG_REQUIRED", "Save a password login configuration in Credential Operations, then authorize Excel before enabling BPS")
+	}
+	return infraerrors.ServiceUnavailable("OPENAI_EXCEL_AUTH_REQUIRED", "Authorize Excel in Credential Operations before enabling BPS")
+}
+
+// Only allowlisted application errors may cross the admin/model boundary.
+func IsExcelAuthorizationError(err error) bool {
+	switch infraerrors.Reason(err) {
+	case "OPENAI_EXCEL_AUTH_PENDING", "OPENAI_EXCEL_AUTH_FAILED", "OPENAI_EXCEL_AUTH_VERIFICATION_REQUIRED", "OPENAI_EXCEL_AUTH_CONFIG_REQUIRED", "OPENAI_EXCEL_AUTH_REQUIRED", "OPENAI_EXCEL_AUTH_UNAVAILABLE":
+		return true
+	}
+	return false
+}
+
+// Preparing authorization is separate from persisting routing. A rejected edit
+// leaves the previous route intact; task uniqueness prevents duplicate logins.
+func (s *adminServiceImpl) validateExcelBPSActivation(ctx context.Context, account *Account) error {
+	if s.excelOAuthReauth == nil || !account.IsExcelBPSEnabled() || account.IsExcelOAuth() {
+		return nil
+	}
+	if account.ID == 0 {
+		return infraerrors.BadRequest("OPENAI_EXCEL_AUTH_REQUIRED", "Create the account with BPS disabled, then authorize Excel in Credential Operations before enabling BPS")
+	}
+	previous, err := s.accountRepo.GetByID(ctx, account.ID)
+	if err != nil {
+		return err
+	}
+	// Do not block unrelated edits or change routes for existing enabled accounts.
+	if previous.IsExcelBPSEnabled() {
+		return nil
+	}
+	_, credentials, _, err := s.excelOAuthReauth.readExcelGrant(ctx, account)
+	if err == nil {
+		info, validateErr := decodeExcelOAuthTokenInfo(credentials, true)
+		if validateErr == nil {
+			validateErr = validateReauthToken(account, info)
+		}
+		if validateErr == nil {
+			return nil
+		}
+		err = validateErr
+	}
+	if infraerrors.Reason(err) == "OPENAI_EXCEL_AUTH_REQUIRED" {
+		if _, queueErr := s.excelOAuthReauth.CreateTaskForProfile(ctx, account.ID, "excel"); queueErr != nil {
+			return queueErr
+		}
+		return infraerrors.Conflict("OPENAI_EXCEL_AUTH_PENDING", "Excel authorization has been queued; BPS remains disabled. Enable BPS again after authorization succeeds in Credential Operations")
+	}
+	if IsExcelAuthorizationError(err) {
+		return err
+	}
+	return infraerrors.ServiceUnavailable("OPENAI_EXCEL_AUTH_UNAVAILABLE", "Excel authorization is unavailable; review Credential Operations before enabling BPS")
 }

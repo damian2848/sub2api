@@ -1,5 +1,16 @@
 export default {
     accounts: {
+      "modelsLoadFailed": "模型列表加载失败，请重试。",
+      "retryModels": "重新加载模型",
+      "openCredentialOperations": "查看凭据运维",
+      "excelAuthErrors": {
+        "OPENAI_EXCEL_AUTH_PENDING": "Excel 授权正在进行中，完成后可重新加载模型。",
+        "OPENAI_EXCEL_AUTH_FAILED": "Excel 授权失败，请到凭据运维查看 Excel 任务并处理后重试。",
+        "OPENAI_EXCEL_AUTH_VERIFICATION_REQUIRED": "Excel 登录需要安全验证，请到凭据运维处理授权。",
+        "OPENAI_EXCEL_AUTH_CONFIG_REQUIRED": "尚未配置 Excel 登录，请到凭据运维保存登录配置并完成授权。",
+        "OPENAI_EXCEL_AUTH_REQUIRED": "尚未取得 Excel 授权，请先到凭据运维完成授权。",
+        "OPENAI_EXCEL_AUTH_UNAVAILABLE": "暂时无法读取 Excel 授权状态，请稍后重试。"
+      },
       title: '账号管理',
       description: '管理 AI 平台账号和 Cookie',
       createAccount: '添加账号',

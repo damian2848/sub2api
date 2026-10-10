@@ -1086,6 +1086,17 @@ func (s *AccountTestService) testExcelBPSAccountConnection(c *gin.Context, accou
 		if errors.As(err, &failover) && failover.ClientMessage != "" {
 			return s.sendErrorAndEnd(c, failover.ClientMessage)
 		}
+		var local *excelBPSForwardError
+		if errors.As(err, &local) && strings.HasPrefix(local.code, "basispoints_auth_") {
+			var payload struct {
+				Error struct {
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if json.Unmarshal(probe.Body.Bytes(), &payload) == nil && payload.Error.Message != "" {
+				return s.sendErrorAndEnd(c, local.Error()+": "+payload.Error.Message)
+			}
+		}
 		return s.sendErrorAndEnd(c, err.Error())
 	}
 
