@@ -16,7 +16,7 @@ func (a *Account) IsExcelOAuth() bool {
 	return a != nil && a.IsOpenAIOAuthLike() && strings.TrimSpace(a.GetCredential("client_id")) == openai.ExcelClientID
 }
 
-var errExcelOAuthRouteUnavailable = errors.New("Excel OAuth credentials require an enabled Excel BPS route for the requested model; native Codex is unavailable")
+var errExcelOAuthRouteUnavailable = errors.New("an enabled Excel BPS route is required for Excel OAuth credentials and the requested model; native Codex is unavailable")
 
 const excelOAuthRouteErrorCode = "excel_oauth_route_unavailable"
 
