@@ -30,6 +30,9 @@ func (s *OpenAIGatewayService) fetchNativeOpenAIModelsList(ctx context.Context, 
 	if err != nil {
 		return nil, fmt.Errorf("resolve model list credentials: %w", err)
 	}
+	if credentialAccount.IsExcelOAuth() {
+		return nil, errExcelOAuthRouteUnavailable
+	}
 	if credentialAccount.IsOpenAIOAuth() {
 		clientVersion := CodexCanonicalClientVersion()
 		if s.settingService != nil {

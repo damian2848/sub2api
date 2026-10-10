@@ -359,6 +359,9 @@ func (s *OpenAIGatewayService) admitOpenAITurnWithGroup(
 	if err != nil {
 		return nil, err
 	}
+	if err := s.validateExcelOAuthRoute(ctx, latest, outboundModel); err != nil {
+		return nil, &OpenAITurnAdmissionError{Reason: excelOAuthRouteErrorCode, cause: err}
+	}
 	// 会话中途被收窄了分组内的可用模型、或后续 turn 换成了不允许的模型时，要求客户端重连重新选号。
 	if enforceGroup && !latest.IsModelAllowedInGroup(&groupID, outboundModel) {
 		return nil, denyOpenAITurn("model_not_allowed_in_group")

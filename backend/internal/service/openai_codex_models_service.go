@@ -1703,6 +1703,9 @@ func (s *OpenAIGatewayService) fetchNativeCodexModelsManifest(ctx context.Contex
 		return nil, infraerrors.Newf(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_CREDENTIALS_FAILED", "resolve credential account: %v", err)
 	}
 
+	if credAccount.IsExcelOAuth() {
+		return nil, errExcelOAuthRouteUnavailable
+	}
 	clientVersion = strings.TrimSpace(clientVersion)
 	if clientVersion == "" {
 		clientVersion = CodexCanonicalClientVersion()

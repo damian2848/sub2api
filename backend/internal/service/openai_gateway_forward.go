@@ -84,6 +84,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	defer requesttiming.Observe(ctx, "forward_attempt")()
 	latest, admissionErr := s.admitOpenAITurn(ctx, c, account, extractOpenAICodexTicketModel(body))
 	if admissionErr != nil {
+		if errors.Is(admissionErr, errExcelOAuthRouteUnavailable) {
+			return nil, writeExcelOAuthRouteError(c)
+		}
 		return nil, markOpenAIInitialAdmissionError(admissionErr)
 	}
 	account = latest
@@ -1804,6 +1807,9 @@ func shouldAdaptDeepSeekResponsesClientTools(account *Account, body []byte, comp
 
 func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token string, isStream bool, promptCacheKey string, isCodexCLI bool) (*http.Request, error) {
 	defer requesttiming.Observe(ctx, "build_upstream_request")()
+	if codexAccountIdentitySource(c, account).IsExcelOAuth() {
+		return nil, errExcelOAuthRouteUnavailable
+	}
 	// Determine target URL based on account type
 	var targetURL string
 	switch account.Type {
