@@ -1,15 +1,28 @@
-export type CodexQuickConfigPlatform =
-  | 'openai'
-  | 'anthropic'
-  | 'gemini'
-  | 'antigravity'
-  | 'grok'
-  | 'kimi'
-  | 'zhipu'
-  | 'deepseek'
-  | 'minimax'
-  | 'opencode_go'
-  | 'composite'
+import type { GroupPlatform } from '@/types'
+
+export const CODEX_QUICK_CONFIG_PLATFORMS = [
+  'openai',
+  'anthropic',
+  'gemini',
+  'antigravity',
+  'grok',
+  'kimi',
+  'zhipu',
+  'deepseek',
+  'minimax',
+  'opencode_go',
+  'composite'
+] as const satisfies readonly GroupPlatform[]
+
+export type CodexQuickConfigPlatform = typeof CODEX_QUICK_CONFIG_PLATFORMS[number]
+
+const codexQuickConfigPlatforms = new Set<GroupPlatform>(CODEX_QUICK_CONFIG_PLATFORMS)
+
+export function isCodexQuickConfigPlatform(
+  platform: GroupPlatform | null | undefined
+): platform is CodexQuickConfigPlatform {
+  return platform != null && codexQuickConfigPlatforms.has(platform)
+}
 
 export interface CodexQuickConfigInput {
   apiKey: string

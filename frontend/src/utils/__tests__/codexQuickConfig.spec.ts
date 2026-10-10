@@ -10,6 +10,7 @@ import {
   buildMacLinuxCodexQuickConfigScript,
   buildWindowsCmdCodexQuickConfigScript,
   encodeUtf8Base64,
+  isCodexQuickConfigPlatform,
   normalizeCodexBaseUrl
 } from '@/utils/codexQuickConfig'
 
@@ -89,6 +90,13 @@ afterEach(() => {
 })
 
 describe('codexQuickConfig', () => {
+  it('only accepts platforms served through a Codex-compatible API', () => {
+    expect(isCodexQuickConfigPlatform('openai')).toBe(true)
+    expect(isCodexQuickConfigPlatform('composite')).toBe(true)
+    expect(isCodexQuickConfigPlatform('typesafe')).toBe(false)
+    expect(isCodexQuickConfigPlatform(null)).toBe(false)
+  })
+
   it('normalizes the API base and escapes TOML values', () => {
     expect(normalizeCodexBaseUrl(' https://example.com/// ')).toBe('https://example.com/v1')
     expect(normalizeCodexBaseUrl('https://example.com/v1')).toBe('https://example.com/v1')

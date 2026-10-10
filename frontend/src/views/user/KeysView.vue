@@ -438,7 +438,7 @@
           <template #cell-actions="{ row }">
             <div class="flex items-center gap-1">
               <button
-                v-if="row.group?.platform"
+                v-if="isCodexQuickConfigPlatform(row.group?.platform)"
                 @click="openCodexQuickConfigModal(row)"
                 data-testid="quick-config-button"
                 class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-primary-50 hover:text-primary-600 dark:hover:bg-primary-900/20 dark:hover:text-primary-400"
@@ -1164,7 +1164,7 @@
       :show="showCodexQuickConfigModal"
       :api-key="selectedKey?.key || ''"
       :base-url="publicSettings?.api_base_url || ''"
-      :platform="selectedKey?.group?.platform || null"
+      :platform="selectedCodexQuickConfigPlatform"
       @close="closeCodexQuickConfigModal"
     />
 
@@ -1325,6 +1325,7 @@ import {
   buildCcSwitchImportDeeplink,
   type CcSwitchClientType
 } from '@/utils/ccswitchImport'
+import { isCodexQuickConfigPlatform } from '@/utils/codexQuickConfig'
 
 // Helper to format date for datetime-local input
 const formatDateTimeLocal = (isoDate: string): string => {
@@ -1584,6 +1585,10 @@ const showCcsClientSelect = ref(false)
 const showColumnDropdown = ref(false)
 const pendingCcsRow = ref<ApiKey | null>(null)
 const selectedKey = ref<ApiKey | null>(null)
+const selectedCodexQuickConfigPlatform = computed(() => {
+  const platform = selectedKey.value?.group?.platform
+  return isCodexQuickConfigPlatform(platform) ? platform : null
+})
 const copiedKeyId = ref<number | null>(null)
 const groupSelectorKeyId = ref<number | null>(null)
 const publicSettings = ref<PublicSettings | null>(null)
