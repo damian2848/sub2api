@@ -53,6 +53,21 @@ func normalizeOpenAIResponsesNamespaces(c *gin.Context, account *Account, body [
 	return body, nil
 }
 
+// excelBPSGloballyEnabled reports the BPS protocol master switch. An unreadable
+// switch keeps BPS routing: treating a transient settings error as "off" would
+// silently send BPS-designated accounts (usually moved off because the native
+// channel is degraded) back through the native channel.
+func (s *OpenAIGatewayService) excelBPSGloballyEnabled(ctx context.Context) bool {
+	if s == nil || s.settingService == nil {
+		return true
+	}
+	enabled, err := s.settingService.GetProtocolFeatureEnabled(ctx, SettingKeyExcelBPSEnabled)
+	if err != nil {
+		return true
+	}
+	return enabled
+}
+
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (result *OpenAIForwardResult, resultErr error) {
 	defer func() {
@@ -69,6 +84,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	defer requesttiming.Observe(ctx, "forward_attempt")()
 	latest, admissionErr := s.admitOpenAITurn(ctx, c, account, extractOpenAICodexTicketModel(body))
 	if admissionErr != nil {
+		if errors.Is(admissionErr, errExcelOAuthRouteUnavailable) {
+			return nil, writeExcelOAuthRouteError(c)
+		}
 		return nil, markOpenAIInitialAdmissionError(admissionErr)
 	}
 	account = latest
@@ -120,11 +138,15 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 
 	modelForBPS := gjson.GetBytes(body, "model").String()
+	if err := s.checkControlledRoute(ctx, c, account, modelForBPS); err != nil {
+		return nil, err
+	}
+	// A BPS-only probe must not spend a native request when the global switch is off.
 	if c.GetBool(bpsAccountProbeRequiredContextKey) &&
-		(!account.IsExcelBPSEnabledForModel(modelForBPS) || account.excelBPSNativeFallbackReason(body) != "") {
+		(!account.IsExcelBPSEnabledForModel(modelForBPS) || account.excelBPSNativeFallbackReason(body) != "" || !s.excelBPSGloballyEnabled(ctx)) {
 		return nil, errors.New("bps probe path is unavailable")
 	}
-	if account.IsExcelBPSEnabledForModel(modelForBPS) {
+	if account.IsExcelBPSEnabledForModel(modelForBPS) && s.excelBPSGloballyEnabled(ctx) {
 		return s.forwardExcelBPS(ctx, c, account, body, startTime)
 	}
 
@@ -201,6 +223,16 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// HTTP SSE may opt into the native WS pool on ordinary OAuth accounts.
 	wsDecision = s.resolveOpenAIHTTPWSSSEDecision(c, account, body, wsDecision)
 	accelerateHTTPSSE := wsDecision.Reason == openAIOAuthWSSSEAccelerationReason
+	if mode := controlledMode(ctx); mode != nil {
+		switch mode.channel {
+		case "native_http":
+			wsDecision = openAIWSHTTPDecision("controlled_experiment_http")
+		case "native_ws":
+			if wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
+				return nil, errors.New("controlled WS experiment cannot fall back to HTTP")
+			}
+		}
+	}
 	passthroughEnabled := account.IsOpenAIPassthroughEnabled()
 	compactPath := isOpenAIResponsesCompactPath(c)
 	body, err = normalizeOpenAIResponsesNamespaces(c, account, body, wsDecision.Transport, passthroughEnabled, compactPath)
@@ -240,24 +272,6 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return s.forwardGrokResponses(ctx, c, account, body, originalModel, reqStream, startTime)
 	}
 
-	if account.IsOpenCodeGo() {
-		mapped := resolveOpenCodeGoMappedModel(account, body, "")
-		switch openCodeGoNativeProtocol(account, mapped) {
-		case APIProtocolAnthropic:
-			return s.forwardResponsesViaNativeAnthropic(ctx, c, account, body, "")
-		case APIProtocolResponses:
-			break
-		default:
-			return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
-		}
-	}
-
-	// CN 供应商 anthropic 协议账号：/v1/responses 入站是交叉协议组合
-	// （Responses 客户端 × Anthropic 上游），转成 Anthropic 请求走原生端点。
-	// 不能落到下面的 raw-CC 分支——其 URL 构造会把 anthropic base 当 CC base 用。
-	if account.IsAnthropicProtocol() {
-		return s.forwardResponsesViaNativeAnthropic(ctx, c, account, body, reqModel)
-	}
 	if account.IsOpenAIApiKey() {
 		if normalized, changed, normalizeErr := normalizeOpenAIParallelToolCallsWithoutTools(body, responsesLite); normalizeErr != nil {
 			return nil, normalizeErr
@@ -276,10 +290,23 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		originalModel = reqModel
 	}
 
-	if isOpenAINativeCompactionV2(c) && shouldForwardDeepSeekResponsesCompactViaChatCompletions(account, body) {
+	if (isOpenAINativeCompactionV2(c) && shouldForwardDeepSeekResponsesCompactViaChatCompletions(account, body)) ||
+		shouldForwardDeepSeekResponsesLiteViaChatCompletions(account, body) {
 		return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
 	}
-	if shouldForwardOpenAIResponsesViaChatCompletions(account, body) {
+	// 上游协议统一由 resolveUpstreamProtocol 判定（按模型分流时带上游模型目录）。OpenAI API Key 账号只会落到
+	// Responses / Chat Completions，上面的归一化对两条路径都生效。
+	routingModel := upstreamRoutingModel(account, body, "")
+	if account.IsOpenCodeGo() && IsOpenCodeUnsupportedModel(routingModel) {
+		return nil, writeOpenCodeUnsupportedModelError(c, false, routingModel)
+	}
+	switch s.resolveUpstreamProtocolFor(ctx, account, APIProtocolResponses, routingModel) {
+	case APIProtocolAnthropic:
+		// Responses 客户端 × Anthropic 上游：转成 Anthropic 请求走原生端点。不能落到
+		// raw-CC 分支——其 URL 构造会把 anthropic base 当 CC base 用。
+		// 账号映射未命中时以去除首尾空白的请求模型兜底，计费名与上游模型名一致。
+		return s.forwardResponsesViaNativeAnthropic(ctx, c, account, body, reqModel)
+	case APIProtocolChatCompletions:
 		return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
 	}
 	SetActualOpenAIUpstreamEndpoint(c, openAIResponsesUpstreamEndpoint)
@@ -916,6 +943,9 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			hasPreviousResponseID,
 		)
 		maxAttempts := openAIWSReconnectRetryLimit + 1
+		if isControlledExperiment(ctx) {
+			maxAttempts = 1
+		}
 		wsAttempts := 0
 		var wsResult *OpenAIForwardResult
 		var wsErr error
@@ -1140,7 +1170,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			return nil, wsErr
 		}
 		fallbackReason := ""
-		if accelerateHTTPSSE {
+		if accelerateHTTPSSE && !isControlledExperiment(ctx) {
 			fallbackReason = openAIWSSSEFallbackReason(ctx, c, wsErr)
 		}
 		if fallbackReason == "" {
@@ -1272,7 +1302,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 			upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 			upstreamCode := extractUpstreamErrorCode(respBody)
-			if !agentTaskRecoveryTried && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {
+			if !isControlledExperiment(ctx) && !agentTaskRecoveryTried && s.isAgentIdentityAccount(ctx, account) && isAgentIdentityTaskInvalidHTTPResponse(resp.StatusCode, respBody) {
 				agentTaskRecoveryTried = true
 				expectedTaskID := account.GetCredential("task_id")
 				if err := s.recoverAgentIdentityTask(ctx, account, expectedTaskID); err != nil {
@@ -1282,7 +1312,12 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			respBody = s.redactAgentIdentitySensitiveBody(ctx, account, respBody)
 			resp.Body = io.NopCloser(bytes.NewReader(respBody))
-			if !httpInvalidEncryptedContentRetryTried && resp.StatusCode == http.StatusBadRequest && upstreamCode == "invalid_encrypted_content" {
+			invalidEncryptedContentError := upstreamCode == "invalid_encrypted_content" ||
+				(upstreamCode == "thinking_signature_invalid" &&
+					strings.Contains(upstreamMsg, "The encrypted content") &&
+					strings.Contains(upstreamMsg, "could not be verified") &&
+					strings.Contains(upstreamMsg, "could not be decrypted or parsed"))
+			if !isControlledExperiment(ctx) && !httpInvalidEncryptedContentRetryTried && resp.StatusCode == http.StatusBadRequest && invalidEncryptedContentError {
 				decoded, decodeErr := ensureReqBody()
 				if decodeErr != nil {
 					return nil, decodeErr
@@ -1308,7 +1343,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			if retryBody, reason, changed, retryErr := normalizeOpenAIResponsesRejectedFieldRetryBody(resp.StatusCode, body, respBody); retryErr != nil {
 				return nil, fmt.Errorf("normalize rejected Responses field retry body: %w", retryErr)
-			} else if changed && rejectedFieldRetryState.Allow(retryBody) {
+			} else if !isControlledExperiment(ctx) && changed && rejectedFieldRetryState.Allow(retryBody) {
 				body = retryBody
 				requestView = newOpenAIRequestView(body)
 				reqBody = nil
@@ -1317,7 +1352,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			if retryBody, fallbackModel, retry := s.prepareOpenAICompactFallbackRetry(
 				c, account, requestedModel, body, resp.StatusCode, upstreamMsg, respBody, compactModelFallbackRetried,
-			); retry {
+			); retry && !isControlledExperiment(ctx) {
 				s.appendOpenAICompactFallbackRetryOps(c, account, resp, respBody, upstreamMsg, false)
 				fromModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 				body = retryBody
@@ -1519,14 +1554,15 @@ func shouldForwardOpenAIResponsesViaRawChatCompletions(account *Account) bool {
 	if account == nil || account.Type != AccountTypeAPIKey {
 		return false
 	}
-	if account.IsOpenCodeGo() {
+	if account.routesByModel() {
 		// Model protocol_rules are the authority. Probe Extra must not collapse
 		// Grok/GPT/Muse into Chat Completions.
 		return false
 	}
-	if account.IsCNProvider() {
-		// CN 的显式协议配置优先于异步探针 Extra；adaptive 仅 DeepSeek / Kimi
-		// 有原生 Responses，GLM 回退 Chat Completions。
+	if account.RoutesProtocolByInbound() {
+		// 按入站协议分流的供应商（国产厂商等）：显式协议配置优先于异步探针
+		// Extra；adaptive 仅在供应商有原生 Responses 端点时直转，否则回退
+		// Chat Completions（如 GLM）。
 		switch account.GetAPIProtocol() {
 		case APIProtocolChatCompletions:
 			return true
@@ -1772,6 +1808,9 @@ func shouldAdaptDeepSeekResponsesClientTools(account *Account, body []byte, comp
 
 func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.Context, account *Account, body []byte, token string, isStream bool, promptCacheKey string, isCodexCLI bool) (*http.Request, error) {
 	defer requesttiming.Observe(ctx, "build_upstream_request")()
+	if codexAccountIdentitySource(c, account).IsExcelOAuth() {
+		return nil, errExcelOAuthRouteUnavailable
+	}
 	// Determine target URL based on account type
 	var targetURL string
 	switch account.Type {

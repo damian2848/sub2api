@@ -213,8 +213,9 @@
               <span
                 v-if="showLongContextBadge && row.long_context_billing_applied"
                 data-testid="long-context-billing-marker"
+                :title="t('admin.usage.longContextPricingTooltip')"
                 class="inline-flex items-center rounded px-1 py-px text-[10px] font-semibold leading-tight bg-amber-100 text-amber-700 ring-1 ring-inset ring-amber-200 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-500/30"
-              >x2</span>
+              >{{ t('admin.usage.longContext') }}</span>
               <!-- Cost Detail Tooltip -->
               <div
                 class="group relative"
@@ -255,7 +256,7 @@
                 :class="LATENCY_TEXT_CLASSES[tpsSeverity(usageOutputTps(row) ?? 0)]"
                 :title="t('usage.latencyTpsHint')"
               >{{ formatUsageOutputTps(row) }}</span>
-              <span v-else data-testid="latency-tps" class="text-gray-400 dark:text-gray-500">-</span>
+              <span v-else data-testid="latency-tps" class="text-gray-400 dark:text-gray-500" :title="tpsUnavailableHint(row)">-</span>
             </div>
           </component>
         </template>
@@ -506,7 +507,7 @@
           </div>
           <div class="flex items-center justify-between gap-6">
             <span class="text-gray-400">{{ t('usage.rate') }}</span>
-            <span class="font-semibold text-blue-400">{{ formatMultiplier(tooltipData?.rate_multiplier || 1) }}x</span>
+            <span class="font-semibold text-blue-400">{{ formatMultiplier(tooltipData?.rate_multiplier ?? 1) }}x</span>
           </div>
           <div class="flex items-center justify-between gap-6">
             <span class="text-gray-400">{{ t('usage.original') }}</span>
@@ -561,7 +562,7 @@ import {
   firstTokenSeverity,
   tpsSeverity,
 } from '@/utils/latencyHealth'
-import { formatUsageOutputTps, usageOutputTps } from '@/utils/usageTps'
+import { formatUsageOutputTps, usageOutputTps, usageOutputTpsUnavailableReason } from '@/utils/usageTps'
 import {
   BILLING_MODE_TOKEN,
   getBillingModeLabel,
@@ -755,6 +756,12 @@ const formatDuration = (ms: number | null | undefined): string => {
   const totalSec = Math.round(ms / 1000)
   if (totalSec < 3600) return `${Math.floor(totalSec / 60)}m ${totalSec % 60}s`
   return `${Math.floor(totalSec / 3600)}h ${Math.floor((totalSec % 3600) / 60)}m`
+}
+
+// TPS 显示占位符时说明原因（只有 1 个输出 Token 的多是中断的流式请求）
+const tpsUnavailableHint = (row: AdminUsageLog): string | undefined => {
+  const reason = usageOutputTpsUnavailableReason(row)
+  return reason ? t(`usage.latencyTpsUnavailable.${reason}`) : undefined
 }
 
 // 延迟色条三段依次对应首字/总耗时/TPS 三行（30%/50%/70% 分别落在三行内）；无首字或无 TPS 的段沿用总耗时档

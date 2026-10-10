@@ -88,18 +88,17 @@ func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cf
 		result.Reason = "judge_accounts_unavailable"
 		return result
 	}
-	sort.SliceStable(accounts, func(i, j int) bool { return accounts[i].Priority < accounts[j].Priority })
+	accounts = qualityJudgeCandidates(accounts, testedAccount, judge)
 	prompt := qualityJudgePrompt(cfg, answer)
 	result.Reason = "judge_no_available_account"
-	attempts := 0
 	runID, logicalID := uuid.NewString(), uuid.NewString()
 	var facts []ProbeRequestFact
 	defer func() { finalizeProbeFacts(facts); saveProbeFacts(s.factRecorder, facts) }()
+	firstAttempt := true
 	for i := range accounts {
 		account := &accounts[i]
-		// The tested account must not grade its own response, even in the same group.
-		if account.ID == testedAccount || !account.IsSchedulable() || !account.IsModelSupportedInGroup(&judge.GroupID, judge.ModelID) {
-			continue
+		if ctx.Err() != nil {
+			break
 		}
 		slot, err := s.slots.AcquireAccountSlot(ctx, account.ID, account.Concurrency)
 		if err != nil {
@@ -109,14 +108,17 @@ func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cf
 		if slot == nil || !slot.Acquired {
 			continue
 		}
-		if attempts == 0 {
+		if firstAttempt {
 			result.Usage.CostUSD = nil
+			firstAttempt = false
 		}
-		attempts++
 		output, requestErr := func() (string, error) {
 			if slot.ReleaseFunc != nil {
 				defer slot.ReleaseFunc()
 			}
+			// A slow route must leave time for another candidate within the overall deadline.
+			attemptCtx, cancelAttempt := context.WithTimeout(ctx, 30*time.Second)
+			defer cancelAttempt()
 			// Judge requests own their collector so the caller can add them exactly once.
 			collector := &pelicanTestUsageCollector{model: account.GetMappedModel(judge.ModelID), requestedModel: judge.ModelID, runID: runID, logicalRequestID: logicalID, role: "quality_judge", groupID: &judge.GroupID}
 			defer func() {
@@ -124,7 +126,7 @@ func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cf
 				usage := collector.probeUsage(s.billing, account)
 				result.Usage.Add(&usage)
 			}()
-			return s.request(context.WithValue(ctx, pelicanTestUsageKey{}, collector), account.ID, judge.ModelID, prompt)
+			return s.request(context.WithValue(attemptCtx, pelicanTestUsageKey{}, collector), account.ID, judge.ModelID, prompt)
 		}()
 		result.AccountID = account.ID
 		if requestErr != nil {
@@ -140,11 +142,54 @@ func (s *QualityJudgeService) Judge(ctx context.Context, testedAccount int64, cf
 			}
 			result.Reason = "judge_invalid_response"
 		}
-		if attempts >= 3 || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			break
 		}
 	}
 	return result
+}
+
+// Interleave upstream routes before revisiting one with a different credential.
+// Routing identity is only an ordering hint: accounts on the same route may have
+// different model permissions, so a rejected request must not exclude its peers.
+func qualityJudgeCandidates(accounts []Account, testedAccount int64, judge *QualityJudgeConfig) []Account {
+	candidates := make([]Account, 0, len(accounts))
+	seen := make(map[int64]bool, len(accounts))
+	for _, account := range accounts {
+		if seen[account.ID] || account.ID == testedAccount || !account.IsSchedulable() ||
+			!account.IsModelSupportedInGroup(&judge.GroupID, judge.ModelID) {
+			continue
+		}
+		seen[account.ID] = true
+		candidates = append(candidates, account)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Priority < candidates[j].Priority })
+	type route struct{ platform, accountType, baseURL string }
+	routes := make(map[route]int)
+	buckets := make([][]Account, 0)
+	for _, account := range candidates {
+		baseURL := account.GetBaseURL()
+		if account.Platform == PlatformOpenAI {
+			baseURL = account.GetOpenAIBaseURL()
+		}
+		key := route{account.Platform, account.Type, strings.TrimRight(baseURL, "/")}
+		bucket, ok := routes[key]
+		if !ok {
+			bucket = len(buckets)
+			routes[key] = bucket
+			buckets = append(buckets, nil)
+		}
+		buckets[bucket] = append(buckets[bucket], account)
+	}
+	ordered := make([]Account, 0, len(candidates))
+	for round := 0; len(ordered) < len(candidates); round++ {
+		for _, bucket := range buckets {
+			if round < len(bucket) {
+				ordered = append(ordered, bucket[round])
+			}
+		}
+	}
+	return ordered
 }
 
 func qualityJudgePrompt(cfg *PelicanTestConfig, answer string) string {

@@ -135,6 +135,8 @@ vite.config.js
 docs/*
 !docs/pelican-showcase-api.md
 !docs/openai-ws-sse-acceleration.md
+!docs/openai-outbound-identity.md
+!docs/openai-2fa-dual-oauth.md
 !docs/PAYMENT.md
 !docs/PAYMENT_CN.md
 !docs/ADMIN_PAYMENT_INTEGRATION_API.md
@@ -183,7 +185,26 @@ issues/
 **/credential-operations.key
 **/.credential-key-*
 !docs/credential-encryption.md
+!docs/new-api-upstream-probe.md
+!docs/account-ops-notifications.md
+!docs/screenshots/account-ops-monitoring/
 !docs/screenshots/credential-encryption/
 !docs/screenshots/pelican-showcase-api-ui/
 
 !docs/typesafe-jev.md
+
+# Upstream regional egress guide
+!/docs/upstream-regional-routing.md
+
+!docs/harvest-gateway-borrow.md
+!docs/screenshots/harvest-gateway-borrow/
+!docs/screenshots/channel-monitor-v3/
+!docs/screenshots/monitor-client-rejections/
+!docs/screenshots/usage-tps-single-token/
+!docs/screenshots/support-tickets/
+!docs/screenshots/pelican-showcase-notice/
+
+!docs/openai-2fa-rotation.md
+!docs/screenshots/2fa-rotation/
+**/totp-recovery/
+**/*.sealed

@@ -64,9 +64,6 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 
 	payload := s.buildOpenAIWSCreatePayload(reqBody, account)
 	accelerateHTTPSSE := decision.Reason == openAIOAuthWSSSEAccelerationReason
-	if accelerateHTTPSSE && hasOpenAIWSSSEUnsupportedTool(payload) {
-		return nil, errOpenAIWSSSEUnsupportedTool
-	}
 	payloadStrategy, removedKeys := applyOpenAIWSRetryPayloadStrategy(payload, attempt)
 	turnState := ""
 	turnMetadata := ""
@@ -445,9 +442,11 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			return nil, err
 		}
 	}
-	if err := s.performOpenAIWSGeneratePrewarm(ctx, lease, decision, payload, previousResponseID, reqBody, account, stateStore, groupID); err != nil {
-		cleanExit = errors.Is(err, errOpenAIWSSSEPayloadTooLarge)
-		return nil, err
+	if !isControlledExperiment(ctx) {
+		if err := s.performOpenAIWSGeneratePrewarm(ctx, lease, decision, payload, previousResponseID, reqBody, account, stateStore, groupID); err != nil {
+			cleanExit = errors.Is(err, errOpenAIWSSSEPayloadTooLarge)
+			return nil, err
+		}
 	}
 	if err := checkBeforeWrite(); err != nil {
 		return nil, err
@@ -455,6 +454,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	var probeAttempt *pelicanTestUsage
 	sendRequest := func(value any) error {
 		if err := s.acquireOpenAIRPMForSend(ctx, account); err != nil {
+			return err
+		}
+		if err := controlledSubmission(ctx, "native_ws"); err != nil {
 			return err
 		}
 		probeAttempt = beginProbeStreamAttempt(ctx, mappedModel)

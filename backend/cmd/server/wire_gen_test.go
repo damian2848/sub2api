@@ -92,6 +92,7 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		nil, // openAIGateway
 		nil, // prismAccounts
 		nil, // scheduledTestRunner
+		nil, // controlledExperiment
 		nil, // accountOps
 		nil, // accountTokenGuard
 		nil, // accountTokenGuardV2

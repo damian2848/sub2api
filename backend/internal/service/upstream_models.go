@@ -625,7 +625,7 @@ func upstreamModelRegistryBaseURL(account *Account) string {
 		return ""
 	}
 	switch {
-	case account.IsOpenAI() || account.IsCNProvider() || account.IsOpenCodeGo():
+	case account.IsOpenAI() || account.IsMultiProtocolAPIKey():
 		return account.GetOpenAIFormatBaseURL()
 	case account.IsGrok():
 		return account.GetGrokBaseURL()
@@ -736,6 +736,17 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 		models, err := s.fetchAntigravityOAuthUpstreamModels(ctx, account)
 		return models, nil, err
 	}
+	if account.IsExcelBPSEnabled() && s.openaiGatewayService != nil {
+		response, err := s.openaiGatewayService.FetchOpenAIModelsList(ctx, account)
+		if err != nil {
+			return nil, nil, newUpstreamModelSyncUpstreamError("Excel BPS model discovery failed", err)
+		}
+		models, _, err := extractUpstreamModelCatalog(response.Body, false)
+		if err != nil {
+			return nil, nil, newUpstreamModelSyncUpstreamError("Invalid Excel BPS model catalog", err)
+		}
+		return models, response.Body, nil
+	}
 
 	if s.httpUpstream == nil {
 		return nil, nil, newUpstreamModelSyncConfigError("Upstream HTTP client is not configured", nil)
@@ -792,9 +803,8 @@ func (s *AccountTestService) buildUpstreamModelsRequest(ctx context.Context, acc
 		return s.buildAntigravityAPIKeyModelsRequest(ctx, account)
 	case account.IsGrok():
 		return s.buildGrokUpstreamModelsRequest(ctx, account)
-	case account.IsOpenAI() || account.IsCNProvider() || account.IsOpenCodeGo():
-		// 国产 OpenAI 兼容供应商（kimi/zhipu/deepseek）与 OpenCode Go
-		// 复用 OpenAI /v1/models 探测。
+	case account.IsOpenAI() || account.IsMultiProtocolAPIKey():
+		// 多协议 API Key 供应商（国产厂商与聚合平台）复用 OpenAI /v1/models 探测。
 		return s.buildOpenAIUpstreamModelsRequest(ctx, account)
 	case account.IsGemini():
 		return s.buildGeminiUpstreamModelsRequest(ctx, account)

@@ -4056,7 +4056,7 @@
                       </tr>
                     </thead>
                     <tbody class="space-y-2">
-                      <tr v-for="p in (['anthropic', 'openai', 'gemini', 'antigravity', 'grok', 'typesafe'] as const)" :key="p" class="align-top">
+                      <tr v-for="p in platformQuotaRows(form.default_platform_quotas)" :key="p" class="align-top">
                         <td class="pr-4 py-1">
                           <span class="font-mono text-xs text-gray-700 dark:text-gray-300">{{ p }}</span>
                         </td>
@@ -4391,7 +4391,7 @@
                             </tr>
                           </thead>
                           <tbody>
-                            <tr v-for="p in (['anthropic', 'openai', 'gemini', 'antigravity', 'grok', 'typesafe'] as const)" :key="`${authSource.source}-pq-${p}`" class="align-top">
+                            <tr v-for="p in platformQuotaRows(authSourceDefaults[authSource.source].platform_quotas)" :key="`${authSource.source}-pq-${p}`" class="align-top">
                               <td class="pr-4 py-1">
                                 <span class="font-mono text-xs text-gray-700 dark:text-gray-300">{{ p }}</span>
                               </td>
@@ -5528,6 +5528,20 @@
                   <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
                     {{ t("admin.settings.gatewayForwarding.grokDefaultBaseURLModeHint") }}
                   </p>
+                </div>
+                <div class="flex items-center justify-between gap-5 md:col-span-2">
+                  <div>
+                    <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                      {{ t("admin.settings.gatewayForwarding.grokVideoSourceURL") }}
+                    </label>
+                    <p class="mt-0.5 max-w-xl text-xs text-gray-500 dark:text-gray-400">
+                      {{ t("admin.settings.gatewayForwarding.grokVideoSourceURLHint") }}
+                    </p>
+                  </div>
+                  <Toggle
+                    v-model="form.grok_video_source_url_enabled"
+                    data-testid="grok-video-source-url-toggle"
+                  />
                 </div>
 
               <!-- OpenAI Responses 首 token 统计 -->
@@ -7354,8 +7368,20 @@
         </div>
         <!-- /Tab: Login Agreement -->
 
-	        <!-- Tab: Features (功能开关) -->
+        <!-- Tab: Features (功能开关) -->
         <div v-show="activeTab === 'features'" class="space-y-6">
+        <div class="card" data-testid="protocol-feature-switches">
+          <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.settings.features.protocolSwitches.title') }}</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.settings.features.protocolSwitches.description') }}</p>
+          </div>
+          <div class="space-y-5 p-6">
+            <div class="flex items-center justify-between gap-4">
+              <span id="settings-excel-bps-enabled-label" class="font-medium text-gray-900 dark:text-white">{{ t('admin.settings.features.protocolSwitches.excelBps') }}</span>
+              <Toggle v-model="form.excel_bps_enabled" aria-labelledby="settings-excel-bps-enabled-label" data-testid="excel-bps-enabled-toggle" />
+            </div>
+          </div>
+        </div>
         <div class="card" data-testid="request-capture-settings">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
             <h2 id="settings-section-request-capture" tabindex="-1" class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.requestCapture.title') }}</h2>
@@ -7637,6 +7663,111 @@
               </div>
               <Toggle v-model="form.plugin_management_enabled" />
             </div>
+          </div>
+        </div>
+
+        <div class="card" data-testid="support-ticket-settings">
+          <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+            <h2 id="settings-section-features-support-tickets" tabindex="-1" class="text-lg font-semibold text-gray-900 dark:text-white">
+              {{ t('admin.settings.features.supportTickets.title') }}
+            </h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              {{ t('admin.settings.features.supportTickets.description') }}
+            </p>
+            <p v-if="form.support_ticket_enabled" class="mt-1.5 text-xs">
+              <router-link
+                to="/admin/support-tickets"
+                class="inline-flex items-center gap-1 text-primary-600 hover:underline dark:text-primary-400"
+              >
+                {{ t('admin.settings.features.supportTickets.openPage') }}
+                <span aria-hidden="true">→</span>
+              </router-link>
+            </p>
+          </div>
+          <div class="space-y-5 p-6">
+            <div class="flex items-center justify-between gap-4">
+              <div>
+                <label for="support-ticket-enabled" class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  {{ t('admin.settings.features.supportTickets.enabled') }}
+                </label>
+                <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.features.supportTickets.enabledHint') }}
+                </p>
+              </div>
+              <Toggle id="support-ticket-enabled" v-model="form.support_ticket_enabled" />
+            </div>
+            <template v-if="form.support_ticket_enabled">
+              <div>
+                <span class="input-label">{{ t('admin.settings.features.supportTickets.categories') }}</span>
+                <div class="space-y-2" data-testid="support-ticket-categories">
+                  <div class="grid gap-2 sm:grid-cols-2">
+                    <div
+                      v-for="(category, index) in form.support_ticket_config.categories"
+                      :key="index"
+                      class="flex items-center gap-2"
+                    >
+                      <input
+                        v-model="form.support_ticket_config.categories[index]"
+                        class="input flex-1"
+                        :maxlength="SUPPORT_TICKET_CATEGORY_MAX"
+                        :placeholder="t('admin.settings.features.supportTickets.categoryPlaceholder')"
+                        :aria-label="category || t('admin.settings.features.supportTickets.categoryPlaceholder')"
+                      />
+                      <button
+                        type="button"
+                        class="btn btn-secondary px-2"
+                        :aria-label="t('admin.settings.features.supportTickets.removeCategory')"
+                        @click="form.support_ticket_config.categories.splice(index, 1)"
+                      >
+                        <Icon name="x" size="xs" class="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    v-if="form.support_ticket_config.categories.length < SUPPORT_TICKET_MAX_CATEGORIES"
+                    type="button"
+                    class="btn btn-secondary btn-sm"
+                    data-testid="support-ticket-add-category"
+                    @click="form.support_ticket_config.categories.push('')"
+                  >
+                    + {{ t('admin.settings.features.supportTickets.addCategory') }}
+                  </button>
+                </div>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.features.supportTickets.categoriesHint', { max: SUPPORT_TICKET_MAX_CATEGORIES, length: SUPPORT_TICKET_CATEGORY_MAX }) }}
+                </p>
+              </div>
+              <div class="space-y-1">
+                <label for="support-ticket-max-open" class="input-label">{{ t('admin.settings.features.supportTickets.maxOpen') }}</label>
+                <input
+                  id="support-ticket-max-open"
+                  v-model.number="form.support_ticket_config.max_open_per_user"
+                  class="input w-40"
+                  type="number"
+                  min="1"
+                  :max="SUPPORT_TICKET_MAX_OPEN_LIMIT"
+                  step="1"
+                  required
+                />
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.features.supportTickets.maxOpenHint', { max: SUPPORT_TICKET_MAX_OPEN_LIMIT }) }}
+                </p>
+              </div>
+              <div class="space-y-1">
+                <label for="support-ticket-notice" class="input-label">{{ t('admin.settings.features.supportTickets.notice') }}</label>
+                <textarea
+                  id="support-ticket-notice"
+                  v-model="form.support_ticket_config.notice"
+                  rows="3"
+                  class="input"
+                  :maxlength="SUPPORT_TICKET_NOTICE_MAX"
+                  :placeholder="t('admin.settings.features.supportTickets.noticePlaceholder')"
+                ></textarea>
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.features.supportTickets.noticeHint', { max: SUPPORT_TICKET_NOTICE_MAX }) }}
+                </p>
+              </div>
+            </template>
           </div>
         </div>
 
@@ -9204,6 +9335,7 @@
 <script setup lang="ts">
 import { excelBPSImageLimits } from "@/utils/excelBPSImageLimits";
 import { ref, reactive, computed, onMounted, watch } from "vue";
+import { listPlatformIds } from "@/constants/platformCatalog";
 import { useI18n } from "vue-i18n";
 import { useSettingsNavigation } from "@/composables/useSettingsNavigation";
 import type { SettingsTab } from "@/utils/settingsSearch";
@@ -9243,6 +9375,12 @@ import type {
 import type { ProviderInstance } from "@/types/payment";
 import AppLayout from "@/components/layout/AppLayout.vue";
 import Icon from "@/components/icons/Icon.vue";
+import {
+  SUPPORT_TICKET_CATEGORY_MAX,
+  SUPPORT_TICKET_MAX_CATEGORIES,
+  SUPPORT_TICKET_MAX_OPEN_LIMIT,
+  SUPPORT_TICKET_NOTICE_MAX,
+} from "@/api/supportTickets";
 import Select, { type SelectOption } from "@/components/common/Select.vue";
 import {
   SITE_BILLING_MODES,
@@ -9990,14 +10128,21 @@ type SettingsForm = Omit<
   payment_recharge_bonus_tiers: RechargeBonusTierDraft[];
   payment_recharge_bonus_mode: RechargeBonusMode;
   payment_recharge_bonus_notice: string;
-  // 系统全局平台限额 map；form 内始终归一化为全 4 平台对象（模板非空绑定依赖此不变量）
+  // 系统全局平台限额 map；form 内始终归一化为全部平台对象（模板非空绑定依赖此不变量）
   default_platform_quotas: DefaultPlatformQuotasMap;
   account_scheduling_thresholds: ReturnType<typeof normalizeAccountSchedulingThresholdsMap>;
 };
 
 const schedulingThresholdPlatforms = SCHEDULING_THRESHOLD_PLATFORMS;
 
+// 平台限额表格的行：平台清单顺序中、已在归一化 map 里的平台（清单晚于设置加载时
+// 不渲染尚未归一化的平台，保持模板非空绑定）。
+function platformQuotaRows(map: DefaultPlatformQuotasMap | undefined): string[] {
+  return listPlatformIds().filter((platform) => !!map?.[platform]);
+}
+
 const form = reactive<SettingsForm>({
+  excel_bps_enabled: true,
   registration_enabled: true,
   email_verify_enabled: false,
   registration_email_suffix_whitelist: [],
@@ -10209,6 +10354,7 @@ const form = reactive<SettingsForm>({
   grok_default_text_model: "grok-4.5",
   grok_cross_client_model_map_enabled: false,
   grok_default_base_url_mode: "cli",
+  grok_video_source_url_enabled: false,
   // Identity patch (Claude -> Gemini)
   enable_identity_patch: true,
   identity_patch_prompt: "",
@@ -10298,6 +10444,9 @@ const form = reactive<SettingsForm>({
   model_plaza_description: '',
   // Plugin management menu visibility; plugin runtime is unaffected.
   plugin_management_enabled: false,
+  // Support tickets (网站工单) switch + form config
+  support_ticket_enabled: false,
+  support_ticket_config: { categories: [] as string[], max_open_per_user: 5, notice: '' },
   // Affiliate (邀请返利) feature switch
   affiliate_enabled: false,
   // Allow user view error requests
@@ -11409,6 +11558,7 @@ async function loadSettings() {
     form.channel_monitor_hide_user_ranking = Boolean(
       settings.channel_monitor_hide_user_ranking
     );
+    form.excel_bps_enabled = settings.excel_bps_enabled !== false;
     form.login_agreement_updated_at =
       settings.login_agreement_updated_at || "2026-03-31";
     form.login_agreement_documents =
@@ -11847,6 +11997,7 @@ async function saveSettings() {
     }
 
     const payload: UpdateSettingsRequest = {
+      excel_bps_enabled: form.excel_bps_enabled,
       registration_enabled: form.registration_enabled,
       email_verify_enabled: form.email_verify_enabled,
       registration_email_suffix_whitelist:
@@ -12024,6 +12175,7 @@ async function saveSettings() {
       grok_cross_client_model_map_enabled:
         form.grok_cross_client_model_map_enabled,
       grok_default_base_url_mode: form.grok_default_base_url_mode,
+      grok_video_source_url_enabled: form.grok_video_source_url_enabled,
       enable_identity_patch: form.enable_identity_patch,
       identity_patch_prompt: form.identity_patch_prompt,
       min_claude_code_version: form.min_claude_code_version,
@@ -12185,6 +12337,13 @@ async function saveSettings() {
       model_plaza_require_auth: form.model_plaza_require_auth,
       model_plaza_description: form.model_plaza_description,
       plugin_management_enabled: form.plugin_management_enabled,
+      // Support tickets: blank category rows are dropped; the server trims and deduplicates.
+      support_ticket_enabled: form.support_ticket_enabled,
+      support_ticket_config: {
+        categories: form.support_ticket_config.categories.map((category) => category.trim()).filter(Boolean),
+        max_open_per_user: Number(form.support_ticket_config.max_open_per_user) || 5,
+        notice: form.support_ticket_config.notice,
+      },
       // Affiliate (邀请返利) feature switch
       affiliate_enabled: form.affiliate_enabled,
       allow_user_view_error_requests: form.allow_user_view_error_requests,

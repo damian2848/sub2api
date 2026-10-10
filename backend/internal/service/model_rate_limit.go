@@ -90,6 +90,10 @@ func (a *Account) modelRateLimitKeysForRequest(ctx context.Context, requestedMod
 		if isAnthropicFableModel(modelKey) && modelKey != anthropicFableRateLimitKey {
 			keys = append(keys, anthropicFableRateLimitKey)
 		}
+	case PlatformCline:
+		if walletKey := clineWalletRateLimitKey(modelKey); walletKey != "" {
+			keys = append(keys, walletKey)
+		}
 	}
 	return keys
 }
@@ -187,6 +191,43 @@ func (a *Account) modelRateLimitResetAt(scope string) *time.Time {
 		return nil
 	}
 	return &resetAt
+}
+
+// modelRateLimitReason 返回指定 scope 冷却记录中的原因；没有记录时为空。
+func (a *Account) modelRateLimitReason(scope string) string {
+	if a == nil || a.Extra == nil {
+		return ""
+	}
+	rawLimits, _ := a.Extra[modelRateLimitsKey].(map[string]any)
+	rawLimit, _ := rawLimits[scope].(map[string]any)
+	reason, _ := rawLimit["reason"].(string)
+	return reason
+}
+
+// modelCapabilityRejected reports only an unexpired, explicit upstream model
+// rejection. Ordinary quota/capacity cooldowns and unknown reasons stay faults.
+func (a *Account) modelCapabilityRejected(scope string) bool {
+	if !a.isRateLimitActiveForKey(scope) {
+		return false
+	}
+	switch a.modelRateLimitReason(scope) {
+	case upstreamModelNotFoundReason, upstreamModelNotFound401Reason, upstreamCodexPlanGatedModelReason:
+		return true
+	default:
+		return false
+	}
+}
+
+// Use the actual outbound model, including Codex alias normalization, so a
+// public alias cannot hide a previously observed model capability rejection.
+func (a *Account) modelCapabilityRejectedForRequest(ctx context.Context, model string) bool {
+	scope := a.GetMappedModel(model)
+	if a.IsOpenAICompatible() {
+		scope = resolveOpenAIAccountUpstreamModelForRequest(a, model, false)
+	} else if a.Platform == PlatformAntigravity {
+		scope = resolveFinalAntigravityModelKey(ctx, a, model)
+	}
+	return a.modelCapabilityRejected(scope)
 }
 
 func setAccountModelRateLimitSnapshot(account *Account, scope string, resetAt time.Time, reason string, now time.Time) {

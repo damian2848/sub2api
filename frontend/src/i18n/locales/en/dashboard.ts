@@ -173,6 +173,27 @@ export default {
     lastUsedAt: 'Last Used',
     lastUsedIP: 'Last Used IP',
     useKey: 'Use Key',
+    quickConfigure: 'Quick Configure',
+    quickConfigureModal: {
+      title: 'Configure Codex Automatically',
+      warning: 'This script contains the current API key. Run it only on your own computer and never share or commit it.',
+      description: 'Download and run the script to generate the Codex configuration and replace the existing file. Windows / macOS show the result in a system dialog; if unavailable, check the terminal output.',
+      macLinux: 'macOS / Linux',
+      windows: 'Windows',
+      importCatalog: 'Include the model catalog for this API key',
+      importCatalogHint: 'Off by default. When enabled, the script fetches available models and also writes codex-models.json.',
+      importCatalogLoading: 'Fetching the model catalog…',
+      importCatalogReady: 'Model catalog ready with {count} models.',
+      importCatalogError: 'Could not fetch the model catalog. Uncheck and retry, or verify the API key.',
+      copy: 'Copy Script',
+      copied: 'Copied',
+      download: 'Download Script',
+      copySuccessMessage: 'The script was copied. Paste it into a file and run it to finish configuring Codex.',
+      downloadSuccessMessage: 'The script was downloaded. Run it, wait for the success message, then restart Codex.',
+      errorMessage: 'The operation did not complete. Try again or check the browser clipboard and download permissions.',
+      runTitle: 'Run with',
+      windowsRun: 'Download the .cmd file and double-click it. No extra packages are needed. Check the system dialog or terminal result, then press any key to close the window. Fully quit and restart Codex after success.'
+    },
     useKeyModal: {
       title: 'Use API Key',
       description:
@@ -415,6 +436,12 @@ export default {
     latencyDuration: 'Total',
     latencyTps: 'Avg TPS',
     latencyTpsHint: 'Average TPS = output tokens ÷ total duration (seconds). Includes waiting time and any reasoning tokens reported in output usage; not model generation speed.',
+    latencyTpsUnavailable: {
+      singleToken: 'Only 1 output token was recorded, so no speed can be computed. This is usually an interrupted stream (upstream error or client disconnect): the upstream never sent the final usage, so only the initial 1-token count was recorded.',
+      noOutput: 'No output tokens were recorded, so no speed can be computed.',
+      noDuration: 'No total duration was recorded, so no speed can be computed.',
+      media: 'TPS is not computed for image and video requests.'
+    },
     time: 'Time',
     ws: 'WS',
     stream: 'Stream',
@@ -628,6 +655,7 @@ export default {
   pelicanShowcase: {
     title: 'Pelican Showcase',
     description: 'Each group answers the same drawing prompt on a schedule. Compare model quality by looking at the results.',
+    notice: "The Pelican test limits the model's maximum tokens, so some pelicans shown here may have no legs or wheels that don't turn. This is normal. If the style is right, the model is not degraded.",
     allGroups: 'All groups',
     keepRule: 'Latest {count} per group',
     retentionRule: 'Auto-removed after {days} days',
