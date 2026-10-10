@@ -4,10 +4,12 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
 
 type settingPublicRepoStub struct {
@@ -114,6 +116,23 @@ func TestSettingService_ChannelMonitorHideThroughputDefaultsToPrivate(t *testing
 		}}, &config.Config{}).GetChannelMonitorRuntime(context.Background())
 		require.False(t, runtime.HideThroughput, "value=%q", value)
 	}
+}
+
+func TestSettingService_PublicProtocolSwitchesAreAvailableAtBoot(t *testing.T) {
+	public, err := NewSettingService(&settingPublicRepoStub{values: map[string]string{
+		SettingKeyExcelBPSEnabled: "false",
+	}}, &config.Config{}).GetPublicSettings(context.Background())
+	require.NoError(t, err)
+	require.False(t, public.ExcelBPSEnabled)
+
+	injected, err := NewSettingService(&settingPublicRepoStub{values: map[string]string{
+		SettingKeyExcelBPSEnabled: "false",
+	}}, &config.Config{}).GetPublicSettingsForInjection(context.Background())
+	require.NoError(t, err)
+	raw, err := json.Marshal(injected)
+	require.NoError(t, err)
+	require.True(t, gjson.GetBytes(raw, "excel_bps_enabled").Exists())
+	require.False(t, gjson.GetBytes(raw, "excel_bps_enabled").Bool())
 }
 
 func TestSettingService_ChannelMonitorShowQuotaFailsClosed(t *testing.T) {

@@ -14,6 +14,11 @@ export default {
         payment: 'Payment',
       },
       features: {
+        protocolSwitches: {
+          title: 'Protocol features',
+          description: 'Turning a protocol off stops using it immediately and hides its options in account editors.',
+          excelBps: 'Excel / BPS protocol',
+        },
         excelBpsImages: {
           mode: 'Image transport',
           modeRelay: 'Temporary HTTPS relay (default)',
@@ -113,6 +118,23 @@ export default {
           requireAuthHint: 'When on, anonymous visitors are redirected to the login page; when off, the page is public and anonymous visitors only see non-exclusive groups.',
           priceDescription: 'Pricing notes (Markdown)',
           priceDescriptionHint: 'Rendered at the top of the plaza page. Use it for billing rules, exchange rates, promotions, etc.',
+        },
+        supportTickets: {
+          title: 'Support Tickets',
+          description: 'Users open tickets on the site and admins answer them here. Text only; new messages show a red badge in the menu and no email is sent.',
+          enabled: 'Enable support tickets',
+          enabledHint: 'When off, the menu entries are hidden for users and admins. Existing tickets are kept and come back when you turn it on again.',
+          openPage: 'Open ticket management',
+          categories: 'Ticket categories',
+          categoriesHint: 'Users pick one when opening a ticket. Remove them all to go without categories. Up to {max}, each at most {length} characters.',
+          categoryPlaceholder: 'Category name',
+          addCategory: 'Add category',
+          removeCategory: 'Remove category',
+          maxOpen: 'Unclosed tickets per user',
+          maxOpenHint: '1–{max}; closed tickets do not count.',
+          notice: 'Note above the form',
+          noticePlaceholder: 'For example: we answer 9:00–21:00, usually within 2 hours',
+          noticeHint: 'Shown above the new-ticket form. Optional, up to {max} characters.',
         },
         pluginManagement: {
           title: 'Plugin Management',

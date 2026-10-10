@@ -21,6 +21,7 @@ const {
   createOpenAICodexPATMock,
   createCredentialOperationsMock,
   authIsSimpleMode,
+  publicSettings,
 } = vi.hoisted(() => ({
   createAccountMock: vi.fn(),
   generateAuthUrlMock: vi.fn(),
@@ -33,6 +34,7 @@ const {
   createOpenAICodexPATMock: vi.fn(),
   createCredentialOperationsMock: vi.fn(),
   authIsSimpleMode: { value: true },
+  publicSettings: { value: undefined as Record<string, unknown> | undefined },
 }))
 
 vi.mock('@/stores/app', () => ({
@@ -40,6 +42,9 @@ vi.mock('@/stores/app', () => ({
     showError: vi.fn(),
     showSuccess: vi.fn(),
     showWarning: showWarningMock,
+    get cachedPublicSettings() {
+      return publicSettings.value
+    },
   }),
 }))
 
@@ -316,6 +321,39 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expectWSAcceleration(payload.extra, clicks === 1)
     expect(wrapper.emitted('created')).toHaveLength(1)
     expect(wrapper.emitted('close')).toHaveLength(1)
+  })
+
+  it('hides the BPS OAuth entry while the BPS master switch is off', async () => {
+    publicSettings.value = { excel_bps_enabled: false }
+    try {
+      const wrapper = await prepareWSAcceleration(0)
+      expect(wrapper.find('[data-testid="openai-bps-oauth"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="openai-two-fa"]').exists()).toBe(true)
+    } finally {
+      publicSettings.value = undefined
+    }
+  })
+
+  it('creates BPS OAuth through the Excel client and enables only the selected BPS models', async () => {
+    const wrapper = await prepareWSAcceleration(0)
+    await wrapper.get('[data-testid="openai-bps-oauth"]').trigger('click')
+    expect(wrapper.find('[data-testid="bps-oauth-models"]').exists()).toBe(true)
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    const flow = wrapper.getComponent(OAuthAuthorizationFlowStub)
+    flow.vm.$emit('generate-url')
+    await flushPromises()
+    expect(generateAuthUrlMock).toHaveBeenLastCalledWith('/admin/openai/generate-auth-url', { oauth_client: 'excel' })
+    exchangeCodeMock.mockResolvedValueOnce({ access_token: 'excel-at', refresh_token: 'excel-rt', client_id: 'app_fnr0pYvVwwFDocDumLG3H2Bp', expires_at: 1900000000 })
+    flow.vm.authCode = 'code'
+    flow.vm.oauthState = 'state'
+    await flushPromises()
+    await selectButtonByText(wrapper, 'admin.accounts.oauth.completeAuth')
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    expect(createAccountMock.mock.calls[0]?.[0]).toMatchObject({
+      type: 'oauth', platform: 'openai',
+      credentials: { access_token: 'excel-at', refresh_token: 'excel-rt', client_id: 'app_fnr0pYvVwwFDocDumLG3H2Bp' },
+      extra: { openai_excel_bps: true, openai_excel_bps_models: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra'] }
+    })
   })
 
   it.each([0, 1, 2].flatMap(clicks => [

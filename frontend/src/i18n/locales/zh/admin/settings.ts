@@ -14,6 +14,11 @@ export default {
         payment: '支付设置',
       },
       features: {
+        protocolSwitches: {
+          title: '协议功能',
+          description: '关闭后立即停止使用对应协议，并隐藏账号编辑中的相关选项。',
+          excelBps: 'Excel / BPS 协议',
+        },
         excelBpsImages: {
           mode: '图片传输方式',
           modeRelay: '临时 HTTPS 中转（默认）',
@@ -113,6 +118,23 @@ export default {
           requireAuthHint: '开启后未登录访问将跳转登录页；关闭则公开可见，匿名访客仅展示非专属分组。',
           priceDescription: '价格说明（Markdown）',
           priceDescriptionHint: '展示在模型广场页面顶部，可用于说明计费规则、汇率、优惠活动等。',
+        },
+        supportTickets: {
+          title: '网站工单',
+          description: '用户在网站上提交问题，管理员在后台回复。只支持文字，有新消息时菜单上显示红点，不发邮件。',
+          enabled: '启用网站工单',
+          enabledHint: '关闭后用户和管理员的菜单都会隐藏，已有的工单会保留，重新打开后还在。',
+          openPage: '打开工单管理',
+          categories: '工单分类',
+          categoriesHint: '用户提交时从这里选。全部删掉表示不分类。最多 {max} 个，每个不超过 {length} 个字。',
+          categoryPlaceholder: '分类名称',
+          addCategory: '添加分类',
+          removeCategory: '删除分类',
+          maxOpen: '每个用户最多同时开着的工单数',
+          maxOpenHint: '1–{max} 张，已关闭的不算。',
+          notice: '提交页说明',
+          noticePlaceholder: '例如：工作时间 9:00–21:00，一般 2 小时内回复',
+          noticeHint: '显示在用户提交工单的表单上方，可以不填，最多 {max} 字。',
         },
         pluginManagement: {
           title: '插件管理',

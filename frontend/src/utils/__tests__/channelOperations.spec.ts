@@ -26,7 +26,7 @@ describe('channel operations navigation', () => {
     expect(sidebar[0]).not.toHaveProperty('children')
     expect(entries.map(entry => entry.path)).toEqual(expect.arrayContaining([
       `${CHANNEL_OPERATIONS_PATH}/bps`, `${CHANNEL_OPERATIONS_PATH}/harvest`, `${CHANNEL_OPERATIONS_PATH}/prism`,
-      `${CHANNEL_OPERATIONS_PATH}/smart/quality`, `${CHANNEL_OPERATIONS_PATH}/smart/priority`, `${CHANNEL_OPERATIONS_PATH}/smart/alerts`,
+      `${CHANNEL_OPERATIONS_PATH}/smart/quality`, `${CHANNEL_OPERATIONS_PATH}/smart/priority`, `${CHANNEL_OPERATIONS_PATH}/smart/experiments`, `${CHANNEL_OPERATIONS_PATH}/smart/alerts`,
       `${CHANNEL_OPERATIONS_PATH}/credentials`, `${CHANNEL_OPERATIONS_PATH}/credentials/legacy`, `${CHANNEL_OPERATIONS_PATH}/pelican`,
     ]))
     expect(new Set(entries.map(entry => entry.path)).size).toBe(entries.length)

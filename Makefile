@@ -11,6 +11,11 @@ FRONTEND_CRITICAL_VITEST := \
 	src/features/channel-monitor-v2/__tests__/MonitorCandySettings.spec.ts \
 	src/features/channel-monitor-v2/__tests__/MonitorStatusCards.spec.ts \
 	src/features/channel-monitor-v2/__tests__/monitorCards.spec.ts \
+	src/features/support-tickets/__tests__/supportTickets.spec.ts \
+	src/features/support-tickets/__tests__/TicketComponents.spec.ts \
+	src/views/user/__tests__/SupportTicketsViews.spec.ts \
+	src/views/admin/__tests__/SupportTicketsAdmin.spec.ts \
+	src/stores/__tests__/supportTickets.spec.ts \
 	src/views/admin/__tests__/AccountQualityView.spec.ts \
 	src/views/admin/__tests__/AccountsView.bulkEdit.spec.ts \
 	src/utils/__tests__/qualityRulePatch.spec.ts \
@@ -25,6 +30,8 @@ FRONTEND_CRITICAL_VITEST := \
 	src/views/user/__tests__/UsageEntryView.spec.ts \
 	src/components/admin/usage/__tests__/UsageFilters.spec.ts \
 	src/components/admin/usage/__tests__/UsageTimingDialog.spec.ts \
+	src/components/admin/usage/__tests__/UsageTable.spec.ts \
+	src/utils/__tests__/usageTps.spec.ts \
 	src/views/admin/ops/components/__tests__/OpsErrorDetailModal.spec.ts \
 	src/router/__tests__/feature-access.spec.ts \
 	src/api/admin/__tests__/requestCaptures.spec.ts \

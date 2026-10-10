@@ -17,6 +17,7 @@ export const channelOperationsSections = {
   smart: [
     { path: `${CHANNEL_OPERATIONS_PATH}/smart/quality`, label: 'qualityOps.title' },
     { path: `${CHANNEL_OPERATIONS_PATH}/smart/priority`, label: 'priorityScheduling.title' },
+    { path: `${CHANNEL_OPERATIONS_PATH}/smart/experiments`, label: 'controlledExperiments.title' },
     { path: `${CHANNEL_OPERATIONS_PATH}/smart/alerts`, label: 'accountOps.title' },
   ],
   credentials: [

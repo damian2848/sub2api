@@ -267,6 +267,31 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/support-tickets',
+    name: 'SupportTickets',
+    component: () => import('@/views/user/SupportTicketsView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: false,
+      requiresSupportTickets: true,
+      title: 'Support Tickets',
+      titleKey: 'supportTickets.title',
+      descriptionKey: 'supportTickets.description'
+    }
+  },
+  {
+    path: '/support-tickets/:id(\\d+)',
+    name: 'SupportTicketDetail',
+    component: () => import('@/views/user/SupportTicketDetailView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: false,
+      requiresSupportTickets: true,
+      title: 'Support Tickets',
+      titleKey: 'supportTickets.title'
+    }
+  },
+  {
     path: '/available-channels',
     name: 'UserAvailableChannels',
     component: () => import('@/views/user/AvailableChannelsView.vue'),
@@ -568,6 +593,31 @@ const routes: RouteRecordRaw[] = [
       title: 'Announcements',
       titleKey: 'admin.announcements.title',
       descriptionKey: 'admin.announcements.description'
+    }
+  },
+  {
+    path: '/admin/support-tickets',
+    name: 'AdminSupportTickets',
+    component: () => import('@/views/admin/SupportTicketsView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      requiresSupportTickets: true,
+      title: 'Support Tickets',
+      titleKey: 'supportTickets.title',
+      descriptionKey: 'supportTickets.adminDescription'
+    }
+  },
+  {
+    path: '/admin/support-tickets/:id(\\d+)',
+    name: 'AdminSupportTicketDetail',
+    component: () => import('@/views/admin/SupportTicketDetailView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      requiresSupportTickets: true,
+      title: 'Support Tickets',
+      titleKey: 'supportTickets.title'
     }
   },
   {
@@ -945,7 +995,7 @@ router.beforeEach(async (to, _from, next) => {
   // 公共设置可能尚未加载（App.vue 的 onMounted 异步拉取晚于首次导航，且纯静态部署
   // 无 __APP_CONFIG__ 注入）。此时 cachedPublicSettings 为空会把 payment/risk_control
   // 误判为“未启用”而错误拦截，故这里先确保设置加载完成。
-  if ((to.meta.requiresPayment || to.meta.requiresRiskControl || to.meta.requiresSubscription) && !appStore.publicSettingsLoaded) {
+  if ((to.meta.requiresPayment || to.meta.requiresRiskControl || to.meta.requiresSubscription || to.meta.requiresSupportTickets) && !appStore.publicSettingsLoaded) {
     try {
       await appStore.fetchPublicSettings()
     } catch (error) {
@@ -968,6 +1018,16 @@ router.beforeEach(async (to, _from, next) => {
     to.meta.requiresRiskControl &&
     appStore.publicSettingsLoaded &&
     appStore.cachedPublicSettings?.risk_control_enabled === false
+  ) {
+    next(authStore.isAdmin ? '/admin/settings' : '/dashboard')
+    return
+  }
+
+  // 网站工单是 opt-in 开关：设置加载成功且未开启时拦截直达。
+  if (
+    to.meta.requiresSupportTickets &&
+    appStore.publicSettingsLoaded &&
+    appStore.cachedPublicSettings?.support_ticket_enabled !== true
   ) {
     next(authStore.isAdmin ? '/admin/settings' : '/dashboard')
     return

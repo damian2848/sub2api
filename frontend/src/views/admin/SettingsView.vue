@@ -7354,8 +7354,20 @@
         </div>
         <!-- /Tab: Login Agreement -->
 
-	        <!-- Tab: Features (功能开关) -->
+        <!-- Tab: Features (功能开关) -->
         <div v-show="activeTab === 'features'" class="space-y-6">
+        <div class="card" data-testid="protocol-feature-switches">
+          <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.settings.features.protocolSwitches.title') }}</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.settings.features.protocolSwitches.description') }}</p>
+          </div>
+          <div class="space-y-5 p-6">
+            <div class="flex items-center justify-between gap-4">
+              <span id="settings-excel-bps-enabled-label" class="font-medium text-gray-900 dark:text-white">{{ t('admin.settings.features.protocolSwitches.excelBps') }}</span>
+              <Toggle v-model="form.excel_bps_enabled" aria-labelledby="settings-excel-bps-enabled-label" data-testid="excel-bps-enabled-toggle" />
+            </div>
+          </div>
+        </div>
         <div class="card" data-testid="request-capture-settings">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
             <h2 id="settings-section-request-capture" tabindex="-1" class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.requestCapture.title') }}</h2>
@@ -7637,6 +7649,111 @@
               </div>
               <Toggle v-model="form.plugin_management_enabled" />
             </div>
+          </div>
+        </div>
+
+        <div class="card" data-testid="support-ticket-settings">
+          <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+            <h2 id="settings-section-features-support-tickets" tabindex="-1" class="text-lg font-semibold text-gray-900 dark:text-white">
+              {{ t('admin.settings.features.supportTickets.title') }}
+            </h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              {{ t('admin.settings.features.supportTickets.description') }}
+            </p>
+            <p v-if="form.support_ticket_enabled" class="mt-1.5 text-xs">
+              <router-link
+                to="/admin/support-tickets"
+                class="inline-flex items-center gap-1 text-primary-600 hover:underline dark:text-primary-400"
+              >
+                {{ t('admin.settings.features.supportTickets.openPage') }}
+                <span aria-hidden="true">→</span>
+              </router-link>
+            </p>
+          </div>
+          <div class="space-y-5 p-6">
+            <div class="flex items-center justify-between gap-4">
+              <div>
+                <label for="support-ticket-enabled" class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  {{ t('admin.settings.features.supportTickets.enabled') }}
+                </label>
+                <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.features.supportTickets.enabledHint') }}
+                </p>
+              </div>
+              <Toggle id="support-ticket-enabled" v-model="form.support_ticket_enabled" />
+            </div>
+            <template v-if="form.support_ticket_enabled">
+              <div>
+                <span class="input-label">{{ t('admin.settings.features.supportTickets.categories') }}</span>
+                <div class="space-y-2" data-testid="support-ticket-categories">
+                  <div class="grid gap-2 sm:grid-cols-2">
+                    <div
+                      v-for="(category, index) in form.support_ticket_config.categories"
+                      :key="index"
+                      class="flex items-center gap-2"
+                    >
+                      <input
+                        v-model="form.support_ticket_config.categories[index]"
+                        class="input flex-1"
+                        :maxlength="SUPPORT_TICKET_CATEGORY_MAX"
+                        :placeholder="t('admin.settings.features.supportTickets.categoryPlaceholder')"
+                        :aria-label="category || t('admin.settings.features.supportTickets.categoryPlaceholder')"
+                      />
+                      <button
+                        type="button"
+                        class="btn btn-secondary px-2"
+                        :aria-label="t('admin.settings.features.supportTickets.removeCategory')"
+                        @click="form.support_ticket_config.categories.splice(index, 1)"
+                      >
+                        <Icon name="x" size="xs" class="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    v-if="form.support_ticket_config.categories.length < SUPPORT_TICKET_MAX_CATEGORIES"
+                    type="button"
+                    class="btn btn-secondary btn-sm"
+                    data-testid="support-ticket-add-category"
+                    @click="form.support_ticket_config.categories.push('')"
+                  >
+                    + {{ t('admin.settings.features.supportTickets.addCategory') }}
+                  </button>
+                </div>
+                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.features.supportTickets.categoriesHint', { max: SUPPORT_TICKET_MAX_CATEGORIES, length: SUPPORT_TICKET_CATEGORY_MAX }) }}
+                </p>
+              </div>
+              <div class="space-y-1">
+                <label for="support-ticket-max-open" class="input-label">{{ t('admin.settings.features.supportTickets.maxOpen') }}</label>
+                <input
+                  id="support-ticket-max-open"
+                  v-model.number="form.support_ticket_config.max_open_per_user"
+                  class="input w-40"
+                  type="number"
+                  min="1"
+                  :max="SUPPORT_TICKET_MAX_OPEN_LIMIT"
+                  step="1"
+                  required
+                />
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.features.supportTickets.maxOpenHint', { max: SUPPORT_TICKET_MAX_OPEN_LIMIT }) }}
+                </p>
+              </div>
+              <div class="space-y-1">
+                <label for="support-ticket-notice" class="input-label">{{ t('admin.settings.features.supportTickets.notice') }}</label>
+                <textarea
+                  id="support-ticket-notice"
+                  v-model="form.support_ticket_config.notice"
+                  rows="3"
+                  class="input"
+                  :maxlength="SUPPORT_TICKET_NOTICE_MAX"
+                  :placeholder="t('admin.settings.features.supportTickets.noticePlaceholder')"
+                ></textarea>
+                <p class="text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.features.supportTickets.noticeHint', { max: SUPPORT_TICKET_NOTICE_MAX }) }}
+                </p>
+              </div>
+            </template>
           </div>
         </div>
 
@@ -9243,6 +9360,12 @@ import type {
 import type { ProviderInstance } from "@/types/payment";
 import AppLayout from "@/components/layout/AppLayout.vue";
 import Icon from "@/components/icons/Icon.vue";
+import {
+  SUPPORT_TICKET_CATEGORY_MAX,
+  SUPPORT_TICKET_MAX_CATEGORIES,
+  SUPPORT_TICKET_MAX_OPEN_LIMIT,
+  SUPPORT_TICKET_NOTICE_MAX,
+} from "@/api/supportTickets";
 import Select, { type SelectOption } from "@/components/common/Select.vue";
 import {
   SITE_BILLING_MODES,
@@ -9998,6 +10121,7 @@ type SettingsForm = Omit<
 const schedulingThresholdPlatforms = SCHEDULING_THRESHOLD_PLATFORMS;
 
 const form = reactive<SettingsForm>({
+  excel_bps_enabled: true,
   registration_enabled: true,
   email_verify_enabled: false,
   registration_email_suffix_whitelist: [],
@@ -10298,6 +10422,9 @@ const form = reactive<SettingsForm>({
   model_plaza_description: '',
   // Plugin management menu visibility; plugin runtime is unaffected.
   plugin_management_enabled: false,
+  // Support tickets (网站工单) switch + form config
+  support_ticket_enabled: false,
+  support_ticket_config: { categories: [] as string[], max_open_per_user: 5, notice: '' },
   // Affiliate (邀请返利) feature switch
   affiliate_enabled: false,
   // Allow user view error requests
@@ -11409,6 +11536,7 @@ async function loadSettings() {
     form.channel_monitor_hide_user_ranking = Boolean(
       settings.channel_monitor_hide_user_ranking
     );
+    form.excel_bps_enabled = settings.excel_bps_enabled !== false;
     form.login_agreement_updated_at =
       settings.login_agreement_updated_at || "2026-03-31";
     form.login_agreement_documents =
@@ -11847,6 +11975,7 @@ async function saveSettings() {
     }
 
     const payload: UpdateSettingsRequest = {
+      excel_bps_enabled: form.excel_bps_enabled,
       registration_enabled: form.registration_enabled,
       email_verify_enabled: form.email_verify_enabled,
       registration_email_suffix_whitelist:
@@ -12185,6 +12314,13 @@ async function saveSettings() {
       model_plaza_require_auth: form.model_plaza_require_auth,
       model_plaza_description: form.model_plaza_description,
       plugin_management_enabled: form.plugin_management_enabled,
+      // Support tickets: blank category rows are dropped; the server trims and deduplicates.
+      support_ticket_enabled: form.support_ticket_enabled,
+      support_ticket_config: {
+        categories: form.support_ticket_config.categories.map((category) => category.trim()).filter(Boolean),
+        max_open_per_user: Number(form.support_ticket_config.max_open_per_user) || 5,
+        notice: form.support_ticket_config.notice,
+      },
       // Affiliate (邀请返利) feature switch
       affiliate_enabled: form.affiliate_enabled,
       allow_user_view_error_requests: form.allow_user_view_error_requests,
