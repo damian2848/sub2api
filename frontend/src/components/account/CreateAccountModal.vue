@@ -3010,6 +3010,7 @@
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
           <input v-model.number="form.concurrency" type="number" min="1" class="input"
             @input="form.concurrency = Math.max(1, form.concurrency || 1)" />
+          <p class="input-hint">{{ t('admin.accounts.concurrencyHint') }}</p>
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.loadFactor') }}</label>
