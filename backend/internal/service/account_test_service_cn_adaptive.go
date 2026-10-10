@@ -23,6 +23,10 @@ const accountTestSuppressCompletionContextKey = "account_test_suppress_completio
 // native Responses endpoints. Endpoints the provider profile does not offer are
 // skipped.
 func (s *AccountTestService) testCNProviderAdaptiveConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
+	// A question needs one answer, rather than concatenated connectivity probes.
+	if pelicanTestRequested(c) {
+		return s.testCNProviderChatCompletionsConnection(c, account, modelID, prompt)
+	}
 	requestedModelID := strings.TrimSpace(modelID)
 	if requestedModelID == "" {
 		requestedModelID = account.providerDefaultTestModel()
@@ -71,6 +75,9 @@ func (s *AccountTestService) testCNProviderAdaptiveAnthropicConnection(c *gin.Co
 	apiURL := strings.TrimRight(baseURL, "/") + "/v1/messages"
 
 	payload, err := createTestPayload(testModelID)
+	if options, ok := pelicanTestOptionsFromContext(ctx); ok {
+		payload, err = createPelicanClaudePayload(testModelID, options.prompt, options.reasoningEffort)
+	}
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create adaptive Anthropic test payload")
 	}
@@ -172,6 +179,9 @@ func (s *AccountTestService) testCNProviderAdaptiveResponsesConnection(c *gin.Co
 	apiURL := buildOpenAIResponsesURLForPlatform(account.Platform, baseURL)
 
 	payload := createOpenAITestPayload(testModelID, false)
+	if options, ok := pelicanTestOptionsFromContext(ctx); ok {
+		payload = createPelicanOpenAIPayload(testModelID, false, options.prompt, options.reasoningEffort)
+	}
 	// DeepSeek / Kimi native Responses endpoints are stateless and do not need
 	// the OpenAI probe's synthetic instructions.
 	delete(payload, "instructions")
@@ -258,6 +268,9 @@ func (s *AccountTestService) testCNProviderAnthropicConnection(c *gin.Context, a
 	c.Writer.Flush()
 
 	payload, err := createTestPayload(testModelID)
+	if options, ok := pelicanTestOptionsFromContext(ctx); ok {
+		payload, err = createPelicanClaudePayload(testModelID, options.prompt, options.reasoningEffort)
+	}
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Failed to create Anthropic test payload")
 	}

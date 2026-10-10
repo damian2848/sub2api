@@ -377,10 +377,11 @@ func (s *AntigravityGatewayService) TestConnection(ctx context.Context, account 
 
 	// 构建请求体
 	var requestBody []byte
+	options, _ := pelicanTestOptionsFromContext(ctx)
 	if strings.HasPrefix(modelID, "gemini-") {
-		requestBody, err = s.buildGeminiTestRequest(projectID, mappedModel)
+		requestBody, err = s.buildGeminiTestRequest(projectID, mappedModel, options.prompt)
 	} else {
-		requestBody, err = s.buildClaudeTestRequest(projectID, mappedModel)
+		requestBody, err = s.buildClaudeTestRequest(projectID, mappedModel, options.prompt)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("构建请求失败: %w", err)
@@ -453,14 +454,20 @@ func testConnectionHandleError(
 }
 
 // buildGeminiTestRequest 构建 Gemini 格式测试请求
-// 使用最小 token 消耗：输入 "." + maxOutputTokens: 1
-func (s *AntigravityGatewayService) buildGeminiTestRequest(projectID, model string) ([]byte, error) {
+// 未指定题目时使用最小 token 消耗的连通性探针。
+func (s *AntigravityGatewayService) buildGeminiTestRequest(projectID, model, prompt string) ([]byte, error) {
+	maxTokens := 1
+	if strings.TrimSpace(prompt) == "" {
+		prompt = "."
+	} else {
+		maxTokens = pelicanClaudeMaxTokens
+	}
 	payload := map[string]any{
 		"contents": []map[string]any{
 			{
 				"role": "user",
 				"parts": []map[string]any{
-					{"text": "."},
+					{"text": prompt},
 				},
 			},
 		},
@@ -471,7 +478,7 @@ func (s *AntigravityGatewayService) buildGeminiTestRequest(projectID, model stri
 			},
 		},
 		"generationConfig": map[string]any{
-			"maxOutputTokens": 1,
+			"maxOutputTokens": maxTokens,
 		},
 	}
 	payloadBytes, _ := json.Marshal(payload)
@@ -479,17 +486,27 @@ func (s *AntigravityGatewayService) buildGeminiTestRequest(projectID, model stri
 }
 
 // buildClaudeTestRequest 构建 Claude 格式测试请求并转换为 Gemini 格式
-// 使用最小 token 消耗：输入 "." + MaxTokens: 1
-func (s *AntigravityGatewayService) buildClaudeTestRequest(projectID, mappedModel string) ([]byte, error) {
+// 未指定题目时使用最小 token 消耗的连通性探针。
+func (s *AntigravityGatewayService) buildClaudeTestRequest(projectID, mappedModel, prompt string) ([]byte, error) {
+	maxTokens := 1
+	if strings.TrimSpace(prompt) == "" {
+		prompt = "."
+	} else {
+		maxTokens = pelicanClaudeMaxTokens
+	}
+	content, err := json.Marshal(prompt)
+	if err != nil {
+		return nil, err
+	}
 	claudeReq := &antigravity.ClaudeRequest{
 		Model: mappedModel,
 		Messages: []antigravity.ClaudeMessage{
 			{
 				Role:    "user",
-				Content: json.RawMessage(`"."`),
+				Content: content,
 			},
 		},
-		MaxTokens: 1,
+		MaxTokens: maxTokens,
 		Stream:    false,
 	}
 	return antigravity.TransformClaudeToGemini(claudeReq, projectID, mappedModel)
@@ -562,6 +579,9 @@ func extractTextFromSSEResponse(respBody []byte) string {
 
 		for _, part := range parts {
 			if partMap, ok := part.(map[string]any); ok {
+				if thought, _ := partMap["thought"].(bool); thought {
+					continue
+				}
 				if text, ok := partMap["text"].(string); ok && text != "" {
 					texts = append(texts, text)
 				}

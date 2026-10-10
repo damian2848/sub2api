@@ -14,7 +14,8 @@ const {
   showWarning,
   syncUpstreamModels,
   syncUpstreamModelsPreview,
-  testAccountModel
+  testAccountModel,
+  testAccountModelIntelligence
 } = vi.hoisted(() => ({
   copyToClipboard: vi.fn().mockResolvedValue(true),
   showError: vi.fn(),
@@ -23,7 +24,8 @@ const {
   showWarning: vi.fn(),
   syncUpstreamModels: vi.fn(),
   syncUpstreamModelsPreview: vi.fn(),
-  testAccountModel: vi.fn()
+  testAccountModel: vi.fn(),
+  testAccountModelIntelligence: vi.fn()
 }))
 
 vi.mock('vue-i18n', async () => {
@@ -49,7 +51,8 @@ vi.mock('@/api/admin/accounts', () => ({
   accountsAPI: {
     syncUpstreamModels,
     syncUpstreamModelsPreview,
-    testAccountModel
+    testAccountModel,
+    testAccountModelIntelligence
   }
 }))
 
@@ -98,6 +101,7 @@ describe('ModelWhitelistSelector', () => {
     syncUpstreamModels.mockReset()
     syncUpstreamModelsPreview.mockReset()
     testAccountModel.mockReset()
+    testAccountModelIntelligence.mockReset()
   })
 
   afterEach(() => {
@@ -351,6 +355,7 @@ describe('ModelWhitelistSelector', () => {
   it('hides the model test button when there is no saved account', () => {
     const wrapper = mountSelector({ modelValue: ['good-model'] })
     expect(wrapper.find('[data-testid="test-models"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="test-iq-models"]').exists()).toBe(false)
   })
 
   it('drops a model\'s test marker when the model leaves the whitelist', async () => {
@@ -386,5 +391,74 @@ describe('ModelWhitelistSelector', () => {
     expect(wrapper.get('[data-testid="test-models"]').text()).toBe('admin.accounts.testModels')
     expect(showSuccess).not.toHaveBeenCalled()
     expect(showWarning).not.toHaveBeenCalled()
+  })
+
+  it('runs the candy intelligence test for every selected model independently', async () => {
+    testAccountModelIntelligence.mockImplementation(async (_id: number, model: string) =>
+      model === 'bad-model' ? { success: false, error: 'Expected answer 21' } : { success: true, answer: '21' }
+    )
+    const models = ['good-model', 'bad-model', 'third', 'fourth', 'fifth']
+    const wrapper = mountSelector({ accountId: 7, modelValue: models })
+
+    await wrapper.get('[data-testid="test-iq-models"]').trigger('click')
+    await flushPromises()
+
+    expect(testAccountModelIntelligence.mock.calls.map(call => call[1])).toEqual(models)
+    expect(wrapper.findAll('[data-testid="model-iq-test-status"]').map(mark => mark.text())).toEqual(['🧠✅', '🧠❌', '🧠✅', '🧠✅', '🧠✅'])
+    expect(showWarning).toHaveBeenCalledWith('admin.accounts.testIQDone')
+  })
+
+  it('stops a running intelligence test without marking unfinished models', async () => {
+    let release!: () => void
+    testAccountModelIntelligence.mockImplementation((_id: number, _model: string, signal: AbortSignal) =>
+      new Promise((resolve, reject) => {
+        release = () => resolve({ success: true, answer: '21' })
+        signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+      })
+    )
+    const wrapper = mountSelector({ accountId: 7, modelValue: ['a', 'b', 'c', 'd'] })
+    await wrapper.get('[data-testid="test-iq-models"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="test-iq-models"]').text()).toContain('admin.accounts.testIQStop')
+    expect(wrapper.get('[data-testid="test-models"]').attributes('disabled')).toBeDefined()
+    expect(testAccountModelIntelligence).toHaveBeenCalledTimes(3)
+
+    await wrapper.get('[data-testid="test-iq-models"]').trigger('click')
+    await flushPromises()
+    release?.()
+    expect(wrapper.findAll('[data-testid="model-iq-test-status"]')).toHaveLength(0)
+    expect(wrapper.get('[data-testid="test-models"]').attributes('disabled')).toBeUndefined()
+    expect(testAccountModelIntelligence).toHaveBeenCalledTimes(3)
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(showWarning).not.toHaveBeenCalled()
+  })
+
+  it('ignores late intelligence responses after stopping or switching accounts', async () => {
+    for (const action of ['stop', 'switch']) {
+      let release!: (result: { success: boolean; answer: string }) => void
+      testAccountModelIntelligence.mockImplementation(() => new Promise(resolve => { release = resolve }))
+      const wrapper = mountSelector({ accountId: 7, modelValue: ['a'] })
+      await wrapper.get('[data-testid="test-iq-models"]').trigger('click')
+      if (action === 'stop') await wrapper.get('[data-testid="test-iq-models"]').trigger('click')
+      else await wrapper.setProps({ accountId: 8 })
+      release({ success: true, answer: '21' })
+      await flushPromises()
+      expect(wrapper.findAll('[data-testid="model-iq-test-status"]')).toHaveLength(0)
+      wrapper.unmount()
+    }
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(showWarning).not.toHaveBeenCalled()
+  })
+
+  it('does not restore a late intelligence marker after removing and re-adding a model', async () => {
+    let release!: (result: { success: boolean; answer: string }) => void
+    testAccountModelIntelligence.mockImplementation(() => new Promise(resolve => { release = resolve }))
+    const wrapper = mountSelector({ accountId: 7, modelValue: ['a'] })
+    await wrapper.get('[data-testid="test-iq-models"]').trigger('click')
+    await wrapper.setProps({ modelValue: [] })
+    await wrapper.setProps({ modelValue: ['a'] })
+    release({ success: true, answer: '21' })
+    await flushPromises()
+    expect(wrapper.findAll('[data-testid="model-iq-test-status"]')).toHaveLength(0)
   })
 })

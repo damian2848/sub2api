@@ -21,6 +21,13 @@
                 class="shrink-0"
                 :title="testStatus[model] === 'fail' ? testErrors[model] : undefined"
               >{{ testStatus[model] === 'ok' ? '✅' : testStatus[model] === 'fail' ? '❌' : '⏳' }}</span>
+              <span
+                v-if="iqTestStatus[model]"
+                data-testid="model-iq-test-status"
+                class="shrink-0"
+                :title="iqTestDetail(model)"
+                :aria-label="`${model}: ${iqTestDetail(model)}`"
+              >🧠{{ iqTestStatus[model] === 'ok' ? '✅' : iqTestStatus[model] === 'fail' ? '❌' : '⏳' }}</span>
             </span>
             <button
               type="button"
@@ -120,10 +127,21 @@
         v-if="accountId && modelValue.length > 0"
         type="button"
         data-testid="test-models"
+        :disabled="isTestingIQModels"
         @click="isTestingModels ? stopTestModels() : testModels()"
-        class="rounded-lg border border-amber-200 px-3 py-1.5 text-sm text-amber-600 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-400 dark:hover:bg-amber-900/30"
+        class="rounded-lg border border-amber-200 px-3 py-1.5 text-sm text-amber-600 hover:bg-amber-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-800 dark:text-amber-400 dark:hover:bg-amber-900/30"
       >
         {{ isTestingModels ? t('admin.accounts.testModelsStop', { done: testedCount, total: modelValue.length }) : t('admin.accounts.testModels') }}
+      </button>
+      <button
+        v-if="accountId && modelValue.length > 0"
+        type="button"
+        data-testid="test-iq-models"
+        :disabled="isTestingModels"
+        @click="isTestingIQModels ? stopIQTestModels() : testIQModels()"
+        class="rounded-lg border border-violet-200 px-3 py-1.5 text-sm text-violet-600 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-violet-800 dark:text-violet-400 dark:hover:bg-violet-900/30"
+      >
+        {{ isTestingIQModels ? t('admin.accounts.testIQStop', { done: testedIQCount, total: testIQTotal }) : t('admin.accounts.testIQ') }}
       </button>
       <button
         type="button"
@@ -133,6 +151,10 @@
         {{ t('admin.accounts.clearAllModels') }}
       </button>
     </div>
+
+    <p v-if="accountId && modelValue.length > 0" class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+      {{ t('admin.accounts.testIQHint') }}
+    </p>
 
     <!-- Custom Model Input -->
     <div class="mb-3">
@@ -367,8 +389,12 @@ const syncUpstreamModels = async () => {
 
 const clearAll = () => {
   stopTestModels()
+  stopIQTestModels()
   testStatus.value = {}
   testErrors.value = {}
+  iqTestStatus.value = {}
+  iqTestErrors.value = {}
+  iqTestAnswers.value = {}
   emit('update:modelValue', [])
 }
 
@@ -384,8 +410,26 @@ const stopTestModels = () => {
   testAbort = null
 }
 
+const iqTestStatus = ref<Record<string, 'pending' | 'ok' | 'fail'>>({})
+const iqTestErrors = ref<Record<string, string>>({})
+const iqTestAnswers = ref<Record<string, string>>({})
+const isTestingIQModels = ref(false)
+const testedIQCount = ref(0)
+const testIQTotal = ref(0)
+let iqTestAbort: AbortController | null = null
+
+const stopIQTestModels = () => {
+  iqTestAbort?.abort()
+}
+
+const iqTestDetail = (model: string) => {
+  const status = iqTestStatus.value[model]
+  const label = t(`admin.accounts.${status === 'pending' ? 'testIQRunning' : status === 'ok' ? 'testIQPassed' : 'testIQFailed'}`)
+  return [label, iqTestAnswers.value[model], iqTestErrors.value[model]].filter(Boolean).join(' · ')
+}
+
 const testModels = async () => {
-  if (isTestingModels.value || !props.accountId) return
+  if (isTestingModels.value || isTestingIQModels.value || !props.accountId) return
   const accountId = props.accountId
   const models = [...props.modelValue]
   if (models.length === 0) return
@@ -403,6 +447,8 @@ const testModels = async () => {
       const model = models[next++]
       try {
         const result = await accountsAPI.testAccountModel(accountId, model, abort.signal)
+        if (abort.signal.aborted || props.accountId !== accountId) return
+        if (testStatus.value[model] !== 'pending') continue
         testStatus.value = { ...testStatus.value, [model]: result.success ? 'ok' : 'fail' }
         if (!result.success && result.error) {
           testErrors.value = { ...testErrors.value, [model]: result.error }
@@ -436,6 +482,68 @@ const testModels = async () => {
   }
 }
 
+const testIQModels = async () => {
+  if (isTestingIQModels.value || isTestingModels.value || !props.accountId) return
+  const accountId = props.accountId
+  const models = [...props.modelValue]
+  if (models.length === 0) return
+
+  const abort = new AbortController()
+  iqTestAbort = abort
+  isTestingIQModels.value = true
+  testedIQCount.value = 0
+  testIQTotal.value = models.length
+  iqTestStatus.value = Object.fromEntries(models.map(model => [model, 'pending' as const]))
+  iqTestErrors.value = {}
+  iqTestAnswers.value = {}
+
+  let next = 0
+  let ok = 0
+  let failed = 0
+  const worker = async () => {
+    while (!abort.signal.aborted) {
+      const index = next++
+      if (index >= models.length) return
+      const model = models[index]
+      let result: { success: boolean; error?: string; answer?: string }
+      try {
+        result = await accountsAPI.testAccountModelIntelligence(accountId, model, abort.signal)
+      } catch (error) {
+        if (abort.signal.aborted) return
+        result = { success: false, error: error instanceof Error ? error.message : t('admin.accounts.testIQFailed') }
+      }
+      if (abort.signal.aborted || props.accountId !== accountId) return
+      // Removing a model invalidates its marker, including a response already in flight.
+      if (iqTestStatus.value[model] === 'pending') {
+        iqTestStatus.value = { ...iqTestStatus.value, [model]: result.success ? 'ok' : 'fail' }
+        if (result.answer) iqTestAnswers.value = { ...iqTestAnswers.value, [model]: result.answer }
+        if (!result.success && result.error) iqTestErrors.value = { ...iqTestErrors.value, [model]: result.error }
+      }
+      if (result.success) ok += 1
+      else failed += 1
+      testedIQCount.value += 1
+    }
+  }
+
+  try {
+    await Promise.all(Array.from({ length: Math.min(TEST_CONCURRENCY, models.length) }, worker))
+  } finally {
+    const done: typeof iqTestStatus.value = {}
+    for (const [model, status] of Object.entries(iqTestStatus.value)) {
+      if (status !== 'pending') done[model] = status
+    }
+    iqTestStatus.value = done
+    isTestingIQModels.value = false
+    iqTestAbort = null
+  }
+  if (abort.signal.aborted) return
+  if (failed > 0) {
+    appStore.showWarning(t('admin.accounts.testIQDone', { ok, failed }))
+  } else {
+    appStore.showSuccess(t('admin.accounts.testIQDone', { ok, failed }))
+  }
+}
+
 // A removed (or re-added) model must not keep a result from its previous life.
 watch(() => props.modelValue, models => {
   const present = new Set(models)
@@ -445,8 +553,26 @@ watch(() => props.modelValue, models => {
     testStatus.value = prune(testStatus.value)
     testErrors.value = prune(testErrors.value)
   }
+  if (Object.keys(iqTestStatus.value).some(model => !present.has(model))) {
+    iqTestStatus.value = prune(iqTestStatus.value)
+    iqTestErrors.value = prune(iqTestErrors.value)
+    iqTestAnswers.value = prune(iqTestAnswers.value)
+  }
 })
 
-onBeforeUnmount(stopTestModels)
+watch(() => props.accountId, () => {
+  stopTestModels()
+  stopIQTestModels()
+  testStatus.value = {}
+  testErrors.value = {}
+  iqTestStatus.value = {}
+  iqTestErrors.value = {}
+  iqTestAnswers.value = {}
+})
+
+onBeforeUnmount(() => {
+  stopTestModels()
+  stopIQTestModels()
+})
 
 </script>

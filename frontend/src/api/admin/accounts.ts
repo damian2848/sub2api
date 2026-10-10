@@ -5,6 +5,7 @@
 
 import { apiClient, buildApiUrl } from '../client'
 import { ADMIN_UI_REQUEST_HEADER } from '../adminUIRequest'
+import { questionContract, questionPrompt } from '@/utils/intelligenceTest'
 import type { CodexHarvestRuntime } from './codexHarvest'
 export { getCodexHarvestControls, saveCodexHarvestControls, getCodexHarvestNodes, resetCodexHarvestNodes } from './codexHarvest'
 import type { OpenAIReferralRefreshResult, OpenAIReferralSendResult } from '@/types/openaiReferrals'
@@ -370,6 +371,80 @@ export async function testAccountModel(
     }
     handleLine(buffer)
     return result ?? { success: false, error: 'No test result received' }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') throw error
+    return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
+  }
+}
+
+/**
+ * Run the candy intelligence question against one model and judge its answer.
+ * The regular account test only checks whether a request can complete; this
+ * endpoint collects the generated text so the whitelist UI can distinguish a
+ * correct answer (21) from a merely reachable model.
+ */
+export async function testAccountModelIntelligence(
+  id: number,
+  modelId: string,
+  signal?: AbortSignal
+): Promise<{ success: boolean; error?: string; answer?: string }> {
+  try {
+    const response = await fetch(buildApiUrl(`/admin/accounts/${id}/pelican-test`), {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${localStorage.getItem('auth_token')}`,
+        'Content-Type': 'application/json',
+        [ADMIN_UI_REQUEST_HEADER]: '1'
+      },
+      body: JSON.stringify({
+        model_id: modelId,
+        prompt: `${questionPrompt('candy')}\n\n${questionContract('candy')}`,
+        reasoning_effort: 'medium'
+      }),
+      signal
+    })
+    if (!response.ok) return { success: false, error: `HTTP ${response.status}` }
+    const reader = response.body?.getReader()
+    if (!reader) return { success: false, error: 'No response body' }
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let answer = ''
+    let completed = false
+    let streamError = ''
+    const handleLine = (line: string) => {
+      if (!line.startsWith('data:')) return
+      const json = line.replace(/^data:\s*/, '').trim()
+      if (!json) return
+      try {
+        const event = JSON.parse(json) as { type?: string; text?: string; success?: boolean; error?: string }
+        if (event.type === 'content' && event.text) answer += event.text
+        if (event.type === 'test_complete') {
+          completed = true
+          if (!event.success) streamError = event.error || 'Test failed'
+        }
+        if (event.type === 'error') streamError = event.error || 'Test failed'
+      } catch {
+        // Ignore keepalive or malformed events and let the completion guard below fail safely.
+      }
+    }
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+      lines.forEach((line) => handleLine(line.trim()))
+    }
+    if (buffer.trim()) handleLine(buffer.trim())
+
+    const trimmedAnswer = answer.trim()
+    if (streamError) return { success: false, error: streamError, answer: trimmedAnswer }
+    if (!completed) return { success: false, error: 'No test result received', answer: trimmedAnswer }
+    if (trimmedAnswer !== '21') {
+      return { success: false, error: 'Expected answer 21', answer: trimmedAnswer }
+    }
+    return { success: true, answer: trimmedAnswer }
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
     return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
@@ -1546,6 +1621,7 @@ export const accountsAPI = {
   toggleStatus,
   testAccount,
   testAccountModel,
+  testAccountModelIntelligence,
   refreshCredentials,
   applyOAuthCredentials,
   getStats,

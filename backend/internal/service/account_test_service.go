@@ -763,6 +763,12 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 	c.Writer.Flush()
 
 	// Create a minimal Bedrock-compatible payload (no stream, no cache_control)
+	prompt := "hi"
+	maxTokens := 256
+	if options, ok := pelicanTestOptionsFromContext(ctx); ok {
+		prompt = promptOrDefault(options.prompt)
+		maxTokens = pelicanClaudeMaxTokens
+	}
 	bedrockPayload := map[string]any{
 		"anthropic_version": "bedrock-2023-05-31",
 		"messages": []map[string]any{
@@ -771,12 +777,12 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 				"content": []map[string]any{
 					{
 						"type": "text",
-						"text": "hi",
+						"text": prompt,
 					},
 				},
 			},
 		},
-		"max_tokens":  256,
+		"max_tokens":  maxTokens,
 		"temperature": 1,
 	}
 	bedrockBody, _ := json.Marshal(bedrockPayload)
@@ -837,8 +843,8 @@ func (s *AccountTestService) testBedrockAccountConnection(c *gin.Context, ctx co
 	}
 
 	text := ""
-	if len(result.Content) > 0 {
-		text = result.Content[0].Text
+	for _, content := range result.Content {
+		text += content.Text
 	}
 	if text == "" {
 		text = "(empty response)"
