@@ -6,6 +6,10 @@
     @close="handleClose"
   >
     <div class="space-y-4">
+      <div v-if="account?.extra?.openai_excel_bps_authorization_pending === true" role="status" class="text-sm text-amber-700 dark:text-amber-300">
+        {{ t('admin.accounts.bpsAuthorizing') }}
+        <a href="/admin/token-guard-v2" target="_blank" rel="noopener noreferrer" class="ml-2 underline">{{ t('admin.accounts.openCredentialOperations') }}</a>
+      </div>
       <div v-if="modelLoadError" role="alert" class="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-900/20 dark:text-amber-200">
         <p>{{ modelLoadError }}</p>
         <div class="mt-2 flex gap-4">

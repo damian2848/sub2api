@@ -1,14 +1,15 @@
 export default {
     accounts: {
+      bpsAuthorizing: 'BPS authorization is automatic. Native routing remains active until authorization succeeds, then BPS activates automatically.',
       "modelsLoadFailed": "Could not load models. Please retry.",
       "retryModels": "Reload models",
       "openCredentialOperations": "Open Credential Operations",
       "excelAuthErrors": {
         "OPENAI_EXCEL_AUTH_PENDING": "Excel authorization is in progress. Reload models after it completes.",
-        "OPENAI_EXCEL_AUTH_FAILED": "Excel authorization failed. Review the Excel task in Credential Operations before retrying.",
-        "OPENAI_EXCEL_AUTH_VERIFICATION_REQUIRED": "Excel login requires a security check. Review authorization in Credential Operations.",
-        "OPENAI_EXCEL_AUTH_CONFIG_REQUIRED": "Configure an Excel login in Credential Operations and complete authorization.",
-        "OPENAI_EXCEL_AUTH_REQUIRED": "Authorize Excel in Credential Operations first.",
+        "OPENAI_EXCEL_AUTH_FAILED": "Automatic Excel authorization failed and will retry after cooldown. View progress in Credential Operations.",
+        "OPENAI_EXCEL_AUTH_VERIFICATION_REQUIRED": "Automatic Excel login is blocked by an upstream security check. View status in Credential Operations.",
+        "OPENAI_EXCEL_AUTH_CONFIG_REQUIRED": "Automatic Excel authorization needs login configuration. The worker resumes after configuration is saved.",
+        "OPENAI_EXCEL_AUTH_REQUIRED": "Excel authorization is waiting for the automatic worker. View progress in Credential Operations.",
         "OPENAI_EXCEL_AUTH_UNAVAILABLE": "Excel authorization status is unavailable. Please retry later."
       },
       title: 'Account Management',

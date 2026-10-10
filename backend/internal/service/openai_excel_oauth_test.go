@@ -319,3 +319,5 @@ func (r *excelReauthTestRepo) GetLatestExcelTask(context.Context, int64) (*OpenA
 	}
 	return nil, nil
 }
+
+func (r *excelReauthTestRepo) PrepareMissingExcelRoutes(context.Context) error { return nil }

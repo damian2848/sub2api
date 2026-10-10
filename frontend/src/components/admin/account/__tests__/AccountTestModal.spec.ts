@@ -243,3 +243,15 @@ describe('Excel authorization model errors', () => {
     wrapper.unmount()
   })
 })
+
+
+it('keeps native model testing available during automatic BPS authorization', async () => {
+  getAvailableModels.mockResolvedValue([{id:'gpt-6-sol',display_name:'Sol'}])
+  const wrapper = mountModal({id:42,name:'Automatic BPS',platform:'openai',type:'oauth',status:'active',extra:{openai_excel_bps:true,openai_excel_bps_authorization_pending:true}})
+  await wrapper.setProps({show:true})
+  await flushPromises()
+  expect(wrapper.get('[role="status"]').text()).toContain('admin.accounts.bpsAuthorizing')
+  const start=wrapper.findAll('button').find(b=>b.text().includes('admin.accounts.startTest'))!
+  expect(start.attributes('disabled')).toBeUndefined()
+  wrapper.unmount()
+})

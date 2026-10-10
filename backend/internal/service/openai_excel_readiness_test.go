@@ -62,7 +62,20 @@ func TestExcelMissingConfigurationAndValidGrant(t *testing.T) {
 	require.Equal(t, creds["access_token"], token)
 }
 
-type readinessAccountRepo struct{ adminExcelBPSGroupRepo }
+type readinessAccountRepo struct {
+	adminExcelBPSGroupRepo
+	preparation map[int64]any
+}
+
+func (r *readinessAccountRepo) BulkUpdate(ctx context.Context, ids []int64, update AccountBulkUpdate) (int64, error) {
+	if r.preparation == nil {
+		r.preparation = map[int64]any{}
+	}
+	for _, id := range ids {
+		r.preparation[id] = update.ExcelBPSAuthorizationPending[id]
+	}
+	return r.accountRepoStubForBulkUpdate.BulkUpdate(ctx, ids, update)
+}
 
 func (r *readinessAccountRepo) GetByID(_ context.Context, id int64) (*Account, error) {
 	a := *r.getByIDAccounts[id]
@@ -79,7 +92,7 @@ func TestAdminExcelActivationPreservesRouteAcrossEntryPoints(t *testing.T) {
 			account.Status = StatusActive
 			account.Extra = map[string]any{}
 			loginRepo.task = &OpenAIOAuthReauthTaskRecord{OAuthProfile: "excel", Status: "failed", Error: "reason=security_check"}
-			repo := &readinessAccountRepo{adminExcelBPSGroupRepo{accountRepoStubForBulkUpdate: accountRepoStubForBulkUpdate{
+			repo := &readinessAccountRepo{adminExcelBPSGroupRepo: adminExcelBPSGroupRepo{accountRepoStubForBulkUpdate: accountRepoStubForBulkUpdate{
 				getByIDAccounts: map[int64]*Account{account.ID: account}, getByIDsAccounts: []*Account{account},
 			}}}
 			svc := &adminServiceImpl{accountRepo: repo, excelOAuthReauth: reauth}
@@ -96,12 +109,17 @@ func TestAdminExcelActivationPreservesRouteAcrossEntryPoints(t *testing.T) {
 			case "bulk":
 				_, err = svc.BulkUpdateAccounts(ctx, &BulkUpdateAccountsInput{AccountIDs: []int64{account.ID}, Extra: extra})
 			}
-			require.Error(t, err)
-			require.True(t, IsExcelAuthorizationError(err), err)
-			require.Nil(t, repo.createAccount)
-			require.Empty(t, repo.updatedAccounts)
-			require.Empty(t, repo.extraUpdates)
-			require.Zero(t, repo.bulkUpdateCalls)
+			require.NoError(t, err)
+			switch method {
+			case "create":
+				require.Equal(t, true, repo.createAccount.Extra[ExcelBPSAuthorizationPendingKey])
+			case "update":
+				require.Equal(t, true, repo.updatedAccounts[0].Extra[ExcelBPSAuthorizationPendingKey])
+			case "extra":
+				require.Equal(t, true, repo.extraUpdates[0][ExcelBPSAuthorizationPendingKey])
+			case "bulk":
+				require.Equal(t, true, repo.preparation[account.ID])
+			}
 			require.False(t, account.IsExcelBPSEnabled())
 		})
 	}
@@ -112,18 +130,22 @@ func TestAdminExcelActivationQueuesOnceAndAcceptsReadyGrant(t *testing.T) {
 	account := reader.account
 	account.Status = StatusActive
 	account.Extra = map[string]any{}
-	repo := &readinessAccountRepo{adminExcelBPSGroupRepo{accountRepoStubForBulkUpdate: accountRepoStubForBulkUpdate{getByIDAccounts: map[int64]*Account{account.ID: account}}}}
+	repo := &readinessAccountRepo{adminExcelBPSGroupRepo: adminExcelBPSGroupRepo{accountRepoStubForBulkUpdate: accountRepoStubForBulkUpdate{getByIDAccounts: map[int64]*Account{account.ID: account}}}}
 	svc := &adminServiceImpl{accountRepo: repo, excelOAuthReauth: reauth}
 	extra := map[string]any{"openai_excel_bps": true}
 	for range 2 {
 		err := svc.UpdateAccountExtra(context.Background(), account.ID, extra)
-		require.Equal(t, "OPENAI_EXCEL_AUTH_PENDING", infraerrors.Reason(err))
+		require.NoError(t, err)
 	}
-	require.Empty(t, repo.extraUpdates)
+	require.Len(t, repo.extraUpdates, 2)
+	require.Nil(t, loginRepo.task, "worker queues only after the routing request is persisted")
+	loginRepo.ids = []int64{account.ID}
+	require.NoError(t, reauth.QueueMissingExcelAuthorizations(context.Background()))
 	require.Equal(t, "excel", loginRepo.task.OAuthProfile)
 	storeExcelTestCredentials(t, reauth, loginRepo, excelTestCredentials("ready", time.Now().Add(time.Hour)))
 	require.NoError(t, svc.UpdateAccountExtra(context.Background(), account.ID, extra))
-	require.Len(t, repo.extraUpdates, 1)
+	require.Len(t, repo.extraUpdates, 3)
+	require.NotEqual(t, true, repo.extraUpdates[2][ExcelBPSAuthorizationPendingKey])
 }
 
 func TestExcelScopedModelDiscoveryKeepsNativeModels(t *testing.T) {
@@ -140,4 +162,34 @@ func TestExcelScopedModelDiscoveryKeepsNativeModels(t *testing.T) {
 	require.Contains(t, string(result.Body), "gpt-6-sol")
 	require.NotContains(t, string(result.Body), "gpt-6-astra")
 	require.EqualValues(t, 1, calls.Load())
+}
+
+type mixedExcelGrantRepo struct {
+	*excelReauthTestRepo
+	readyID int64
+}
+
+func (r *mixedExcelGrantRepo) GetExcelCredentials(ctx context.Context, id int64) (string, error) {
+	if id != r.readyID {
+		return "", nil
+	}
+	return r.excelReauthTestRepo.GetExcelCredentials(ctx, id)
+}
+func TestAdminExcelBulkSeparatesReadyAndPreparingAccounts(t *testing.T) {
+	reauth, reader, loginRepo, _, _ := newExcelReauthTestService(t)
+	a := *reader.account
+	a.Extra = map[string]any{}
+	b := a
+	b.ID++
+	storeExcelTestCredentials(t, reauth, loginRepo, excelTestCredentials("ready", time.Now().Add(time.Hour)))
+	reauth.repo = &mixedExcelGrantRepo{excelReauthTestRepo: loginRepo, readyID: a.ID}
+	repo := &readinessAccountRepo{adminExcelBPSGroupRepo: adminExcelBPSGroupRepo{accountRepoStubForBulkUpdate: accountRepoStubForBulkUpdate{
+		getByIDsAccounts: []*Account{&a, &b}, getByIDAccounts: map[int64]*Account{a.ID: &a, b.ID: &b},
+	}}}
+	svc := &adminServiceImpl{accountRepo: repo, excelOAuthReauth: reauth}
+	_, err := svc.BulkUpdateAccounts(context.Background(), &BulkUpdateAccountsInput{AccountIDs: []int64{a.ID, b.ID}, Extra: map[string]any{"openai_excel_bps": true}})
+	require.NoError(t, err)
+	require.Equal(t, false, repo.preparation[a.ID])
+	require.Equal(t, true, repo.preparation[b.ID])
+	require.Equal(t, 1, repo.bulkUpdateCalls)
 }

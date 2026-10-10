@@ -310,8 +310,9 @@ func TestQualityEnableBPSRestoreAfterAccountEditorSave(t *testing.T) {
 func TestQualityEnableBPSRequiresExcelAuthorization(t *testing.T) {
 	f := newQualityBPSFixture(t, `{}`, &service.QualityPolicy{Action: service.QualityActionEnableBPS, BPS: &service.QualityBPSPolicy{FailureThreshold: 1, AllModels: true}})
 	f.exec(`DELETE FROM openai_excel_oauth_credentials WHERE account_id=$1`)
-	require.Equal(t, "bps_auth_required", f.apply("failed"))
-	require.NotEqual(t, true, f.extra()["openai_excel_bps"])
+	require.Equal(t, "bps_authorizing", f.apply("failed"))
+	require.Equal(t, true, f.extra()["openai_excel_bps"])
+	require.Equal(t, true, f.extra()[service.ExcelBPSAuthorizationPendingKey])
 	f.exec(`INSERT INTO openai_excel_oauth_credentials(account_id,credentials_ciphertext) VALUES($1,'test-encrypted-grant')`)
-	require.Equal(t, "bps_enabled", f.apply("failed"))
+	// The worker callback, tested separately, clears preparation automatically.
 }
