@@ -69,6 +69,15 @@ export function encodeUtf8Base64(value: string): string {
   return btoa(binary)
 }
 
+function encodeUtf16LeBase64(value: string): string {
+  let binary = ''
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index)
+    binary += String.fromCharCode(codeUnit & 0xff, codeUnit >> 8)
+  }
+  return btoa(binary)
+}
+
 export function buildCodexQuickConfigToml(input: CodexQuickConfigInput): string {
   const platform = input.platform || 'openai'
   const model = preferredModels[platform] || preferredModels.openai
@@ -208,6 +217,7 @@ export function buildWindowsCmdCodexQuickConfigScript(input: CodexQuickConfigInp
 ${psPayload(catalogPayload)}
   ) -join ''
   $catalogFile = [IO.Path]::Combine($configDir, 'codex-models.json')
+  $catalogBackup = $catalogFile + '.backup.' + [Guid]::NewGuid().ToString('N')
   $catalogTemp = $catalogFile + '.tmp.' + [Guid]::NewGuid().ToString('N')
   $tempFiles += $catalogTemp
   [IO.File]::WriteAllBytes($catalogTemp, [Convert]::FromBase64String($catalogPayload))
@@ -215,6 +225,9 @@ ${psPayload(catalogPayload)}
   $config = 'model_catalog_json = "' + $catalogPath + '"' + [Environment]::NewLine + $config
 `
     : ''
+  const bootstrapPayload = encodeUtf16LeBase64(
+    `$ErrorActionPreference = 'Stop'; try { $source = [IO.File]::ReadAllText($env:SUB2API_CODEX_SCRIPT); $marker = '# SUB2API_POWERSHELL'; & ([ScriptBlock]::Create($source.Substring($source.LastIndexOf($marker) + $marker.Length))) } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }`
+  )
 
   // Only the short bootstrap is interpreted by CMD. Payloads stay out of its
   // 8191-character command/environment limit, and the entire file is ASCII.
@@ -224,8 +237,9 @@ set "SUB2API_CODEX_SCRIPT=%~f0"
 set "SUB2API_POWERSHELL=%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
 if exist "%SystemRoot%\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe" set "SUB2API_POWERSHELL=%SystemRoot%\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe"
 if not exist "%SUB2API_POWERSHELL%" goto :missing_powershell
-"%SUB2API_POWERSHELL%" -NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -Command "try { $source = [IO.File]::ReadAllText($env:SUB2API_CODEX_SCRIPT); $marker = '# SUB2API_POWERSHELL'; & ([ScriptBlock]::Create($source.Substring($source.LastIndexOf($marker) + $marker.Length))) } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }"
-set "SUB2API_CODEX_EXIT=%ERRORLEVEL%"
+set "SUB2API_CODEX_EXIT=1"
+"%SUB2API_POWERSHELL%" -NoLogo -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -EncodedCommand ${bootstrapPayload}
+if not errorlevel 1 if errorlevel 0 set "SUB2API_CODEX_EXIT=0"
 pause
 endlocal & exit /b %SUB2API_CODEX_EXIT%
 
@@ -241,13 +255,20 @@ $ErrorActionPreference = 'Stop'
 $tempFiles = @()
 $status = 1
 $configFile = ''
+$catalogPublished = $false
+$catalogBackup = ''
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 function Decode-Text([string]$value) {
   return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($value))
 }
-function Publish-File([string]$source, [string]$destination) {
+function Publish-File([string]$source, [string]$destination, [string]$backup = '') {
   if ([IO.File]::Exists($destination)) {
-    [IO.File]::Replace($source, $destination, $null)
+    if ($backup) {
+      [IO.File]::Replace($source, $destination, $backup)
+    } else {
+      # PowerShell converts $null to an empty string for .NET string parameters.
+      [IO.File]::Replace($source, $destination, [System.Management.Automation.Language.NullString]::Value)
+    }
   } else {
     [IO.File]::Move($source, $destination)
   }
@@ -267,12 +288,26 @@ ${psPayload(configPayload)}
 ${catalogBlock}  $configTemp = $configFile + '.tmp.' + [Guid]::NewGuid().ToString('N')
   $tempFiles += $configTemp
   [IO.File]::WriteAllBytes($configTemp, [Text.Encoding]::UTF8.GetBytes($config))
-${catalogPayload ? '  Publish-File $catalogTemp $catalogFile\n' : ''}  Publish-File $configTemp $configFile
+${catalogPayload ? '  Publish-File $catalogTemp $catalogFile $catalogBackup\n  $catalogPublished = $true\n' : ''}  Publish-File $configTemp $configFile
   $status = 0
   $message = (Decode-Text '${encodeUtf8Base64('Codex 配置成功。')}') + [Environment]::NewLine + $configFile + [Environment]::NewLine + (Decode-Text '${encodeUtf8Base64('请完全退出并重启 Codex 以加载新配置。')}')
 } catch {
-  $message = (Decode-Text '${encodeUtf8Base64('Codex 配置失败。请检查目录权限、磁盘空间和终端错误信息后重试。')}') + [Environment]::NewLine + $configFile + [Environment]::NewLine + $_.Exception.Message
+  $failure = $_.Exception.Message
+  if ($catalogPublished) {
+    try {
+      if ([IO.File]::Exists($catalogBackup)) {
+        Publish-File $catalogBackup $catalogFile
+      } else {
+        [IO.File]::Delete($catalogFile)
+      }
+    } catch {
+      $failure += [Environment]::NewLine + 'Could not restore the model catalog. Backup: ' + $catalogBackup + [Environment]::NewLine + $_.Exception.Message
+    }
+  }
+  $message = (Decode-Text '${encodeUtf8Base64('Codex 配置失败。请检查目录权限、磁盘空间和终端错误信息后重试。')}') + [Environment]::NewLine + $configFile + [Environment]::NewLine + $failure
 } finally {
+  # Keep the original catalog backup if rollback failed.
+  if ($status -eq 0 -and $catalogBackup) { $tempFiles += $catalogBackup }
   foreach ($file in $tempFiles) {
     try { if ([IO.File]::Exists($file)) { [IO.File]::Delete($file) } } catch { }
   }
