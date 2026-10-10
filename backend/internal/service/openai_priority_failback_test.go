@@ -13,7 +13,7 @@ import (
 
 func TestOpenAIPriorityStickyFailbackAcrossSchedulers(t *testing.T) {
 	for _, mode := range []string{"legacy", "legacy_batch", "advanced", "experimental"} {
-		for _, scenario := range []string{"recovered", "same_priority", "full", "near_full", "queued", "load_error", "load_missing", "slot_race", "cooldown", "excluded", "wrong_group", "wrong_model", "rpm_full", "rpm_warning"} {
+		for _, scenario := range []string{"recovered", "active", "activity_error", "activity_revoked", "same_priority", "full", "near_full", "queued", "load_error", "load_missing", "slot_race", "cooldown", "excluded", "wrong_group", "wrong_model", "rpm_full", "rpm_warning"} {
 			t.Run(mode+"/"+scenario, func(t *testing.T) {
 				resetOpenAIAdvancedSchedulerSettingCacheForTest()
 				defer resetOpenAIAdvancedSchedulerSettingCacheForTest()
@@ -63,8 +63,17 @@ func TestOpenAIPriorityStickyFailbackAcrossSchedulers(t *testing.T) {
 				cfg.Gateway.Scheduling.LoadBatchEnabled = mode == "legacy_batch"
 				cfg.Gateway.OpenAIWS.LBTopK = 1
 				cache := &schedulerTestGatewayCache{sessionBindings: map[string]int64{"openai:backup-session": 10}}
+				activity := withIdleActivity(cache)
+				switch scenario {
+				case "active":
+					activity.idle = false
+				case "activity_error":
+					activity.err = errors.New("activity unavailable")
+				case "activity_revoked":
+					activity.denyAfter = 1
+				}
 				svc := &OpenAIGatewayService{
-					cfg: cfg, cache: cache, rpmCache: rpm,
+					cfg: cfg, cache: activity, rpmCache: rpm,
 					accountRepo:        schedulerTestOpenAIAccountRepo{accounts: accounts},
 					concurrencyService: NewConcurrencyService(concurrency),
 				}
@@ -75,9 +84,9 @@ func TestOpenAIPriorityStickyFailbackAcrossSchedulers(t *testing.T) {
 					priority := DefaultPrioritySchedulingConfig()
 					priority.Enabled = true
 					svc.settingService = &SettingService{settingRepo: &prioritySettingStub{}}
-					require.NoError(t, svc.settingService.SavePrioritySchedulingConfig(context.Background(), priority))
+					require.NoError(t, svc.settingService.SavePrioritySchedulingConfig(t.Context(), priority))
 				}
-				selection, decision, err := svc.SelectAccountWithScheduler(context.Background(), &groupID, "", "backup-session", "gpt-5.1", excluded, OpenAIUpstreamTransportAny, false)
+				selection, decision, err := svc.SelectAccountWithScheduler(t.Context(), &groupID, "", "backup-session", "gpt-5.1", excluded, OpenAIUpstreamTransportAny, false)
 				require.NoError(t, err)
 				require.NotNil(t, selection)
 				require.True(t, selection.Acquired)
@@ -116,7 +125,7 @@ func TestOpenAIPriorityFailbackPreservesHardBindings(t *testing.T) {
 			case "escape_disabled":
 				req.DisableStickyEscape = true
 			}
-			require.Nil(t, scheduler.tryPriorityStickyFailback(context.Background(), req, sticky, true))
+			require.Nil(t, scheduler.tryPriorityStickyFailback(idleSessionContext(t.Context(), nil, "openai:session"), req, sticky, true))
 		})
 	}
 }
@@ -158,7 +167,7 @@ func TestOpenAIExplicitPriorityFallsBackOnSlotRace(t *testing.T) {
 		rateLimitService:   newOpenAIAdvancedSchedulerRateLimitService("true"),
 		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{acquiredIDs: &acquired, acquireResults: map[int64]bool{218: false, 10: true}}),
 	}
-	selection, _, err := svc.SelectAccountWithScheduler(context.Background(), nil, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	selection, _, err := svc.SelectAccountWithScheduler(t.Context(), nil, "", "", "gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
 	require.NoError(t, err)
 	require.NotNil(t, selection)
 	t.Cleanup(selection.ReleaseFunc)
@@ -196,12 +205,12 @@ func TestOpenAIPriorityFailbackRechecksBeforeUpdatingBinding(t *testing.T) {
 			cache := &schedulerTestGatewayCache{sessionBindings: map[string]int64{"openai:backup-session": backup.ID}}
 			acquired, released := []int64{}, []int64{}
 			svc := &OpenAIGatewayService{
-				cache:              cache,
+				cache:              withIdleActivity(cache),
 				accountRepo:        priorityFailbackRecheckRepo{schedulerTestOpenAIAccountRepo{accounts: []Account{primary, backup}}, fresh},
 				concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{acquiredIDs: &acquired, releasedIDs: &released}),
 			}
 			scheduler := &defaultOpenAIAccountScheduler{service: svc}
-			selection := scheduler.tryPriorityStickyFailback(context.Background(), OpenAIAccountScheduleRequest{
+			selection := scheduler.tryPriorityStickyFailback(idleSessionContext(t.Context(), nil, "openai:backup-session"), OpenAIAccountScheduleRequest{
 				Platform: PlatformOpenAI, SessionHash: "backup-session", RequestedModel: "gpt-5.1", UseUpstreamTokenCost: true,
 			}, &backup, true)
 			require.Nil(t, selection)

@@ -102,6 +102,9 @@ func (s *defaultOpenAIAccountScheduler) shouldRebalancePrioritySticky(ctx contex
 		req.Platform != PlatformOpenAI || !req.UseUpstreamTokenCost || req.RequiredImageCapability != "" {
 		return false
 	}
+	if !sessionActivityAllowsMigration(ctx, req.GroupID, s.service.openAISessionCacheKey(req.SessionHash)) {
+		return false
+	}
 	cfg := s.service.prioritySchedulingRuntimeConfig()
 	if !cfg.applies(req.GroupID, req.RequestedModel) {
 		return false
@@ -177,7 +180,7 @@ func (s *defaultOpenAIAccountScheduler) shouldRebalancePrioritySticky(ctx contex
 		}
 		for _, item := range buildPrioritySelectionOrder(historyPool, req) {
 			if item.account.ID == sticky.ID && item.priorityAPIStandby {
-				return true
+				return sessionActivityAllowsMigration(ctx, req.GroupID, s.service.openAISessionCacheKey(req.SessionHash))
 			}
 		}
 	}
@@ -202,7 +205,7 @@ func (s *defaultOpenAIAccountScheduler) shouldRebalancePrioritySticky(ctx contex
 		otherUtilization := float64(load.CurrentConcurrency) / float64(max(1, account.Concurrency))
 		otherWeight := prioritySelectionWeight(openAIAccountCandidateScore{account: account, loadInfo: load, loadKnown: true, score: 50}, now)
 		if utilization-otherUtilization >= 0.20 && otherWeight > 2*weight {
-			return true
+			return sessionActivityAllowsMigration(ctx, req.GroupID, s.service.openAISessionCacheKey(req.SessionHash))
 		}
 	}
 	return false

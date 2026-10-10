@@ -240,8 +240,10 @@ func TestPriorityStickyRebalancesWithoutChangingBinding(t *testing.T) {
 			if test.previous {
 				req.PreviousResponseID = "resp-owner"
 			}
-			require.Equal(t, test.expectEscape, scheduler.shouldRebalancePrioritySticky(context.Background(), req, &accounts[0]))
-			selected, escaped, err := scheduler.selectBySessionHash(context.Background(), req)
+			warmCtx := trackSessionActivity(t.Context(), &testSessionActivityCache{GatewayCache: cache}, req.GroupID, "openai:"+req.SessionHash)
+			require.False(t, scheduler.shouldRebalancePrioritySticky(warmCtx, req, &accounts[0]), "capacity differences cannot displace an active session")
+			require.Equal(t, test.expectEscape, scheduler.shouldRebalancePrioritySticky(idleSessionContext(t.Context(), req.GroupID, "openai:"+req.SessionHash), req, &accounts[0]))
+			selected, escaped, err := scheduler.selectBySessionHash(idleSessionContext(t.Context(), req.GroupID, "openai:"+req.SessionHash), req)
 			require.NoError(t, err)
 			require.Equal(t, test.expectEscape, escaped)
 			if test.expectEscape {
@@ -269,8 +271,8 @@ func TestPriorityStickyLoadFailureAndHealthyBindingStayPut(t *testing.T) {
 	gateway.accountRepo = schedulerTestOpenAIAccountRepo{accounts: accounts}
 	gateway.concurrencyService = NewConcurrencyService(schedulerTestConcurrencyCache{loadMap: map[int64]*AccountLoadInfo{1: {AccountID: 1, CurrentConcurrency: 2}, 2: {AccountID: 2}}})
 	scheduler := &defaultOpenAIAccountScheduler{service: gateway, stats: newOpenAIAccountRuntimeStats()}
-	req := OpenAIAccountScheduleRequest{Platform: PlatformOpenAI, GroupID: &groupID, UseUpstreamTokenCost: true}
-	require.False(t, scheduler.shouldRebalancePrioritySticky(context.Background(), req, &accounts[0]))
+	req := OpenAIAccountScheduleRequest{Platform: PlatformOpenAI, GroupID: &groupID, UseUpstreamTokenCost: true, SessionHash: "healthy-session"}
+	require.False(t, scheduler.shouldRebalancePrioritySticky(idleSessionContext(t.Context(), req.GroupID, "openai:"+req.SessionHash), req, &accounts[0]))
 	gateway.concurrencyService = NewConcurrencyService(schedulerTestConcurrencyCache{loadBatchErr: fmt.Errorf("offline")})
-	require.False(t, scheduler.shouldRebalancePrioritySticky(context.Background(), req, &accounts[0]))
+	require.False(t, scheduler.shouldRebalancePrioritySticky(idleSessionContext(t.Context(), req.GroupID, "openai:"+req.SessionHash), req, &accounts[0]))
 }

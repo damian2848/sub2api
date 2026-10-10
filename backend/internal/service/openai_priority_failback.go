@@ -17,6 +17,9 @@ func (s *defaultOpenAIAccountScheduler) tryPriorityStickyFailback(ctx context.Co
 		preserveOpenAIGuardianParentBinding(ctx, req.SessionHash) {
 		return nil
 	}
+	if !sessionActivityAllowsMigration(ctx, req.GroupID, s.service.openAISessionCacheKey(req.SessionHash)) {
+		return nil
+	}
 	// Failback is optional work on a healthy session; bound its dependency cost.
 	probeCtx, cancel := context.WithTimeout(ctx, priorityFailbackTimeout)
 	defer cancel()
@@ -158,7 +161,8 @@ func (s *defaultOpenAIAccountScheduler) tryPriorityStickyFailback(ctx context.Co
 		}
 		selection.Account = fresh
 	}
-	if probeCtx.Err() != nil || selection.Account.Priority >= sticky.Priority {
+	if probeCtx.Err() != nil || selection.Account.Priority >= sticky.Priority ||
+		!sessionActivityAllowsMigration(probeCtx, req.GroupID, s.service.openAISessionCacheKey(req.SessionHash)) {
 		if selection.ReleaseFunc != nil {
 			selection.ReleaseFunc()
 		}

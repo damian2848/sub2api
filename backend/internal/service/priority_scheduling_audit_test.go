@@ -183,15 +183,15 @@ func TestPriorityStickyDoesNotEscapeToKnownRisk(t *testing.T) {
 	g.accountRepo = schedulerTestOpenAIAccountRepo{accounts: accounts}
 	g.concurrencyService = NewConcurrencyService(schedulerTestConcurrencyCache{loadMap: map[int64]*AccountLoadInfo{1: {AccountID: 1, CurrentConcurrency: 20}, 2: {AccountID: 2}}})
 	id := int64(11)
-	req := OpenAIAccountScheduleRequest{Platform: PlatformOpenAI, RequestedModel: "gpt-6-astra", GroupID: &id, UseUpstreamTokenCost: true}
+	req := OpenAIAccountScheduleRequest{Platform: PlatformOpenAI, RequestedModel: "gpt-6-astra", GroupID: &id, UseUpstreamTokenCost: true, SessionHash: "risk-session"}
 	pool := []openAIAccountCandidateScore{{account: &accounts[0]}, {account: &accounts[1]}}
 	require.Eventually(t, func() bool { _, ready := g.prioritySignals(req, c, pool); return ready }, time.Second, time.Millisecond)
 	scheduler := &defaultOpenAIAccountScheduler{service: g}
-	require.False(t, scheduler.shouldRebalancePrioritySticky(context.Background(), req, &accounts[0]))
+	require.False(t, scheduler.shouldRebalancePrioritySticky(idleSessionContext(t.Context(), req.GroupID, "openai:"+req.SessionHash), req, &accounts[0]))
 	g.priorityScheduling.mu.Lock()
 	g.priorityScheduling.entries[priorityHistoryKey(req, c)].signals[2] = PrioritySchedulingSignal{QualityPassed: 10, QualitySamples: 10}
 	g.priorityScheduling.mu.Unlock()
-	require.True(t, scheduler.shouldRebalancePrioritySticky(context.Background(), req, &accounts[0]), "the same compatible idle peer may attract traffic once its known risk is gone")
+	require.True(t, scheduler.shouldRebalancePrioritySticky(idleSessionContext(t.Context(), req.GroupID, "openai:"+req.SessionHash), req, &accounts[0]), "the same compatible idle peer may attract traffic once its known risk is gone")
 }
 
 func TestPrioritySelectionWeightRejectsNonFiniteQuota(t *testing.T) {

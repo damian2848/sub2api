@@ -18,6 +18,9 @@ func (s *GatewayService) tryPriorityStickyFailback(ctx context.Context, groupID 
 	if _, skip := ctx.Value(gatewayPriorityFailbackAttemptedKey{}).(bool); skip {
 		return nil
 	}
+	if !sessionActivityAllowsMigration(ctx, groupID, sessionHash) {
+		return nil
+	}
 	if _, skip := excluded[stickyID]; skip {
 		return nil
 	}
@@ -158,6 +161,13 @@ func (s *GatewayService) tryPriorityStickyFailback(ctx context.Context, groupID 
 				release()
 			}
 			continue
+		}
+		// A concurrent request arriving during candidate checks revokes migration.
+		if !sessionActivityAllowsMigration(probeCtx, groupID, sessionHash) {
+			if release != nil {
+				release()
+			}
+			return nil
 		}
 		_ = s.bindGatewayStickySessionDuringSelection(ctx, groupID, sessionHash, fresh.ID)
 		slog.Info("priority_sticky_failback", "platform", platform, "from_account_id", sticky.ID,

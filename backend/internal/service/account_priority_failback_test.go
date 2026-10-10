@@ -16,7 +16,7 @@ import (
 func TestGatewayPriorityRecoveryAcrossPlatforms(t *testing.T) {
 	for _, platform := range []string{PlatformAnthropic, PlatformGemini, PlatformAntigravity, PlatformTypeSafe} {
 		for _, mode := range []string{"batch", "legacy", "metadata"} {
-			for _, scenario := range []string{"recovered", "same_priority", "near_full", "real_full", "queued", "load_error", "load_missing", "slot_race", "cooldown", "wrong_model", "wrong_group", "excluded"} {
+			for _, scenario := range []string{"recovered", "active", "activity_error", "activity_revoked", "backup_cooldown", "backup_excluded", "unbound", "same_priority", "near_full", "real_full", "queued", "load_error", "load_missing", "slot_race", "cooldown", "wrong_model", "wrong_group", "excluded"} {
 				t.Run(platform+"/"+mode+"/"+scenario, func(t *testing.T) {
 					groupID := int64(7)
 					primary := Account{ID: 1, Platform: platform, Type: AccountTypeAPIKey, Priority: 1, Status: StatusActive, Schedulable: true, Concurrency: 10,
@@ -28,6 +28,11 @@ func TestGatewayPriorityRecoveryAcrossPlatforms(t *testing.T) {
 					concurrency := schedulerTestConcurrencyCache{loadMap: loads, acquiredIDs: &acquired}
 					var excluded map[int64]struct{}
 					switch scenario {
+					case "backup_cooldown":
+						end := time.Now().Add(time.Hour)
+						backup.RateLimitResetAt = &end
+					case "backup_excluded":
+						excluded = map[int64]struct{}{2: {}}
 					case "same_priority":
 						primary.Priority = 25
 					case "near_full":
@@ -57,9 +62,21 @@ func TestGatewayPriorityRecoveryAcrossPlatforms(t *testing.T) {
 					}
 					repo := &mockAccountRepoForPlatform{accounts: []Account{primary, backup}, accountsByID: map[int64]*Account{1: &primary, 2: &backup}}
 					cache := &mockGatewayCacheForPlatform{sessionBindings: map[string]int64{"session": 2}}
+					activity := withIdleActivity(cache)
+					switch scenario {
+					case "active", "backup_cooldown", "backup_excluded", "unbound":
+						activity.idle = false
+						if scenario == "unbound" {
+							cache.sessionBindings = nil
+						}
+					case "activity_error":
+						activity.err = errors.New("activity unavailable")
+					case "activity_revoked":
+						activity.denyAfter = 1
+					}
 					cfg := &config.Config{}
 					cfg.Gateway.Scheduling.LoadBatchEnabled = mode == "batch"
-					svc := &GatewayService{accountRepo: repo, cache: cache, cfg: cfg,
+					svc := &GatewayService{accountRepo: repo, cache: activity, cfg: cfg,
 						groupRepo:          &mockGroupRepoForGateway{groups: map[int64]*Group{groupID: {ID: groupID, Platform: platform, Status: StatusActive}}},
 						concurrencyService: NewConcurrencyService(concurrency)}
 					model := "claude-sonnet-4-5"
@@ -72,23 +89,25 @@ func TestGatewayPriorityRecoveryAcrossPlatforms(t *testing.T) {
 					var account *Account
 					if mode == "metadata" {
 						var err error
-						account, err = svc.SelectAccountForModelWithExclusions(context.Background(), &groupID, "session", model, excluded)
+						account, err = svc.SelectAccountForModelWithExclusions(t.Context(), &groupID, "session", model, excluded)
 						require.NoError(t, err)
 						require.Empty(t, acquired, "metadata must not reserve generation capacity")
 					} else {
-						selection, err := svc.SelectAccountWithLoadAwareness(context.Background(), &groupID, "session", model, excluded, "", 0)
+						selection, err := svc.SelectAccountWithLoadAwareness(t.Context(), &groupID, "session", model, excluded, "", 0)
 						require.NoError(t, err)
 						require.True(t, selection.Acquired)
 						t.Cleanup(selection.ReleaseFunc)
 						account = selection.Account
 					}
 					wantID := int64(2)
-					if scenario == "recovered" || mode == "metadata" && scenario == "slot_race" {
+					if scenario == "recovered" || scenario == "backup_cooldown" || scenario == "backup_excluded" || scenario == "unbound" || mode == "metadata" && scenario == "slot_race" {
 						wantID = 1
 					}
 					require.Equal(t, wantID, account.ID)
 					require.Equal(t, wantID, cache.sessionBindings["session"])
-					require.Empty(t, cache.deletedSessions)
+					if scenario != "backup_cooldown" {
+						require.Empty(t, cache.deletedSessions)
+					}
 				})
 			}
 		}
@@ -104,7 +123,7 @@ func TestGatewayPriorityRecoveryRespectsRoutingAndMixedPools(t *testing.T) {
 			backup := primary
 			backup.ID, backup.Priority, backup.Type = 2, 25, AccountTypeAPIKey
 			group := &Group{ID: groupID, Platform: PlatformAnthropic, Status: StatusActive}
-			ctx := context.Background()
+			ctx := idleSessionContext(t.Context(), &groupID, "session")
 			rpm := &openAIRPMTestCache{counts: map[int64]int{1: 8}}
 			switch scenario {
 			case "mixed", "mixed_disabled":
@@ -131,7 +150,7 @@ func TestGatewayPriorityRecoveryRespectsRoutingAndMixedPools(t *testing.T) {
 			}
 			repo := &mockAccountRepoForPlatform{accounts: []Account{primary, backup}, accountsByID: map[int64]*Account{1: &primary, 2: &backup}}
 			cache := &mockGatewayCacheForPlatform{sessionBindings: map[string]int64{"session": 2}}
-			svc := &GatewayService{accountRepo: repo, cache: cache, rpmCache: rpm,
+			svc := &GatewayService{accountRepo: repo, cache: withIdleActivity(cache), rpmCache: rpm,
 				groupRepo:          &mockGroupRepoForGateway{groups: map[int64]*Group{groupID: group}},
 				concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{})}
 			if scenario == "session_limit" {
@@ -174,7 +193,7 @@ func TestCompatiblePriorityRecoveryAcrossPlatformsAndMedia(t *testing.T) {
 					cache := &schedulerTestGatewayCache{sessionBindings: map[string]int64{"openai:session": 2}}
 					cfg := &config.Config{}
 					cfg.Gateway.OpenAIWS.LBTopK = 1
-					svc := &OpenAIGatewayService{accountRepo: schedulerTestOpenAIAccountRepo{accounts: accounts}, cache: cache, cfg: cfg,
+					svc := &OpenAIGatewayService{accountRepo: schedulerTestOpenAIAccountRepo{accounts: accounts}, cache: withIdleActivity(cache), cfg: cfg,
 						concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{})}
 					if advanced {
 						svc.rateLimitService = newOpenAIAdvancedSchedulerRateLimitService("true")
@@ -193,13 +212,13 @@ func TestCompatiblePriorityRecoveryAcrossPlatformsAndMedia(t *testing.T) {
 					var decision OpenAIAccountScheduleDecision
 					var err error
 					if kind == "media" && platform == PlatformOpenAI {
-						selection, decision, err = svc.SelectAccountWithSchedulerForImages(context.Background(), nil, "session", "gpt-image-1", nil, OpenAIImagesCapabilityAPIKey)
+						selection, decision, err = svc.SelectAccountWithSchedulerForImages(t.Context(), nil, "session", "gpt-image-1", nil, OpenAIImagesCapabilityAPIKey)
 					} else {
 						capability := OpenAIEndpointCapabilityChatCompletions
 						if kind == "media" && platform == PlatformGrok {
 							capability = OpenAIEndpointCapabilityGrokMediaGeneration
 						}
-						selection, decision, err = svc.SelectAccountWithSchedulerForCapability(context.Background(), nil, "", "session", model, nil,
+						selection, decision, err = svc.SelectAccountWithSchedulerForCapability(t.Context(), nil, "", "session", model, nil,
 							OpenAIUpstreamTransportAny, capability, false, false, kind == "text", platform)
 					}
 					require.NoError(t, err)
@@ -241,11 +260,11 @@ func TestPriorityRecoverySlotFreeCompatibilityAPIs(t *testing.T) {
 			var err error
 			if provider == "gemini" {
 				repo := &mockAccountRepoForPlatform{accounts: []Account{primary, backup}, accountsByID: map[int64]*Account{1: &primary, 2: &backup}}
-				svc := &GeminiMessagesCompatService{accountRepo: repo, cache: cache, concurrencyService: concurrency}
-				account, err = svc.SelectAccountForModel(context.Background(), nil, "session", model)
+				svc := &GeminiMessagesCompatService{accountRepo: repo, cache: withIdleActivity(cache), concurrencyService: concurrency}
+				account, err = svc.SelectAccountForModel(t.Context(), nil, "session", model)
 			} else {
-				svc := &OpenAIGatewayService{accountRepo: schedulerTestOpenAIAccountRepo{accounts: []Account{primary, backup}}, cache: cache, concurrencyService: concurrency}
-				account, err = svc.SelectAccountForTokenCount(context.Background(), nil, "session", model, OpenAIEndpointCapabilityChatCompletions, platform)
+				svc := &OpenAIGatewayService{accountRepo: schedulerTestOpenAIAccountRepo{accounts: []Account{primary, backup}}, cache: withIdleActivity(cache), concurrencyService: concurrency}
+				account, err = svc.SelectAccountForTokenCount(t.Context(), nil, "session", model, OpenAIEndpointCapabilityChatCompletions, platform)
 			}
 			require.NoError(t, err)
 			require.Equal(t, int64(1), account.ID)
@@ -277,8 +296,8 @@ func TestGatewayPriorityRecoveryRechecksAccountChanges(t *testing.T) {
 			cache := &schedulerTestGatewayCache{sessionBindings: map[string]int64{"session": 2}}
 			acquired, released := []int64{}, []int64{}
 			repo := &mockAccountRepoForPlatform{accounts: []Account{primary, backup}, accountsByID: map[int64]*Account{1: &fresh, 2: &backup}}
-			svc := &GatewayService{accountRepo: repo, cache: cache, concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{acquiredIDs: &acquired, releasedIDs: &released})}
-			require.Nil(t, svc.tryPriorityStickyFailback(context.Background(), nil, PlatformGemini, false, "session", "gemini-2.5-flash", nil, 2, true))
+			svc := &GatewayService{accountRepo: repo, cache: withIdleActivity(cache), concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{acquiredIDs: &acquired, releasedIDs: &released})}
+			require.Nil(t, svc.tryPriorityStickyFailback(idleSessionContext(t.Context(), nil, "session"), nil, PlatformGemini, false, "session", "gemini-2.5-flash", nil, 2, true))
 			require.Equal(t, []int64{1}, acquired)
 			require.Equal(t, acquired, released)
 			require.Equal(t, int64(2), cache.sessionBindings["session"])
@@ -300,7 +319,7 @@ func TestPriorityRecoveryPreservesMediaCapabilitiesAndOwnership(t *testing.T) {
 			}
 			cache := &schedulerTestGatewayCache{sessionBindings: map[string]int64{"openai:session": 2}}
 			acquired := []int64{}
-			svc := &OpenAIGatewayService{accountRepo: schedulerTestOpenAIAccountRepo{accounts: []Account{primary, backup}}, cache: cache,
+			svc := &OpenAIGatewayService{accountRepo: schedulerTestOpenAIAccountRepo{accounts: []Account{primary, backup}}, cache: withIdleActivity(cache),
 				concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{acquiredIDs: &acquired})}
 			req := OpenAIAccountScheduleRequest{Platform: PlatformOpenAI, SessionHash: "session", RequestedModel: "gpt-5.1"}
 			switch scenario {
@@ -309,14 +328,14 @@ func TestPriorityRecoveryPreservesMediaCapabilitiesAndOwnership(t *testing.T) {
 			case "transport_required":
 				req.RequiredTransport = OpenAIUpstreamTransportResponsesWebsocketV2
 			case "video_owner":
-				selection, _, err := svc.SelectMediaVideoRequestAccount(context.Background(), nil, "session", 2, "grok-imagine-video", PlatformGrok)
+				selection, _, err := svc.SelectMediaVideoRequestAccount(t.Context(), nil, "session", 2, "grok-imagine-video", PlatformGrok)
 				require.NoError(t, err)
 				require.Equal(t, int64(2), selection.Account.ID)
 				t.Cleanup(selection.ReleaseFunc)
 				require.Equal(t, []int64{2}, acquired)
 				return
 			}
-			require.Nil(t, (&defaultOpenAIAccountScheduler{service: svc}).tryPriorityStickyFailback(context.Background(), req, &backup, true))
+			require.Nil(t, (&defaultOpenAIAccountScheduler{service: svc}).tryPriorityStickyFailback(idleSessionContext(t.Context(), nil, "openai:session"), req, &backup, true))
 			require.Empty(t, acquired)
 			require.Equal(t, int64(2), cache.sessionBindings["openai:session"])
 		})
@@ -331,8 +350,8 @@ func TestPriorityRecoveryAcrossAccountTypes(t *testing.T) {
 			backup.ID, backup.Priority, backup.Type = 2, 25, AccountTypeAPIKey
 			repo := &mockAccountRepoForPlatform{accounts: []Account{primary, backup}, accountsByID: map[int64]*Account{1: &primary, 2: &backup}}
 			cache := &schedulerTestGatewayCache{sessionBindings: map[string]int64{"session": 2}}
-			svc := &GatewayService{accountRepo: repo, cache: cache, concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{})}
-			selection := svc.tryPriorityStickyFailback(context.Background(), nil, PlatformAnthropic, false, "session", "claude-sonnet-4-5-20250929", nil, 2, true)
+			svc := &GatewayService{accountRepo: repo, cache: withIdleActivity(cache), concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{})}
+			selection := svc.tryPriorityStickyFailback(idleSessionContext(t.Context(), nil, "session"), nil, PlatformAnthropic, false, "session", "claude-sonnet-4-5-20250929", nil, 2, true)
 			require.NotNil(t, selection)
 			t.Cleanup(selection.ReleaseFunc)
 			require.Equal(t, int64(1), selection.Account.ID)
@@ -353,7 +372,7 @@ func TestGeminiAIStudioPriorityWithinCompatibleAccounts(t *testing.T) {
 			backup := Account{ID: 2, Platform: PlatformGemini, Type: AccountTypeAPIKey, Priority: 25, Status: StatusActive, Schedulable: true, Credentials: map[string]any{"api_key": "test"}}
 			repo := &mockAccountRepoForPlatform{accounts: []Account{backup, primary}}
 			svc := &GeminiMessagesCompatService{accountRepo: repo}
-			account, err := svc.SelectAccountForAIStudioEndpoints(context.Background(), nil)
+			account, err := svc.SelectAccountForAIStudioEndpoints(t.Context(), nil)
 			require.NoError(t, err)
 			want := int64(1)
 			if scenario == "unknown_scopes" {

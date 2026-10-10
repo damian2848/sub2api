@@ -1199,10 +1199,10 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_EnabledUsesAdvancedPrev
 	require.True(t, decision.StickyPreviousHit)
 }
 
-func TestOpenAIGatewayService_SelectAccountWithScheduler_StickyWeightedSessionYieldsToHigherPriority(t *testing.T) {
+func TestOpenAIGatewayService_SelectAccountWithScheduler_IdleStickyWeightedSessionYieldsToHigherPriority(t *testing.T) {
 	resetOpenAIAdvancedSchedulerSettingCacheForTest()
 
-	ctx := context.Background()
+	ctx := t.Context()
 	groupID := int64(101071)
 	accounts := []Account{
 		{
@@ -1239,7 +1239,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_StickyWeightedSessionYi
 	}}
 	svc := &OpenAIGatewayService{
 		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: accounts},
-		cache:              cache,
+		cache:              withIdleActivity(cache),
 		cfg:                cfg,
 		rateLimitService:   newOpenAIAdvancedSchedulerRateLimitService("true", "true"),
 		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),

@@ -245,7 +245,7 @@ func TestPriorityOAuthQuotaStickyEscapeRespectsOwnershipAndScope(t *testing.T) {
 				return ready
 			}, time.Second, time.Millisecond)
 			scheduler := &defaultOpenAIAccountScheduler{service: gateway, stats: newOpenAIAccountRuntimeStats()}
-			require.Equal(t, tc.want, scheduler.shouldRebalancePrioritySticky(context.Background(), req, api.account))
+			require.Equal(t, tc.want, scheduler.shouldRebalancePrioritySticky(idleSessionContext(t.Context(), req.GroupID, "openai:"+req.SessionHash), req, api.account))
 			require.Equal(t, int64(2), cache.sessionBindings["openai:quota-session"], "checking escape never rewrites the binding")
 		})
 	}

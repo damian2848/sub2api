@@ -281,6 +281,7 @@ func (s *OpenAIGatewayService) SelectAccountForTokenCount(
 // Slot-free requests use the same priority recovery without reserving a
 // generation slot. The normal selector remains the fallback on uncertain load.
 func (s *OpenAIGatewayService) selectAccountWithoutSlot(ctx context.Context, req OpenAIAccountScheduleRequest) (*Account, error) {
+	ctx = s.trackOpenAISessionActivity(ctx, req.GroupID, req.SessionHash)
 	req.Platform = NormalizeOpenAICompatiblePlatform(req.Platform)
 	req.RequirePrivacySet = s.openAIGroupRequiresPrivacySet(ctx, req.GroupID)
 	if s.concurrencyService != nil && req.SessionHash != "" && !s.checkChannelPricingRestriction(ctx, req.GroupID, req.RequestedModel) {
@@ -1201,6 +1202,7 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 }
 
 func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Context, req OpenAIAccountScheduleRequest) (*AccountSelectionResult, error) {
+	ctx = s.trackOpenAISessionActivity(ctx, req.GroupID, req.SessionHash)
 	groupID, sessionHash, requestedModel := req.GroupID, req.SessionHash, req.RequestedModel
 	excludedIDs, requireCompact, requiredCapability := req.ExcludedIDs, req.RequireCompact, req.RequiredCapability
 	useUpstreamTokenCost := req.UseUpstreamTokenCost
@@ -1223,8 +1225,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			stickyAccountID = accountID
 		}
 	}
-	// A backup's active session must not renew forever after primary capacity
-	// recovers. Explicit low-rate ordering remains authoritative when enabled.
+	// An idle backup session can return after primary capacity recovers.
+	// Explicit low-rate ordering remains authoritative when enabled.
 	if stickyAccountID > 0 && !preferLowUpstreamRate {
 		if sticky, stickyErr := s.getSchedulableAccount(ctx, stickyAccountID); stickyErr == nil {
 			failback := &defaultOpenAIAccountScheduler{service: s}

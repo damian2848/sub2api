@@ -402,6 +402,7 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	ctx context.Context,
 	req OpenAIAccountScheduleRequest,
 ) (selection *AccountSelectionResult, decision OpenAIAccountScheduleDecision, err error) {
+	ctx = s.service.trackOpenAISessionActivity(ctx, req.GroupID, req.SessionHash)
 	if s != nil && s.service != nil && s.service.openAIGroupRequiresPrivacySet(ctx, req.GroupID) {
 		req.RequirePrivacySet = true
 	}
@@ -489,7 +490,9 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
-	if !req.StickyWeighted {
+	// Weighted scoring must not move a warm, healthy session just because a
+	// higher-priority cohort is available. Eligibility/fault checks still run.
+	if !req.StickyWeighted || req.SessionHash != "" && !sessionActivityAllowsMigration(ctx, req.GroupID, s.service.openAISessionCacheKey(req.SessionHash)) {
 		selection, escapedSticky, err := s.selectBySessionHash(ctx, req)
 		if err != nil {
 			return nil, decision, err
@@ -1422,6 +1425,20 @@ func (s *defaultOpenAIAccountScheduler) tryAcquireOpenAISelectionOrderWithBudget
 			}
 			if result == nil || !result.Acquired {
 				continue
+			}
+		}
+		// Weighted selection can outlive the idle check in Select. Before
+		// replacing its binding, give a newly active, still eligible sticky
+		// account another chance and release speculative capacity if it wins.
+		if req.StickyWeighted && req.StickyAccountID > 0 && fresh.ID != req.StickyAccountID &&
+			req.SessionHash != "" && !req.PreserveStickyBinding &&
+			!sessionActivityAllowsMigration(ctx, req.GroupID, s.service.openAISessionCacheKey(req.SessionHash)) {
+			stickyReq := req
+			stickyReq.PreserveStickyBinding = true
+			sticky, _, stickyErr := s.selectBySessionHash(ctx, stickyReq)
+			if stickyErr != nil || sticky != nil {
+				release(result)
+				return sticky, compactBlocked, stickyErr
 			}
 		}
 		if req.SessionHash != "" && !req.PreserveStickyBinding {
@@ -2446,6 +2463,7 @@ func (s *OpenAIGatewayService) selectAccountWithScheduler(
 	previousResponseCanMove bool,
 	useUpstreamTokenCost bool,
 ) (selection *AccountSelectionResult, decision OpenAIAccountScheduleDecision, err error) {
+	ctx = s.trackOpenAISessionActivity(ctx, groupID, sessionHash)
 	selection, decision, err = s.selectAccountWithSchedulerOnce(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
 	if err == nil || openAIProxyStreamQuarantineBypassed(ctx) {
 		return selection, decision, err

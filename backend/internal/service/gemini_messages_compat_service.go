@@ -126,6 +126,9 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 	}
 
 	cacheKey := "gemini:" + sessionHash
+	if sessionHash != "" {
+		ctx = trackSessionActivity(ctx, s.cache, groupID, cacheKey)
+	}
 
 	// 2. 尝试粘性会话命中
 	// Try sticky session hit
