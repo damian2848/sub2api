@@ -28,7 +28,7 @@ related_frontend_specs() {
   return 0
 }
 
-export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.0}" GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" GOSUMDB="${GOSUMDB:-sum.golang.google.cn}"
+export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.2}" GOPROXY="${GOPROXY:-https://goproxy.cn,direct}" GOSUMDB="${GOSUMDB:-sum.golang.google.cn}"
 export GOMODCACHE="${GOMODCACHE:-/tmp/sub2api-gomodcache}" GOFLAGS="${GOFLAGS:--mod=mod}" NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=8192}"
 
 # Only Go source or module changes need the Go checks; the VERSION file alone does not.
