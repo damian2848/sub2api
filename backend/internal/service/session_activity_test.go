@@ -176,9 +176,10 @@ func TestWarmSessionPriorityAndNecessaryFailover(t *testing.T) {
 					svc := &OpenAIGatewayService{cfg: cfg, cache: activity,
 						accountRepo:        schedulerTestOpenAIAccountRepo{accounts: []Account{primary, backup}},
 						concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{acquiredIDs: &acquired, releasedIDs: &released})}
-					if mode == "advanced" || mode == "oauth" {
+					switch mode {
+					case "advanced", "oauth":
 						svc.rateLimitService = newOpenAIAdvancedSchedulerRateLimitService("true")
-					} else if mode == "weighted" {
+					case "weighted":
 						svc.rateLimitService = newOpenAIAdvancedSchedulerRateLimitService("true", "true")
 					}
 					var account *Account
