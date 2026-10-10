@@ -373,7 +373,6 @@ func createTestPayload(modelID string) (map[string]any, error) {
 // opts is optional media (image/audio data URLs for real generation / STT).
 func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int64, modelID string, prompt string, mode string, opts ...AccountTestOptions) (testErr error) {
 	initAccountTestLogger(c, accountID, modelID, mode)
-	ctx := c.Request.Context()
 	// 测试可能在响应头或正文到来前长时间等待；所有协议共用同一段下游保活生命周期。
 	stopKeepalive := startAccountTestSSEKeepalive(c, 10*time.Second)
 	defer func() {
@@ -383,7 +382,7 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		}
 		stopKeepalive()
 	}()
-	ctx = c.Request.Context()
+	ctx := c.Request.Context()
 	testOpts := firstAccountTestOptions(opts)
 
 	// Get account

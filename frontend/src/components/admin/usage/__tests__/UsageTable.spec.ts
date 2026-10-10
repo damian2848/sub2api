@@ -984,7 +984,7 @@ describe('admin UsageTable latency TPS', () => {
       { request_id: 'req-tps-stream', output_tokens: 872, duration_ms: 31_260, first_token_ms: 2_910 },
     ])
 
-    expect(wrapper.text()).toContain('usage.latencyTps')
+    expect(wrapper.text()).toContain('Avg TPS')
     const cell = tpsCell(wrapper, 'req-tps-stream')
     expect(cell.text()).toBe('27.9 t/s')
     expect(cell.attributes('title')).toBe('usage.latencyTpsHint')
