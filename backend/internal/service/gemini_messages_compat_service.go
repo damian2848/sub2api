@@ -59,6 +59,7 @@ type GeminiMessagesCompatService struct {
 	accountRepo               AccountRepository
 	groupRepo                 GroupRepository
 	cache                     GatewayCache
+	concurrencyService        *ConcurrencyService
 	schedulerSnapshot         *SchedulerSnapshotService
 	tokenProvider             *GeminiTokenProvider
 	rateLimitService          *RateLimitService
@@ -90,11 +91,13 @@ func NewGeminiMessagesCompatService(
 	httpUpstream HTTPUpstream,
 	antigravityGatewayService *AntigravityGatewayService,
 	cfg *config.Config,
+	concurrencyService *ConcurrencyService,
 ) *GeminiMessagesCompatService {
 	return &GeminiMessagesCompatService{
 		accountRepo:               accountRepo,
 		groupRepo:                 groupRepo,
 		cache:                     cache,
+		concurrencyService:        concurrencyService,
 		schedulerSnapshot:         schedulerSnapshot,
 		tokenProvider:             tokenProvider,
 		rateLimitService:          rateLimitService,
@@ -127,6 +130,17 @@ func (s *GeminiMessagesCompatService) SelectAccountForModelWithExclusions(ctx co
 	// 2. 尝试粘性会话命中
 	// Try sticky session hit
 	if account := s.tryStickySessionHit(ctx, groupID, sessionHash, cacheKey, requestedModel, excludedIDs, platform, useMixedScheduling); account != nil {
+		// Reuse gateway eligibility and recovery for this slot-free legacy API,
+		// retaining its namespaced session key and platform boundary.
+		gateway := &GatewayService{accountRepo: s.accountRepo, groupRepo: s.groupRepo, cache: s.cache,
+			cfg: s.cfg, schedulerSnapshot: s.schedulerSnapshot, concurrencyService: s.concurrencyService,
+			rateLimitService: s.rateLimitService}
+		if primary := gateway.tryPriorityStickyFailback(ctx, groupID, platform, hasForcePlatform, cacheKey, requestedModel, excludedIDs, account.ID, false,
+			func(checkCtx context.Context, a *Account) bool {
+				return s.isAccountUsableForRequest(checkCtx, a, groupID, requestedModel, platform, useMixedScheduling)
+			}); primary != nil {
+			return primary.Account, nil
+		}
 		return account, nil
 	}
 
@@ -541,11 +555,9 @@ func (s *GeminiMessagesCompatService) HasAntigravityAccounts(ctx context.Context
 // SelectAccountForAIStudioEndpoints selects an account that is likely to succeed against
 // generativelanguage.googleapis.com (e.g. GET /v1beta/models).
 //
-// Preference order:
-// 1) API key accounts (AI Studio)
-// 2) OAuth accounts without project_id (AI Studio OAuth)
-// 3) OAuth accounts explicitly marked as ai_studio
-// 4) Any remaining Gemini accounts (fallback)
+// Confirmed AI Studio API keys and OAuth accounts compare account priority
+// first, with authentication preference breaking ties. Accounts with uncertain
+// scopes remain fallback candidates.
 func (s *GeminiMessagesCompatService) SelectAccountForAIStudioEndpoints(ctx context.Context, groupID *int64) (*Account, error) {
 	accounts, err := s.listSchedulableAccountsOnce(ctx, groupID, PlatformGemini, true)
 	if err != nil {
@@ -592,6 +604,12 @@ func (s *GeminiMessagesCompatService) SelectAccountForAIStudioEndpoints(ctx cont
 		}
 
 		r1, r2 := rank(acc), rank(selected)
+		if r1 < 3 && r2 < 3 && acc.Priority != selected.Priority {
+			if acc.Priority < selected.Priority {
+				selected = acc
+			}
+			continue
+		}
 		if r1 < r2 {
 			selected = acc
 			continue

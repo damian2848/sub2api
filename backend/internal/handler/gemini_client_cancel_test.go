@@ -63,7 +63,7 @@ func newGeminiClientCancelFixture(t *testing.T) *geminiClientCancelFixture {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	upstream := &clientCancelUpstream{cancel: cancel}
-	h.geminiCompatService = service.NewGeminiMessagesCompatService(nil, nil, nil, nil, nil, nil, upstream, nil, &config.Config{})
+	h.geminiCompatService = service.NewGeminiMessagesCompatService(nil, nil, nil, nil, nil, nil, upstream, nil, &config.Config{}, nil)
 
 	apiKey := &service.APIKey{
 		ID: 9202, UserID: 9203, GroupID: &groupID, Group: group, Status: service.StatusActive,

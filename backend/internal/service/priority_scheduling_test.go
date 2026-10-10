@@ -242,7 +242,7 @@ func TestPriorityLoadFactorDoesNotHideActualConcurrency(t *testing.T) {
 	normal := scorePriorityCandidate(c, a, good, time.Now())
 	require.Equal(t, boosted.Score, normal.Score, "load-factor overrides must not inflate actual capacity")
 }
-func TestPriorityExplicitPriorityWithinExperienceTier(t *testing.T) {
+func TestPriorityExplicitPriorityPrecedesExperienceTier(t *testing.T) {
 	a, b, poor := priorityCandidate(1, 1, 0), priorityCandidate(2, 1, 0), priorityCandidate(3, 0, 0)
 	a.account.Priority = 1
 	b.account.Priority = 2
@@ -250,6 +250,7 @@ func TestPriorityExplicitPriorityWithinExperienceTier(t *testing.T) {
 	a.score = 410
 	b.score = 490
 	poor.score = 99
+	poor.priorityUnhealthy = true
 	s, ok := newDefaultOpenAIAccountScheduler(&OpenAIGatewayService{}, nil).(*defaultOpenAIAccountScheduler)
 	require.True(t, ok)
 	got := s.buildOpenAISelectionOrder(OpenAIAccountScheduleRequest{}, openAIAccountLoadPlan{priorityScheduling: true, topK: 1, candidates: []openAIAccountCandidateScore{b, poor, a}})

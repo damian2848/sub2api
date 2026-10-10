@@ -282,7 +282,7 @@ export default {
         baseShort: 'Base',
         stickyShort: 'Sticky',
         ungrouped: 'Ungrouped',
-        hint: 'Displayed as "group / base score / sticky bonus". The base score is computed within the current filtered candidate set and includes priority, load, queue depth, error rate, first-token latency, reset window, quota headroom, billing rate, and related factors. The sticky bonus applies only when sticky weighting is enabled for previous_response_id or session_hash. Higher scores are preferred.'
+        hint: 'Displayed as "group / base score / sticky bonus". Base scores include load, queues, errors, first-token latency, reset windows, quota headroom and billing rates. Freely routed compatible requests across platforms compare health and account priority first, then scores within each priority. Soft sticky bonuses cannot promote a backup above a primary. Hard response and task ownership still take precedence.'
       },
       usageWindowsHint: '"5h / 7d" are the upstream account\'s official rolling usage windows (e.g. OpenAI ChatGPT, Claude). They are imposed by the upstream provider on the account itself — not configured by sub2api, and unrelated to the models you map. Usage resets automatically once each window rolls over, and the limit cannot be lifted from within sub2api.',
       ollamaCloud: {
@@ -1208,7 +1208,7 @@ export default {
       loadFactor: 'Load Factor',
       loadFactorHint: 'Higher load factor increases scheduling frequency',
       priority: 'Priority',
-      priorityHint: 'Lower value accounts are used first',
+      priorityHint: 'Lower values are preferred; equal priorities share traffic. Movable sessions across platforms return to recovered higher-priority accounts with spare capacity. Response and task ownership is preserved.',
       billingRateMultiplier: 'Billing Rate Multiplier',
       costMultiplier: 'Cost multiplier',
       costMultiplierHint: 'Defaults to 0.1; follow upstream updates or turn off to enter your actual cost, without changing billing.',

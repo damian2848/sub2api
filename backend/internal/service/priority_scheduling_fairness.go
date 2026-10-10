@@ -228,14 +228,16 @@ func buildPrioritySelectionOrder(pool []openAIAccountCandidateScore, req OpenAIA
 		if a.priorityUnhealthy != b.priorityUnhealthy {
 			return !a.priorityUnhealthy
 		}
+		// Explicit priorities define primary/backup cohorts. Balance capacity
+		// and experience within a cohort, keeping every backup for slot races.
+		if a.account.Priority != b.account.Priority {
+			return a.account.Priority < b.account.Priority
+		}
 		if choices[i].band != choices[j].band {
 			return choices[i].band < choices[j].band
 		}
 		if int(a.score/200) != int(b.score/200) {
 			return a.score > b.score
-		}
-		if a.account.Priority != b.account.Priority {
-			return a.account.Priority < b.account.Priority
 		}
 		if choices[i].key != choices[j].key {
 			return choices[i].key < choices[j].key

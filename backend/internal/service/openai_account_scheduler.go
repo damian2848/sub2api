@@ -24,6 +24,7 @@ const (
 	openAIAccountScheduleLayerPreviousResponse = "previous_response_id"
 	openAIAccountScheduleLayerGuardianParent   = "guardian_parent"
 	openAIAccountScheduleLayerSessionSticky    = "session_hash"
+	openAIAccountScheduleLayerPriorityFailback = "priority_failback"
 	openAIAccountScheduleLayerLoadBalance      = "load_balance"
 	openAIAdvancedSchedulerSettingKey          = "openai_advanced_scheduler_enabled"
 )
@@ -496,6 +497,10 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		if selection != nil && selection.Account != nil {
 			decision.Layer = openAIAccountScheduleLayerSessionSticky
 			decision.StickySessionHit = true
+			if selection.priorityFailback {
+				decision.Layer = openAIAccountScheduleLayerPriorityFailback
+				decision.StickySessionHit = false
+			}
 			decision.SelectedAccountID = selection.Account.ID
 			decision.SelectedAccountType = selection.Account.Type
 			return selection, decision, nil
@@ -624,6 +629,10 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	if !req.PreserveStickyBinding && s.service.openAICodexTicketShouldYieldSticky(ctx, account, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.ExcludedIDs) {
 		clearBinding()
 		return nil, false, nil
+	}
+	if selection := s.tryPriorityStickyFailback(ctx, req, account, true); selection != nil {
+		// This is a new load-balanced assignment, not a hit on the old sticky ID.
+		return selection, false, nil
 	}
 	escapeCfg := s.service.openAIStickyEscapeConfig()
 	if escapeCfg.enabled && s.shouldRebalancePrioritySticky(ctx, req, account) {
@@ -944,6 +953,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 	loadMap map[int64]*AccountLoadInfo,
 ) openAIAccountLoadPlan {
 	allCandidates := make([]openAIAccountCandidateScore, 0, len(filtered))
+	escapeCfg := s.service.openAIStickyEscapeConfig()
 	for _, account := range filtered {
 		loadInfo, loadKnown := loadMap[account.ID]
 		if !loadKnown || loadInfo == nil {
@@ -955,12 +965,13 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 			errorRate, ttft, hasTTFT = s.stats.snapshot(account.ID)
 		}
 		allCandidates = append(allCandidates, openAIAccountCandidateScore{
-			account:   account,
-			loadInfo:  loadInfo,
-			loadKnown: loadKnown,
-			errorRate: errorRate,
-			ttft:      ttft,
-			hasTTFT:   hasTTFT,
+			priorityUnhealthy: errorRate > 0.2 || escapeCfg.enabled && hasTTFT && ttft > escapeCfg.ttftMs,
+			account:           account,
+			loadInfo:          loadInfo,
+			loadKnown:         loadKnown,
+			errorRate:         errorRate,
+			ttft:              ttft,
+			hasTTFT:           hasTTFT,
 		})
 		if rpm, ok := accountRPMStateFromContext(ctx, account); ok && account.IsOpenAIOAuth() {
 			candidate := &allCandidates[len(allCandidates)-1]
@@ -1143,6 +1154,11 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAIAccountLoadPlan(
 	if plan.topK <= 0 {
 		plan.topK = 1
 	}
+	// Keep lower-priority cohorts available after primary slot races. Top-K
+	// limits score sampling within each cohort, not the set of backup priorities.
+	if minPriority != maxPriority {
+		plan.includeOverflowFallback = true
+	}
 
 	plan.selectionOrder = s.buildOpenAISelectionOrder(req, plan)
 	return plan
@@ -1152,7 +1168,7 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 	req OpenAIAccountScheduleRequest,
 	plan openAIAccountLoadPlan,
 ) []openAIAccountCandidateScore {
-	buildSelectionOrder := func(pool []openAIAccountCandidateScore) []openAIAccountCandidateScore {
+	buildScoreSelectionOrder := func(pool []openAIAccountCandidateScore) []openAIAccountCandidateScore {
 		if len(pool) == 0 || plan.topK <= 0 {
 			return nil
 		}
@@ -1221,6 +1237,31 @@ func (s *defaultOpenAIAccountScheduler) buildOpenAISelectionOrder(
 			return isOpenAIAccountCandidateBetter(overflow[i], overflow[j])
 		})
 		return append(primary, overflow...)
+	}
+	buildSelectionOrder := func(pool []openAIAccountCandidateScore) []openAIAccountCandidateScore {
+		if plan.priorityScheduling || len(pool) < 2 {
+			return buildScoreSelectionOrder(pool)
+		}
+		// Scores and soft sticky bonuses only compete within a healthy priority
+		// cohort. A backup's large score cannot outrank a usable primary.
+		ordered := append([]openAIAccountCandidateScore(nil), pool...)
+		unhealthy := func(c openAIAccountCandidateScore) bool { return c.priorityUnhealthy }
+		sort.SliceStable(ordered, func(i, j int) bool {
+			if unhealthy(ordered[i]) != unhealthy(ordered[j]) {
+				return !unhealthy(ordered[i])
+			}
+			return ordered[i].account.Priority < ordered[j].account.Priority
+		})
+		out := make([]openAIAccountCandidateScore, 0, len(pool))
+		for start := 0; start < len(ordered); {
+			end := start + 1
+			for end < len(ordered) && ordered[end].account.Priority == ordered[start].account.Priority && unhealthy(ordered[end]) == unhealthy(ordered[start]) {
+				end++
+			}
+			out = append(out, buildScoreSelectionOrder(ordered[start:end])...)
+			start = end
+		}
+		return out
 	}
 
 	// Excel/BPS is a per-account protocol. Once a request model has a BPS
@@ -2469,6 +2510,10 @@ func applyLegacySelectionDecision(decision *OpenAIAccountScheduleDecision, selec
 		decision.Layer = openAIAccountScheduleLayerSessionSticky
 		decision.StickySessionHit = true
 	}
+	if selection.priorityFailback {
+		decision.Layer = openAIAccountScheduleLayerPriorityFailback
+		decision.StickySessionHit = false
+	}
 }
 
 // selectLegacyAccountByPreviousResponse 在非高级调度路径按 previous_response_id 命中持有该响应的账号，
@@ -2633,7 +2678,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		if requiredTransport == OpenAIUpstreamTransportAny || requiredTransport == OpenAIUpstreamTransportHTTPSSE {
 			effectiveExcludedIDs := cloneExcludedAccountIDs(excludedIDs)
 			for {
-				selection, err := s.selectAccountWithLoadAwareness(ctx, groupID, platform, legacySessionHash, requestedModel, effectiveExcludedIDs, requireCompact, requiredCapability, useUpstreamTokenCost)
+				selection, err := s.selectAccountWithLoadAwareness(ctx, OpenAIAccountScheduleRequest{GroupID: groupID, Platform: platform, SessionHash: legacySessionHash, RequestedModel: requestedModel, ExcludedIDs: effectiveExcludedIDs, RequireCompact: requireCompact, RequiredCapability: requiredCapability, RequiredImageCapability: requiredImageCapability, RequiredTransport: requiredTransport, PreviousResponseID: previousResponseID, UseUpstreamTokenCost: useUpstreamTokenCost})
 				if err != nil {
 					return nil, decision, err
 				}
@@ -2659,7 +2704,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 
 		effectiveExcludedIDs := cloneExcludedAccountIDs(excludedIDs)
 		for {
-			selection, err := s.selectAccountWithLoadAwareness(ctx, groupID, platform, legacySessionHash, requestedModel, effectiveExcludedIDs, requireCompact, requiredCapability, useUpstreamTokenCost)
+			selection, err := s.selectAccountWithLoadAwareness(ctx, OpenAIAccountScheduleRequest{GroupID: groupID, Platform: platform, SessionHash: legacySessionHash, RequestedModel: requestedModel, ExcludedIDs: effectiveExcludedIDs, RequireCompact: requireCompact, RequiredCapability: requiredCapability, RequiredImageCapability: requiredImageCapability, RequiredTransport: requiredTransport, PreviousResponseID: previousResponseID, UseUpstreamTokenCost: useUpstreamTokenCost})
 			if err != nil {
 				return nil, decision, err
 			}

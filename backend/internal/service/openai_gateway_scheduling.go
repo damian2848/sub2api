@@ -256,7 +256,7 @@ func (s *OpenAIGatewayService) SelectAccountForModel(ctx context.Context, groupI
 // SelectAccountForModelWithExclusions selects an account supporting the requested model while excluding specified accounts.
 // SelectAccountForModelWithExclusions 选择支持指定模型的账号，同时排除指定的账号。
 func (s *OpenAIGatewayService) SelectAccountForModelWithExclusions(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}) (*Account, error) {
-	return s.selectAccountForModelWithExclusions(s.withOpenAIQuotaAutoPauseContext(ctx), groupID, PlatformOpenAI, sessionHash, requestedModel, excludedIDs, false, 0, "", false)
+	return s.selectAccountWithoutSlot(s.withOpenAIQuotaAutoPauseContext(ctx), OpenAIAccountScheduleRequest{GroupID: groupID, Platform: PlatformOpenAI, SessionHash: sessionHash, RequestedModel: requestedModel, ExcludedIDs: excludedIDs})
 }
 
 // SelectAccountForTokenCount selects an account for a non-billable token-count
@@ -272,18 +272,28 @@ func (s *OpenAIGatewayService) SelectAccountForTokenCount(
 ) (*Account, error) {
 	ctx = WithOpenAIProfitControlSuppressed(ctx)
 	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
-	return s.selectAccountForModelWithExclusions(
-		ctx,
-		groupID,
-		platform,
-		sessionHash,
-		requestedModel,
-		nil,
-		false,
-		0,
-		requiredCapability,
-		false,
-	)
+	return s.selectAccountWithoutSlot(ctx, OpenAIAccountScheduleRequest{
+		GroupID: groupID, Platform: platform, SessionHash: sessionHash,
+		RequestedModel: requestedModel, RequiredCapability: requiredCapability,
+	})
+}
+
+// Slot-free requests use the same priority recovery without reserving a
+// generation slot. The normal selector remains the fallback on uncertain load.
+func (s *OpenAIGatewayService) selectAccountWithoutSlot(ctx context.Context, req OpenAIAccountScheduleRequest) (*Account, error) {
+	req.Platform = NormalizeOpenAICompatiblePlatform(req.Platform)
+	req.RequirePrivacySet = s.openAIGroupRequiresPrivacySet(ctx, req.GroupID)
+	if s.concurrencyService != nil && req.SessionHash != "" && !s.checkChannelPricingRestriction(ctx, req.GroupID, req.RequestedModel) {
+		if id, err := s.getStickySessionAccountID(ctx, req.GroupID, req.SessionHash); err == nil && id > 0 {
+			if sticky, readErr := s.getSchedulableAccount(ctx, id); readErr == nil {
+				scheduler := &defaultOpenAIAccountScheduler{service: s}
+				if selection := scheduler.tryPriorityStickyFailback(ctx, req, sticky, false); selection != nil {
+					return selection.Account, nil
+				}
+			}
+		}
+	}
+	return s.selectAccountForModelWithExclusions(ctx, req.GroupID, req.Platform, req.SessionHash, req.RequestedModel, req.ExcludedIDs, req.RequireCompact, 0, req.RequiredCapability, false)
 }
 
 // NormalizeOpenAICompatiblePlatform 保留 grok 与国产 OpenAI 兼容供应商（kimi/zhipu/
@@ -1187,11 +1197,16 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 	// 分组利润控制：legacy 公共入口同样装门，保证不经
 	// selectAccountWithScheduler 的调用方也无法绕过利润准入。
 	ctx = s.withOpenAIProfitControlGate(ctx, groupID)
-	return s.selectAccountWithLoadAwareness(ctx, groupID, PlatformOpenAI, sessionHash, requestedModel, excludedIDs, false, "", true)
+	return s.selectAccountWithLoadAwareness(ctx, OpenAIAccountScheduleRequest{GroupID: groupID, Platform: PlatformOpenAI, SessionHash: sessionHash, RequestedModel: requestedModel, ExcludedIDs: excludedIDs, UseUpstreamTokenCost: true})
 }
 
-func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, useUpstreamTokenCost bool) (*AccountSelectionResult, error) {
-	platform = NormalizeOpenAICompatiblePlatform(platform)
+func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Context, req OpenAIAccountScheduleRequest) (*AccountSelectionResult, error) {
+	groupID, sessionHash, requestedModel := req.GroupID, req.SessionHash, req.RequestedModel
+	excludedIDs, requireCompact, requiredCapability := req.ExcludedIDs, req.RequireCompact, req.RequiredCapability
+	useUpstreamTokenCost := req.UseUpstreamTokenCost
+	platform := NormalizeOpenAICompatiblePlatform(req.Platform)
+	req.Platform = platform
+	req.RequirePrivacySet = s.openAIGroupRequiresPrivacySet(ctx, groupID)
 	if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
 		slog.Warn("channel pricing restriction blocked request",
 			"group_id", derefGroupID(groupID),
@@ -1206,6 +1221,16 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	if sessionHash != "" && s.cache != nil {
 		if accountID, err := s.getStickySessionAccountID(ctx, groupID, sessionHash); err == nil {
 			stickyAccountID = accountID
+		}
+	}
+	// A backup's active session must not renew forever after primary capacity
+	// recovers. Explicit low-rate ordering remains authoritative when enabled.
+	if stickyAccountID > 0 && !preferLowUpstreamRate {
+		if sticky, stickyErr := s.getSchedulableAccount(ctx, stickyAccountID); stickyErr == nil {
+			failback := &defaultOpenAIAccountScheduler{service: s}
+			if selection := failback.tryPriorityStickyFailback(ctx, req, sticky, true); selection != nil {
+				return selection, nil
+			}
 		}
 	}
 	if s.concurrencyService == nil || !cfg.LoadBatchEnabled {

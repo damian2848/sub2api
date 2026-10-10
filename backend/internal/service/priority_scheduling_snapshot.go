@@ -67,7 +67,7 @@ func (s *OpenAIGatewayService) PrioritySchedulingSnapshot() *PrioritySchedulingS
 		id := *input.request.GroupID
 		group = &id
 	}
-	snapshot := &PrioritySchedulingSnapshot{At: input.at, EvaluatedAt: now, Model: input.request.RequestedModel, GroupID: group, Mode: input.config.Mode, SelectionPolicy: "capacity_first", HistoryReady: h.ready(), HistoryStatus: h.status, HistoryObservedAt: h.observed, HistoryError: h.failure, HistoryRefreshing: h.refreshing, Candidates: make([]PrioritySchedulingScore, 0, len(input.candidates))}
+	snapshot := &PrioritySchedulingSnapshot{At: input.at, EvaluatedAt: now, Model: input.request.RequestedModel, GroupID: group, Mode: input.config.Mode, SelectionPolicy: "priority_first", HistoryReady: h.ready(), HistoryStatus: h.status, HistoryObservedAt: h.observed, HistoryError: h.failure, HistoryRefreshing: h.refreshing, Candidates: make([]PrioritySchedulingScore, 0, len(input.candidates))}
 	if input.config.OAuthQuotaPriority {
 		snapshot.SelectionPolicy = "oauth_quota_priority"
 	}
@@ -104,6 +104,9 @@ func comparePrioritySnapshotScores(a, b PrioritySchedulingScore) int {
 		}
 		return -1
 	}
+	if v := cmp.Compare(a.Priority, b.Priority); v != 0 {
+		return v
+	}
 	if v := cmp.Compare(a.CapacityBand, b.CapacityBand); v != 0 {
 		return v
 	}
@@ -118,9 +121,6 @@ func comparePrioritySnapshotScores(a, b PrioritySchedulingScore) int {
 		}
 	}
 	if v := cmp.Compare(tier(b.Tier), tier(a.Tier)); v != 0 {
-		return v
-	}
-	if v := cmp.Compare(a.Priority, b.Priority); v != 0 {
 		return v
 	}
 	if v := cmp.Compare(b.SelectionWeight, a.SelectionWeight); v != 0 {

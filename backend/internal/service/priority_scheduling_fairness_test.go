@@ -122,7 +122,7 @@ func TestPriorityExplorationRequiresSafeUnknownAccount(t *testing.T) {
 		require.False(t, candidate.priorityExploration)
 	}
 	snapshot := gateway.PrioritySchedulingSnapshot()
-	require.Equal(t, "capacity_first", snapshot.SelectionPolicy)
+	require.Equal(t, "priority_first", snapshot.SelectionPolicy)
 	for _, candidate := range snapshot.Candidates {
 		require.Greater(t, candidate.SelectionWeight, 0.0)
 	}

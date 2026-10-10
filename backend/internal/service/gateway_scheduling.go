@@ -75,6 +75,13 @@ func (s *GatewayService) SelectAccountForModelWithExclusions(ctx context.Context
 		return nil, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
 	}
 
+	if _, attempted := ctx.Value(gatewayPriorityFailbackAttemptedKey{}).(bool); !attempted && sessionHash != "" && s.cache != nil && s.concurrencyService != nil {
+		stickyID, _ := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
+		if selection := s.tryPriorityStickyFailback(ctx, groupID, platform, hasForcePlatform, sessionHash, requestedModel, excludedIDs, stickyID, false); selection != nil {
+			return selection.Account, nil
+		}
+	}
+
 	// anthropic/gemini 分组支持混合调度（包含启用了 mixed_scheduling 的 antigravity 账户）
 	// 注意：强制平台模式不走混合调度
 	if (platform == PlatformAnthropic || platform == PlatformGemini) && !hasForcePlatform {
@@ -161,6 +168,15 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			derefGroupID(groupID), groupPlatform, requestedModel, shortSessionHash(sessionHash), stickyAccountID, cfg.LoadBatchEnabled, s.concurrencyService != nil)
 	}
 
+	platform, hasForcePlatform, err := s.resolvePlatform(ctx, groupID, group, requestedModel)
+	if err != nil {
+		return nil, err
+	}
+	if selection := s.tryPriorityStickyFailback(ctx, groupID, platform, hasForcePlatform, sessionHash, requestedModel, excludedIDs, stickyAccountID, true); selection != nil {
+		return selection, nil
+	}
+	ctx = context.WithValue(ctx, gatewayPriorityFailbackAttemptedKey{}, true)
+
 	if s.concurrencyService == nil || !cfg.LoadBatchEnabled {
 		// 复制排除列表，用于会话限制拒绝时的重试
 		localExcluded := make(map[int64]struct{})
@@ -211,10 +227,6 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		}
 	}
 
-	platform, hasForcePlatform, err := s.resolvePlatform(ctx, groupID, group, requestedModel)
-	if err != nil {
-		return nil, err
-	}
 	preferOAuth := platform == PlatformGemini
 	if s.debugModelRoutingEnabled() && requestedModel != "" && modelRoutingAppliesToTargetPlatform(platform) {
 		logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] load-aware enabled: group_id=%v model=%s session=%s platform=%s", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), platform)

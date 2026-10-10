@@ -95,7 +95,7 @@ func TestGeminiV1BetaListModels_FiltersFallbackByAllowlist(t *testing.T) {
 		},
 	}}
 	h := &GatewayHandler{
-		geminiCompatService: service.NewGeminiMessagesCompatService(repo, nil, nil, nil, nil, nil, nil, nil, nil),
+		geminiCompatService: service.NewGeminiMessagesCompatService(repo, nil, nil, nil, nil, nil, nil, nil, nil, nil),
 	}
 
 	rec := httptest.NewRecorder()
