@@ -1079,7 +1079,7 @@ func (c CodexGatewayPinConfig) Validate() error {
 		return fmt.Errorf("astra node attempts must be 1–10 (0 uses default 3)")
 	}
 	if c.TTLSeconds != 0 && (c.TTLSeconds < 30 || c.TTLSeconds > 240) {
-		return fmt.Errorf("borrowed ticket TTL must be 30–240 seconds")
+		return fmt.Errorf("cookie TTL must be 30–240 seconds")
 	}
 	if !c.Enabled {
 		return nil
@@ -2637,7 +2637,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.api_key_queue.timeout_seconds", defaultAPIKeyQueueTimeoutSeconds)
 	viper.SetDefault("gateway.force_codex_cli", false)
 	viper.SetDefault("gateway.codex_ws_anchor.ttl_seconds", 3600)
-	viper.SetDefault("gateway.codex_gateway_pin.ttl_seconds", 240)
+	viper.SetDefault("gateway.codex_gateway_pin.ttl_seconds", 230)
 	viper.SetDefault("gateway.codex_gateway_pin.node_cooldown_seconds", 3600)
 	viper.SetDefault("gateway.codex_gateway_pin.rotate_nodes", false)
 	viper.SetDefault("gateway.codex_gateway_pin.max_node_attempts", 0)

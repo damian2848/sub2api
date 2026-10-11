@@ -402,11 +402,10 @@ func (s *OpenAIGatewayService) admitOpenAITurnWithGroup(
 // A connection is bound to the ticket actually sent at handshake, not the
 // response's turn-state header and not the most recently harvested standby.
 type openAIWSTurnBinding struct {
-	borrowedSettings *config.AstraRoutingSettings
-	model            string
-	ticket           *openAICodexTicket
-	fingerprint      [32]byte
-	createdAt        time.Time
+	model       string
+	ticket      *openAICodexTicket
+	fingerprint [32]byte
+	createdAt   time.Time
 }
 
 func (s *OpenAIGatewayService) bindOpenAIWSHandshake(account *Account, model string, headers http.Header) *openAIWSTurnBinding {
@@ -430,16 +429,6 @@ func (s *OpenAIGatewayService) checkOpenAIWSBinding(account *Account, model stri
 	if b == nil || openAITurnRouteFingerprint(account) != b.fingerprint ||
 		time.Since(b.createdAt) >= openAIWSConnMaxAge {
 		return denyOpenAITurn("connection_binding_expired")
-	}
-	if b.borrowedSettings != nil {
-		current := s.cfg.AstraRouting(context.Background())
-		if b.model != strings.TrimSpace(model) || !s.usesAstraBorrowedTicket(context.Background(), account, model) ||
-			!config.AstraRouteSettingsEqual(*b.borrowedSettings, current) || b.borrowedSettings.Revision != current.Revision {
-			return denyOpenAITurn("connection_binding_expired")
-		}
-		// The donor ticket was checked at the handshake. Existing connections
-		// retain their normal session limit without requiring a target-owned ticket.
-		return nil
 	}
 	if !isOpenAICodexTicketAccount(account) || !s.openAICodexTicketEnabled() ||
 		!s.openAICodexTicketConfig().FailClosed || !s.openAICodexTicketGatedModel(model) {

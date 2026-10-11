@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"net/http"
@@ -223,7 +224,7 @@ func (s *astraRoutingUpstream) prepareRotatedSource(ctx context.Context, pool *c
 	return errors.New("astra_rotation_exhausted")
 }
 
-func (s *astraRoutingUpstream) targetRoute(req *http.Request, proxy string, id int64, n int, profile *tlsfingerprint.Profile) (*codexGatewayRoute, [32]byte, string, func(), error) {
+func (s *astraRoutingUpstream) targetRoute(req *http.Request, proxy string, id int64, n int, profile *tlsfingerprint.Profile) (*http.Cookie, [32]byte, string, func(), error) {
 	pool := s.current(req.Context())
 	if pool == nil || !pool.config.RotateNodes {
 		return s.targetRouteOnce(req, proxy, id, n, profile)
@@ -262,11 +263,11 @@ func (s *astraRoutingUpstream) targetRoute(req *http.Request, proxy string, id i
 				pool.activeSource = 0
 			}
 			pool.mu.Unlock()
-		case "astra_rotation_cooling", "target_route_changed", "target_probe_failed":
+		case "astra_rotation_cooling", "target_probe_degraded", "target_route_changed", "target_probe_failed":
 			pool.targetMu.Lock()
 			check := pool.targetChecks[id]
 			pool.mu.Lock()
-			if route, ok := pool.routes[check.sourceID]; ok && route.fingerprint() == check.routeFingerprint && route.node.Identity == check.node.Identity {
+			if route, ok := pool.routes[check.sourceID]; ok && sha256.Sum256([]byte(route.cookie.Value)) == check.cookieFingerprint && route.node.Identity == check.node.Identity {
 				delete(pool.routes, check.sourceID)
 				status := pool.statuses[check.sourceID]
 				status.State = "candidate"

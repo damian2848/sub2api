@@ -708,9 +708,6 @@ func (s *OpenAIGatewayService) harvestPinnedSessionForModel(ctx context.Context,
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if s.usesAstraBorrowedTicket(ctx, account, model) {
-		return ""
-	}
 	if !s.openAICodexTicketEnabledContext(ctx) {
 		return ""
 	}
@@ -733,12 +730,6 @@ func (s *OpenAIGatewayService) harvestPinsCodexIdentity(ctx context.Context, acc
 // 请求路径只注入已捕获的有效门票，不现场打票；无票则返回
 // ErrOpenAICodexTicketUnavailable。打票由后台 harvester 完成。
 func (s *OpenAIGatewayService) applyOpenAICodexTicket(ctx context.Context, account *Account, model string, h http.Header, transport ...string) error {
-	if h != nil && s.usesAstraBorrowedTicket(ctx, account, model) {
-		// The borrowing transport owns final ticket/cookie assembly and expiry.
-		// Do not bind, require, or later rotate an unrelated per-account ticket.
-		h.Del(openAICodexTurnStateHeader)
-		return nil
-	}
 	if s == nil || h == nil || !isOpenAICodexTicketAccount(account, model) || !s.openAICodexTicketEnabledContext(ctx) {
 		return nil
 	}
@@ -819,9 +810,6 @@ func (s *OpenAIGatewayService) openAICodexTicketOutboundModel(account *Account, 
 // outboundModel 必须是真正会发给上游的模型名（openAICodexTicketOutboundModel），
 // 不是客户端原始模型：注入侧读的是出站 body.model，两侧口径必须一致。
 func (s *OpenAIGatewayService) openAICodexTicketBlocksAccount(account *Account, outboundModel string) bool {
-	if s.usesAstraBorrowedTicket(context.Background(), account, outboundModel) {
-		return false // Borrowing validates/acquires its donor ticket before send.
-	}
 	if account.isPrismBrowserUpstreamModelEnabled(outboundModel) {
 		return false
 	}

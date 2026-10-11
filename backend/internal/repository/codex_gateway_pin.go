@@ -1,7 +1,6 @@
 package repository
 
 import (
-	"crypto/sha256"
 	"errors"
 	"io"
 	"log/slog"
@@ -21,8 +20,8 @@ import (
 var errCodexGatewayPinUnavailable = errors.New("codex gateway pin: no qualified source route; run an Astra HTTP test on a source account first")
 
 // This private experiment runs after ticket/identity header assembly and also
-// covers account tests. Donor turn state and routing cookies are shared while
-// authentication remains target-owned. All tickets are process-local and bounded.
+// covers account tests. Only __oailb is shared; credentials and turn state stay
+// owned by the selected account. All routes are process-local and bounded.
 type codexGatewayPinUpstream struct {
 	rotationCache         *astraRotationCache
 	nodeCursor            int
@@ -46,42 +45,9 @@ type codexGatewayPinUpstream struct {
 type codexGatewayRoute struct {
 	node mihomo.AstraNode
 	// Process-local only: this may contain proxy credentials. Never expose it.
-	proxy    string
-	cookie   http.Cookie
-	cfCookie string
-	ticket   string
-	expires  time.Time
-}
-
-func (r codexGatewayRoute) fingerprint() [32]byte {
-	return sha256.Sum256([]byte(r.cookie.Value + "\x00" + r.cfCookie + "\x00" + r.ticket))
-}
-
-func (r codexGatewayRoute) apply(headers http.Header) error {
-	if r.ticket == "" || r.cookie.Value == "" || !time.Now().Before(r.expires) {
-		return errors.New("route_expired")
-	}
-	req := &http.Request{Header: headers}
-	// Both routing cookies must come from the donor, never an unrelated ticket.
-	var kept []string
-	for _, header := range headers.Values("Cookie") {
-		for _, part := range strings.Split(header, ";") {
-			name, _, _ := strings.Cut(strings.TrimSpace(part), "=")
-			if name != "__oailb" && name != "__cflb" && strings.TrimSpace(part) != "" {
-				kept = append(kept, strings.TrimSpace(part))
-			}
-		}
-	}
-	headers.Del("Cookie")
-	if len(kept) > 0 {
-		headers.Set("Cookie", strings.Join(kept, "; "))
-	}
-	req.AddCookie(&http.Cookie{Name: "__oailb", Value: r.cookie.Value})
-	if r.cfCookie != "" {
-		req.AddCookie(&http.Cookie{Name: "__cflb", Value: r.cfCookie})
-	}
-	headers.Set("X-Codex-Turn-State", r.ticket)
-	return nil
+	proxy   string
+	cookie  http.Cookie
+	expires time.Time
 }
 
 func (s *codexGatewayPinUpstream) Do(req *http.Request, proxy string, accountID int64, concurrency int) (*http.Response, error) {
@@ -104,18 +70,16 @@ func (s *codexGatewayPinUpstream) DoWithTLS(req *http.Request, proxy string, acc
 			slog.Info("codex_gateway_pin_unavailable", "target_account_id", accountID)
 			return nil, errCodexGatewayPinUnavailable
 		}
-		s.mu.Lock()
-		route, exists := s.routes[sourceID]
-		s.mu.Unlock()
-		if !exists || route.cookie.Value != cookie.Value {
-			return nil, errCodexGatewayPinUnavailable
-		}
 		if s.config.IPAffinity {
+			s.mu.Lock()
+			route, exists := s.routes[sourceID]
+			s.mu.Unlock()
+			if !exists || route.cookie.Value != cookie.Value || !time.Now().Before(route.expires) {
+				return nil, errCodexGatewayPinUnavailable
+			}
 			proxy = route.proxy
 		}
-		if err := route.apply(req.Header); err != nil {
-			return nil, err
-		}
+		replaceCodexGatewayCookie(req, cookie)
 		slog.Info("codex_gateway_pin_applied", "source_account_id", sourceID, "target_account_id", accountID)
 	}
 	egress, _ := req.Context().Value(astraSourceEgressKey{}).(astraSourceEgress)
@@ -137,7 +101,7 @@ func (s *codexGatewayPinUpstream) DoWithTLS(req *http.Request, proxy string, acc
 			}
 			ttl := s.config.TTLSeconds
 			if ttl == 0 {
-				ttl = 240
+				ttl = 230
 			}
 			if route != nil && !route.expires.IsZero() && route.expires.After(received.Add(time.Duration(ttl)*time.Second)) {
 				route.expires = received.Add(time.Duration(ttl) * time.Second)
@@ -145,13 +109,7 @@ func (s *codexGatewayPinUpstream) DoWithTLS(req *http.Request, proxy string, acc
 			// Qualification happens only after the complete SSE response has been read.
 			// A header or response.created event does not prove request success.
 			if contentType := strings.ToLower(resp.Header.Get("Content-Type")); contentType == "" || strings.HasPrefix(contentType, "text/event-stream") {
-				resp.Body = &codexGatewayProbeBody{ReadCloser: resp.Body, onResult: func(ok bool) {
-					if ok && strings.TrimSpace(resp.Header.Get("X-Codex-Turn-State")) == "" {
-						s.recordSourceReason(accountID, started, nil, false, "source_ticket_missing")
-						return
-					}
-					s.recordSource(accountID, started, route, ok)
-				}}
+				resp.Body = &codexGatewayProbeBody{ReadCloser: resp.Body, onResult: func(ok bool) { s.recordSource(accountID, started, route, ok) }}
 			} else {
 				s.recordSource(accountID, started, nil, false)
 			}
@@ -188,15 +146,11 @@ func codexGatewayCookiePathMatches(path, scope string) bool {
 }
 
 func codexGatewayRouteFromResponse(resp *http.Response, path string, now time.Time, configuredTTL ...int) *codexGatewayRoute {
-	ttl := 240
+	ttl := 230
 	if len(configuredTTL) > 0 && configuredTTL[0] >= 30 && configuredTTL[0] <= 240 {
 		ttl = configuredTTL[0]
 	}
 	var route *codexGatewayRoute
-	ticket := strings.TrimSpace(resp.Header.Get("X-Codex-Turn-State"))
-	if ticket == "" || len(ticket) > 16<<10 || strings.ContainsAny(ticket, "\r\n") {
-		return nil
-	}
 	for _, cookie := range resp.Cookies() {
 		if cookie.Name != "__oailb" || !cookie.Secure || (cookie.Domain != "" && strings.TrimPrefix(cookie.Domain, ".") != "chatgpt.com") {
 			continue
@@ -222,29 +176,7 @@ func codexGatewayRouteFromResponse(resp *http.Response, path string, now time.Ti
 				expires = cookie.Expires
 			}
 		}
-		if ticketExpiry := service.AstraBorrowedTicketExpiry(ticket, now); ticketExpiry.Before(expires) {
-			expires = ticketExpiry
-		}
-		route = &codexGatewayRoute{cookie: *cookie, ticket: ticket, expires: expires}
-	}
-	if route != nil {
-		for _, cookie := range resp.Cookies() {
-			if cookie.Name != "__cflb" || cookie.Value == "" || cookie.MaxAge < 0 || !cookie.Secure || (cookie.Domain != "" && strings.TrimPrefix(cookie.Domain, ".") != "chatgpt.com") {
-				continue
-			}
-			if cookie.Path != "" && !codexGatewayCookiePathMatches(path, cookie.Path) {
-				continue
-			}
-			if !cookie.Expires.IsZero() && !now.Before(cookie.Expires) {
-				continue
-			}
-			route.cfCookie = cookie.Value
-			if cookie.MaxAge > 0 && now.Add(time.Duration(cookie.MaxAge)*time.Second).Before(route.expires) {
-				route.expires = now.Add(time.Duration(cookie.MaxAge) * time.Second)
-			} else if cookie.MaxAge == 0 && !cookie.Expires.IsZero() && cookie.Expires.Before(route.expires) {
-				route.expires = cookie.Expires
-			}
-		}
+		route = &codexGatewayRoute{cookie: *cookie, expires: expires}
 	}
 	return route
 }
@@ -257,8 +189,6 @@ func (s *codexGatewayPinUpstream) recordSource(id int64, started time.Time, rout
 			reason = "routing_cookie_missing"
 		} else if route.cookie.Value == "" {
 			reason = "routing_cookie_deleted"
-		} else if route.ticket == "" {
-			reason = "source_ticket_missing"
 		} else if !time.Now().Before(route.expires) {
 			reason = "route_expired"
 		}
@@ -296,7 +226,7 @@ func (s *codexGatewayPinUpstream) recordSourceReason(id int64, started time.Time
 		host = prior.Gateway
 	}
 	s.statuses[id] = service.AstraRouteStatus{AccountID: id, State: "rejected", Reason: reason, CheckedAt: &checked, Gateway: host}
-	if !qualified || (route != nil && (route.cookie.Value == "" || route.ticket == "")) {
+	if !qualified || (route != nil && route.cookie.Value == "") {
 		delete(s.routes, id)
 		slog.Info("codex_gateway_pin_source_rejected", "source_account_id", id)
 		return
@@ -307,15 +237,15 @@ func (s *codexGatewayPinUpstream) recordSourceReason(id int64, started time.Time
 	if s.routes == nil {
 		s.routes = make(map[int64]codexGatewayRoute)
 	}
-	// Seeing the same ticket again never renews its original lifetime, even if
-	// the gateway reissues a Cookie or the source switches egress.
-	if old, ok := s.routes[id]; ok && old.ticket == route.ticket {
-		// A changed route needs revalidation without extending ticket life.
+	// A newly qualified route replaces the prior sample; an identical cookie
+	// must never gain lifetime from being replayed.
+	if old, ok := s.routes[id]; ok && time.Now().Before(old.expires) && old.cookie.Value == route.cookie.Value {
+		if (!s.config.IPAffinity || old.proxy == route.proxy) && old.node.Identity == route.node.Identity {
+			return
+		}
+		// A changed egress needs revalidation without extending Cookie life.
 		if old.expires.Before(route.expires) {
 			route.expires = old.expires
-		}
-		if old.fingerprint() == route.fingerprint() && (!s.config.IPAffinity || old.proxy == route.proxy) && old.node.Identity == route.node.Identity && !route.expires.Before(old.expires) {
-			return
 		}
 	}
 	s.routes[id] = *route
@@ -345,8 +275,7 @@ func (s *codexGatewayPinUpstream) currentCookie(path string, now time.Time) (*ht
 				s.statuses = make(map[int64]service.AstraRouteStatus)
 			}
 			s.statuses[id] = status
-			// Retain the expired record until replacement so rediscovering the
-			// same ticket cannot restart its lifetime.
+			delete(s.routes, id)
 			return nil
 		}
 		if !codexGatewayCookiePathMatches(path, route.cookie.Path) {
@@ -366,6 +295,21 @@ func (s *codexGatewayPinUpstream) currentCookie(path string, now time.Time) (*ht
 	}
 	s.activeSource = 0
 	return nil, 0
+}
+
+func replaceCodexGatewayCookie(req *http.Request, cookie *http.Cookie) {
+	var kept []string
+	for _, header := range req.Header.Values("Cookie") {
+		for _, part := range strings.Split(header, ";") {
+			part = strings.TrimSpace(part)
+			name, _, ok := strings.Cut(part, "=")
+			if part != "" && (!ok || strings.TrimSpace(name) != "__oailb") {
+				kept = append(kept, part)
+			}
+		}
+	}
+	kept = append(kept, (&http.Cookie{Name: "__oailb", Value: cookie.Value}).String())
+	req.Header.Set("Cookie", strings.Join(kept, "; "))
 }
 
 // The observer forwards bytes unchanged and buffers at most one bounded SSE

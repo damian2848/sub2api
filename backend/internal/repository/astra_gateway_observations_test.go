@@ -21,7 +21,7 @@ func TestAstraGatewayObservationsDeduplicateHostAndRetainFailures(t *testing.T) 
 	for i, pass := range []bool{true, false} {
 		claims, _ := json.Marshal(map[string]string{"host": host, "nonce": fmt.Sprint(i)})
 		cookie := "header." + base64.RawURLEncoding.EncodeToString(claims) + ".signature"
-		pool.recordSource(int64(299+i), now, &codexGatewayRoute{ticket: "fixture-state", cookie: http.Cookie{Value: cookie}, expires: now.Add(time.Minute)}, pass)
+		pool.recordSource(int64(299+i), now, &codexGatewayRoute{cookie: http.Cookie{Value: cookie}, expires: now.Add(time.Minute)}, pass)
 	}
 	require.Len(t, pool.gateways, 1)
 	node := pool.gatewayObservations()[0]

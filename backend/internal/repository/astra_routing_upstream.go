@@ -71,19 +71,16 @@ func (s *astraRoutingUpstream) DoWithTLS(r *http.Request, p string, a int64, n i
 	if r != nil && !service.IsOpenAICodexStateProbeRequest(r.Context()) && codexGatewayPinRequest(r) {
 		if pool := s.current(r.Context()); pool != nil {
 			if slices.Contains(pool.config.TargetAccountIDs, a) && codexGatewayPinAstra(r) {
-				route, _, effectiveProxy, release, err := s.targetRoute(r, p, a, n, f)
+				cookie, _, effectiveProxy, release, err := s.targetRoute(r, p, a, n, f)
 				if err != nil {
 					return nil, err
 				}
-				if route == nil {
+				if cookie == nil {
 					release()
-					return nil, errors.New("configuration_changed")
+					return s.delegate.DoWithTLS(r, p, a, n, f)
 				}
 				r = r.Clone(service.WithHTTPUpstreamRedirectsDisabled(r.Context()))
-				if err := route.apply(r.Header); err != nil {
-					release()
-					return nil, err
-				}
+				replaceCodexGatewayCookie(r, cookie)
 				if pool.config.RotateNodes {
 					r = astraFreshRequest(r)
 				}
@@ -209,14 +206,14 @@ func (s *astraRoutingUpstream) AstraGatewaySnapshot(ctx context.Context) service
 			row.ProxyNode = check.node.Name
 			row.ProxyCountry = check.node.Country
 			route, exists := pool.routes[check.sourceID]
-			current := exists && route.fingerprint() == check.routeFingerprint && now.Before(route.expires) && now.Before(check.expires) && (!pool.config.RotateNodes || route.node.Identity == check.node.Identity) && (!pool.config.IPAffinity || pool.config.RotateNodes || check.proxyFingerprint == sha256.Sum256([]byte(route.proxy)))
+			current := exists && sha256.Sum256([]byte(route.cookie.Value)) == check.cookieFingerprint && now.Before(route.expires) && now.Before(check.expires) && (!pool.config.RotateNodes || route.node.Identity == check.node.Identity) && (!pool.config.IPAffinity || pool.config.RotateNodes || check.proxyFingerprint == sha256.Sum256([]byte(route.proxy)))
 			if current && check.passed {
 				expiry := check.expires
 				if route.expires.Before(expiry) {
 					expiry = route.expires
 				}
 				row.State = "ready"
-				row.Reason = check.reason
+				row.Reason = "target_probe_passed"
 				row.ExpiresAt = &expiry
 				row.RemainingSeconds = max(0, int64(expiry.Sub(now).Seconds()))
 				if old, ok := readySource[check.sourceID]; !ok || expiry.Before(old) {

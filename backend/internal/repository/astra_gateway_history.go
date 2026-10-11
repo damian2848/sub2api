@@ -18,7 +18,7 @@ func (r *settingRepository) RecordAstraGateway(ctx context.Context, row service.
 		row.LastAnswer = ""
 	}
 	switch row.LastReason {
-	case "qualified", "response_not_qualified", "target_probe_passed", "target_probe_ticket_rotated", "target_probe_degraded", "target_probe_failed", "target_route_changed":
+	case "qualified", "response_not_qualified", "target_probe_passed", "target_probe_degraded", "target_probe_failed", "target_route_changed":
 	default:
 		row.LastReason = "response_not_qualified"
 	}
