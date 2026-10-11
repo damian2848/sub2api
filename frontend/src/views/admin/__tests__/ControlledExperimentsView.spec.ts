@@ -52,7 +52,7 @@ describe('ControlledExperimentsView', () => {
 
   it('shows the frozen credential parent, proxy and mapped model', async () => {
     const data = report()
-    data.run.spec.routes[0] = { account_id: 23, account_name: 'shadow', channel: 'bps', parent_account_id: 4, proxy_id: 7, mapped_model: 'gpt-6-luna' }
+    data.run.spec.routes[0] = { account_id: 23, account_name: 'shadow', channel: 'prism', parent_account_id: 4, proxy_id: 7, mapped_model: 'gpt-6-luna' }
     api.list.mockResolvedValue([data.run]); api.report.mockResolvedValue(data)
     wrapper = mountView(); await flushPromises()
     const frozen = wrapper.get('[data-testid="experiment-frozen-route"]').text()

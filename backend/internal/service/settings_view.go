@@ -211,6 +211,10 @@ type SystemSettings struct {
 	ChannelMonitorHideThroughput         bool   `json:"channel_monitor_hide_throughput"`
 	ChannelMonitorShowQuota              bool   `json:"channel_monitor_show_quota"`
 	ChannelMonitorHideUserRanking        bool   `json:"channel_monitor_hide_user_ranking"`
+	PrismBrowserEnabled                  bool   `json:"prism_browser_enabled"`
+	PrismBrowserBaseURL                  string `json:"prism_browser_base_url"`
+	PrismBrowserAPIKeyConfigured         bool   `json:"prism_browser_api_key_configured"`
+	PrismBrowserAPIKey                   string `json:"-"`
 
 	// Grok model mapping policy (admin settings; empty mapping falls back to these).
 	GrokDefaultTextModel           string `json:"grok_default_text_model"`
@@ -267,6 +271,7 @@ type SystemSettings struct {
 	OpenAICodexClientVersion               string // 出站声明的 Codex 客户端版本号（管理员覆写）；空值跟随自动同步值
 	OpenAICodexClientVersionSynced         string // 自动同步到的官方最新稳定版版本号（只读展示）
 	OpenAICodexVersionAutoSyncEnabled      bool   // 是否启用 Codex 客户端版本号自动同步（默认 true）
+	OpenAIRequestTimezoneEnabled           bool   // Rewrite request timezones; disabled by default.
 	OpenAICodexTicketEnabled               bool   // Codex 292 打票总开关；关闭则不打票不注入
 	OpenAICodexTicketHarvestProxyURL       string // Codex 292 打票代理 URL；空则回退 yaml/env
 	OpenAICodexTicketStaticProxyURL        string
@@ -428,8 +433,9 @@ type PublicSettings struct {
 	BalanceLowNotifyThreshold   float64
 	BalanceLowNotifyRechargeURL string
 
-	// Protocol feature switch, exposed so account editors follow the global control.
-	ExcelBPSEnabled bool `json:"excel_bps_enabled"`
+	// Protocol feature switches, exposed so account editors follow global controls.
+	ExcelBPSEnabled     bool `json:"excel_bps_enabled"`
+	PrismBrowserEnabled bool `json:"prism_browser_enabled"`
 
 	// Channel Monitor feature
 	ChannelMonitorEnabled                bool   `json:"channel_monitor_enabled"`

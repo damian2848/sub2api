@@ -1,6 +1,5 @@
 import { apiClient } from './client'
 
-export type MonitorRequestSource = 'all' | 'business' | 'probe'
 export type MonitorRange = '90m' | '24h' | '7d' | '30d'
 export type HealthState = 'unknown' | 'healthy' | 'warning' | 'critical'
 /** Fine-grained score band for multi-stop green→yellow→red gradients (score0..score10). */
@@ -21,7 +20,6 @@ export type MonitorMatrixGroupBy = 'platform' | 'platform_group' | 'platform_mod
 
 export interface MonitorFilter {
   range: MonitorRange
-  source?: MonitorRequestSource
   platforms: string[]
   groupIds: number[]
   models: string[]
@@ -37,17 +35,6 @@ export interface LatencyMetric {
 
 export interface MonitorMetric {
   has_samples?: boolean
-  probe_sample_count?: number
-  probe_passed_count?: number
-  probe_failed_count?: number
-  probe_inconclusive_count?: number
-  probe_availability?: number | null
-  probe_checked_at?: string
-  availability_source?: 'business' | 'probe' | 'mixed' | 'unknown'
-  business_request_count?: number
-  probe_request_count?: number
-  usage_incomplete_request_count?: number
-  cost_incomplete_request_count?: number
   success_requests: number
   error_requests: number
   request_count: number
@@ -176,7 +163,6 @@ export interface MonitorMatrixBucket {
 export interface MonitorMatrixRow {
   group_rate_multiplier?: number
   candy?: MonitorCandyHistory
-  candy_histories?: MonitorCandyHistory[]
   platform: string
   group_id?: number
   group_name?: string
@@ -194,82 +180,13 @@ export interface MonitorCandyProbe {
   interval_minutes: number
 }
 export interface MonitorCandyResult {
-  platform?: string
-  account_id?: number
-  requested_model?: string
-  upstream_model?: string
-  attempt_count?: number
-  usage?: ProbeUsage
   checked_at: string
   verdict: 'correct' | 'incorrect' | 'error'
   latency_ms: number
   answer_preview?: string
   reason?: string
 }
-
-export interface ProbeUsage {
-  source: 'probe'
-  request_count: number
-  input_tokens: number
-  output_tokens: number
-  cache_read_tokens: number
-  cache_creation_tokens: number
-  cache_creation_5m_tokens: number
-  cache_creation_1h_tokens: number
-  reasoning_tokens: number
-  cost_usd?: number | null
-  cost_incomplete: boolean
-  usage_incomplete: boolean
-}
-export interface MonitorObservationPoint {
-  checked_at: string
-  verdict: string
-  latency_ms?: number
-  message?: string
-}
-export interface MonitorObservationRow {
-  id: string
-  type: 'connectivity' | 'quota' | 'candy' | 'state_probe' | 'quality'
-  name: string
-  platform: string
-  group_id?: number
-  group_name: string
-  model: string
-  enabled: boolean
-  interval_seconds: number
-  schedule?: string
-  verdict: string
-  checked_at?: string
-  latency_ms?: number
-  sample_count: number
-  passed_count: number
-  failed_count: number
-  inconclusive_count: number
-  usage: ProbeUsage
-  history: MonitorObservationPoint[]
-}
-export interface MonitorObservations {
-  range: MonitorRange
-  start: string
-  end: string
-  computed_at: string
-  group_by: MonitorMatrixGroupBy
-  items: MonitorObservationRow[]
-  summary: {
-    probe_count: number
-    passed_count: number
-    failed_count: number
-    inconclusive_count: number
-    usage: ProbeUsage
-  }
-  business_usage: MonitorMetric
-  request_usage?: MonitorMetric
-  total_tokens: number
-}
 export interface MonitorCandyHistory {
-  group_id?: number
-  platform?: string
-  usage?: ProbeUsage
   model: string
   reasoning_effort: string
   interval_minutes: number
@@ -319,7 +236,6 @@ export interface MonitorUserRow {
 function params(filter: MonitorFilter) {
   return {
     range: filter.range,
-    source: filter.source && filter.source !== 'all' ? filter.source : undefined,
     platform: filter.platforms.length ? filter.platforms : undefined,
     group_id: filter.groupIds.length ? filter.groupIds : undefined,
     model: filter.models.length ? filter.models : undefined,
@@ -368,10 +284,6 @@ export async function getErrors(filter: MonitorFilter, admin = false, signal?: A
 }
 export async function getUsers(filter: MonitorFilter, admin = false, signal?: AbortSignal) {
   const { data } = await apiClient.get<{ coverage: MonitorCoverage; items: MonitorUserRow[] }>(`${base(admin)}/users`, requestConfig(filter, signal))
-  return data
-}
-export async function getObservations(filter: MonitorFilter, admin = false, signal?: AbortSignal, groupBy: MonitorMatrixGroupBy = 'platform_group') {
-  const { data } = await apiClient.get<MonitorObservations>(`${base(admin)}/observations`, requestConfig(filter, signal, { group_by: groupBy }))
   return data
 }
 export async function getConfig() {

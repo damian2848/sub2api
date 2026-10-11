@@ -14,7 +14,6 @@ import { useRoutePrefetch } from '@/composables/useRoutePrefetch'
 import { getSetupStatus } from '@/api/setup'
 import { resolveCompletedSetupRedirectPath } from './setupRedirect'
 import { resolveRouteDocumentTitle } from './title'
-import { channelOperationsRoutes } from './channelOperations'
 
 /**
  * Route definitions with lazy loading
@@ -558,7 +557,20 @@ const routes: RouteRecordRaw[] = [
       descriptionKey: 'admin.subscriptions.description'
     }
   },
-  ...channelOperationsRoutes,
+  { path: '/admin/priority-scheduling', name: 'AdminPriorityScheduling', component: () => import('@/views/admin/PrioritySchedulingView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Priority scheduling', titleKey: 'priorityScheduling.title' } },
+  { path: '/admin/auto-config', name: 'AdminAutoConfig', component: () => import('@/views/admin/AutoConfigView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Auto Configuration', titleKey: 'autoConfig.title' } },
+  { path: '/admin/smart-ops', redirect: '/admin/account-quality', meta: { requiresAuth: true, requiresAdmin: true } },
+  { path: '/admin/controlled-experiments', name: 'AdminControlledExperiments', component: () => import('@/views/admin/ControlledExperimentsView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Controlled experiments', titleKey: 'controlledExperiments.title', descriptionKey: 'controlledExperiments.description' } },
+  { path: '/admin/token-guard', name: 'AdminTokenGuard', component: () => import('@/views/admin/ops/TokenGuardView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Credential Guard', titleKey: 'tokenGuard.title', descriptionKey: 'tokenGuard.description' } },
+  { path: '/admin/pelican-tests', name: 'AdminPelicanTests', component: () => import('@/views/admin/PelicanTestsView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Pelican Showcase', titleKey: 'pelicanTests.title', descriptionKey: 'pelicanTests.description' } },
+  { path: '/admin/token-guard-v2', name: 'AdminTokenGuardV2', component: () => import('@/views/admin/ops/TokenGuardV2View.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Credential Operations', titleKey: 'tokenGuardV2.title', descriptionKey: 'tokenGuardV2.description' } },
+  { path: '/admin/account-ops', name: 'AdminAccountOps', component: () => import('@/views/admin/AccountOpsView.vue'), meta: { requiresAuth: true, requiresAdmin: true, title: 'Account operations', titleKey: 'accountOps.title', descriptionKey: 'accountOps.description' } },
+  {
+    path: '/admin/account-quality',
+    name: 'AdminAccountQuality',
+    component: () => import('@/views/admin/AccountQualityView.vue'),
+    meta: { requiresAuth: true, requiresAdmin: true, title: 'Account Quality Operations', titleKey: 'qualityOps.title', descriptionKey: 'qualityOps.description' }
+  },
   {
     path: '/admin/accounts',
     name: 'AdminAccounts',
@@ -569,6 +581,19 @@ const routes: RouteRecordRaw[] = [
       title: 'Account Management',
       titleKey: 'admin.accounts.title',
       descriptionKey: 'admin.accounts.description'
+    }
+  },
+  { path: '/admin/astra-gateway', redirect: '/admin/harvest-flow' },
+  {
+    path: '/admin/harvest-flow',
+    name: 'AdminHarvestFlow',
+    component: () => import('@/views/admin/HarvestFlowView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: true,
+      title: 'Ticket Harvest Flow',
+      titleKey: 'admin.harvestFlow.title',
+      descriptionKey: 'admin.harvestFlow.description'
     }
   },
   {

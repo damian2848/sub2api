@@ -33,6 +33,9 @@ type SystemSettings struct {
 	OpenAICodexTicketFailClosed         bool                            `json:"openai_codex_ticket_fail_closed"`
 	OpenAICodexTicketStrategy           string                          `json:"openai_codex_ticket_strategy"`
 	RegistrationEnabled                 bool                            `json:"registration_enabled"`
+	PrismBrowserEnabled                 bool                            `json:"prism_browser_enabled"`
+	PrismBrowserBaseURL                 string                          `json:"prism_browser_base_url"`
+	PrismBrowserAPIKeyConfigured        bool                            `json:"prism_browser_api_key_configured"`
 	EmailVerifyEnabled                  bool                            `json:"email_verify_enabled"`
 	RegistrationEmailSuffixWhitelist    []string                        `json:"registration_email_suffix_whitelist"`
 	RegistrationEmailDomainQuotaEnabled bool                            `json:"registration_email_domain_quota_enabled"`
@@ -221,6 +224,7 @@ type SystemSettings struct {
 	OpenAICodexClientVersion                string   `json:"openai_codex_client_version"`
 	OpenAICodexClientVersionSynced          string   `json:"openai_codex_client_version_synced"`
 	OpenAICodexVersionAutoSyncEnabled       bool     `json:"openai_codex_version_auto_sync_enabled"`
+	OpenAIRequestTimezoneEnabled            bool     `json:"openai_request_timezone_enabled"`
 	OpenAICodexTicketEnabled                bool     `json:"openai_codex_ticket_enabled"`
 	OpenAICodexTicketHarvestProxyURL        string   `json:"openai_codex_ticket_harvest_proxy_url"`
 	OpenAICodexTicketStaticProxyURL         string   `json:"openai_codex_ticket_static_proxy_url,omitempty"`
@@ -469,7 +473,8 @@ type PublicSettings struct {
 	BalanceLowNotifyThreshold   float64 `json:"balance_low_notify_threshold"`
 	BalanceLowNotifyRechargeURL string  `json:"balance_low_notify_recharge_url"`
 
-	ExcelBPSEnabled bool `json:"excel_bps_enabled"`
+	ExcelBPSEnabled     bool `json:"excel_bps_enabled"`
+	PrismBrowserEnabled bool `json:"prism_browser_enabled"`
 
 	ChannelMonitorEnabled                bool   `json:"channel_monitor_enabled"`
 	ChannelMonitorMode                   string `json:"channel_monitor_mode"`

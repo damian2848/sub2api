@@ -483,6 +483,15 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyChannelMonitorHideThroughput] = strconv.FormatBool(settings.ChannelMonitorHideThroughput)
 	updates[SettingKeyChannelMonitorShowQuota] = strconv.FormatBool(settings.ChannelMonitorShowQuota)
 	updates[SettingKeyChannelMonitorHideUserRanking] = strconv.FormatBool(settings.ChannelMonitorHideUserRanking)
+	updates[SettingKeyPrismBrowserEnabled] = strconv.FormatBool(settings.PrismBrowserEnabled)
+	baseURL := strings.TrimSpace(settings.PrismBrowserBaseURL)
+	if baseURL == "" {
+		baseURL = "http://127.0.0.1:8319/v1"
+	}
+	updates[SettingKeyPrismBrowserBaseURL] = baseURL
+	if strings.TrimSpace(settings.PrismBrowserAPIKey) != "" {
+		updates[SettingKeyPrismBrowserAPIKey] = strings.TrimSpace(settings.PrismBrowserAPIKey)
+	}
 
 	// Grok model mapping policy
 	if v := strings.TrimSpace(settings.GrokDefaultTextModel); v != "" {
@@ -573,6 +582,7 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyOpenAICodexUserAgent] = strings.TrimSpace(settings.OpenAICodexUserAgent)
 	updates[SettingKeyOpenAICodexClientVersion] = NormalizeCodexClientVersion(settings.OpenAICodexClientVersion)
 	updates[SettingKeyOpenAICodexVersionAutoSyncEnabled] = strconv.FormatBool(settings.OpenAICodexVersionAutoSyncEnabled)
+	updates[SettingKeyOpenAIRequestTimezoneEnabled] = strconv.FormatBool(settings.OpenAIRequestTimezoneEnabled)
 	updates[SettingKeyOpenAICodexTicketEnabled] = strconv.FormatBool(settings.OpenAICodexTicketEnabled)
 	updates[SettingKeyOpenAICodexTicketFailClosed] = strconv.FormatBool(settings.OpenAICodexTicketFailClosed)
 	if err := ValidateOpenAICodexTicketHarvestProxyURL(settings.OpenAICodexTicketHarvestProxyURL); err != nil {
@@ -897,6 +907,7 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 	// 版本号缓存只做失效，不在此重算：生效值还取决于自动同步写入的 synced 键，
 	// 这里没有它的最新值，重算会把同步结果覆盖成陈旧值。
 	s.InvalidateOpenAICodexClientVersionCache()
+	s.InvalidateOpenAIRequestTimezoneEnabledCache()
 	s.InvalidateOpenAICodexTicketEnabledCache()
 	s.InvalidateOpenAICodexTicketFailClosedCache()
 	s.InvalidateOpenAICodexTicketModelsCache()
@@ -956,9 +967,9 @@ func (s *SettingService) refreshCachedSettings(settings *SystemSettings) {
 	// codex_cli_only 加固策略缓存：设置更新后强制下次重载（涉及 4 个键 + JSON 解析，直接置过期）。
 	s.codexRestrictionPolicySF.Forget("codex_restriction_policy")
 	s.codexRestrictionPolicyCache.Store(&cachedCodexRestrictionPolicy{expiresAt: 0})
-	// Invalidate the cached switches immediately and preserve the saved allowlist.
+	// Cyber 会话屏蔽与严格身份门控必须在后台保存后立即生效，不能继续
+	// 使用最长 60 秒的旧开关快照。保留刚保存成功的白名单，下一次 DB 刷新失败时沿用。
 	s.cyberSessionBlockRuntimeSF.Forget("cyber_session_block_runtime")
-	// Retain the successfully saved allowlist if the next DB refresh fails.
 	s.cyberSessionBlockRuntimeMu.Lock()
 	allowlistedUsers, _ := ParseCyberPolicyUserAllowlist(settings.CyberPolicyUserAllowlist)
 	s.cyberSessionBlockRuntimeCache.Store(&cachedCyberSessionBlockRuntime{allowlistedUsers: allowlistedUsers})

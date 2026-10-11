@@ -1943,11 +1943,11 @@ func newOpenAIWSHandlerTestServer(t *testing.T, h *OpenAIGatewayHandler, subject
 type openAIResponsesWSUsageLogCase struct {
 	authSetup              func(*service.APIKey, *config.Config) *service.APIKeyService
 	afterAccountSlot       func()
+	closeStatus            coderws.StatusCode
 	simpleModeRejectAtRead int64
 	compositeResolver      *service.CompositeRouteResolver
 	accountPlatform        string
 	closeReason            string
-	closeStatus            coderws.StatusCode
 	firstPayload           string
 	// midPayload 在首个 turn 完成后发送 session.update；上游确认 session.updated，
 	// 不生成 response.completed，也不产生额外计费用量。
@@ -3186,12 +3186,6 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 	cancelWrite()
 	require.NoError(t, err)
 
-	if tc.closeReason == "" {
-		tc.closeReason = "not available for this group"
-	}
-	if tc.closeStatus == 0 {
-		tc.closeStatus = coderws.StatusPolicyViolation
-	}
 	if tc.firstFrameCloseExpected {
 		readCtx, cancelRead := context.WithTimeout(context.Background(), 3*time.Second)
 		_, _, readErr := clientConn.Read(readCtx)

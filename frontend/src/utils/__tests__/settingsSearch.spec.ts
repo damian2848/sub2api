@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parse } from 'vue/compiler-sfc'
 import source from '@/views/admin/SettingsView.vue?raw'
-import imageCardSource from '@/components/admin/operations/BPSImageSettingsCard.vue?raw'
 import zh from '@/i18n/locales/zh'
 import en from '@/i18n/locales/en'
 import { buildFeatureSearchEntries, searchFeatures } from '../featureSearch'
@@ -42,11 +41,6 @@ describe('settings feature search', () => {
       if (id?.type === 6 && id.value?.content.startsWith('settings-section-')) {
         expect(anchors.has(id.value.content)).toBe(false)
         anchors.set(id.value.content, tab)
-      }
-      // Follow the extracted card at its actual mount point, preserving the
-      // parent's tab and checking its real heading rather than adding an alias.
-      if (node.tag === 'BPSImageSettingsCard') {
-        for (const child of parse(imageCardSource).descriptor.template!.ast!.children) visit(child, tab)
       }
       for (const child of node.children) visit(child, tab)
     }

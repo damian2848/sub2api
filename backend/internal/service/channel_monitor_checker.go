@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -72,22 +71,6 @@ func runCheckForModel(ctx context.Context, provider, endpoint, apiKey, model str
 
 	start := time.Now()
 	respText, rawBody, statusCode, err := callProvider(ctx, provider, endpoint, apiKey, model, challenge.Prompt, opts)
-	protocol := "chat"
-	if provider == MonitorProviderAnthropic {
-		protocol = "anthropic"
-	}
-	if provider == MonitorProviderGemini {
-		protocol = "gemini"
-	}
-	if opts != nil && opts.APIMode == MonitorAPIModeResponses {
-		protocol = "responses"
-	}
-	usage := &pelicanTestUsage{protocol: protocol, model: model}
-	usage.read(rawBody)
-	usage.complete = err == nil && statusCode >= 200 && statusCode < 300
-	collector := &pelicanTestUsageCollector{model: model, requests: []*pelicanTestUsage{usage}}
-	metering := collector.probeUsage(nil, nil)
-	res.Usage = &metering
 	latency := time.Since(start)
 	latencyMs := int(latency / time.Millisecond)
 	res.LatencyMs = &latencyMs
@@ -400,27 +383,18 @@ func extractOpenAIResponsesText(respBytes []byte) string {
 // mergeHeaders 把用户自定义 headers 合并到 adapter 默认 headers 上。
 // 用户值覆盖默认；命中黑名单（hop-by-hop / 由 http.Client 自管的）的 key 静默丢弃。
 func mergeHeaders(base map[string]string, opts *CheckOptions) map[string]string {
-	out := make(map[string]string, len(base))
+	if opts == nil || len(opts.ExtraHeaders) == 0 {
+		return base
+	}
+	out := make(map[string]string, len(base)+len(opts.ExtraHeaders))
 	for k, v := range base {
-		out[http.CanonicalHeaderKey(k)] = v
+		out[k] = v
 	}
-	if opts == nil {
-		return out
-	}
-	// HTTP header names are case-insensitive. Keep a single canonical entry so
-	// a lowercase Authorization override cannot race the adapter's default
-	// when postRawJSON later ranges the map. Sorting also makes old persisted
-	// headers with duplicate casing deterministic.
-	keys := make([]string, 0, len(opts.ExtraHeaders))
-	for k := range opts.ExtraHeaders {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
+	for k, v := range opts.ExtraHeaders {
 		if IsForbiddenHeaderName(k) {
 			continue
 		}
-		out[http.CanonicalHeaderKey(k)] = opts.ExtraHeaders[k]
+		out[k] = v
 	}
 	return out
 }
@@ -570,9 +544,6 @@ func postRawJSON(ctx context.Context, fullURL string, payload []byte, headers ma
 	req.Header.Set("Accept", "application/json")
 	for k, v := range headers {
 		req.Header.Set(k, v)
-	}
-	if err := SignChannelMonitorProbeRequest(ctx, req); err != nil {
-		return nil, 0, err
 	}
 
 	resp, err := monitorHTTPClient.Do(req)

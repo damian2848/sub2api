@@ -1,7 +1,6 @@
 package apicompat
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -244,10 +243,6 @@ func anthropicUserToResponses(raw json.RawMessage) ([]ResponsesInputItem, error)
 			if uri := anthropicImageToDataURI(b.Source); uri != "" {
 				parts = append(parts, ResponsesContentPart{Type: "input_image", ImageURL: uri})
 			}
-		case "document":
-			if part, ok := anthropicDocumentToResponsesPart(b); ok {
-				parts = append(parts, part)
-			}
 		}
 	}
 	parts = append(parts, toolResultImageParts...)
@@ -361,9 +356,6 @@ func fromResponsesCallID(id string) string {
 // anthropicImageToDataURI converts an AnthropicImageSource to a data URI string.
 // Returns "" if the source is nil or has no data.
 func anthropicImageToDataURI(src *AnthropicImageSource) string {
-	if src != nil && src.Type == "url" {
-		return src.URL
-	}
 	if src == nil || src.Data == "" {
 		return ""
 	}
@@ -372,34 +364,6 @@ func anthropicImageToDataURI(src *AnthropicImageSource) string {
 		mediaType = "image/png"
 	}
 	return "data:" + mediaType + ";base64," + src.Data
-}
-
-func anthropicDocumentToResponsesPart(block AnthropicContentBlock) (ResponsesContentPart, bool) {
-	source := block.Source
-	if source == nil {
-		return ResponsesContentPart{}, false
-	}
-	part := ResponsesContentPart{Type: "input_file", Filename: block.Title}
-	switch source.Type {
-	case "url":
-		if source.URL == "" {
-			return ResponsesContentPart{}, false
-		}
-		part.FileURL = source.URL
-	case "base64":
-		if source.Data == "" || source.MediaType == "" {
-			return ResponsesContentPart{}, false
-		}
-		part.FileData = "data:" + source.MediaType + ";base64," + source.Data
-	case "text":
-		if source.MediaType != "text/plain" {
-			return ResponsesContentPart{}, false
-		}
-		part.FileData = "data:text/plain;base64," + base64.StdEncoding.EncodeToString([]byte(source.Data))
-	default:
-		return ResponsesContentPart{}, false
-	}
-	return part, true
 }
 
 // convertToolResultOutput extracts text and image content from a tool_result
@@ -438,10 +402,6 @@ func convertToolResultOutput(b AnthropicContentBlock) (string, []ResponsesConten
 		case "image":
 			if uri := anthropicImageToDataURI(ib.Source); uri != "" {
 				imageParts = append(imageParts, ResponsesContentPart{Type: "input_image", ImageURL: uri})
-			}
-		case "document":
-			if part, ok := anthropicDocumentToResponsesPart(ib); ok {
-				imageParts = append(imageParts, part)
 			}
 		}
 	}

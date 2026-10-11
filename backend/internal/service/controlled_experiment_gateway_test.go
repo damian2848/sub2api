@@ -4,7 +4,9 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -119,13 +121,50 @@ func TestControlledExperimentGatewayWSUsesOneFrameAndNoHTTPFallback(t *testing.T
 	require.Empty(t, upstream.requests)
 }
 
+func TestControlledExperimentGatewayPrismKeepsAdapterEvidenceAndUnavailableUsage(t *testing.T) {
+	var submissions atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"data":[{"id":"gpt-6-luna"}]}`)
+			return
+		}
+		submissions.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		require.Len(t, r.Header.Get("X-Prism-Caller-ID"), 64)
+		require.Len(t, r.Header.Get("X-Prism-Turn-ID"), 64)
+		_, _ = io.WriteString(w, "data: "+controlledGatewayTerminal("gpt-6-luna", "high")+"\n\n")
+	}))
+	defer server.Close()
+	gateway, account := prismTestService(server.URL)
+	account.Status = StatusActive
+	account.Schedulable = true
+	executor, route, spec, body := controlledGatewayFixture(account, gateway, "prism", "gpt-6-luna")
+	turn, d := executor.Execute(context.Background(), route, spec, body, "9d8ad823-69d3-4c0d-a0b2-23e4f9509e21")
+	require.Equal(t, "ok", d.Code, "%+v", d)
+	require.Equal(t, "OK", turn.Text)
+	require.EqualValues(t, 1, submissions.Load())
+	require.Equal(t, 1, d.Submissions)
+	require.Equal(t, "prism", d.ActualChannel)
+	require.Equal(t, "adapter_declared", d.EffortEvidence)
+	require.Equal(t, "unavailable", d.UsageSource)
+	require.Nil(t, d.CostUSD)
+	require.True(t, d.CostIncomplete)
+}
+
 func TestControlledExperimentGatewayRespectsProtocolSwitchesBeforeSend(t *testing.T) {
-	for _, channel := range []string{"bps"} {
+	for _, channel := range []string{"prism", "bps"} {
 		t.Run(channel, func(t *testing.T) {
-			flag := "openai_excel_bps"
-			setting := SettingKeyExcelBPSEnabled
-			reason := "bps_not_enabled_for_account_model"
-			model := "gpt-5.4"
+			flag := "openai_prism_browser"
+			setting := SettingKeyPrismBrowserEnabled
+			reason := "prism_not_enabled_for_account_model"
+			model := "gpt-6-luna"
+			if channel == "bps" {
+				flag = "openai_excel_bps"
+				setting = SettingKeyExcelBPSEnabled
+				reason = "bps_not_enabled_for_account_model"
+				model = "gpt-5.4"
+			}
 			repo := &excelBPSImageSettingsRepo{values: map[string]string{setting: "false"}}
 			upstream := &httpUpstreamRecorder{}
 			account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Credentials: map[string]any{"access_token": "fixture-oauth"}, Extra: map[string]any{flag: true}}
@@ -143,22 +182,6 @@ func TestControlledExperimentGatewayRespectsProtocolSwitchesBeforeSend(t *testin
 			require.Empty(t, gateway.controlledRouteReason(context.Background(), account, spec.Model, channel))
 		})
 	}
-}
-
-func TestControlledExperimentGatewayRejectsManagedPrismBeforeSend(t *testing.T) {
-	upstream := &httpUpstreamRecorder{}
-	account := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
-		Credentials: map[string]any{"api_key": "fixture-key"},
-		Extra:       map[string]any{"provider_preset": PrismProviderPreset, PrismSourceAccountKey: int64(7)}}
-	require.True(t, account.IsManagedPrismAccount())
-	gateway := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
-	for _, channel := range []string{"native_http", "native_ws", "bps"} {
-		executor, route, spec, _ := controlledGatewayFixture(account, gateway, channel, "gpt-6-luna")
-		preflight := executor.Preflight(context.Background(), route, spec)
-		require.False(t, preflight.Available, channel)
-		require.Equal(t, "unsupported_credential_or_adapter", preflight.Reason, channel)
-	}
-	require.Empty(t, upstream.requests)
 }
 
 func TestControlledExperimentGatewayBPSUsesOneSubmission(t *testing.T) {

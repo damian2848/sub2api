@@ -133,7 +133,6 @@ deploy/docker-compose.override.yml
 .gocache/
 vite.config.js
 docs/*
-!docs/pelican-showcase-api.md
 !docs/openai-ws-sse-acceleration.md
 !docs/openai-outbound-identity.md
 !docs/openai-2fa-dual-oauth.md
@@ -146,17 +145,18 @@ docs/*
 !docs/COMPOSITE_GROUPS.md
 !docs/PLUGIN_DEVELOPMENT.md
 !docs/channel-monitor-v2-safe-defaults.md
-!docs/fork-release-process.md
 !docs/quality-bps-observation.md
 !docs/cyber-session-blocking.md
 !docs/request-capture.md
 !docs/codex-credits.md
 !docs/account-token-guard.md
 !docs/priority-scheduling.md
+!docs/astra-account-scheduling.md
 !docs/legal/
 !docs/legal/*.md
 !docs/screenshots/
 docs/screenshots/*
+!docs/screenshots/astra-auto-groups/
 !docs/screenshots/ws-sse-acceleration/
 !docs/screenshots/mobile-account-actions-menu.png
 !docs/screenshots/codex-referral-dialog.png
@@ -190,6 +190,7 @@ issues/
 !docs/screenshots/account-ops-monitoring/
 !docs/screenshots/credential-encryption/
 !docs/screenshots/pelican-showcase-api-ui/
+!docs/screenshots/smart-ops-capture-harvest/
 
 !docs/typesafe-jev.md
 

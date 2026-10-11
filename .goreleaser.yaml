@@ -187,7 +187,6 @@ release:
 
     ## 📥 Installation
 
-    {{ if eq .Env.PUBLISH_IMAGES "true" -}}
     **Docker:**
     ```bash
     {{ if ne .Env.DOCKERHUB_USERNAME "skip" -}}
@@ -199,7 +198,6 @@ release:
     docker pull ghcr.io/{{ .Env.GITHUB_REPO_OWNER_LOWER }}/sub2api:{{ .Version }}
     ```
 
-    {{ end -}}
     **One-line install (Linux):**
     ```bash
     curl -fsSL https://raw.githubusercontent.com/{{ .Env.GITHUB_REPO_OWNER }}/{{ .Env.GITHUB_REPO_NAME }}/{{ .Tag }}/deploy/install.sh | sudo bash -s -- install -v {{ .Tag }}
@@ -207,13 +205,6 @@ release:
 
     **Manual download:**
     Download the appropriate archive for your platform from the assets below.
-
-    **Verify a download:**
-    ```bash
-    sha256sum -c checksums.txt --ignore-missing
-    ```
-
-    **Prism browser service (optional):** download `prism-browser_{{ .Version }}.tar.gz` (its `.sha256` is next to it) from the assets below, unpack it and follow `deploy/PRISM_BROWSER.md`. It holds the service source, the compose file and the env example for exactly this release.
 
     **K3s gateway upgrade (on each existing single-node host):**
     ```bash

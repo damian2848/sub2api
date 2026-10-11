@@ -35,6 +35,11 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	lastFailureReason string,
 	agentTaskRecoveryTried *bool,
 ) (*OpenAIForwardResult, error) {
+	if anchor := codexWSAnchorFromContext(ctx); anchor != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, anchor.expires)
+		defer cancel()
+	}
 	if s == nil || account == nil {
 		return nil, wrapOpenAIWSFallback("invalid_state", errors.New("service or account is nil"))
 	}
@@ -149,6 +154,10 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			preferredConnID = connID
 		}
 	}
+	anchor := codexWSAnchorFromContext(ctx)
+	if anchor != nil && anchor.previousID != "" {
+		preferredConnID = anchor.connID
+	}
 	storeDisabledConnMode := s.openAIWSStoreDisabledConnMode()
 	forceNewConnByPolicy := shouldForceNewConnOnStoreDisabled(storeDisabledConnMode, lastFailureReason)
 	forceNewConn := forceNewConnByPolicy && storeDisabled && previousResponseID == "" && sessionHash != "" && preferredConnID == ""
@@ -167,6 +176,10 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	)
 	if buildHdrErr != nil {
 		return nil, fmt.Errorf("build ws headers: %w", buildHdrErr)
+	}
+
+	if anchor != nil && anchor.cookie != "" {
+		replaceCodexWSAnchorCookie(wsHeaders, anchor.cookie)
 	}
 	logOpenAIWSModeDebug(
 		"acquire_start account_id=%d account_type=%s transport=%s preferred_conn_id=%s has_previous_response_id=%v session_hash=%s has_turn_state=%v turn_state_len=%d has_turn_metadata=%v turn_metadata_len=%d store_disabled=%v store_disabled_conn_mode=%s retry_last_reason=%s force_new_conn=%v header_user_agent=%s header_openai_beta=%s header_originator=%s header_accept_language=%s header_session_id=%s header_conversation_id=%s session_id_source=%s conversation_id_source=%s has_prompt_cache_key=%v has_chatgpt_account_id=%v has_authorization=%v has_session_id=%v has_conversation_id=%v proxy_enabled=%v",
@@ -211,12 +224,40 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		return nil, wrapOpenAIWSFallback("codex_ticket_unavailable", pinErr)
 	}
 	defer releaseHarvest()
+	if anchor != nil && anchor.connID == "" {
+		if pool, ok := s.httpUpstream.(interface {
+			CodexGatewayPinWSRequest(context.Context, http.Header, string, int64, int) (string, string, func(), error)
+		}); ok {
+			route, effectiveProxy, releaseRoute, err := pool.CodexGatewayPinWSRequest(ctx, wsHeaders, proxyURL, account.ID, account.Concurrency)
+			if err != nil {
+				return nil, s.astraRouteFailover(ctx, account, err)
+			}
+			defer releaseRoute()
+			proxyURL = effectiveProxy
+			anchor.cookie = route
+			if route != "" {
+				replaceCodexWSAnchorCookie(wsHeaders, route)
+			}
+		}
+	}
 
-	probeDialStarted := time.Now()
+	if anchor != nil {
+		if anchor.connID != "" {
+			proxyURL = anchor.proxyURL
+		} else {
+			anchor.proxyURL = proxyURL
+		}
+	}
+
+	anchorScope := ""
+	if anchor != nil {
+		anchorScope = anchor.scope
+	}
 	lease, err := s.getOpenAIWSConnPool().Acquire(acquireCtx, openAIWSAcquireRequest{
-		Account: account,
-		WSURL:   wsURL,
-		Headers: wsHeaders,
+		AnchorScope: anchorScope,
+		Account:     account,
+		WSURL:       wsURL,
+		Headers:     wsHeaders,
 		HeadersFactory: func(factoryCtx context.Context, headers http.Header) (http.Header, error) {
 			latest, err := s.admitOpenAITurnForGroup(factoryCtx, groupID, enforceGroup, account, mappedModel)
 			if err != nil {
@@ -240,6 +281,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 					err,
 				)
 				return nil, err
+			}
+			if anchor != nil && anchor.cookie != "" {
+				replaceCodexWSAnchorCookie(headers, anchor.cookie)
 			}
 			return s.refreshOpenAIAgentIdentityHeaders(factoryCtx, account, headers)
 		},
@@ -272,28 +316,12 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			}
 			return nil
 		},
-		PreferredConnID: preferredConnID,
-		ForceNewConn:    forceNewConn,
-		ProxyURL:        proxyURL,
+		PreferredConnID:    preferredConnID,
+		ForceNewConn:       forceNewConn || (anchor != nil && anchor.connID == ""),
+		ForcePreferredConn: anchor != nil && anchor.connID != "",
+		ProxyURL:           proxyURL,
 	})
 	if err != nil {
-		var probeDialErr *openAIWSDialError
-		if errors.As(err, &probeDialErr) {
-			u := beginProbeStreamAttempt(ctx, mappedModel)
-			if u != nil {
-				u.startedAt = probeDialStarted
-				u.httpStatus = nil
-				if probeDialErr.StatusCode > 0 {
-					status := probeDialErr.StatusCode
-					u.httpStatus = &status
-				}
-				kind := "transport"
-				if probeDialErr.StatusCode >= 400 {
-					kind = "http"
-				}
-				finishProbeStreamAttempt(u, err, kind)
-			}
-		}
 		if IsOpenAITurnAdmissionError(err) {
 			return nil, err
 		}
@@ -345,6 +373,10 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		lease.Release()
 	}()
 	connID := strings.TrimSpace(lease.ConnID())
+	if anchor != nil {
+		anchor.connID = connID
+		lease.conn.anchorUntilNano.Store(anchor.expires.UnixNano())
+	}
 	logOpenAIWSModeDebug(
 		"connected account_id=%d account_type=%s transport=%s conn_id=%s conn_reused=%v conn_idle_ms=%d conn_age_ms=%d upstream_pings=%d conn_pick_ms=%d queue_wait_ms=%d has_previous_response_id=%v",
 		account.ID,
@@ -451,7 +483,6 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	if err := checkBeforeWrite(); err != nil {
 		return nil, err
 	}
-	var probeAttempt *pelicanTestUsage
 	sendRequest := func(value any) error {
 		if err := s.acquireOpenAIRPMForSend(ctx, account); err != nil {
 			return err
@@ -459,9 +490,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		if err := controlledSubmission(ctx, "native_ws"); err != nil {
 			return err
 		}
-		probeAttempt = beginProbeStreamAttempt(ctx, mappedModel)
 		if err := lease.WriteJSONWithContextTimeout(ctx, value, s.openAIWSWriteTimeout()); err != nil {
-			finishProbeStreamAttempt(probeAttempt, err, "transport")
 			lease.MarkBroken()
 			logOpenAIWSModeInfo(
 				"write_request_fail account_id=%d conn_id=%s cause=%s payload_bytes=%d",
@@ -489,7 +518,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	if err != nil {
 		return nil, err
 	}
-	defer finishProbeStreamAttempt(probeAttempt, nil, "stream")
+
 	if debugEnabled {
 		logOpenAIWSModeDebug(
 			"write_request_sent account_id=%d conn_id=%s stream=%v payload_bytes=%d previous_response_id=%s",
@@ -693,11 +722,6 @@ readLoop:
 			}
 		}
 		markClientRequestCanceled()
-		if readErr == nil {
-			probeAttempt.read(string(message))
-		} else {
-			finishProbeStreamAttempt(probeAttempt, readErr, "stream")
-		}
 		if readErr == nil && !json.Valid(message) {
 			eventType, _, _ := parseOpenAIWSEventEnvelope(message)
 			if eventType == "" {
@@ -862,6 +886,11 @@ readLoop:
 			}
 			// error 事件后连接不再可复用，避免回池后污染下一请求。
 			lease.MarkBroken()
+			if !wroteDownstream && (errCodeRaw == "server_is_overloaded" || errCodeRaw == "slow_down") {
+				failover := newOpenAIUpstreamFailoverError(http.StatusServiceUnavailable, lease.HandshakeHeaders(), message, errMsg, false)
+				failover.RetryableOnSameAccount = false
+				return nil, failover
+			}
 			if !wroteDownstream && canFallback {
 				return nil, wrapOpenAIWSFallback(fallbackReason, errors.New(errMsg))
 			}
@@ -993,6 +1022,9 @@ readLoop:
 		clientDisconnected,
 	)
 
+	if anchor != nil {
+		anchor.qualified = responseModelObserver.astraCompleted && !responseModelObserver.Conflict()
+	}
 	result := resultWithUsage()
 	result.ImageCount = imageCounter.Count()
 	result.ImageOutputSizes = imageCounter.Sizes()

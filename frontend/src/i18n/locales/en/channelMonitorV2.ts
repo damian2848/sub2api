@@ -3,31 +3,22 @@ export default {
   channelMonitorV2: {
     "cards": {
         "bucketDetails": "Samples in this time window",
-        "lowSampleWarning": "⚠ Low sample count — treat with caution",
-        "sampleDetails": "{time} · API health {health} · Availability {availability} · Cache {cache} ({cacheState}) · TTFT P50 {ttft}",
+        "sampleDetails": "{time} · Availability {availability} · Cache {cache} · TTFT P50 {ttft}",
         "showCards": "Cards",
         "showAnalytics": "Detailed data",
-        "passive": "Real requests + active probes · channel availability",
-        "activeProbe": "Active probes",
-        "apiHealth": "API health",
-        "healthHint": "API health combines only error rate and first-token latency. Cache is assessed separately and does not affect API health colors. Insufficient request samples make the badge unknown (observed availability may still be shown); timeline bars for such windows are colored by their error rate and drawn semi-transparent.",
-        "cacheHint": "Cache performance is assessed separately and does not affect API health. Low cache does not mean API unavailability; cache status is unknown below the request sample threshold.",
-        "cacheStates": { "healthy": "Cache healthy", "warning": "Cache watch", "critical": "Low cache", "unknown": "Cache unknown" },
-        "availabilityHint": "Actual generation requests include business traffic and active probes. Answer quality, quota checks and HEAD pings are not API outcomes. Unobserved periods remain unknown.",
+        "passive": "V2 passive traffic · cache and availability",
         "groupRate": "Group rate {value}x",
         "cache": "Cache rate",
         "availability": "Availability",
         "ttft": "First token",
-        "windows": "API health · Last {count} time windows",
+        "windows": "Last {count} time windows",
         "refreshIn": "Refresh in {seconds}s",
-        "pageRefresh": "Page refresh",
-        "refreshPaused": "Paused",
-        "trafficHistory": "API health timeline (error rate / first token; cache is separate)",
+        "trafficHistory": "Observed request health timeline",
         "health": {
             "healthy": "Healthy",
             "warning": "Degraded",
             "critical": "Unhealthy",
-            "unknown": "Unknown (insufficient samples)"
+            "unknown": "Insufficient samples"
         }
     },
     "candy": {
@@ -49,14 +40,14 @@ export default {
             "stale": "Check expired"
         },
         "settingsTitle": "Group candy logic checks",
-        "settingsHint": "Configure independent checks for each group, model, and reasoning effort.",
-        "costHint": "Active checks consume upstream quota. Disabled by default; runs for monitored groups. Maximum 64 check rules.",
+        "settingsHint": "Uses the same group routing as /admin/pelican-tests. The gateway scheduler selects an account for each check using the built-in account candy question. No fixed account binding.",
+        "costHint": "Active checks consume upstream quota. Disabled by default; runs only in enabled V2 mode for displayed groups. Maximum 64 groups, 4 concurrent checks per instance, and 90 seconds per check.",
         "model": "Probe model",
         "modelHint": "A model ID available in this group",
         "effort": "Reasoning effort",
         "interval": "Interval (minutes)",
         "selectGroup": "Choose a group",
-        "addGroup": "Add check rule",
+        "addGroup": "Add group check",
         "ruleHint": "Accepts clear answers such as 21, 21 candies or the answer is 21. Other answers fail. Transport failures are shown separately. Wrong answers do not disable accounts. Save to apply. Public results expose status and time only; records are retained for 24 hours. A single test does not establish permanent model capability."
     },
     title: 'Channel Monitor',
@@ -81,10 +72,7 @@ export default {
     ignored: 'Ignored',
     currentUser: 'Current user',
     ranges: { '90m': '90m', '24h': '24h', '7d': '7d', '30d': '30d' },
-    users: { businessScope: 'User rankings include business requests only; system probes are excluded regardless of the source filter.' },
-    sources: { all: 'All requests', business: 'Business requests', probe: 'Active probes', mixed: 'Business + probes' },
     filters: {
-      source: 'Source',
       platform: 'Platform', allPlatforms: 'All', group: 'Group', allGroups: 'All', model: 'Model', allModels: 'All',
       empty: 'No options', selectedCount: '{count}', labelValue: '{label}: {value}'
     },
@@ -92,7 +80,7 @@ export default {
       label: 'Group by', platform: 'Platform', platformGroup: 'Platform / Group', platformModel: 'Platform / Model', platformGroupModel: 'Platform / Group / Model'
     },
     trendView: { label: 'Trend view', pulse: 'Pulse matrix', line: 'Line chart' },
-    healthMode: { label: 'Health display', overall: 'API health', success: 'Error rate', ttft: 'First token', cache: 'Cache rate' },
+    healthMode: { label: 'Health display', overall: 'Overall', success: 'Error rate', ttft: 'First token', cache: 'Cache rate' },
     tabs: { aria: 'Detail dimension', models: 'Models', errors: 'Error reasons', users: 'User ranking' },
     metrics: {
       rpm: 'RPM',
@@ -106,7 +94,7 @@ export default {
       ttftP50: 'First token P50',
       durationP50: 'Duration P50',
       cacheRate: 'Cache rate',
-      cacheDetail: 'Read cache share · separate assessment',
+      cacheDetail: 'Read cache share',
       successRate: 'Success rate',
       successRateValue: 'Success rate {value}',
       errorRateValue: 'Error rate {value}',
@@ -138,24 +126,24 @@ export default {
       unranked: 'Unranked',
     },
     settings: {
-      title: 'Usage and quality checks',
+      title: 'V2 data monitor config',
       description:
-        'Real request scope, health thresholds, and group quality checks.',
+        'Configure passive usage aggregation dimensions (platform / model / group) and refresh cadence. Health colors and details on the user /monitor page show rates, RPM, and TPM — not absolute request volume.',
       save: 'Save',
       loading: 'Loading…',
-      loadFailed: 'Failed to load monitor config',
-      saveSuccess: 'Monitor config saved',
-      saveFailed: 'Failed to save monitor config',
+      loadFailed: 'Failed to load V2 config',
+      saveSuccess: 'V2 monitor config saved',
+      saveFailed: 'Failed to save V2 config',
       modeBanner:
-        'Real usage aggregation is paused.',
+        'System mode is currently {mode}. V2 minute aggregation will not run; this config can be prepared now and takes effect after switching to {modeV2}. Change mode under System Settings → Feature switches.',
       modeClosed: 'Channel monitor disabled',
-      modeV1: 'Active probes',
-      modeV2: 'Real usage aggregation',
-      enableTitle: 'Enable usage aggregation',
+      modeV1: 'V1 active probes',
+      modeV2: 'V2 passive monitoring',
+      enableTitle: 'Enable V2 aggregation',
       enableHint:
-        'Health statistics for real requests.',
+        'Applies when system mode is V2. Turning this off only stops this config’s aggregation; the system mode switch remains under Feature switches.',
       refreshTitle: 'Aggregation interval',
-      refreshHint: 'Statistics granularity; probes use their own check intervals.',
+      refreshHint: 'Affects matrix time granularity and refresh cadence',
       refreshAria: 'Aggregation interval',
       platformsTitle: 'Platforms and models',
       platformsHint:
@@ -173,11 +161,9 @@ export default {
       ignoredSummary: 'Ignored {ignored} categories · counted in error rate {counted} categories',
       healthTitle: 'Health thresholds',
       healthHint:
-        'Overall API health combines only error rate and first-token latency. Cache thresholds apply only to separate cache assessments, never to API health colors.',
-      minimumSampleHint: 'All health signals share the real request-count threshold and remain unknown below it; token counts are not used. First-token health also requires enough measured latency samples.',
-      cacheThresholdHint: 'The default 0 / 0 does not flag cache misses as unhealthy. Non-zero thresholds enable only the separate cache assessment.',
+        'Controls user-facing color bands and overall score. Defaults are tolerant so small error rates or low cache do not immediately show as unhealthy.',
       fields: {
-        minimumSample: 'Minimum request samples',
+        minimumSample: 'Minimum samples',
         warningError: 'Error rate watch %',
         criticalError: 'Error rate critical %',
         targetTtft: 'TTFT target ms',
@@ -190,33 +176,21 @@ export default {
       namedModelsCount: 'Showing {count} named model dimensions; unlisted models fold into per-platform “Other”.',
       userContractTitle: 'User-facing display contract',
       userContract: {
-        health: 'API colors combine only error rate and first-token P50, using errors alone when first-token samples are unavailable. Cache is separate; the badge is unknown below the request sample threshold, while card timeline bars are colored by error rate (semi-transparent = few samples; windows with fewer than 3 requests stay unknown).',
+        health: 'Health color weights: error rate 60% + first-token P50 20% + cache rate 20% (thresholds configurable above)',
         trend: 'Trend can switch between pulse matrix and line chart (error · cache · first token)',
         latency: 'Latency shows AVG · P50 · P90; absolute request / error counts are not shown',
         models: 'Empty model lists show real names and never dump everything into “Other”',
       },
     },
     admin: {
-      description: 'Real usage, connectivity, and quality checks.',
       descriptionV1:
-        'Active probes are enabled.',
+        'System mode is V1 active probes: manage probe monitors and run checks now; V2 aggregation does not run.',
       descriptionV2:
-        'Real usage aggregation is enabled.',
-      probesPaused: 'Active probes are paused.',
+        'System mode is V2 passive monitoring: configure aggregation dimensions; V1 active probes do not run.',
       tabAria: 'Monitor management',
-      tabV2: 'Usage and quality checks',
-      tabV1Active: 'Active probe tasks',
-      tabV1History: 'Probe history',
-    },
-    observations: {
-      title: 'Probe and quality results', target: 'Target', kind: 'Check type', status: 'Latest result', lastChecked: 'Checked at', usage: 'Probe usage', history: 'History',
-      requestUsage: 'Channel requests (deduplicated)', businessUsage: 'Business traffic', probeUsage: 'Task metering (not added again)', totalTokens: 'Deduplicated channel tokens', cost: 'Probe cost', partial: 'Incomplete records',
-      requestsTokens: '{requests} requests · {tokens} tokens', summary: '{passed} passed · {failed} failed · {inconclusive} inconclusive',
-      samples: '{count} checks', cadence: 'Every {seconds}s', paused: 'Paused', empty: 'No probe or quality records in this range',
-      boundGroup: 'Linked group', externalTarget: 'External target (no group)',
-      quotaFailed: 'Quota check failed', quotaAvailable: 'Quota available', connectedSlow: 'Connected, slow response',
-      kinds: { connectivity: 'Connectivity', quota: 'Quota and balance', candy: 'Logic check', state_probe: 'State probe', quality: 'Quality check' },
-      verdicts: { healthy: 'Healthy', degraded: 'Degraded state', inconclusive: 'Inconclusive', operational: 'Connected', passed: 'Passed', correct: 'Correct answer', incorrect: 'Wrong answer', error: 'Probe failed', failed: 'Connection failed', warning: 'Watch', critical: 'Unhealthy', unknown: 'No conclusion' },
+      tabV2: 'V2 data monitor config',
+      tabV1Active: 'V1 active probes',
+      tabV1History: 'V1 history (probes not active in current mode)',
     },
   },
 }

@@ -83,7 +83,6 @@ func TestPrepareVerifiesDigestBeforeExecutingAndReusesCache(t *testing.T) {
 			m.client = &http.Client{Transport: transportFunc(func(req *http.Request) (*http.Response, error) {
 				requests++
 				require.NotContains(t, req.URL.String(), m.token)
-				require.Contains(t, req.URL.Path, "/damian2848/sub2api/releases/")
 				body := data
 				if strings.Contains(req.URL.Path, "/releases/tags/") {
 					body, _ = json.Marshal(map[string]any{"assets": []map[string]string{{"name": "sub2api-reauth_1.2.3_linux_" + runtime.GOARCH + ".tar.gz", "digest": "sha256:" + digest}}})
@@ -106,7 +105,7 @@ func TestPrepareVerifiesDigestBeforeExecutingAndReusesCache(t *testing.T) {
 
 func TestStopCancelsPreparationAndCannotRestart(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("Linux runtime")
+		t.Skip("Linux runtime preparation")
 	}
 	m := New(t.TempDir(), "1.2.3", "http://127.0.0.1:4040", strings.Repeat("x", 64))
 	entered := make(chan struct{})

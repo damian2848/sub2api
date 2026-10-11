@@ -1,5 +1,6 @@
 <template>
   <div ref="rootRef" v-if="showUsageWindows">
+    <ExcelBPSCredentialStatus :state="account.excel_bps_credential_state" />
     <!-- Anthropic OAuth and Setup Token accounts: fetch real usage data -->
     <template
       v-if="
@@ -77,19 +78,8 @@
           color="amber"
         />
 
-      </div>
-
-      <!-- No data yet -->
-      <div v-else class="space-y-1">
-        <div class="text-xs text-gray-400">-</div>
-      </div>
-      <!--
-        One stable instance for every usage state, so a reset-credit query started
-        while usage is still loading survives the usage response. The local query
-        button shares its row once usage data exists.
-      -->
-      <ClaudeResetCreditsCell :account="account" class="mt-1" @redeemed="loadActiveUsage">
-        <template v-if="usageInfo" #pre-actions>
+        <!-- Passive sampling label + active query button -->
+        <div class="flex items-center gap-1.5 mt-0.5">
           <span
             v-if="usageInfo.source === 'passive'"
             class="text-[9px] text-gray-400 dark:text-gray-500 italic"
@@ -98,7 +88,7 @@
           </span>
           <button
             type="button"
-            class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/30 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[9px] font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/30 transition-colors"
             :disabled="activeQueryLoading"
             @click="loadActiveUsage"
           >
@@ -118,8 +108,13 @@
             </svg>
             {{ t('admin.accounts.usageWindow.activeQuery') }}
           </button>
-        </template>
-      </ClaudeResetCreditsCell>
+        </div>
+      </div>
+
+      <!-- No data yet -->
+      <div v-else class="space-y-1">
+        <div class="text-xs text-gray-400">-</div>
+      </div>
     </template>
 
     <!-- OpenAI Codex accounts: ticket status; usage querying remains OAuth-only. -->
@@ -680,6 +675,7 @@
 </template>
 
 <script setup lang="ts">
+import ExcelBPSCredentialStatus from './ExcelBPSCredentialStatus.vue'
 import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, watch } from 'vue'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import { useI18n } from 'vue-i18n'
@@ -690,7 +686,6 @@ import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber } from '@/utils/format'
 import UsageProgressBar from './UsageProgressBar.vue'
 import AccountQuotaInfo from './AccountQuotaInfo.vue'
-import ClaudeResetCreditsCell from './ClaudeResetCreditsCell.vue'
 import OpenAIQuotaResetCell from './OpenAIQuotaResetCell.vue'
 import GrokQuotaProbeCell from './GrokQuotaProbeCell.vue'
 import CNProviderQuotaCell from './CNProviderQuotaCell.vue'

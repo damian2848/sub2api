@@ -1,26 +1,30 @@
 .PHONY: build build-backend build-frontend test test-backend test-frontend test-frontend-critical
 
 FRONTEND_CRITICAL_VITEST := \
-	src/components/account/__tests__/ClaudeResetCreditsCell.spec.ts \
-	src/components/keys/__tests__/UseKeyModal.spec.ts \
-	src/components/account/__tests__/ModelWhitelistSelector.spec.ts \
-	src/components/common/__tests__/PlatformTypeBadge.openaiPlans.spec.ts \
-	src/views/admin/__tests__/DashboardView.spec.ts \
-	src/api/__tests__/codex.spec.ts \
+	src/components/account/__tests__/OpenAIRequestTimezoneField.spec.ts \
+	src/components/admin/__tests__/HarvestGatewayBorrowPanel.spec.ts \
+	src/components/admin/__tests__/AstraGatewayRuntime.spec.ts \
+	src/components/admin/__tests__/AstraGatewayHistory.spec.ts \
 	src/views/admin/ops/__tests__/TokenGuardV2View.spec.ts \
 	src/features/channel-monitor-v2/__tests__/MonitorCandySettings.spec.ts \
 	src/features/channel-monitor-v2/__tests__/MonitorStatusCards.spec.ts \
 	src/features/channel-monitor-v2/__tests__/monitorCards.spec.ts \
+	src/features/channel-monitor-v3/__tests__/monitorV3.spec.ts \
+	src/features/channel-monitor-v3/__tests__/StatusPage.spec.ts \
+	src/features/channel-monitor-v3/__tests__/V3SettingsPanel.spec.ts \
 	src/features/support-tickets/__tests__/supportTickets.spec.ts \
 	src/features/support-tickets/__tests__/TicketComponents.spec.ts \
 	src/views/user/__tests__/SupportTicketsViews.spec.ts \
 	src/views/admin/__tests__/SupportTicketsAdmin.spec.ts \
 	src/stores/__tests__/supportTickets.spec.ts \
+	src/views/admin/__tests__/ChannelMonitorView.modeSwitch.spec.ts \
 	src/views/admin/__tests__/AccountQualityView.spec.ts \
 	src/views/admin/__tests__/AccountsView.bulkEdit.spec.ts \
 	src/utils/__tests__/qualityRulePatch.spec.ts \
 	src/utils/__tests__/accountAutoBPS.spec.ts \
 	src/components/admin/operations/__tests__/QualityProbeSchedule.spec.ts \
+	src/components/admin/operations/__tests__/SmartOpsNav.spec.ts \
+	src/components/layout/__tests__/AppSidebar.spec.ts \
 	src/components/account/__tests__/CreateAccountModal.autoBPS.spec.ts \
 	src/components/account/__tests__/EditAccountModal.autoBPS.spec.ts \
 	src/stores/__tests__/accountQuality.spec.ts \

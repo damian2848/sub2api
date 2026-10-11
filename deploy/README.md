@@ -32,34 +32,6 @@ This directory contains files for deploying Sub2API on Linux servers and Apple-s
 | `mihomo-codex.service` | Systemd unit for the Mihomo ticket proxy |
 | `mihomo-codex.config.example.yaml` | Sanitized Mihomo subscription configuration example |
 | `EDGE_SECURITY.md` | Reverse proxy, CDN/WAF, trusted proxy, and ingress hardening guide |
-| `docker-compose.prism2api.yml` | Optional free-astra/Prism2API sidecar overlay |
-| `.env.prism2api.example` | Prism2API sidecar environment template |
-| `prism2api-account.example.json` | OpenAI API-key account payload for the sidecar |
-| `PRISM2API_SUB2API.md` | Full Prism2API setup, networking, and limitations guide |
-
-### Prism2API / free-astra
-
-Sub2API can use free-astra's `prism2api` through its existing OpenAI API-key
-account path. The optional overlay keeps port 8319 on the internal
-`sub2api-network` bridge and makes the service available as
-`http://prism2api:8319/v1`. It works with either Compose deployment file:
-
-```bash
-cp .env.example .env
-cat .env.prism2api.example >> .env
-# Edit .env: set PRISM_API_KEY, PRISM2API_SOURCE, PRISM2API_DATA_DIR,
-# POSTGRES_PASSWORD and the other deployment secrets.
-docker compose --env-file .env \
-  -f docker-compose.yml -f docker-compose.prism2api.yml up -d --build
-```
-
-Create an OpenAI API-key account and choose the **Free-Astra / Prism** provider
-preset in the admin UI. It fills the internal Base URL, model mapping, text-only
-capabilities, Responses mode, and concurrency defaults. Keep the API key equal
-to `PRISM_API_KEY`, bind the account to a real group, and use
-[`prism2api-account.example.json`](./prism2api-account.example.json) when an API
-payload is needed. The full Chinese setup and limitations are in
-[`PRISM2API_SUB2API.md`](./PRISM2API_SUB2API.md).
 
 ---
 
@@ -98,10 +70,10 @@ chmod +x docker-deploy.sh
 
 **What the script does:**
 - Downloads `docker-compose.local.yml` and `.env.example`
-- Automatically generates secure secrets (JWT_SECRET, TOTP_ENCRYPTION_KEY, POSTGRES_PASSWORD) and an admin login email
+- Automatically generates secure secrets (JWT_SECRET, TOTP_ENCRYPTION_KEY, POSTGRES_PASSWORD)
 - Creates `.env` file with generated secrets
 - Creates necessary data directories (data/, postgres_data/, redis_data/)
-- Saves `.env` with mode `600` without printing any secret values
+- **Displays generated credentials** (POSTGRES_PASSWORD, JWT_SECRET, etc.)
 
 **After running the script:**
 ```bash
@@ -111,9 +83,8 @@ docker compose -f docker-compose.local.yml up -d
 # View logs
 docker compose -f docker-compose.local.yml logs -f sub2api
 
-# If ADMIN_EMAIL or ADMIN_PASSWORD was left empty, read the generated credentials once:
-# cat data/admin-credentials.txt
-# The file is mode 600; save the values securely, then delete it.
+# If admin email/password were auto-generated, find them in logs:
+docker compose -f docker-compose.local.yml logs sub2api | grep "Generated admin"
 
 # Access Web UI
 # http://localhost:8080
@@ -145,7 +116,7 @@ mkdir -p data postgres_data redis_data
 # Start all services using local directory version
 docker compose -f docker-compose.local.yml up -d
 
-# View application logs (generated admin passwords are never logged)
+# View logs (check for auto-generated admin email and password)
 docker compose -f docker-compose.local.yml logs -f sub2api
 
 # Access Web UI
@@ -174,9 +145,10 @@ When using Docker Compose with `AUTO_SETUP=true`:
 
 2. No manual Setup Wizard needed - just configure `.env` and start
 
-3. If `ADMIN_EMAIL` or `ADMIN_PASSWORD` is not set, read the generated credentials from
-   `data/admin-credentials.txt` (mode `0600`), save them securely, and delete the file. The
-   generated password is never written to application logs.
+3. If `ADMIN_EMAIL` / `ADMIN_PASSWORD` are not set, check logs for the generated admin email (login username) and password:
+   ```bash
+   docker compose logs sub2api | grep "Generated admin"
+   ```
 
 ### Startup and Database Recovery
 
@@ -289,8 +261,8 @@ docker compose down -v
 | `JWT_SECRET` | **Recommended** | *(auto-generated)* | JWT secret (fixed for persistent sessions) |
 | `TOTP_ENCRYPTION_KEY` | **Recommended** | *(auto-generated)* | TOTP encryption key (fixed for persistent 2FA) |
 | `SERVER_PORT` | No | `8080` | Server port |
-| `ADMIN_EMAIL` | No | *(auto-generated)* | Admin login email |
-| `ADMIN_PASSWORD` | No | *(auto-generated)* | Admin password (saved once to `data/admin-credentials.txt`, mode 0600) |
+| `ADMIN_EMAIL` | No | *(auto-generated)* | Admin email (login username) |
+| `ADMIN_PASSWORD` | No | *(auto-generated)* | Admin password (8-72 bytes) |
 | `TZ` | No | `Asia/Shanghai` | Timezone |
 | `UPDATE_GITHUB_TOKEN` | No | *(empty)* | Token for `api.github.com` release checks only; asset downloads remain anonymous. |
 | `GEMINI_OAUTH_CLIENT_ID` | No | *(builtin)* | Google OAuth client ID (Gemini OAuth). Leave empty to use the built-in Gemini CLI client. |

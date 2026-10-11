@@ -23,41 +23,12 @@ it('renders platform groups, three passive metrics and observed-only candy bars'
   wrapper.unmount()
 })
 
-it('renders independent histories for multiple models in the same group', () => {
-  const row = { platform: 'openai', group_id: 7, group_name: 'Multi model', metrics: { has_samples: false, request_count: 0, ttft: { p50_ms: null } }, health: { overall: 'unknown' }, buckets: [],
-    candy_histories: [
-      { model: 'model-a', reasoning_effort: 'medium', interval_minutes: 1, results: [] },
-      { model: 'model-b', reasoning_effort: 'high', interval_minutes: 5, results: [] },
-    ],
-  } as unknown as MonitorMatrixRow
-  const wrapper = mount(MonitorStatusCards, { props: { items: [row], countdown: 60, loading: false, now: Date.now() }, global: { stubs: { ProviderIcon: true } } })
-  expect(wrapper.findAll('[data-testid="candy-history-slots"]')).toHaveLength(2)
-  expect(wrapper.text()).toContain('model-a')
-  expect(wrapper.text()).toContain('model-b')
-  wrapper.unmount()
-})
-
 it('does not show zero traffic as 100 percent availability or invent candy records', () => {
   const row = { platform: 'openai', group_id: 7, group_name: 'No samples', metrics: { has_samples: false, request_count: 0, cache_rate: 0, error_rate: 0, ttft: { p50_ms: null } }, health: { overall: 'unknown' }, buckets: [], candy: { model: 'model', reasoning_effort: 'medium', interval_minutes: 1, results: [] } } as unknown as MonitorMatrixRow
   const wrapper = mount(MonitorStatusCards, { props: { items: [row], countdown: 32, loading: false, now: Date.now() }, global: { stubs: { ProviderIcon: true } } })
   expect(wrapper.text()).not.toContain('100.0%')
   expect(wrapper.text()).toContain('channelMonitorV2.candy.waiting')
   expect(wrapper.findAll('[data-testid="candy-history-bar"]')).toHaveLength(0)
-  wrapper.unmount()
-})
-
-it.each([1, 0.75, 0])('shows real probe request availability %s and observed timeline with missing TTFT', (availability) => {
-  const metrics = { has_samples: true, request_count: 0, cache_rate: 0.2, error_rate: 1 - availability, probe_sample_count: 0, availability_source: 'probe', ttft: { p50_ms: null } }
-  const row = { platform: 'openai', group_id: 7, group_name: 'Probe only', metrics, health: { overall: 'healthy', error_rate: 'healthy' }, buckets: [{ bucket_start: '2026-09-28T00:06:00Z', metrics, health: { overall: 'healthy' } }] } as unknown as MonitorMatrixRow
-  const coverage = { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage
-  const wrapper = mount(MonitorStatusCards, { props: { items: [row], coverage, countdown: 32, loading: false, now: Date.now() }, global: { stubs: { ProviderIcon: true } } })
-  expect(wrapper.get('[data-testid="availability-source"]').text()).toBe('channelMonitorV2.sources.probe')
-  const values = wrapper.findAll('dl > div')
-  expect(values[0].get('dd').text()).toBe('20.0%')
-  expect(values[1].get('dd').text()).toBe(availability === 0 ? '0.00%' : `${(availability * 100).toFixed(1)}%`)
-  expect(values[2].get('dd').text()).toBe('-')
-  expect(wrapper.findAll('[data-testid="traffic-history-bar"]')).toHaveLength(18)
-  expect(wrapper.findAll('[data-testid="traffic-history-bar"]').filter(bar => bar.classes().includes('bg-emerald-400'))).toHaveLength(1)
   wrapper.unmount()
 })
 
@@ -218,63 +189,4 @@ it.each([0, 1, 99, 100, 120])('renders exactly 100 enabled-check slots for %i ac
     await bars.at(-1)!.trigger('mouseenter')
     expect(tooltip()?.textContent).toContain('channelMonitorV2.candy.states.error')
   }
-})
-
-it('keeps 100 percent API availability healthy while low cache is independently critical', async () => {
-  const { wrapper, row } = hoverFixture()
-  // Public counts are redacted: retain the authoritative server verdicts.
-  const metrics = { ...row.metrics, request_count: 0, has_samples: true, error_rate: 0, cache_rate: 0 }
-  const health = { ...row.health, overall: 'healthy' as const, error_rate: 'healthy' as const, cache: 'critical' as const, minimum_sample: 50 }
-  await wrapper.setProps({ items: [{ ...row, metrics, health, buckets: [{ ...row.buckets[0], metrics, health }] }] })
-  const apiHealth = wrapper.get('[data-testid="monitor-api-health"]')
-  expect(apiHealth.text()).toContain('channelMonitorV2.cards.apiHealth')
-  expect(apiHealth.text()).toContain('channelMonitorV2.cards.health.healthy')
-  expect(apiHealth.classes()).toContain('bg-emerald-100')
-  expect(apiHealth.classes()).not.toContain('bg-red-100')
-  const values = wrapper.findAll('dl > div')
-  expect(values[1].get('dd').text()).toBe('100.0%')
-  expect(values[0].get('dd').text()).toBe('0.00%')
-  expect(wrapper.get('[data-testid="cache-health-state"]').text()).toBe('channelMonitorV2.cards.cacheStates.critical')
-  expect(wrapper.get('[data-testid="cache-health-state"]').classes()).toContain('text-red-600')
-  const bar = wrapper.findAll('[data-testid="traffic-history-bar"]')[1]
-  expect(bar.classes()).toContain('bg-emerald-400')
-  await bar.trigger('mouseenter')
-  expect(tooltip()?.textContent).toContain('channelMonitorV2.cards.health.healthy')
-  expect(tooltip()?.textContent).toContain('channelMonitorV2.cards.cacheStates.critical')
-})
-
-it('shows low-sample bars with derived health color at reduced opacity instead of grey', async () => {
-  const { wrapper, row } = hoverFixture()
-  const metrics = { ...row.metrics, request_count: 5, has_samples: true, error_rate: 0, cache_rate: 0 }
-  const health = { ...row.health, overall: 'unknown' as const, error_rate: 'unknown' as const, ttft: 'unknown' as const, cache: 'unknown' as const, score: null, error_rate_score: null, ttft_score: null, cache_score: null, minimum_sample: 50 }
-  await wrapper.setProps({ items: [{ ...row, metrics, health, buckets: [{ ...row.buckets[0], metrics, health }] }] })
-  // Card badge still shows unknown — that uses the server's overall verdict.
-  const apiHealth = wrapper.get('[data-testid="monitor-api-health"]')
-  expect(apiHealth.text()).toContain('channelMonitorV2.cards.health.unknown')
-  expect(apiHealth.classes()).toContain('bg-gray-100')
-  expect(wrapper.findAll('dl > div')[1].get('dd').text()).toBe('100.0%')
-  expect(wrapper.get('[data-testid="cache-health-state"]').text()).toBe('channelMonitorV2.cards.cacheStates.unknown')
-  // Timeline bars derive health from error_rate: 0% errors → green, but at 50% opacity.
-  const bars = wrapper.findAll('[data-testid="traffic-history-bar"]')
-  const observedBar = bars[1]
-  expect(observedBar.classes()).toContain('bg-emerald-400')
-  expect(observedBar.classes()).toContain('opacity-50')
-  // Unobserved bars remain grey without opacity class.
-  expect(bars[0].classes()).toContain('bg-gray-300')
-  expect(bars[0].classes()).not.toContain('opacity-50')
-  // Hover tooltip shows the low-sample warning.
-  await observedBar.trigger('mouseenter')
-  expect(tooltip()?.textContent).toContain('channelMonitorV2.cards.health.healthy')
-  expect(tooltip()?.querySelector('[data-testid="low-sample-warning"]')).not.toBeNull()
-  expect(tooltip()?.querySelectorAll('[data-testid="monitor-card-tooltip-sample"]')).toHaveLength(1)
-})
-
-it.each(['error_rate', 'ttft'] as const)('retains a critical API badge and timeline for real %s problems despite healthy cache', async (failedMetric) => {
-  const { wrapper, row } = hoverFixture()
-  const health = { ...row.health, overall: 'critical' as const, error_rate: 'healthy' as const, ttft: 'healthy' as const, cache: 'healthy' as const, [failedMetric]: 'critical' as const }
-  const metrics = { ...row.metrics, error_rate: failedMetric === 'error_rate' ? 1 : 0, ttft: { ...row.metrics.ttft, p50_ms: failedMetric === 'ttft' ? 30000 : 1000 } }
-  await wrapper.setProps({ items: [{ ...row, metrics, health, buckets: [{ ...row.buckets[0], metrics, health }] }] })
-  expect(wrapper.get('[data-testid="monitor-api-health"]').classes()).toContain('bg-red-100')
-  expect(wrapper.get('[data-testid="cache-health-state"]').text()).toBe('channelMonitorV2.cards.cacheStates.healthy')
-  expect(wrapper.findAll('[data-testid="traffic-history-bar"]')[1].classes()).toContain('bg-red-400')
 })

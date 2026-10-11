@@ -70,6 +70,12 @@ func TestPelicanKeepaliveHTTP(t *testing.T) {
 					_, _ = io.WriteString(w, "data: {\"type\":\"response.created\"}\n\n")
 					w.(http.Flusher).Flush()
 				}
+				if tc.abort {
+					// Keep the request in flight until cancellation. A short timer
+					// can finish the response before the client gets CPU to close it.
+					<-r.Context().Done()
+					return
+				}
 				timer := time.NewTimer(wait)
 				defer timer.Stop()
 				select {

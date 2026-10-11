@@ -257,7 +257,7 @@ func (s *OpenAIGatewayService) SelectAccountForModel(ctx context.Context, groupI
 // SelectAccountForModelWithExclusions selects an account supporting the requested model while excluding specified accounts.
 // SelectAccountForModelWithExclusions 选择支持指定模型的账号，同时排除指定的账号。
 func (s *OpenAIGatewayService) SelectAccountForModelWithExclusions(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}) (*Account, error) {
-	return s.selectAccountWithoutSlot(s.withOpenAIQuotaAutoPauseContext(ctx), OpenAIAccountScheduleRequest{GroupID: groupID, Platform: PlatformOpenAI, SessionHash: sessionHash, RequestedModel: requestedModel, ExcludedIDs: excludedIDs})
+	return s.selectAccountForModelWithExclusions(s.withOpenAIQuotaAutoPauseContext(ctx), groupID, PlatformOpenAI, sessionHash, requestedModel, excludedIDs, false, 0, "", false)
 }
 
 // SelectAccountForTokenCount selects an account for a non-billable token-count
@@ -273,29 +273,18 @@ func (s *OpenAIGatewayService) SelectAccountForTokenCount(
 ) (*Account, error) {
 	ctx = WithOpenAIProfitControlSuppressed(ctx)
 	ctx = s.withOpenAIQuotaAutoPauseContext(ctx)
-	return s.selectAccountWithoutSlot(ctx, OpenAIAccountScheduleRequest{
-		GroupID: groupID, Platform: platform, SessionHash: sessionHash,
-		RequestedModel: requestedModel, RequiredCapability: requiredCapability,
-	})
-}
-
-// Slot-free requests use the same priority recovery without reserving a
-// generation slot. The normal selector remains the fallback on uncertain load.
-func (s *OpenAIGatewayService) selectAccountWithoutSlot(ctx context.Context, req OpenAIAccountScheduleRequest) (*Account, error) {
-	ctx = s.trackOpenAISessionActivity(ctx, req.GroupID, req.SessionHash)
-	req.Platform = NormalizeOpenAICompatiblePlatform(req.Platform)
-	req.RequirePrivacySet = s.openAIGroupRequiresPrivacySet(ctx, req.GroupID)
-	if s.concurrencyService != nil && req.SessionHash != "" && !s.checkChannelPricingRestriction(ctx, req.GroupID, req.RequestedModel) {
-		if id, err := s.getStickySessionAccountID(ctx, req.GroupID, req.SessionHash); err == nil && id > 0 {
-			if sticky, readErr := s.getSchedulableAccount(ctx, id); readErr == nil {
-				scheduler := &defaultOpenAIAccountScheduler{service: s}
-				if selection := scheduler.tryPriorityStickyFailback(ctx, req, sticky, false); selection != nil {
-					return selection.Account, nil
-				}
-			}
-		}
-	}
-	return s.selectAccountForModelWithExclusions(ctx, req.GroupID, req.Platform, req.SessionHash, req.RequestedModel, req.ExcludedIDs, req.RequireCompact, 0, req.RequiredCapability, false)
+	return s.selectAccountForModelWithExclusions(
+		ctx,
+		groupID,
+		platform,
+		sessionHash,
+		requestedModel,
+		nil,
+		false,
+		0,
+		requiredCapability,
+		false,
+	)
 }
 
 // NormalizeOpenAICompatiblePlatform 保留走 OpenAI 网关的平台（openai、grok 与多协议
@@ -1086,6 +1075,10 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 			filterStats.exclude("excluded")
 			continue
 		}
+		if s.isExcelBPSModelCoolingDown(acc, requestedModel) {
+			filterStats.exclude(excelBPSModelPermissionFilterReason)
+			continue
+		}
 		if s.isExcelBPSCoolingDown(acc, requestedModel) {
 			filterStats.exclude(excelBPSRateLimitedFilterReason)
 			continue
@@ -1197,17 +1190,11 @@ func (s *OpenAIGatewayService) SelectAccountWithLoadAwareness(ctx context.Contex
 	// 分组利润控制：legacy 公共入口同样装门，保证不经
 	// selectAccountWithScheduler 的调用方也无法绕过利润准入。
 	ctx = s.withOpenAIProfitControlGate(ctx, groupID)
-	return s.selectAccountWithLoadAwareness(ctx, OpenAIAccountScheduleRequest{GroupID: groupID, Platform: PlatformOpenAI, SessionHash: sessionHash, RequestedModel: requestedModel, ExcludedIDs: excludedIDs, UseUpstreamTokenCost: true})
+	return s.selectAccountWithLoadAwareness(ctx, groupID, PlatformOpenAI, sessionHash, requestedModel, excludedIDs, false, "", true)
 }
 
-func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Context, req OpenAIAccountScheduleRequest) (*AccountSelectionResult, error) {
-	ctx = s.trackOpenAISessionActivity(ctx, req.GroupID, req.SessionHash)
-	groupID, sessionHash, requestedModel := req.GroupID, req.SessionHash, req.RequestedModel
-	excludedIDs, requireCompact, requiredCapability := req.ExcludedIDs, req.RequireCompact, req.RequiredCapability
-	useUpstreamTokenCost := req.UseUpstreamTokenCost
-	platform := NormalizeOpenAICompatiblePlatform(req.Platform)
-	req.Platform = platform
-	req.RequirePrivacySet = s.openAIGroupRequiresPrivacySet(ctx, groupID)
+func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Context, groupID *int64, platform string, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, useUpstreamTokenCost bool) (*AccountSelectionResult, error) {
+	platform = NormalizeOpenAICompatiblePlatform(platform)
 	if s.checkChannelPricingRestriction(ctx, groupID, requestedModel) {
 		slog.Warn("channel pricing restriction blocked request",
 			"group_id", derefGroupID(groupID),
@@ -1222,16 +1209,6 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 	if sessionHash != "" && s.cache != nil {
 		if accountID, err := s.getStickySessionAccountID(ctx, groupID, sessionHash); err == nil {
 			stickyAccountID = accountID
-		}
-	}
-	// An idle backup session can return after primary capacity recovers.
-	// Explicit low-rate ordering remains authoritative when enabled.
-	if stickyAccountID > 0 && !preferLowUpstreamRate {
-		if sticky, stickyErr := s.getSchedulableAccount(ctx, stickyAccountID); stickyErr == nil {
-			failback := &defaultOpenAIAccountScheduler{service: s}
-			if selection := failback.tryPriorityStickyFailback(ctx, req, sticky, true); selection != nil {
-				return selection, nil
-			}
 		}
 	}
 	if s.concurrencyService == nil || !cfg.LoadBatchEnabled {
@@ -1433,6 +1410,10 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		}
 		if !parentHealthyForShadow(acc, parentLookupL2) {
 			filterStats.exclude("shadow_parent_unhealthy")
+			continue
+		}
+		if s.isExcelBPSModelCoolingDown(acc, requestedModel) {
+			filterStats.exclude(excelBPSModelPermissionFilterReason)
 			continue
 		}
 		if s.isExcelBPSCoolingDown(acc, requestedModel) {

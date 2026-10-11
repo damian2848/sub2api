@@ -405,6 +405,9 @@ export function deriveWeChatConnectStoredMode(
  */
 export interface SystemSettings {
 	excel_bps_enabled: boolean;
+	prism_browser_enabled: boolean;
+	prism_browser_base_url: string;
+	prism_browser_api_key_configured: boolean;
   // Registration settings
   registration_enabled: boolean;
   email_verify_enabled: boolean;
@@ -647,6 +650,7 @@ export interface SystemSettings {
   openai_codex_client_version: string;
   openai_codex_client_version_synced: string;
   openai_codex_version_auto_sync_enabled: boolean;
+  openai_request_timezone_enabled: boolean;
   openai_codex_ticket_enabled: boolean;
   openai_codex_ticket_fail_closed: boolean;
   openai_codex_ticket_strategy?: 'fixed' | 'standby';
@@ -746,7 +750,7 @@ export interface SystemSettings {
 
   // Channel Monitor feature switch
   channel_monitor_enabled: boolean;
-  channel_monitor_mode?: 'v1' | 'v2' | 'hybrid';
+  channel_monitor_mode?: 'v1' | 'v2' | 'v3';
   channel_monitor_default_interval_seconds: number;
   channel_monitor_hide_throughput?: boolean;
   channel_monitor_show_quota?: boolean;
@@ -802,6 +806,9 @@ export interface SystemSettings {
 
 export interface UpdateSettingsRequest {
 	excel_bps_enabled?: boolean;
+	prism_browser_enabled?: boolean;
+	prism_browser_base_url?: string;
+	prism_browser_api_key?: string;
   registration_enabled?: boolean;
   email_verify_enabled?: boolean;
   registration_email_suffix_whitelist?: string[];
@@ -1012,6 +1019,7 @@ export interface UpdateSettingsRequest {
   openai_codex_user_agent?: string;
   openai_codex_client_version?: string;
   openai_codex_version_auto_sync_enabled?: boolean;
+  openai_request_timezone_enabled?: boolean;
   openai_codex_ticket_enabled?: boolean;
   openai_codex_ticket_fail_closed?: boolean;
   openai_codex_ticket_strategy?: 'fixed' | 'standby';
@@ -1095,7 +1103,7 @@ export interface UpdateSettingsRequest {
 
   // Channel Monitor feature switch
   channel_monitor_enabled?: boolean;
-  channel_monitor_mode?: 'v1' | 'v2' | 'hybrid';
+  channel_monitor_mode?: 'v1' | 'v2' | 'v3';
   channel_monitor_default_interval_seconds?: number;
   channel_monitor_hide_throughput?: boolean;
   channel_monitor_show_quota?: boolean;
@@ -1150,8 +1158,8 @@ export interface UpdateSettingsRequest {
  * Get all system settings
  * @returns System settings
  */
-export async function getSettings(signal?: AbortSignal): Promise<SystemSettings> {
-  const { data } = await apiClient.get<SystemSettings>("/admin/settings", { signal });
+export async function getSettings(): Promise<SystemSettings> {
+  const { data } = await apiClient.get<SystemSettings>("/admin/settings");
   return data;
 }
 
@@ -1162,12 +1170,10 @@ export async function getSettings(signal?: AbortSignal): Promise<SystemSettings>
  */
 export async function updateSettings(
   settings: UpdateSettingsRequest,
-  signal?: AbortSignal,
 ): Promise<SystemSettings> {
   const { data } = await apiClient.put<SystemSettings>(
     "/admin/settings",
     settings,
-    { signal },
   );
   return data;
 }

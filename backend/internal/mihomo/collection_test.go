@@ -78,7 +78,7 @@ func TestCollectionConfigRejectsUnselectedLanesAndHonorsCountryFilter(t *testing
 	require.NoError(t, json.Unmarshal(data, &cfg))
 	listeners, ok := cfg["listeners"].([]any)
 	require.True(t, ok)
-	require.Len(t, listeners, defaultCollectLanes+1)
+	require.Len(t, listeners, defaultCollectLanes+1+AstraLanes)
 	groups, ok := cfg["proxy-groups"].([]any)
 	require.True(t, ok)
 	for i, l := range listeners[:defaultCollectLanes] {
@@ -194,7 +194,7 @@ func TestCollectionProvisionsRequestedLanesAndRestoresConfig(t *testing.T) {
 	require.NoError(t, c.Close())
 	require.NoError(t, c.Close())
 	require.Len(t, configs, 2)
-	require.Len(t, configs[1]["listeners"], defaultCollectLanes+128)
+	require.Len(t, configs[1]["listeners"], defaultCollectLanes+128+AstraLanes)
 	_, _, err = c.Next(context.Background(), 0)
 	require.ErrorContains(t, err, "closed")
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/serverless"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -135,6 +136,10 @@ type SettingService struct {
 	modelBillingCache                  modelBillingConfigCache
 	prioritySchedulingConfig           priorityConfigCache
 	requestCapture                     *requestcapture.Manager
+	astraRoutingMu                     sync.Mutex
+	astraRoutingOnSaved                func(config.AstraRoutingSettings)
+	astraRoutingCache                  *config.AstraRoutingSettings
+	astraRoutingExpires                time.Time
 	settingRepo                        SettingRepository
 	defaultSubGroupReader              DefaultSubscriptionGroupReader
 	proxyRepo                          ProxyRepository // for resolving websearch provider proxy URLs
@@ -149,6 +154,8 @@ type SettingService struct {
 	openAICodexVersionCache            atomic.Value // *cachedOpenAICodexClientVersion
 	openAICodexVersionSF               singleflight.Group
 	openAICodexTicketEnabledCache      atomic.Value // *cachedOpenAICodexTicketEnabled
+	openAIRequestTimezoneEnabledCache  atomic.Value // *cachedOpenAIRequestTimezoneEnabled
+	openAIRequestTimezoneEnabledSF     singleflight.Group
 	openAICodexTicketEnabledSF         singleflight.Group
 	openAICodexTicketFailClosedCache   atomic.Value // *cachedOpenAICodexTicketFailClosed
 	openAICodexTicketFailClosedSF      singleflight.Group
@@ -321,10 +328,11 @@ const (
 
 // NewSettingService 创建系统设置服务实例
 func NewSettingService(settingRepo SettingRepository, cfg *config.Config) *SettingService {
-	return &SettingService{
-		settingRepo: settingRepo,
-		cfg:         cfg,
+	s := &SettingService{settingRepo: settingRepo, cfg: cfg}
+	if cfg != nil {
+		cfg.SetAstraRoutingLoader(s.astraRoutingRuntime)
 	}
+	return s
 }
 
 // SetDefaultSubscriptionGroupReader injects an optional group reader for default subscription validation.

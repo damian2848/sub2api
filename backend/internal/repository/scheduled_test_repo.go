@@ -125,23 +125,12 @@ func NewScheduledTestResultRepository(db *sql.DB) service.ScheduledTestResultRep
 
 func (r *scheduledTestResultRepository) Create(ctx context.Context, result *service.ScheduledTestResult) (*service.ScheduledTestResult, error) {
 	row := r.db.QueryRowContext(ctx, `
-		WITH saved AS (INSERT INTO scheduled_test_results (plan_id, status, response_text, error_message, latency_ms, started_at, finished_at, created_at, pelican_config, quality_action, quality_judgment, quality_round_id, metering, observation_scope)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13)
-		RETURNING *), archived AS (
-		INSERT INTO channel_monitor_quality_observations(result_id,plan_id,model,type,verdict,checked_at,latency_ms,message,schedule,metering,observation_scope)
-		SELECT s.id,s.plan_id,COALESCE(NULLIF(s.pelican_config->>'model_id',''),p.model_id),
-		CASE WHEN s.pelican_config->>'question_kind'='state_probe' THEN 'state_probe' ELSE 'quality' END,
-		CASE WHEN s.pelican_config->>'question_kind'='state_probe' THEN CASE WHEN s.status='success' THEN 'healthy' WHEN s.error_message='state_degraded' THEN 'degraded' ELSE 'inconclusive' END
-		WHEN s.status='success' AND s.quality_judgment->>'verdict'='correct' THEN 'correct'
-		WHEN s.error_message='answer_mismatch' AND s.quality_judgment->>'verdict'='incorrect' THEN 'incorrect' ELSE 'inconclusive' END,
-		s.started_at,s.latency_ms,s.error_message,p.cron_expression,s.metering,s.observation_scope
-		FROM saved s JOIN scheduled_test_plans p ON p.id=s.plan_id WHERE jsonb_typeof(s.pelican_config->'quality')='object' OR s.pelican_config->>'question_kind'='state_probe'
-		ON CONFLICT(result_id) DO NOTHING)
-		SELECT id, plan_id, status, response_text, error_message, latency_ms, started_at, finished_at, created_at, pelican_config, quality_action, quality_judgment, quality_round_id FROM saved
-	`, result.PlanID, result.Status, result.ResponseText, result.ErrorMessage, result.LatencyMs, result.StartedAt, result.FinishedAt, marshalPelicanConfig(result.PelicanConfig), result.QualityAction, marshalQualityJudgment(result.QualityJudgment), result.QualityRoundID, marshalMonitorMetadata(result.Usage), marshalMonitorMetadata(result.ObservationScope))
+		INSERT INTO scheduled_test_results (plan_id, status, response_text, error_message, latency_ms, started_at, finished_at, created_at, pelican_config, quality_action, quality_judgment, quality_round_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11)
+		RETURNING id, plan_id, status, response_text, error_message, latency_ms, started_at, finished_at, created_at, pelican_config, quality_action, quality_judgment, quality_round_id
+	`, result.PlanID, result.Status, result.ResponseText, result.ErrorMessage, result.LatencyMs, result.StartedAt, result.FinishedAt, marshalPelicanConfig(result.PelicanConfig), result.QualityAction, marshalQualityJudgment(result.QualityJudgment), result.QualityRoundID)
 
 	out := &service.ScheduledTestResult{}
-	out.Usage, out.ObservationScope = result.Usage, result.ObservationScope
 	var judgment []byte
 	var config []byte
 	if err := row.Scan(
@@ -280,11 +269,15 @@ func (r *scheduledTestPlanRepository) ClaimPelican(ctx context.Context, plan *se
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE scheduled_test_plans
  SET running_until = $3, next_run_at = $4
- WHERE id = $1 AND enabled = true AND next_run_at <= $2
- AND (running_until IS NULL OR running_until < $2) AND updated_at = $5
+ WHERE id = $1 AND enabled = true
+ AND (next_run_at <= $2 OR ($7 AND pelican_config->'quality'->>'trigger_on_upstream_5xx'='true'))
+ AND (NOT $7 OR (pelican_config->'quality'->>'trigger_on_upstream_5xx'='true'
+   AND EXISTS (SELECT 1 FROM accounts WHERE accounts.id=account_id AND type='oauth')
+   AND ($8::timestamptz IS NULL OR last_run_at IS NULL OR last_run_at < $8 OR pelican_config->'quality'->>'action'='remove_models')))
+ AND (running_until IS NULL OR running_until < $2) AND updated_at = $5 AND next_run_at = $6
  AND EXISTS (SELECT 1 FROM accounts WHERE accounts.id = account_id AND deleted_at IS NULL)
  AND NOT EXISTS (SELECT 1 FROM scheduled_test_plans other WHERE other.account_id = scheduled_test_plans.account_id
- AND other.id <> scheduled_test_plans.id AND other.pelican_config IS NOT NULL AND other.running_until > $2)`, plan.ID, now, until, next, plan.UpdatedAt)
+ AND other.id <> scheduled_test_plans.id AND other.pelican_config IS NOT NULL AND other.running_until > $2)`, plan.ID, now, until, next, plan.UpdatedAt, plan.NextRunAt, plan.TriggerSource == "upstream_5xx", plan.TriggerObservedAt)
 	if err != nil {
 		return false, err
 	}
@@ -297,6 +290,11 @@ func (r *scheduledTestPlanRepository) ClaimPelican(ctx context.Context, plan *se
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
  SELECT 1 FROM account_quality_states WHERE plan_id=$1 AND state->>'action'=$2)`,
 			plan.ID, service.QualityActionEnableBPS).Scan(&bpsRecoveryPending); err != nil {
+			return false, err
+		}
+	}
+	if n == 1 && plan.PelicanConfig != nil && plan.PelicanConfig.Quality != nil && plan.PelicanConfig.Quality.Action == service.QualityActionRemoveModel {
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT (state->>'quality_5xx_episode')::bigint FROM account_quality_states WHERE plan_id=$1),0)`, plan.ID).Scan(&plan.Quality5xxEpisode); err != nil {
 			return false, err
 		}
 	}
@@ -314,6 +312,13 @@ func (r *scheduledTestPlanRepository) ClaimPelican(ctx context.Context, plan *se
 func (r *scheduledTestPlanRepository) FinishPelican(ctx context.Context, id int64, until, finished time.Time) error {
 	_, err := r.db.ExecContext(ctx, `UPDATE scheduled_test_plans SET running_until = NULL, last_run_at = $3
  WHERE id = $1 AND running_until = $2`, id, until, finished)
+	return err
+}
+
+func (r *scheduledTestPlanRepository) FinishTriggeredQuality(ctx context.Context, plan *service.ScheduledTestPlan, until, finished, next time.Time) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE scheduled_test_plans SET running_until=NULL,last_run_at=$3,
+ next_run_at=CASE WHEN updated_at=$4 AND next_run_at=$5 AND next_run_at<=$3 THEN $6 ELSE next_run_at END
+ WHERE id=$1 AND running_until=$2`, plan.ID, until, finished, plan.UpdatedAt, plan.NextRunAt, next)
 	return err
 }
 

@@ -230,6 +230,7 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 		SettingKeyAccountQuotaNotifyEnabled,
 		SettingKeyChannelMonitorEnabled,
 		SettingKeyExcelBPSEnabled,
+		SettingKeyPrismBrowserEnabled,
 		SettingKeyChannelMonitorMode,
 		SettingKeyChannelMonitorDefaultIntervalSeconds,
 		SettingKeyChannelMonitorHideThroughput,
@@ -363,6 +364,7 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 
 		ChannelMonitorEnabled:                !isFalseSettingValue(settings[SettingKeyChannelMonitorEnabled]),
 		ExcelBPSEnabled:                      !isFalseSettingValue(settings[SettingKeyExcelBPSEnabled]),
+		PrismBrowserEnabled:                  settings[SettingKeyPrismBrowserEnabled] == "true",
 		ChannelMonitorMode:                   normalizeChannelMonitorMode(settings[SettingKeyChannelMonitorMode]),
 		ChannelMonitorDefaultIntervalSeconds: parseChannelMonitorInterval(settings[SettingKeyChannelMonitorDefaultIntervalSeconds]),
 		ChannelMonitorHideThroughput:         !isFalseSettingValue(settings[SettingKeyChannelMonitorHideThroughput]),
@@ -398,15 +400,15 @@ const (
 	defaultChannelMonitorMode      = ChannelMonitorModeV1
 )
 
-// normalizeChannelMonitorMode preserves legacy modes; hybrid runs both collectors.
+// normalizeChannelMonitorMode accepts only v1/v2/v3; empty/invalid → v1 (safe default).
 func normalizeChannelMonitorMode(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case ChannelMonitorModeV1, "":
 		return ChannelMonitorModeV1
 	case ChannelMonitorModeV2:
 		return ChannelMonitorModeV2
-	case ChannelMonitorModeHybrid:
-		return ChannelMonitorModeHybrid
+	case ChannelMonitorModeV3:
+		return ChannelMonitorModeV3
 	default:
 		return defaultChannelMonitorMode
 	}
@@ -440,7 +442,7 @@ func clampChannelMonitorInterval(v int) int {
 // consumed by the runner, V2 aggregator, and user-facing handlers.
 type ChannelMonitorRuntime struct {
 	Enabled                bool
-	Mode                   string // ChannelMonitorModeV1, ChannelMonitorModeV2, or ChannelMonitorModeHybrid
+	Mode                   string // ChannelMonitorModeV1, ChannelMonitorModeV2 or ChannelMonitorModeV3
 	DefaultIntervalSeconds int
 	// HideThroughput: when true, user-facing V2 APIs omit RPM/TPM scale signals.
 	HideThroughput bool
@@ -455,25 +457,31 @@ type ChannelMonitorRuntime struct {
 
 // ActiveProbesAllowed reports whether V1 active provider probes may run.
 func (r ChannelMonitorRuntime) ActiveProbesAllowed() bool {
-	return r.Enabled && (r.Mode == ChannelMonitorModeV1 || r.Mode == ChannelMonitorModeHybrid)
+	return r.Enabled && r.Mode == ChannelMonitorModeV1
 }
 
-// PassiveAggregationAllowed reports whether V2 passive aggregation may run.
+// PassiveAggregationAllowed reports whether the passive aggregation of real
+// traffic may run: V2 shows it directly and V3 builds its status page on it.
 func (r ChannelMonitorRuntime) PassiveAggregationAllowed() bool {
-	return r.Enabled && (r.Mode == ChannelMonitorModeV2 || r.Mode == ChannelMonitorModeHybrid)
+	return r.Enabled && (r.Mode == ChannelMonitorModeV2 || r.Mode == ChannelMonitorModeV3)
 }
 
-// QualityProbesAllowed preserves quality checks in passive and hybrid deployments.
-func (r ChannelMonitorRuntime) QualityProbesAllowed() bool {
-	return r.PassiveAggregationAllowed()
+// V2Active reports whether the V2 views (and its candy probes) are the site's monitor.
+func (r ChannelMonitorRuntime) V2Active() bool {
+	return r.Enabled && r.Mode == ChannelMonitorModeV2
+}
+
+// V3Active reports whether the V3 component status page is the site's monitor.
+func (r ChannelMonitorRuntime) V3Active() bool {
+	return r.Enabled && r.Mode == ChannelMonitorModeV3
 }
 
 // GetChannelMonitorRuntime reads the channel monitor feature flags directly from
-// the settings store. Unavailable settings stop collection until the saved mode can be read.
+// the settings store. Fail-open: on error returns Enabled=true, Mode=v1, default interval.
 func (s *SettingService) GetChannelMonitorRuntime(ctx context.Context) ChannelMonitorRuntime {
 	if s == nil || s.settingRepo == nil {
 		return ChannelMonitorRuntime{
-			Enabled:                false,
+			Enabled:                true,
 			Mode:                   defaultChannelMonitorMode,
 			DefaultIntervalSeconds: channelMonitorIntervalFallback,
 			HideThroughput:         true,
@@ -489,7 +497,7 @@ func (s *SettingService) GetChannelMonitorRuntime(ctx context.Context) ChannelMo
 	})
 	if err != nil {
 		return ChannelMonitorRuntime{
-			Enabled:                false,
+			Enabled:                true,
 			Mode:                   defaultChannelMonitorMode,
 			DefaultIntervalSeconds: channelMonitorIntervalFallback,
 			HideThroughput:         true,
@@ -503,6 +511,25 @@ func (s *SettingService) GetChannelMonitorRuntime(ctx context.Context) ChannelMo
 		ShowQuota:              vals[SettingKeyChannelMonitorShowQuota] == "true",
 		HideUserRanking:        isTrueSettingValue(vals[SettingKeyChannelMonitorHideUserRanking]),
 	}
+}
+
+// SetChannelMonitorMode switches the exclusive monitor implementation and
+// nothing else, so the monitor page can flip it without a full settings save.
+func (s *SettingService) SetChannelMonitorMode(ctx context.Context, mode string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	switch normalized {
+	case ChannelMonitorModeV1, ChannelMonitorModeV2, ChannelMonitorModeV3:
+	default:
+		return "", ErrChannelMonitorInvalidMode
+	}
+	if err := s.settingRepo.Set(ctx, SettingKeyChannelMonitorMode, normalized); err != nil {
+		return "", fmt.Errorf("set channel monitor mode: %w", err)
+	}
+	if s.onUpdate != nil {
+		s.onUpdate() // injected public settings carry the mode
+	}
+	s.notifyChannelMonitorRuntimeListeners()
+	return normalized, nil
 }
 
 // AvailableChannelsRuntime is the lightweight view of the available-channels feature
@@ -640,6 +667,7 @@ type PublicSettingsInjectionPayload struct {
 	// frontend/src/utils/featureFlags.ts. Missing a field here is the bug
 	// that hid the "可用渠道" menu on page refresh.
 	ExcelBPSEnabled                      bool   `json:"excel_bps_enabled"`
+	PrismBrowserEnabled                  bool   `json:"prism_browser_enabled"`
 	ChannelMonitorEnabled                bool   `json:"channel_monitor_enabled"`
 	ChannelMonitorMode                   string `json:"channel_monitor_mode"`
 	ChannelMonitorDefaultIntervalSeconds int    `json:"channel_monitor_default_interval_seconds"`
@@ -735,6 +763,7 @@ func (s *SettingService) GetPublicSettingsForInjection(ctx context.Context) (any
 
 		ChannelMonitorEnabled:                settings.ChannelMonitorEnabled,
 		ExcelBPSEnabled:                      settings.ExcelBPSEnabled,
+		PrismBrowserEnabled:                  settings.PrismBrowserEnabled,
 		ChannelMonitorMode:                   settings.ChannelMonitorMode,
 		ChannelMonitorDefaultIntervalSeconds: settings.ChannelMonitorDefaultIntervalSeconds,
 		ChannelMonitorHideThroughput:         settings.ChannelMonitorHideThroughput,

@@ -52,24 +52,9 @@ func (s *AccountTestService) doOpenAIAccountTestUpstream(
 	useTLSFallback bool,
 ) (*http.Response, error) {
 	if s.pluginManager != nil {
-		collector := pelicanUsageFromContext(request.Context())
-		before := 0
-		if collector != nil {
-			before = len(collector.requests)
-		}
-		handled := false
-		response, err := observeProbeHTTPRequest(request, func() (*http.Response, error) {
-			resp, didHandle, requestErr := s.pluginManager.RoundTripOpenAIOAuth(request.Context(), request, proxyURL, account)
-			handled = didHandle
-			return resp, requestErr
-		})
+		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(request.Context(), request, proxyURL, account)
 		if handled {
 			return response, err
-		}
-		// Capability lookup did not send a request. The normal fallback transport
-		// owns the actual attempt and must not inherit a fabricated plugin failure.
-		if collector != nil {
-			collector.requests = collector.requests[:before]
 		}
 	}
 	if useTLSFallback {

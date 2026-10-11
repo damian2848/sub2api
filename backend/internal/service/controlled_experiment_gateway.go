@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
 
@@ -115,6 +116,18 @@ func (g *controlledExperimentGateway) Execute(parent context.Context, route Cont
 		return nil, d
 	}
 	mode := &controlledExperimentMode{channel: route.Channel}
+	if route.Channel == "prism" {
+		id, err := uuid.Parse(session)
+		if err != nil {
+			d.Code = "invalid_experiment_session"
+			return nil, d
+		}
+		// The adapter requires 64 lowercase hex characters. Random experiment
+		// identities have no relationship to any business user's API key.
+		identity := strings.ReplaceAll(id.String(), "-", "")
+		mode.prismIdentity = identity + identity
+		mode.prismTurnID = strings.ReplaceAll(uuid.NewString()+uuid.NewString(), "-", "")
+	}
 	ctx := context.WithValue(parent, controlledExperimentContextKey{}, mode)
 	ctx = withPelicanTestOptions(ctx, pelicanTestOptions{observeOnly: true})
 	ctx, cancel := context.WithCancel(ctx)
@@ -189,9 +202,9 @@ func (g *controlledExperimentGateway) Execute(parent context.Context, route Cont
 	if effort != "" {
 		d.EffectiveEffort = effort
 		d.EffortEvidence = "upstream_declared"
-		// BPS is an adapter boundary; its echo does not prove the provider's
-		// actual effort.
-		if route.Channel == "bps" {
+		// Prism synthesizes Responses metadata from its request. BPS is an
+		// adapter boundary too; neither echo proves the provider's actual effort.
+		if route.Channel == "prism" || route.Channel == "bps" {
 			d.EffortEvidence = "adapter_declared"
 		}
 	}

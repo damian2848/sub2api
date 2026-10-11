@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -368,7 +369,7 @@ func buildOpenAIWSHTTPBridgeErrorEvent(statusCode int, message string) []byte {
 	return body
 }
 
-func buildOpenAIWSHTTPBridgeFailedEvent(responseID, model string, source []byte, fallbackMessage string, sequenceNumbers ...int64) []byte {
+func buildOpenAIWSHTTPBridgeFailedEvent(responseID, model string, source []byte, fallbackMessage string) []byte {
 	errorType := strings.TrimSpace(gjson.GetBytes(source, "error.type").String())
 	if errorType == "" {
 		errorType = strings.TrimSpace(gjson.GetBytes(source, "response.error.type").String())
@@ -398,11 +399,7 @@ func buildOpenAIWSHTTPBridgeFailedEvent(responseID, model string, source []byte,
 	if model = strings.TrimSpace(model); model != "" {
 		response["model"] = model
 	}
-	sequenceNumber := int64(0)
-	if len(sequenceNumbers) > 0 {
-		sequenceNumber = sequenceNumbers[0]
-	}
-	body, err := json.Marshal(map[string]any{"type": "response.failed", "sequence_number": sequenceNumber, "response": response})
+	body, err := json.Marshal(map[string]any{"type": "response.failed", "sequence_number": 0, "response": response})
 	if err != nil {
 		return []byte(`{"type":"response.failed","sequence_number":0,"response":{"status":"failed","output":[],"error":{"code":"upstream_error","message":"Upstream response failed"}}}`)
 	}
@@ -436,17 +433,6 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	if writeClientMessage == nil {
 		return nil, errors.New("client websocket writer is nil")
 	}
-	if account.IsManagedPrismAccount() {
-		// Declined before any sidecar work and before anything reaches the client,
-		// so the handler (turn 1) or the current-turn retry (later turns) can move
-		// the turn to another account.
-		if failoverErr := prismUnsupportedRequest(c, payload, false); failoverErr != nil {
-			return nil, failoverErr
-		}
-		if err := s.ensurePrismSession(ctx, account); err != nil {
-			return nil, err
-		}
-	}
 	responseModelObserver := &upstreamResponseModelObserver{}
 
 	body, err := prepareOpenAIWSHTTPBridgeBody(account, payload)
@@ -459,12 +445,6 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	var clientToolMapping apicompat.ResponsesClientToolMapping
 	functionToolUpstream := (account.Platform == PlatformOpenAI && account.Type == AccountTypeAPIKey) || account.Platform == PlatformGrok
 	if functionToolUpstream {
-		if account.IsManagedPrismAccount() {
-			body, err = promotePrismResponsesClientTools(body)
-			if err != nil {
-				return nil, fmt.Errorf("promote Prism WS HTTP bridge client tools: %w", err)
-			}
-		}
 		if account.Platform == PlatformGrok {
 			body, err = sanitizeGrokResponsesInput(body)
 			if err != nil {
@@ -511,15 +491,6 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 
 	upstreamCtx, startDrain, releaseUpstreamCtx := openAIWSDrainContext(ctx)
 	defer releaseUpstreamCtx()
-	cancelUpstream := releaseUpstreamCtx
-	if account.IsManagedPrismAccount() {
-		// A Prism generation has no usage to drain: when the client leaves, the
-		// sidecar request must stop at once instead of running on detached.
-		var cancelPrism context.CancelFunc
-		upstreamCtx, cancelPrism = context.WithCancel(ctx)
-		defer cancelPrism()
-		cancelUpstream = cancelPrism
-	}
 	buildUpstreamRequest := func(requestBody []byte) (*http.Request, error) {
 		var upstreamReq *http.Request
 		var buildErr error
@@ -652,7 +623,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			shouldFailover = s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody)
 			s.handleGrokAccountUpstreamError(withGrokTeamRateLimitModel(ctx, resolveGrokWSUpstreamModel(account, body, originalModel)), account, resp.StatusCode, resp.Header, respBody)
 			if shouldFailover && (turn == 1 || resp.StatusCode == http.StatusTooManyRequests) {
-				return nil, newOpenAIUpstreamFailoverError(resp.StatusCode, resp.Header, respBody, upstreamMsg, false)
+				return nil, newOpenAIUpstreamFailoverError(resp.StatusCode, resp.Header, respBody, upstreamMsg, false).WithGrokForbiddenPolicy(account)
 			}
 		} else if shouldFailover && (turn == 1 || resp.StatusCode == http.StatusTooManyRequests) {
 			return nil, s.handleFailoverErrorResponsePassthrough(ctx, resp, c, account, body, respBody)
@@ -664,6 +635,9 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		if writeErr := writeClientMessage(clientError); writeErr == nil {
 			markOpenAIWSClientVisibleFailure(c, "error", clientError)
 		}
+		if scopedErr := grokRequestScopedResponseError(account, resp.StatusCode, respBody, upstreamMsg); scopedErr != nil {
+			return nil, scopedErr
+		}
 		return nil, fmt.Errorf("upstream http bridge error: status=%d message=%s", resp.StatusCode, upstreamMsg)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -674,7 +648,6 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	}
 
 	responseID := ""
-	lastCommittedSequenceNumber := int64(-1)
 	usage := OpenAIUsage{}
 	imageCounter := newOpenAIImageOutputCounter()
 	var firstTokenMs *int
@@ -749,25 +722,10 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	if hasResponsesClientToolMapping(clientToolMapping) {
 		resp.Body = newResponsesClientToolStreamBody(resp.Body, clientToolMapping, maxLineSize)
 	}
-	scanner := newOpenAISSEReadPump(resp.Body, maxLineSize)
-	// Cancel the transport first, join the reader, then let the deferred
-	// resp.Body.Close run exactly once: Close must not race a decompressor Read.
-	scanner.cancelUpstream = cancelUpstream
-	scanner.leaveBodyOpen = true
-	defer scanner.Close()
-	streamInterval := time.Duration(0)
-	reasoningEffort := ""
-	if effort := extractOpenAIReasoningEffortFromBody(body, mappedModel, originalModel); effort != nil {
-		reasoningEffort = *effort
-	}
-	if account.IsManagedPrismAccount() {
-		if timeout := s.openAIFirstOutputTimeout(reasoningEffort); timeout > 0 {
-			scanner.firstOutputDeadline = turnStart.Add(timeout)
-		}
-		if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
-			streamInterval = time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
-		}
-	}
+	scanner := bufio.NewScanner(resp.Body)
+	scanBuf := getSSEScannerBuf64K()
+	scanner.Buffer(scanBuf[:0], maxLineSize)
+	defer putSSEScannerBuf64K(scanBuf)
 
 	pendingSSEEventType := ""
 	finalizeBareError := func() error {
@@ -782,9 +740,6 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			return nil
 		}
 		clientMessage := buildOpenAIWSHTTPBridgeFailedEvent(responseID, originalModel, bareErrorPayload, bareErrorMessage)
-		if account.IsManagedPrismAccount() {
-			clientMessage = buildOpenAIWSHTTPBridgeFailedEvent(responseID, originalModel, bareErrorPayload, bareErrorMessage, lastCommittedSequenceNumber+1)
-		}
 		if rewritten, changed := sanitizeOpenAICapacityShedErrorCodeForClient(clientMessage); changed {
 			clientMessage = rewritten
 		}
@@ -800,26 +755,11 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 				return fmt.Errorf("write synthesized websocket response.failed: %w", err)
 			}
 			wroteDownstream = true
-			if sequence := gjson.GetBytes(message, "sequence_number"); sequence.Type == gjson.Number && sequence.Int() > lastCommittedSequenceNumber {
-				lastCommittedSequenceNumber = sequence.Int()
-			}
 		}
 		markOpenAIWSClientVisibleFailure(c, "response.failed", clientMessage)
 		return nil
 	}
-	sendPrismFailedTerminal := func(message string) error {
-		if !account.IsManagedPrismAccount() || !wroteDownstream || clientDisconnected {
-			return nil
-		}
-		clientMessage := buildOpenAIWSHTTPBridgeFailedEvent(responseID, originalModel, nil, message, lastCommittedSequenceNumber+1)
-		if err := writeClientMessage(clientMessage); err != nil {
-			return wrapOpenAIWSIngressTurnError("write_client", err, wroteDownstream)
-		}
-		upstreamTerminalEvent = "response.failed"
-		markOpenAIWSClientVisibleFailure(c, "response.failed", clientMessage)
-		return nil
-	}
-	for scanner.Next(ctx, streamInterval, nil, nil) {
+	for scanner.Scan() {
 		line := scanner.Text()
 		if eventType, ok := extractOpenAISSEEventLine(line); ok {
 			pendingSSEEventType = eventType
@@ -847,9 +787,6 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			upstreamMessage = normalized
 		}
 		eventType, eventResponseID, _ := parseOpenAIWSEventEnvelope(upstreamMessage)
-		if eventType != "error" && openAIStreamDataStartsClientOutput(string(upstreamMessage), eventType) {
-			scanner.firstOutputDeadline = time.Time{}
-		}
 		responseModelObserver.ObserveOpenAI(upstreamMessage, eventType)
 		if responseID == "" && eventResponseID != "" {
 			responseID = eventResponseID
@@ -916,7 +853,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 				}
 			}
 			requestScopedCapacity := isOpenAIUpstreamCapacityShedEvent(upstreamMessage)
-			if account.Platform == PlatformGrok && eventType == "error" {
+			if account.Platform == PlatformGrok && (eventType == "error" || eventType == "response.failed") {
 				// SSE error events do not carry an HTTP status. The local status
 				// mapper therefore defaults unknown xAI codes (for example
 				// new_sensitive) to 502; classify the body as a request-scoped
@@ -932,7 +869,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			// even when only non-semantic heartbeats were delivered.
 			if !clientDisconnected && !wroteDownstream && shouldFailover && (turn == 1 || statusCode == http.StatusTooManyRequests) {
 				if account.Platform == PlatformGrok {
-					return nil, newOpenAIUpstreamFailoverError(statusCode, resp.Header, upstreamMessage, errMessage, false)
+					return nil, newOpenAIUpstreamFailoverError(statusCode, resp.Header, upstreamMessage, errMessage, false).WithGrokForbiddenPolicy(account)
 				}
 				return nil, s.newOpenAIStreamFailoverErrorWithModel(c, account, true, resp.Header.Get("x-request-id"), upstreamMessage, errMessage, mappedModel, resp.Header)
 			}
@@ -947,6 +884,11 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			}
 			if eventType == "error" && !officialOpenAIResponses {
 				upstreamEventErr = errors.New(errMessage)
+				if account.IsGrok() && isGrokContentPolicyRejection(http.StatusForbidden, upstreamMessage) {
+					upstreamEventErr = &grokContentPolicyError{message: errMessage}
+				} else if scopedErr := grokRequestScopedResponseError(account, statusCode, upstreamMessage, errMessage); scopedErr != nil {
+					upstreamEventErr = scopedErr
+				}
 			} else if eventType == "error" {
 				bareErrorPending = true
 				bareErrorPayload = append(bareErrorPayload[:0], upstreamMessage...)
@@ -971,7 +913,6 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			isKeepalive := eventType == "keepalive"
 			stageBeforeSemanticOutput := turn == 1 && account.Platform == PlatformOpenAI && !wroteDownstream
 			commitStagedMessages := !stageBeforeSemanticOutput ||
-				prismStreamLifecycleStartsOutput(account, eventType) ||
 				openAIStreamDataStartsClientOutput(string(clientMessage), eventType) ||
 				isOpenAIWSTerminalEvent(eventType)
 			if stageBeforeSemanticOutput && !commitStagedMessages && !isKeepalive {
@@ -1021,9 +962,6 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 					}
 					if !isKeepalive {
 						wroteDownstream = true
-						if sequence := gjson.GetBytes(message, "sequence_number"); sequence.Type == gjson.Number && sequence.Int() > lastCommittedSequenceNumber {
-							lastCommittedSequenceNumber = sequence.Int()
-						}
 					}
 				}
 			}
@@ -1034,6 +972,9 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 
 		if upstreamEventErr != nil {
 			return resultWithUsage(), upstreamEventErr
+		}
+		if account.IsGrok() && eventType == "response.failed" && isGrokContentPolicyRejection(http.StatusForbidden, upstreamMessage) {
+			return resultWithUsage(), &grokContentPolicyError{message: extractOpenAISSEErrorMessage(upstreamMessage)}
 		}
 		if isOpenAIWSTerminalEvent(eventType) && !bareErrorPending {
 			if eventType == "response.failed" {
@@ -1078,23 +1019,8 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		if upstreamCtx.Err() != nil {
 			return resultWithUsage(), context.Cause(upstreamCtx)
 		}
-		if account.IsManagedPrismAccount() && errors.Is(err, errOpenAISSEFirstOutput) {
-			timeoutErr := s.newOpenAIFirstOutputTimeoutError(
-				ctx, c, account, opsUpstreamProxyID(account), opsUpstreamProxyName(account),
-				turnStart, originalModel, reasoningEffort,
-				s.openAIFirstOutputTimeout(reasoningEffort), "ws_http_bridge_semantic_output", resp.Header,
-			)
-			if turn == 1 && !clientDisconnected && !wroteDownstream {
-				return nil, timeoutErr
-			}
-		}
 		if turn == 1 && !clientDisconnected && !wroteDownstream {
 			return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, streamErr, true)
-		}
-		if ctx.Err() == nil {
-			if terminalWriteErr := sendPrismFailedTerminal("Upstream stream ended before completion"); terminalWriteErr != nil {
-				return resultWithUsage(), terminalWriteErr
-			}
 		}
 		return resultWithUsage(), streamErr
 	}
@@ -1104,9 +1030,6 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	}
 	if turn == 1 && !clientDisconnected && !wroteDownstream {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, terminalErr, true)
-	}
-	if terminalWriteErr := sendPrismFailedTerminal("Upstream stream ended before completion"); terminalWriteErr != nil {
-		return resultWithUsage(), terminalWriteErr
 	}
 	return resultWithUsage(), terminalErr
 }

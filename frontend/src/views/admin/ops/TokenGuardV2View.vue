@@ -1,7 +1,7 @@
 <template>
-  <component :is="embedded ? 'div' : AppLayout">
+  <AppLayout>
     <div class="guard-v2">
-      <SmartOpsNav v-if="!embedded" />
+      <SmartOpsNav />
       <header class="page-heading">
         <div>
           <p class="eyebrow">{{ t('accountOps.smartTitle') }}</p>
@@ -206,7 +206,7 @@
         </template>
       </BaseDialog>
     </div>
-  </component>
+  </AppLayout>
 </template>
 
 <script setup lang="ts">
@@ -244,7 +244,6 @@ import {
   type TokenGuardV2Task
 } from '@/api/admin/accountTokenGuardV2'
 
-withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
 const { t } = useI18n()
 const encryptionReady = ref(false)
 const emptyStatus = (): TokenGuardV2Status => ({

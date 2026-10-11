@@ -50,12 +50,16 @@ const (
 
 // TestEvent represents a SSE event for account testing
 type TestEvent struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	Model    string `json:"model,omitempty"`
-	Status   string `json:"status,omitempty"`
-	Code     string `json:"code,omitempty"`
-	ImageURL string `json:"image_url,omitempty"`
+	UpstreamStatus    int    `json:"upstream_status,omitempty"`
+	UpstreamModel     string `json:"upstream_model,omitempty"`
+	RequestID         string `json:"request_id,omitempty"`
+	UpstreamErrorCode string `json:"upstream_error_code,omitempty"`
+	Type              string `json:"type"`
+	Text              string `json:"text,omitempty"`
+	Model             string `json:"model,omitempty"`
+	Status            string `json:"status,omitempty"`
+	Code              string `json:"code,omitempty"`
+	ImageURL          string `json:"image_url,omitempty"`
 	// AudioURL / VideoURL are data: or https URLs for in-browser media players.
 	AudioURL string `json:"audio_url,omitempty"`
 	VideoURL string `json:"video_url,omitempty"`
@@ -138,8 +142,12 @@ func normalizeGrokAccountTestMode(mode string) string {
 
 // AccountTestService handles account testing operations
 type AccountTestService struct {
-	probeRecorder             ChannelMonitorProbeRecorder
-	probeRequestFactRecorder  ProbeRequestFactRecorder
+	astraGatewayActionMu      sync.Mutex
+	astraSetupMu              sync.Mutex
+	astraSetupCancel          context.CancelFunc
+	astraSetupStatus          AstraSetupStatus
+	astraGatewayTestMu        sync.Mutex
+	astraGatewayLastTest      *AstraGatewayTestResult
 	accountRepo               AccountRepository
 	geminiTokenProvider       *GeminiTokenProvider
 	claudeTokenProvider       *ClaudeTokenProvider
@@ -162,14 +170,6 @@ type AccountTestService struct {
 	// grokWSDialer is optional; realtime account tests use the default OpenAI-style
 	// WS dialer when nil (supports proxy + coder/websocket handshake).
 	grokWSDialer openAIWSClientDialer
-}
-
-func (s *AccountTestService) SetProbeRequestFactRecorder(recorder ProbeRequestFactRecorder) {
-	s.probeRequestFactRecorder = recorder
-}
-
-func (s *AccountTestService) SetProbeRecorder(recorder ChannelMonitorProbeRecorder) {
-	s.probeRecorder = recorder
 }
 
 func (s *AccountTestService) SetSettingService(settingService *SettingService) {
@@ -287,7 +287,7 @@ func NewAccountTestService(
 		claudeTokenProvider:       claudeTokenProvider,
 		grokTokenProvider:         grokTokenProvider,
 		antigravityGatewayService: antigravityGatewayService,
-		httpUpstream:              observeProbeHTTPUpstream(httpUpstream),
+		httpUpstream:              httpUpstream,
 		cfg:                       cfg,
 		tlsFPProfileService:       tlsFPProfileService,
 	}
@@ -373,6 +373,8 @@ func createTestPayload(modelID string) (map[string]any, error) {
 // opts is optional media (image/audio data URLs for real generation / STT).
 func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int64, modelID string, prompt string, mode string, opts ...AccountTestOptions) (testErr error) {
 	initAccountTestLogger(c, accountID, modelID, mode)
+	ctx := context.WithValue(c.Request.Context(), qualityProbeContextKey{}, true)
+	c.Request = c.Request.WithContext(ctx)
 	// 测试可能在响应头或正文到来前长时间等待；所有协议共用同一段下游保活生命周期。
 	stopKeepalive := startAccountTestSSEKeepalive(c, 10*time.Second)
 	defer func() {
@@ -382,27 +384,13 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 		}
 		stopKeepalive()
 	}()
-	ctx := c.Request.Context()
+	ctx = c.Request.Context()
 	testOpts := firstAccountTestOptions(opts)
 
 	// Get account
 	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil {
 		return s.sendErrorAndEnd(c, "Account not found")
-	}
-	if account != nil && pelicanUsageFromContext(ctx) == nil {
-		collector := &pelicanTestUsageCollector{model: account.GetMappedModel(modelID), requestedModel: modelID, role: "account_check", runID: uuid.NewString(), logicalRequestID: uuid.NewString()}
-		ctx = context.WithValue(ctx, pelicanTestUsageKey{}, collector)
-		c.Request = c.Request.WithContext(ctx)
-		defer func() {
-			var billing *BillingService
-			if s.openaiGatewayService != nil {
-				billing = s.openaiGatewayService.billingService
-			}
-			facts := collector.facts(billing, account)
-			finalizeProbeFacts(facts)
-			saveProbeFacts(s.probeRequestFactRecorder, facts)
-		}()
 	}
 	bindAccountTestPlatform(c, account)
 	if options, ok := pelicanTestOptionsFromContext(ctx); ok {
@@ -447,6 +435,12 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 	}
 
 	if account.IsOpenAI() {
+		if account.IsPrismBrowserEnabledForModel(modelID) && s.openaiGatewayService != nil && s.openaiGatewayService.prismBrowserGloballyEnabled(c.Request.Context()) {
+			if normalizeAccountTestMode(mode) != AccountTestModeDefault || testOpts.ImageDataURL != "" || testOpts.AudioDataURL != "" {
+				return s.sendErrorAndEnd(c, "Prism supports the default text test only")
+			}
+			return s.testPrismBrowserConnection(c, account, modelID, prompt)
+		}
 		return s.testOpenAIAccountConnection(c, account, modelID, prompt, normalizeAccountTestMode(mode))
 	}
 
@@ -472,6 +466,45 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 	}
 
 	return s.testClaudeAccountConnection(c, account, modelID)
+}
+
+func (s *AccountTestService) testPrismBrowserConnection(c *gin.Context, account *Account, modelID, prompt string) error {
+	if s.openaiGatewayService == nil {
+		return s.sendErrorAndEnd(c, "Prism gateway service is unavailable")
+	}
+	modelID = strings.TrimSpace(modelID)
+	if modelID == "" {
+		modelID = "gpt-5.6-sol"
+	}
+	modelID = account.GetMappedModel(modelID)
+	if prompt == "" {
+		prompt = "hi"
+	}
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	s.sendEvent(c, TestEvent{Type: "test_start", Model: modelID})
+	body, err := json.Marshal(map[string]any{"model": modelID, "input": prompt, "stream": false})
+	if err != nil {
+		return s.sendErrorAndEnd(c, "Invalid Prism test request")
+	}
+	response, _, status, err := s.openaiGatewayService.callPrismBrowser(c.Request.Context(), account, body)
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Prism adapter request failed: %s", err.Error()))
+	}
+	if status != http.StatusOK {
+		return s.sendErrorAndEnd(c, prismBrowserAdapterErrorMessage(status, response))
+	}
+	if !gjson.ValidBytes(response) || gjson.GetBytes(response, "status").String() != "completed" {
+		return s.sendErrorAndEnd(c, "Prism adapter returned no completed response")
+	}
+	answer := gjson.GetBytes(response, "output.0.content.0.text").String()
+	if answer == "" {
+		return s.sendErrorAndEnd(c, "Prism adapter returned no text")
+	}
+	s.sendEvent(c, TestEvent{Type: "content", Text: answer})
+	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+	return nil
 }
 
 // testModelRoutedAccountConnection probes the native endpoint for the selected
@@ -1033,6 +1066,7 @@ func (s *AccountTestService) testOpenAIAccountConnection(c *gin.Context, account
 	}
 
 	// 账号级请求头覆写：测试请求与真实转发保持一致的最终头
+	applyOpenAIAPIKeyIdentityHeaders(req.Header, credentialAccount, credentialAccount.GetOpenAIUserAgent())
 	credentialAccount.ApplyHeaderOverrides(req.Header)
 
 	// Get proxy URL
@@ -1096,7 +1130,7 @@ func (s *AccountTestService) testExcelBPSAccountConnection(c *gin.Context, accou
 
 	probe := httptest.NewRecorder()
 	probeCtx, _ := gin.CreateTestContext(probe)
-	probeCtx.Request = c.Request.Clone(c.Request.Context())
+	probeCtx.Request = c.Request.Clone(s.withBPSTestEvidence(c.Request.Context(), c))
 	if probeCtx.Request.Header == nil {
 		probeCtx.Request.Header = make(http.Header)
 	}
@@ -1349,6 +1383,11 @@ func (s *AccountTestService) observeGrokTestResponse(ctx context.Context, accoun
 		_ = resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(responseBody))
 	}
+	if isGrokContentPolicyRejection(resp.StatusCode, responseBody) {
+		return
+	}
+	decision := classifyGrokUpstreamFailure(resp.StatusCode, responseBody, grokRequestedModelFromCtx(ctx))
+	skipAccountState := isGrokExplicitModelFreeUsage(decision) || account.SkipGrokForbiddenPause() && isGrokUnknownForbidden(resp.StatusCode, responseBody)
 	snapshot := parseGrokQuotaSnapshot(resp.Header, resp.StatusCode, now)
 	stampGrokQuotaSnapshotForPlan(account, snapshot, grokRequestedModelFromCtx(ctx))
 	if snapshot != nil && s.accountRepo != nil {
@@ -1356,10 +1395,14 @@ func (s *AccountTestService) observeGrokTestResponse(ctx context.Context, accoun
 		if limited {
 			normalizeGrokExhaustedWindowResets(snapshot, resetAt, now)
 		}
-		_ = s.accountRepo.UpdateExtra(ctx, account.ID, map[string]any{
-			grokQuotaSnapshotExtraKey: snapshot,
-		})
-		if limited {
+		updates := map[string]any{grokQuotaSnapshotExtraKey: snapshot}
+		if !skipAccountState {
+			for key, value := range buildGrokSchedulerExtraUpdates(snapshot) {
+				updates[key] = value
+			}
+		}
+		_ = s.accountRepo.UpdateExtra(ctx, account.ID, updates)
+		if limited && !skipAccountState {
 			persistGrokRateLimit(ctx, s.accountRepo, account, resetAt)
 		} else if isSuccessfulGrokRateLimitRecovery(account, snapshot) {
 			clearGrokRateLimitAfterRecovery(ctx, s.accountRepo, account)
@@ -1375,11 +1418,15 @@ func (s *AccountTestService) observeGrokTestResponse(ctx context.Context, accoun
 		}
 		return
 	}
-	if isGrokContentPolicyRejection(resp.StatusCode, responseBody) {
-		return
-	}
-	decision := classifyGrokUpstreamFailure(resp.StatusCode, responseBody, "")
 	if decision.Class == GrokFailureFreeUsage {
+		if isGrokExplicitModelFreeUsage(decision) {
+			resetAt := now.Add(decision.Cooldown)
+			if observed, limited := grokRateLimitResetAtForAccount(account, snapshot, now); limited && observed.After(now) {
+				resetAt = observed
+			}
+			markGrokModelQuotaBlock(account.ID, decision.Model, resetAt)
+			return
+		}
 		if resetAt, limited := grokRateLimitResetAtForAccount(account, snapshot, now); limited && resetAt.After(now) {
 			persistGrokRateLimit(ctx, s.accountRepo, account, resetAt)
 		} else {
@@ -1391,6 +1438,12 @@ func (s *AccountTestService) observeGrokTestResponse(ctx context.Context, accoun
 	}
 	if decision.Class == GrokFailureBilling && (isGrokSpendingLimitError(responseBody) || strings.Contains(strings.ToLower(decision.Reason), "credit")) {
 		persistGrokRateLimit(ctx, s.accountRepo, account, grokSpendingLimitResetAt(account, now))
+		return
+	}
+	if resp.StatusCode == http.StatusForbidden && s.applyGrokTestForbiddenPolicy(ctx, account, responseBody) {
+		return
+	}
+	if account.SkipGrokForbiddenPause() && isGrokUnknownForbidden(resp.StatusCode, responseBody) {
 		return
 	}
 	cooldown := time.Duration(0)
@@ -1424,6 +1477,21 @@ func (s *AccountTestService) observeGrokTestResponse(ctx context.Context, accoun
 			reason,
 		)
 	}
+}
+
+func (s *AccountTestService) applyGrokTestForbiddenPolicy(ctx context.Context, account *Account, responseBody []byte) bool {
+	matches := matchTempUnschedulableRules(account, http.StatusForbidden, responseBody)
+	if len(matches) == 0 || s == nil || s.accountRepo == nil {
+		return false
+	}
+	cooldown := time.Duration(matches[0].rule.DurationMinutes) * time.Minute
+	if cooldown <= 0 {
+		return true
+	}
+	stateCtx, cancel := openAIAccountStateContext(ctx)
+	defer cancel()
+	_ = s.accountRepo.SetTempUnschedulable(stateCtx, account.ID, time.Now().Add(cooldown), "grok configured forbidden rule")
+	return true
 }
 
 func (s *AccountTestService) testGrokResponsesConnection(c *gin.Context, ctx context.Context, account *Account, authToken, testModelID string) error {
@@ -2334,6 +2402,8 @@ func (s *AccountTestService) testOpenAIChatCompletionsConnection(
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Authorization", "Bearer "+authToken)
 
+	applyOpenAIAPIKeyIdentityHeaders(req.Header, account, account.GetOpenAIUserAgent())
+
 	// 官方 OpenCode / Command Code 上游收敛为规范客户端 UA，与真实转发路径一致。
 	applyOpenCodeUpstreamUserAgent(account, apiURL, req.Header)
 
@@ -2475,6 +2545,7 @@ func (s *AccountTestService) testOpenAICompactConnection(c *gin.Context, account
 	}
 
 	// 账号级请求头覆写：测试请求与真实转发保持一致的最终头
+	applyOpenAIAPIKeyIdentityHeaders(req.Header, credentialAccount, credentialAccount.GetOpenAIUserAgent())
 	account.ApplyHeaderOverrides(req.Header)
 
 	proxyURL := ""
@@ -3224,35 +3295,15 @@ func (s *AccountTestService) processOpenAIStream(c *gin.Context, body io.Reader)
 			}
 			return s.sendErrorAndEnd(c, errorMsg)
 		case "error":
-			return s.sendErrorAndEnd(c, openAIStreamErrorMessage(data))
+			errorMsg := "Unknown error"
+			if errData, ok := data["error"].(map[string]any); ok {
+				if msg, ok := errData["message"].(string); ok {
+					errorMsg = msg
+				}
+			}
+			return s.sendErrorAndEnd(c, errorMsg)
 		}
 	}
-}
-
-// openAIStreamErrorMessage extracts the reason from a Responses stream "error" event. The
-// documented event is flat ({"type":"error","code":...,"message":...}); the Chat-style
-// nested form ({"error":{"message":...}}) is accepted too.
-func openAIStreamErrorMessage(data map[string]any) string {
-	text := func(value any) string {
-		if str, ok := value.(string); ok {
-			return strings.TrimSpace(str)
-		}
-		return ""
-	}
-	if nested, ok := data["error"].(map[string]any); ok {
-		if msg := text(nested["message"]); msg != "" {
-			return msg
-		}
-		if code := text(nested["code"]); code != "" {
-			return code
-		}
-	}
-	for _, key := range []string{"message", "error", "code"} {
-		if msg := text(data[key]); msg != "" {
-			return msg
-		}
-	}
-	return "Unknown error"
 }
 
 // testOpenAIImageAPIKey tests OpenAI image generation using an API Key account.
@@ -3298,6 +3349,7 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 	req.Header.Set("Authorization", "Bearer "+authToken)
 
 	// 账号级请求头覆写：测试请求与真实转发保持一致的最终头
+	applyOpenAIAPIKeyIdentityHeaders(req.Header, account, account.GetOpenAIUserAgent())
 	account.ApplyHeaderOverrides(req.Header)
 
 	proxyURL := ""

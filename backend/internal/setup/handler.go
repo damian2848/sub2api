@@ -84,9 +84,9 @@ func validateUsername(name string) bool {
 	return validName.MatchString(name) && len(name) <= 63
 }
 
-// validateEmail checks if email format is valid. The address must also pass
-// the login endpoint's email binding so setup cannot create an account that
-// can never log in (for example, "a@b" or "Owner <owner@example.com>").
+// validateEmail checks if email format is valid. The address must also pass the
+// login endpoint's `binding:"email"` rule, otherwise the admin could be created
+// with an email (e.g. "a@b" or "Name <a@b.com>") that can never log in.
 func validateEmail(email string) bool {
 	if _, err := mail.ParseAddress(email); err != nil || len(email) > 254 {
 		return false

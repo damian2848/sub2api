@@ -31,12 +31,7 @@ func (r *OAuthInitialQualityRule) plan(platform string) (*ScheduledTestPlan, err
 	}
 	p := &ScheduledTestPlan{ModelID: r.ModelID, CronExpression: r.CronExpression,
 		Enabled: r.Enabled, MaxResults: r.MaxResults, PelicanConfig: cloneQualityPelicanConfig(r.PelicanConfig)}
-	if p.PelicanConfig == nil {
-		return bad("quality rule contains unsupported values")
-	}
 	p.PelicanConfig.TriggerSource = ""
-	p.PelicanConfig.QualityModelOutcomes = nil
-	p.PelicanConfig.QualityModelActions = nil
 	next, err := nextPlanRun(p, time.Now())
 	if err != nil {
 		return bad(err.Error())

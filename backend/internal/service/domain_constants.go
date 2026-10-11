@@ -488,12 +488,15 @@ const (
 	// When false: runner skips scheduling and user-facing endpoints return an empty list.
 	SettingKeyChannelMonitorEnabled = "channel_monitor_enabled"
 
-	// SettingKeyChannelMonitorMode selects active probes, passive aggregation, or both.
+	// SettingKeyChannelMonitorMode selects exclusive implementation:
+	// "v1" active probes, "v2" passive aggregation, "v3" component status page.
+	// Default "v1" (opt-in to v2/v3).
 	SettingKeyChannelMonitorMode = "channel_monitor_mode"
 
-	ChannelMonitorModeV1     = "v1"
-	ChannelMonitorModeV2     = "v2"
-	ChannelMonitorModeHybrid = "hybrid"
+	// ChannelMonitorModeV1/V2/V3 are the only accepted mode values.
+	ChannelMonitorModeV1 = "v1"
+	ChannelMonitorModeV2 = "v2"
+	ChannelMonitorModeV3 = "v3"
 
 	// SettingKeyChannelMonitorDefaultIntervalSeconds controls the default interval (seconds)
 	// pre-filled when creating a new channel monitor from the admin UI. Range: [15, 3600].
@@ -516,8 +519,12 @@ const (
 	// Default false (keep the current ranking tab). Admin endpoints always keep it.
 	SettingKeyChannelMonitorHideUserRanking = "channel_monitor_hide_user_ranking"
 
-	// Protocol-wide BPS switch; defaults on so existing BPS accounts keep working.
+	// Protocol-wide switches default on for BPS compatibility and off for Prism.
 	SettingKeyExcelBPSEnabled = "excel_bps_enabled"
+	// Prism browser bridge is administrator-managed and disabled by default.
+	SettingKeyPrismBrowserEnabled = "prism_browser_enabled"
+	SettingKeyPrismBrowserBaseURL = "prism_browser_base_url"
+	SettingKeyPrismBrowserAPIKey  = "prism_browser_api_key"
 
 	// SettingKeyGrokDefaultTextModel is the fallback Grok text model for empty
 	// request models and built-in Grok aliases (e.g. "grok" → this id). Default grok-4.5.
@@ -541,11 +548,6 @@ const (
 	// user-facing aggregate view. When false: user endpoint returns an empty list and the
 	// sidebar entry is hidden. Defaults to false (opt-in feature).
 	SettingKeyAvailableChannelsEnabled = "available_channels_enabled"
-
-	// SettingKeyPrismEnabled is the live, DB-backed master switch for Prism
-	// routing and managed-account lifecycle operations. It defaults to the
-	// PRISM_BROWSER_ENABLED environment value when settings are initialized.
-	SettingKeyPrismEnabled = "prism_enabled"
 
 	// SettingKeyPelicanShowcaseEnabled is a DB-backed soft switch for the user-facing
 	// Pelican gallery (scheduled Pelican HTML results of selected groups). When false the
@@ -733,6 +735,7 @@ const (
 	SettingKeyOpenAICodexClientVersionSynced = "openai_codex_client_version_synced"
 	// SettingKeyOpenAICodexVersionAutoSyncEnabled 是否启用 Codex 客户端版本号自动同步（默认 true）。
 	SettingKeyOpenAICodexVersionAutoSyncEnabled = "openai_codex_version_auto_sync_enabled"
+	SettingKeyOpenAIRequestTimezoneEnabled      = "openai_request_timezone_enabled"
 	// SettingKeyOpenAICodexTicketEnabled Codex 292 打票总开关（后台可改、热更新）。
 	// 关闭：不打票、不注入 x-codex-turn-state，按原链路转发。
 	// 开启：后台打票并在业务请求中覆盖该头。

@@ -40,8 +40,8 @@ export async function getShowcase(options?: { signal?: AbortSignal }): Promise<P
   return data
 }
 
-export async function getShowcaseItem(id: number, options?: { signal?: AbortSignal }): Promise<PelicanShowcaseItem> {
-  const { data } = await apiClient.get<PelicanShowcaseItem>(`/pelican-showcase/items/${id}`, { signal: options?.signal })
+export async function getShowcaseItem(id: number): Promise<PelicanShowcaseItem> {
+  const { data } = await apiClient.get<PelicanShowcaseItem>(`/pelican-showcase/items/${id}`)
   return data
 }
 

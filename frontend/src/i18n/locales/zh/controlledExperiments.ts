@@ -6,8 +6,8 @@ export default {
   split: '题集', screen: '筛选题 · 12 道', confirm: '确认题 · 32 道',
   repetitions: '重复次数', maxCalls: '提交预算', timeout: '每次请求超时（秒）',
   routes: '实验通道', account: '选择账号', addRoute: '增加通道', remove: '移除',
-  channel: '预期通道', native_http: '原生 HTTP / SSE', native_ws: '原生 WebSocket', bps: 'Excel / BPS',
-  channelHint: 'WS 和 BPS 必须已经对所选账号与模型启用，托管 Prism 账号不支持实验。实验沿用账号凭据、代理和模型映射。',
+  channel: '预期通道', native_http: '原生 HTTP / SSE', native_ws: '原生 WebSocket', prism: 'Prism', bps: 'Excel / BPS',
+  channelHint: 'WS、Prism 和 BPS 必须已经对所选账号与模型启用。实验沿用账号凭据、代理和模型映射。',
   wsPrerequisiteHint: '原生 WebSocket 需要先在账号编辑中开启对应的 WebSocket Mode（如 ctx_pool），并允许网关使用 WS v2。选择实验通道不会修改这些设置；模式为 off、强制 HTTP 或上游不支持 WS 时无法完成测试。配置修复后请新建实验，已跳过的通道不会在原实验中补跑。',
   tasks: '固定题库', selectAll: '全选', selectNone: '取消全选', selected: '已选 {count} 道题',
   coding: 'SQL', constraints: '约束推理', long_context: '长上下文', tools: '工具续轮',
@@ -29,6 +29,7 @@ export default {
   preflightReason: {
     configuration_available: '配置允许执行，生成资格仍需探测',
     websocket_not_enabled: '原生 WebSocket 配置未开启，或被网关限制',
+    prism_not_enabled_for_account_model: 'Prism 未对所选账号、模型启用，或协议总开关已关闭',
     bps_not_enabled_for_account_model: 'BPS 未对所选账号、模型启用，或协议总开关已关闭',
     account_model_uses_another_adapter: '所选账号与模型配置了其他传输适配器',
     account_not_active_or_schedulable: '账号未处于可调度的正常状态',

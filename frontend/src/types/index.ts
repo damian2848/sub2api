@@ -211,6 +211,7 @@ export interface LoginAgreementDocument {
 
 export interface PublicSettings {
   excel_bps_enabled?: boolean
+  prism_browser_enabled?: boolean
   registration_enabled: boolean
   email_verify_enabled: boolean
   force_email_on_third_party_signup: boolean
@@ -270,7 +271,7 @@ export interface PublicSettings {
   balance_low_notify_threshold: number
   channel_monitor_enabled: boolean
   /** Exclusive mode: v1 active probes or v2 passive aggregation. Default v2. */
-  channel_monitor_mode?: 'v1' | 'v2' | 'hybrid'
+  channel_monitor_mode?: 'v1' | 'v2' | 'v3'
   channel_monitor_default_interval_seconds: number
   /** When true, user monitor hides RPM/TPM so scale cannot be reverse-estimated. */
   channel_monitor_hide_throughput?: boolean
@@ -1313,7 +1314,16 @@ export interface OpenCodeGoUsageSettings {
   debounce_minutes: number
 }
 
+export interface ExcelBPSCredentialState {
+ status: string
+ expires_at?: string
+ observed_at?: string
+ error_code?: string
+ requires_manual_resume?: boolean
+}
+
 export interface Account {
+ excel_bps_credential_state?: ExcelBPSCredentialState
   id: number
   name: string
   notes?: string | null
@@ -2629,13 +2639,18 @@ export interface QualityBPSPolicy {
 export interface QualityPolicy {
   judge?: QualityJudgeConfig
   expected_answer: string
-  action: 'remove_groups' | 'disable_scheduling' | 'enable_bps' | 'observe_only'
+  action: 'remove_groups' | 'remove_models' | 'disable_scheduling' | 'enable_bps' | 'observe_only'
   remove_group_ids: number[]
+  remove_models?: string[]
+  recovery_concurrency?: number
   auto_restore: boolean
   bps?: QualityBPSPolicy
 }
 
 export interface PelicanTestConfig {
+  quality_model_outcomes?: Record<string, 'passed' | 'failed' | 'inconclusive' | 'skipped'>
+  quality_model_actions?: Record<string, string>
+  trigger_source?: string
   quality?: QualityPolicy
   question_kind?: 'candy' | 'pelican' | 'state_probe'
   test_channel?: 'account' | 'bps'
@@ -2643,6 +2658,7 @@ export interface PelicanTestConfig {
   reasoning_effort: string
   parallel_count: number
   model_id?: string
+  model_ids?: string[]
 }
 
 export interface ScheduledTestPlan {

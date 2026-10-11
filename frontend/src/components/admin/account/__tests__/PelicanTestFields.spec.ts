@@ -18,7 +18,7 @@ describe('PelicanTestFields question kinds', () => {
     expect(wrapper.emitted('update:modelValue')?.[0]).toEqual([{ ...config, question_kind: 'state_probe', prompt: '', parallel_count: 1, reasoning_effort: 'high' }])
     wrapper.unmount()
   })
-  it('offers every Prism reasoning effort, including extra high', () => {
+  it('offers extra high reasoning for scheduled intelligence tests', () => {
     const wrapper = render()
     const reasoning = wrapper.findAllComponents(SelectStub)[1]
     expect(reasoning.props('options').map((o: { value: string }) => o.value)).toEqual(['low', 'medium', 'high', 'xhigh'])

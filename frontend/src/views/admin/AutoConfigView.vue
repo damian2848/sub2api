@@ -1,8 +1,8 @@
 <template>
-  <component :is="embedded ? 'div' : AppLayout">
+  <AppLayout>
     <div class="space-y-5">
       <header><h1 class="text-2xl font-semibold">{{ t('autoConfig.title') }}</h1><p class="mt-2 text-sm text-gray-500">{{ t('autoConfig.description') }}</p></header>
-      <SmartOpsNav v-if="!embedded" />
+      <SmartOpsNav />
       <p v-if="error" role="alert" class="rounded-xl bg-red-50 p-4 text-red-700 dark:bg-red-950/30 dark:text-red-300">{{ error }}</p>
       <p v-if="notice" role="status" class="text-emerald-600">{{ notice }}</p>
       <p v-if="loading">{{ t('common.loading') }}</p>
@@ -32,7 +32,7 @@
             <header class="flex items-center justify-between gap-3"><h2 class="text-lg font-semibold">{{ t('autoConfig.initial') }}</h2><label class="flex items-center gap-2 text-sm"><input v-model="draft.enabled" data-testid="initial-enabled" type="checkbox" role="switch" />{{ t('autoConfig.enable') }}</label></header>
             <p class="text-sm leading-6 text-gray-500">{{ t('autoConfig.initialHint') }}</p>
             <label class="block"><span class="field-label">{{ t('autoConfig.platform') }}</span><select v-model="draft.platform" data-testid="platform" class="input w-full" @change="draft.group_ids = []; draft.model_mappings = defaultOAuthModelMappings(draft.platform); draft.quality_rule = null; selectedQualityRule = ''"><option v-for="p in platforms" :key="p.value" :value="p.value">{{ p.label }}</option></select></label>
-            <div class="grid gap-4 sm:grid-cols-3"><label v-for="field in initialFields" :key="field.key"><span class="field-label">{{ t('autoConfig.' + field.key) }}</span><input v-model.number="draft[field.key]" :data-testid="field.key" type="number" :min="field.min" max="10000" step="1" required class="input w-full" /></label></div>
+            <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"><label v-for="field in initialFields" :key="field.key"><span class="field-label">{{ t('autoConfig.' + field.key) }}</span><input v-model.number="draft[field.key]" :data-testid="field.key" type="number" :min="field.min" max="10000" step="1" required class="input w-full" /></label><label><span class="field-label">{{ t('autoConfig.cost_multiplier') }}</span><input v-model.number="draft.cost_multiplier" data-testid="cost_multiplier" type="number" min="0" max="1000000" step="0.001" required class="input w-full" /></label></div>
             <p class="text-xs leading-5 text-gray-500">{{ t('autoConfig.loadHint') }}</p>
             <fieldset><legend class="field-label">{{ t('autoConfig.groups') }}</legend><div class="group-list"><label v-for="g in initialGroups" :key="g.id" class="group-option"><input v-model="draft.group_ids" :value="g.id" type="checkbox" :data-testid="'initial-group-' + g.id" /><span>{{ g.name }} <small class="text-gray-400">#{{ g.id }}</small></span></label><p v-if="!initialGroups.length" class="text-sm text-gray-500">{{ t('autoConfig.noGroups') }}</p></div></fieldset>
             <fieldset class="space-y-3" data-testid="initial-quality-rule">
@@ -71,7 +71,7 @@
       </form>
       <AutoConfigHistory v-if="auth.user?.role === 'admin'" :refresh-key="historyRefreshKey" />
     </div>
-  </component>
+  </AppLayout>
 </template>
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -89,7 +89,6 @@ import { listQualityPlans } from '@/api/admin/accountQuality'
 import type { ScheduledTestPlan } from '@/types'
 import type { Group } from '@/types'
 import { defaultModelBillingConfig, modelBillingConfigError, modelBillingPayload, type ModelBillingConfig } from '@/utils/modelBilling'
-withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
 const { t } = useI18n(), auth = useAuthStore()
 const draft = ref<(AutoConfig & { excel_bps: ExcelBPSDefaults; model_billing: ModelBillingConfig; model_mappings: OAuthModelMappingRule[] }) | null>(null), groups = ref<Group[]>([])
 const loading = ref(false), saving = ref(false), error = ref(''), notice = ref('')
@@ -119,7 +118,7 @@ const upgradeFields = [{ key: 'successes_per_step', max: 100000 }, { key: 'upgra
 const initialGroups = computed(() => groups.value.filter(g => g.platform === draft.value?.platform))
 async function load() {
  const v = generation; loading.value = true; error.value = ''
- try { const [config, available] = await Promise.all([getAutoConfig(), getAll()]); if (validGeneration(v)) { draft.value = { ...config, model_mappings: config.model_mappings ?? defaultOAuthModelMappings(config.platform), model_billing: config.model_billing ?? defaultModelBillingConfig(), excel_bps: config.excel_bps ?? defaultExcelBPSDefaults() }; selectedQualityRule.value = config.quality_rule ? 'saved' : ''; groups.value = available.filter(g => g.status === 'active') } }
+ try { const [config, available] = await Promise.all([getAutoConfig(), getAll()]); if (validGeneration(v)) { draft.value = { ...config, cost_multiplier: config.cost_multiplier ?? 0.07, model_mappings: config.model_mappings ?? defaultOAuthModelMappings(config.platform), model_billing: config.model_billing ?? defaultModelBillingConfig(), excel_bps: config.excel_bps ?? defaultExcelBPSDefaults() }; selectedQualityRule.value = config.quality_rule ? 'saved' : ''; groups.value = available.filter(g => g.status === 'active') } }
  catch { if (validGeneration(v)) error.value = t('autoConfig.loadFailed') }
  finally { if (validGeneration(v)) loading.value = false }
 }
@@ -132,9 +131,10 @@ async function save() {
  if (bpsError) { error.value = t(bpsError); return }
  const mappingError = oauthModelMappingsError(c.model_mappings)
  if (mappingError) { error.value = t(mappingError); return }
- if (c.enabled && !c.group_ids.length || c.upgrade_enabled && !c.upgrade_group_ids.length || [...initialFields, ...upgradeFields].some(f => !Number.isInteger(c[f.key]) || c[f.key] < ('min' in f ? f.min : 1) || c[f.key] > ('max' in f ? f.max : 10000))) { error.value = t('autoConfig.invalid'); return }
+ const costMultiplier = c.cost_multiplier ?? 0.07
+ if (c.enabled && !c.group_ids.length || c.upgrade_enabled && !c.upgrade_group_ids.length || !Number.isFinite(costMultiplier) || costMultiplier < 0 || costMultiplier > 1000000 || [...initialFields, ...upgradeFields].some(f => !Number.isInteger(c[f.key]) || c[f.key] < ('min' in f ? f.min : 1) || c[f.key] > ('max' in f ? f.max : 10000))) { error.value = t('autoConfig.invalid'); return }
  const v = generation; saving.value = true; error.value = ''; notice.value = ''
- try { const { runtime_blocked: _blocked, ...payload } = c; const result = await saveAutoConfig({ ...payload, model_mappings: oauthModelMappingsPayload(c.model_mappings), model_billing: modelBillingPayload(c.model_billing), excel_bps: excelBPSDefaultsPayload(c.excel_bps) }); if (validGeneration(v)) { draft.value = { ...result, model_mappings: result.model_mappings ?? defaultOAuthModelMappings(result.platform), model_billing: result.model_billing ?? defaultModelBillingConfig(), excel_bps: result.excel_bps ?? defaultExcelBPSDefaults() }; selectedQualityRule.value = result.quality_rule ? 'saved' : ''; notice.value = t('autoConfig.saved'); historyRefreshKey.value++ } }
+ try { const { runtime_blocked: _blocked, ...payload } = c; const result = await saveAutoConfig({ ...payload, cost_multiplier: costMultiplier, model_mappings: oauthModelMappingsPayload(c.model_mappings), model_billing: modelBillingPayload(c.model_billing), excel_bps: excelBPSDefaultsPayload(c.excel_bps) }); if (validGeneration(v)) { draft.value = { ...result, cost_multiplier: result.cost_multiplier ?? 0.07, model_mappings: result.model_mappings ?? defaultOAuthModelMappings(result.platform), model_billing: result.model_billing ?? defaultModelBillingConfig(), excel_bps: result.excel_bps ?? defaultExcelBPSDefaults() }; selectedQualityRule.value = result.quality_rule ? 'saved' : ''; notice.value = t('autoConfig.saved'); historyRefreshKey.value++ } }
  catch { if (validGeneration(v)) error.value = t('autoConfig.saveFailed') }
  finally { if (validGeneration(v)) saving.value = false }
 }

@@ -14,11 +14,6 @@ export default {
         payment: 'Payment',
       },
       features: {
-        protocolSwitches: {
-          title: 'Protocol features',
-          description: 'Turning a protocol off stops using it immediately and hides its options in account editors.',
-          excelBps: 'Excel / BPS protocol',
-        },
         excelBpsImages: {
           mode: 'Image transport',
           modeRelay: 'Temporary HTTPS relay (default)',
@@ -60,18 +55,20 @@ export default {
         },
         channelMonitor: {
           title: 'Channel Monitor',
-          description: 'Real usage aggregation and active probes can run together.',
+          description: 'Choose one of V1 active probes, V2 passive usage monitoring or the V3 component status page. When disabled, all background jobs stop and the user entry is hidden.',
           configureLink: 'Configure monitors in Channel Management > Channel Monitor',
           enabled: 'Enable Channel Monitor',
-          enabledHint: 'Disabling stops monitor tasks and preserves config and history.',
-          mode: 'Monitor sources',
-          modeHint: 'Enable sources independently. Disabling both stops Channel Monitor.',
-          modeV2: 'Real usage aggregation',
-          modeV1: 'Active probes',
-          modeV2Hint: 'Aggregates usage, latency, and health from business requests.',
-          modeV1Hint: 'Scheduled connectivity, quota, and quality checks generate separate probe traffic.',
+          enabledHint: 'Disabling stops the V1 scheduler and the real-traffic statistics shared by V2 and V3; existing config and history are kept.',
+          mode: 'Monitor mode',
+          modeHint: 'Default is V1 (active probes). Only one implementation can be active at a time; you can also switch at the top of the Channel Monitor page.',
+          modeV2: 'V2 passive monitoring',
+          modeV1: 'V1 active probes',
+          modeV3: 'V3 component status page',
+          modeV2Hint: 'Opt-in: aggregates health metrics from real gateway traffic without upstream probe traffic. V1 probes stop while V2 is active.',
+          modeV1Hint: 'Default: runs scheduled upstream health checks for configured channel monitors (probe traffic).',
+          modeV3Hint: 'Shows status bars by category and component, measured from real requests on this site (the same statistics as V2, no extra requests). V1 probes stop and the V2 page is hidden from users while V3 is active. Components are configured on the Channel Monitor page.',
           defaultInterval: 'Default check interval (seconds)',
-          defaultIntervalHint: 'Default interval for new active tasks; each task can override it. Range 15 – 3600 seconds.',
+          defaultIntervalHint: 'V1 only: default interval for new monitors (overridable per monitor). Range 15 – 3600 seconds.',
           hideThroughput: 'Hide throughput rates from users (RPM / TPM)',
           hideThroughputHint:
             'When on, the user Channel Monitor page and user APIs omit RPM and TPM so fleet volume cannot be reverse-estimated from rates × window. Admins still see full metrics. Error rates, latency, and cache rates remain visible.',
@@ -80,7 +77,7 @@ export default {
             'When on, quota-mode channel monitors expose the linked account usage windows/balance on the user Channel Status page. Disabled by default; admins always see it.',
           hideUserRanking: 'Hide user ranking from users',
           hideUserRankingHint:
-            'When on, Channel Monitor hides user ranking from users. Admins still see the ranking.',
+            'When on, the user Channel Monitor V2 page hides the user ranking tab and the user API returns no ranking rows. Admins still see the ranking.',
         },
         availableChannels: {
           title: 'Available Channels',
@@ -632,6 +629,8 @@ export default {
         claudeCodeVersionAutoSyncHint: 'Fetches the latest Claude Code client version from the official release channel every hour, so you never need to upgrade this service just to keep the version current. When disabled, fetching stops but the previously synced version remains available. The manual version above always takes priority.',
         claudeCodeVersionSyncedValue: 'Currently synced: {version}',
         codexHardeningTitle: "Codex Settings",
+        requestTimezoneEnabled: 'Bind request timezone',
+        requestTimezoneEnabledDesc: 'Use each OpenAI account’s timezone (Asia/Singapore by default) for existing environment context and web search timezone fields. Dates and ordinary text remain unchanged. Disabled means no timezone rewriting. This does not guarantee improved model quality.',
         codexTicketEnabled: "780 ticket harvest",
         codexTicketEnabledDesc:
           "When off, the gateway neither harvests nor injects x-codex-turn-state and forwards traffic as usual. When on, it harvests tickets in the background and overwrites that header on production requests.",

@@ -17,30 +17,25 @@
           <a v-if="modelAuthError" href="/admin/token-guard-v2" target="_blank" rel="noopener noreferrer" class="underline">{{ t('admin.accounts.openCredentialOperations') }}</a>
         </div>
       </div>
+      <AccountTestEvidence v-if="upstreamEvidence" :evidence="upstreamEvidence" />
       <!-- Account Info Card -->
       <div
         v-if="account"
         class="flex items-center justify-between rounded-xl border border-gray-200 bg-gradient-to-r from-gray-50 to-gray-100 p-3 dark:border-dark-500 dark:from-dark-700 dark:to-dark-600"
       >
-        <div class="flex min-w-0 items-center gap-3">
+        <div class="flex items-center gap-3">
           <div
-            class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-primary-500 to-primary-600"
+            class="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary-500 to-primary-600"
           >
             <Icon name="play" size="md" class="text-white" :stroke-width="2" />
           </div>
-          <div class="min-w-0">
-            <div class="break-words font-semibold text-gray-900 dark:text-gray-100">{{ account.name }}</div>
-            <div class="flex flex-wrap items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+          <div>
+            <div class="font-semibold text-gray-900 dark:text-gray-100">{{ account.name }}</div>
+            <div class="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">
               <span
                 class="rounded bg-gray-200 px-1.5 py-0.5 text-[10px] font-medium uppercase dark:bg-dark-500"
               >
                 {{ account.type }}
-              </span>
-              <span
-                v-if="isFreeAstraPrismAccount"
-                class="rounded bg-fuchsia-100 px-1.5 py-0.5 text-[10px] font-medium text-fuchsia-700 dark:bg-fuchsia-900/30 dark:text-fuchsia-300"
-              >
-                Free-Astra / Prism
               </span>
               <span>{{ t('admin.accounts.account') }}</span>
             </div>
@@ -48,7 +43,7 @@
         </div>
         <span
           :class="[
-            'ml-2 shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold',
+            'rounded-full px-2.5 py-1 text-xs font-semibold',
             account.status === 'active'
               ? 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-400'
               : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
@@ -263,13 +258,14 @@ import { computed, ref, watch, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import Select from '@/components/common/Select.vue'
+import AccountTestEvidence from './AccountTestEvidence.vue'
+import type { AccountTestUpstreamEvidence } from '@/types/accountTestEvidence'
 import TextArea from '@/components/common/TextArea.vue'
 import { Icon } from '@/components/icons'
 import { useClipboard } from '@/composables/useClipboard'
 import { buildApiUrl } from '@/api/client'
 import { adminAPI } from '@/api/admin'
 import type { Account, ClaudeModel } from '@/types'
-import { isFreeAstraPrismProviderPreset } from '@/components/account/credentialsBuilder'
 
 const { t } = useI18n()
 const { copyToClipboard } = useClipboard()
@@ -291,8 +287,12 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void
+  (e: 'tested'): void
 }>()
 
+let reportedTestCompletion = false
+const notifyTestComplete = () => { if (!reportedTestCompletion) { reportedTestCompletion = true; emit('tested') } }
+const upstreamEvidence = ref<AccountTestUpstreamEvidence | null>(null)
 const terminalRef = ref<HTMLElement | null>(null)
 const status = ref<'idle' | 'connecting' | 'success' | 'error'>('idle')
 const outputLines = ref<OutputLine[]>([])
@@ -309,16 +309,10 @@ let abortController: AbortController | null = null
 const generatedImages = ref<PreviewImage[]>([])
 const testMode = ref<'default' | 'compact' | 'bps_tools'>('default')
 const isOpenAIAccount = computed(() => props.account?.platform === 'openai')
-const isFreeAstraPrismAccount = computed(() =>
-  isOpenAIAccount.value && props.account?.type === 'apikey' &&
-  isFreeAstraPrismProviderPreset(props.account.extra?.provider_preset)
-)
 const isBPSAccount = computed(() =>
   isOpenAIAccount.value && props.account?.type === 'oauth' && props.account?.extra?.openai_excel_bps === true && props.account?.extra?.openai_excel_bps_authorization_pending !== true
 )
-const openAITestModeOptions = computed(() => isFreeAstraPrismAccount.value
-  ? [{ value: 'default', label: t('admin.accounts.openai.testModeDefault') }]
-  : isBPSAccount.value
+const openAITestModeOptions = computed(() => isBPSAccount.value
   ? [
       { value: 'default', label: t('admin.accounts.openai.testModeDefault') },
       { value: 'bps_tools', label: t('admin.accounts.openai.testModeBPSTools') }
@@ -420,6 +414,8 @@ const loadAvailableModels = async () => {
 }
 
 const resetState = () => {
+  reportedTestCompletion = false
+  upstreamEvidence.value = null
   status.value = 'idle'
   outputLines.value = []
   streamingContent.value = ''
@@ -538,10 +534,14 @@ const handleEvent = (event: {
   error?: string
   image_url?: string
   mime_type?: string
+  upstream_status?: number
+  upstream_model?: string
+  request_id?: string
+  upstream_error_code?: string
 }) => {
   switch (event.type) {
     case 'test_start':
-      addLine(t('admin.accounts.connectedToApi'), 'text-green-400')
+      addLine(t('admin.accounts.testRequestStarted'), 'text-gray-400')
       if (event.model) {
         addLine(t('admin.accounts.usingModel', { model: event.model }), 'text-cyan-400')
       }
@@ -553,6 +553,12 @@ const handleEvent = (event: {
       )
       addLine('', 'text-gray-300')
       addLine(t('admin.accounts.response'), 'text-yellow-400')
+      break
+
+    case 'upstream_response':
+      if (event.upstream_status && event.upstream_status >= 100 && event.upstream_status <= 599) {
+        upstreamEvidence.value = { status: event.upstream_status, model: event.upstream_model, requestId: event.request_id, errorCode: event.upstream_error_code }
+      }
       break
 
     case 'content':
@@ -579,6 +585,7 @@ const handleEvent = (event: {
       break
 
     case 'test_complete':
+      notifyTestComplete()
       // Move streaming content to output lines
       if (streamingContent.value) {
         addLine(streamingContent.value, 'text-green-300')
@@ -593,6 +600,7 @@ const handleEvent = (event: {
       break
 
     case 'error':
+      notifyTestComplete()
       status.value = 'error'
       errorMessage.value = event.error || 'Unknown error'
       if (streamingContent.value) {

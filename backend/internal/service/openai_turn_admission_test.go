@@ -129,50 +129,6 @@ func TestOpenAITurnAdmissionLocalCache(t *testing.T) {
 	require.NotEqual(t, "https://mutated.example.invalid", second.Credentials["base_url"])
 }
 
-func TestOpenAITurnAdmissionLocalCacheDeepClonesJSONValues(t *testing.T) {
-	account := ticketTestAccount(981)
-	account.Credentials["nested"] = map[string]any{"values": []any{map[string]any{"key": "original"}}}
-	account.Extra = make(map[string]any)
-	account.Extra["nested"] = map[string]any{"key": "original"}
-	cache := openAITurnAdmissionLocalCache{}
-	cache.store(account, nil)
-
-	first, _, ok := cache.load(account.ID, time.Minute)
-	require.True(t, ok)
-	firstCredentialsNested := admissionTestMap(t, first.Credentials["nested"])
-	firstCredentialsValues := admissionTestSlice(t, firstCredentialsNested["values"])
-	admissionTestMap(t, firstCredentialsValues[0])["key"] = "mutated"
-	firstExtraNested := admissionTestMap(t, first.Extra["nested"])
-	firstExtraNested["key"] = "mutated"
-
-	second, _, ok := cache.load(account.ID, time.Minute)
-	require.True(t, ok)
-	secondCredentialsNested := admissionTestMap(t, second.Credentials["nested"])
-	secondCredentialsValues := admissionTestSlice(t, secondCredentialsNested["values"])
-	require.Equal(t, "original", admissionTestMap(t, secondCredentialsValues[0])["key"])
-	require.Equal(t, "original", admissionTestMap(t, second.Extra["nested"])["key"])
-	accountCredentialsNested := admissionTestMap(t, account.Credentials["nested"])
-	accountCredentialsValues := admissionTestSlice(t, accountCredentialsNested["values"])
-	admissionTestMap(t, accountCredentialsValues[0])["key"] = "source-mutated"
-	third, _, ok := cache.load(account.ID, time.Minute)
-	require.True(t, ok)
-	thirdCredentialsNested := admissionTestMap(t, third.Credentials["nested"])
-	thirdCredentialsValues := admissionTestSlice(t, thirdCredentialsNested["values"])
-	require.Equal(t, "original", admissionTestMap(t, thirdCredentialsValues[0])["key"])
-}
-
-func admissionTestMap(t *testing.T, value any) map[string]any {
-	result, ok := value.(map[string]any)
-	require.True(t, ok)
-	return result
-}
-
-func admissionTestSlice(t *testing.T, value any) []any {
-	result, ok := value.([]any)
-	require.True(t, ok)
-	return result
-}
-
 func TestOpenAITurnAdmissionExplicitGroupRejectsRemovedMembership(t *testing.T) {
 	selected := ticketTestAccount(905)
 	selected.GroupIDs = []int64{9}

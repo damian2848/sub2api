@@ -590,8 +590,6 @@ type AccountSelectionResult struct {
 	WaitPlan         *AccountWaitPlan // nil means no wait allowed
 	// stickySessionHit 标记账号来自会话粘性绑定命中，供非高级调度路径回填决策标签。
 	stickySessionHit bool
-	// priorityFailback distinguishes a committed return to primary capacity.
-	priorityFailback bool
 	// profitGate 携带本次选号真实生效的利润门（无门为 nil）。门安装在调度栈的
 	// 局部 ctx 上，handler 必须经 ContextWithSelectionProfitGate 重放后才能在
 	// 调度栈之外做抢槽后终检与准入后粘性绑定。
@@ -621,9 +619,7 @@ type AudioUsage struct {
 }
 
 type ForwardResult struct {
-	// Charged partial streams are real consumed usage, not successful API calls.
-	streamReadIncomplete bool
-	RequestID            string
+	RequestID string
 	// UpstreamHeaders 是直接上游的响应头，用于按账户配置解析上游请求标识。
 	UpstreamHeaders http.Header
 	Usage           ClaudeUsage
@@ -734,10 +730,9 @@ func (e *UpstreamFailoverError) IsCredentialFailure() bool {
 // ShouldReportAccountScheduleFailure prevents provider- and request-scoped
 // credential failures from being misattributed to the selected account. Legacy
 // and inference failures retain their existing scheduler-health behavior,
-// except an Excel BPS 429, which only cools the account's BPS route, and a
-// request a Prism account declined, which says nothing about the account.
+// except an Excel BPS 429: it only cools the account's BPS route.
 func (e *UpstreamFailoverError) ShouldReportAccountScheduleFailure() bool {
-	if e == nil || e.Reason == ExcelBPSRateLimitedReason || e.IsPrismRequestUnsupported() {
+	if e == nil || e.Reason == ExcelBPSRateLimitedReason || e.Reason == GrokUnknownForbiddenReason {
 		return false
 	}
 	return !e.IsCredentialFailure() || e.Scope == GatewayFailureScopeAccount
@@ -1367,6 +1362,7 @@ func (s *GatewayService) DoGrokNativeResponsesJSON(ctx context.Context, account 
 		proxyURL = account.Proxy.URL()
 	}
 	resp, err := s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+	s.rateLimitService.observeQualityResponse(upstreamReq.Context(), account, resp, err)
 	if err != nil {
 		return nil, &UpstreamFailoverError{StatusCode: http.StatusBadGateway, Reason: GatewayFailureReason("grok_search_transport")}
 	}

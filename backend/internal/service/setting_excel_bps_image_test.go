@@ -187,26 +187,13 @@ func TestProtocolFeatureSwitchesApplyImmediately(t *testing.T) {
 	settings := NewSettingService(repo, &config.Config{})
 	gateway := &OpenAIGatewayService{settingService: settings}
 
-	require.True(t, gateway.excelBPSGloballyEnabled(ctx), "a missing switch keeps existing BPS accounts working")
-
-	require.NoError(t, settings.UpdateSettings(ctx, &SystemSettings{ExcelBPSEnabled: true}))
+	require.NoError(t, settings.UpdateSettings(ctx, &SystemSettings{ExcelBPSEnabled: true, PrismBrowserEnabled: false}))
 	require.True(t, gateway.excelBPSGloballyEnabled(ctx))
+	require.False(t, gateway.prismBrowserGloballyEnabled(ctx))
 
-	require.NoError(t, settings.UpdateSettings(ctx, &SystemSettings{ExcelBPSEnabled: false}))
+	require.NoError(t, settings.UpdateSettings(ctx, &SystemSettings{ExcelBPSEnabled: false, PrismBrowserEnabled: true}))
 	require.False(t, gateway.excelBPSGloballyEnabled(ctx))
-}
-
-func TestExcelBPSGlobalSwitchKeepsRoutingWhenUnreadable(t *testing.T) {
-	ctx := context.Background()
-	repo := &excelBPSImageSettingsRepo{values: map[string]string{SettingKeyExcelBPSEnabled: "false"}}
-	gateway := &OpenAIGatewayService{settingService: NewSettingService(repo, &config.Config{})}
-	require.False(t, gateway.excelBPSGloballyEnabled(ctx), "a readable off switch disables BPS")
-
-	repo.err = errors.New("settings store unavailable")
-	require.True(t, gateway.excelBPSGloballyEnabled(ctx), "a read failure must not move BPS accounts to the native channel")
-	enabled, err := gateway.settingService.GetProtocolFeatureEnabled(ctx, SettingKeyExcelBPSEnabled)
-	require.Error(t, err)
-	require.False(t, enabled)
+	require.True(t, gateway.prismBrowserGloballyEnabled(ctx))
 }
 
 func TestExcelBPSImageLimitsHotReload(t *testing.T) {

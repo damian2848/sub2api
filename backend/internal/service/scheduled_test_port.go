@@ -51,25 +51,24 @@ type ScheduledTestPlan struct {
 
 // ScheduledTestResult represents a single test execution result.
 type ScheduledTestResult struct {
-	Usage            *ChannelMonitorProbeUsage       `json:"usage,omitempty"`
-	ObservationScope *ChannelMonitorObservationScope `json:"-"`
-	QualityRoundID   string                          `json:"quality_round_id,omitempty"`
-	QualityJudgment  *QualityJudgment                `json:"quality_judgment,omitempty"`
-	QualityAction    string                          `json:"quality_action,omitempty"`
-	PelicanConfig    *PelicanTestConfig              `json:"pelican_config,omitempty"`
-	ID               int64                           `json:"id"`
-	PlanID           int64                           `json:"plan_id"`
-	Status           string                          `json:"status"`
-	ResponseText     string                          `json:"response_text"`
-	ErrorMessage     string                          `json:"error_message"`
-	LatencyMs        int64                           `json:"latency_ms"`
-	StartedAt        time.Time                       `json:"started_at"`
-	FinishedAt       time.Time                       `json:"finished_at"`
-	CreatedAt        time.Time                       `json:"created_at"`
+	QualityRoundID  string             `json:"quality_round_id,omitempty"`
+	QualityJudgment *QualityJudgment   `json:"quality_judgment,omitempty"`
+	QualityAction   string             `json:"quality_action,omitempty"`
+	PelicanConfig   *PelicanTestConfig `json:"pelican_config,omitempty"`
+	ID              int64              `json:"id"`
+	PlanID          int64              `json:"plan_id"`
+	Status          string             `json:"status"`
+	ResponseText    string             `json:"response_text"`
+	ErrorMessage    string             `json:"error_message"`
+	LatencyMs       int64              `json:"latency_ms"`
+	StartedAt       time.Time          `json:"started_at"`
+	FinishedAt      time.Time          `json:"finished_at"`
+	CreatedAt       time.Time          `json:"created_at"`
 }
 
 // ScheduledTestPlanRepository defines the data access interface for test plans.
 type ScheduledTestPlanRepository interface {
+	FinishTriggeredQuality(context.Context, *ScheduledTestPlan, time.Time, time.Time, time.Time) error
 	ListQualityPlans(context.Context) ([]*ScheduledTestPlan, error)
 	ApplyQualityOutcome(context.Context, *ScheduledTestPlan, time.Time, string) (string, error)
 	TriggerQuality(context.Context, int64) error
@@ -108,9 +107,10 @@ type ScheduledTestResultRepository interface {
 
 type QualityHistoryResult struct {
 	PelicanHistoryResult
-	PassedCount int     `json:"passed_count"`
-	TotalCount  int     `json:"total_count"`
-	ResultIDs   []int64 `json:"result_ids"`
+	PassedCount  int     `json:"passed_count"`
+	SkippedCount int     `json:"skipped_count"`
+	TotalCount   int     `json:"total_count"`
+	ResultIDs    []int64 `json:"result_ids"`
 }
 type QualityHistoryPage struct {
 	Items      []*QualityHistoryResult `json:"items"`

@@ -81,18 +81,22 @@ describe('AppSidebar subscription feature flag', () => {
   })
 })
 
-describe('AppSidebar channel operations entry', () => {
-  it('consolidates the old operations group and harvesting menu into one flat entry', () => {
-    expect(componentSource).toMatch(/path: '\/admin\/channel-ops', label: t\('channelOperations\.title'\), icon: SmartOpsIcon/)
-    for (const oldPath of ['/admin/smart-ops', '/admin/auto-config', '/admin/harvest-flow', '/admin/token-guard', '/admin/pelican-tests']) {
-      expect(componentSource).not.toContain(`path: '${oldPath}'`)
-    }
-    expect(componentSource).toContain('withChannelOperationsSearch([')
+describe('AppSidebar smart operations group', () => {
+  const smartOpsBlock = componentSource.match(/path: '\/admin\/smart-ops'[\s\S]*?\n {4}\] \},/)?.[0] ?? ''
+  const pathsIn = (source: string) => [...source.matchAll(/path: '([^']+)'/g)].map(match => match[1])
+
+  it('nests request capture and the ticket harvest flow under 智能运维', () => {
+    expect(smartOpsBlock).not.toBe('')
+    expect(smartOpsBlock).toMatch(/path: '\/admin\/request-captures'[^\n]*featureFlag: \(\) => adminSettingsStore\.requestCaptureEnabled/)
+    expect(smartOpsBlock).toContain("path: '/admin/harvest-flow'")
+    // Each entry is declared once, so neither is still a top-level item.
+    expect(componentSource.match(/path: '\/admin\/request-captures'/g)).toHaveLength(1)
+    expect(componentSource.match(/path: '\/admin\/harvest-flow'/g)).toHaveLength(1)
   })
 
-  it('keeps observer account management and standalone monitoring entries unchanged', () => {
-    expect(componentSource).toContain("{ path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon }")
-    expect(componentSource).toContain("{ path: '/admin/ops', label: t('nav.ops'), icon: OpsMonitoringIcon")
+  it('keeps the group in the same order as the 智能运维 tab bar', () => {
+    const navSource = readFileSync(resolve(dirname(componentPath), '../admin/operations/SmartOpsNav.vue'), 'utf8')
+    expect(pathsIn(smartOpsBlock).slice(1)).toEqual(pathsIn(navSource))
   })
 })
 

@@ -26,7 +26,6 @@ const {
   createOpenAICodexPATMock,
   createCredentialOperationsMock,
   authIsSimpleMode,
-  publicSettings,
 } = vi.hoisted(() => ({
   createAccountMock: vi.fn(),
   generateAuthUrlMock: vi.fn(),
@@ -39,7 +38,6 @@ const {
   createOpenAICodexPATMock: vi.fn(),
   createCredentialOperationsMock: vi.fn(),
   authIsSimpleMode: { value: true },
-  publicSettings: { value: undefined as Record<string, unknown> | undefined },
 }))
 
 vi.mock('@/stores/app', () => ({
@@ -47,9 +45,6 @@ vi.mock('@/stores/app', () => ({
     showError: vi.fn(),
     showSuccess: vi.fn(),
     showWarning: showWarningMock,
-    get cachedPublicSettings() {
-      return publicSettings.value
-    },
   }),
 }))
 
@@ -326,17 +321,6 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expectWSAcceleration(payload.extra, clicks === 1)
     expect(wrapper.emitted('created')).toHaveLength(1)
     expect(wrapper.emitted('close')).toHaveLength(1)
-  })
-
-  it('hides the BPS OAuth entry while the BPS master switch is off', async () => {
-    publicSettings.value = { excel_bps_enabled: false }
-    try {
-      const wrapper = await prepareWSAcceleration(0)
-      expect(wrapper.find('[data-testid="openai-bps-oauth"]').exists()).toBe(false)
-      expect(wrapper.find('[data-testid="openai-two-fa"]').exists()).toBe(true)
-    } finally {
-      publicSettings.value = undefined
-    }
   })
 
   it('creates BPS OAuth through the Excel client and enables only the selected BPS models', async () => {
@@ -770,91 +754,6 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     await submitApiKeyAccount('openai')
 
     expect(createAccountMock.mock.calls[0]?.[0]?.upstream_billing_probe_enabled).toBe(true)
-  })
-
-  it('creates a Free-Astra / Prism account with its complete provider defaults', async () => {
-    const wrapper = mountModal()
-    await selectButtonByText(wrapper, 'OpenAI')
-    await selectButtonByText(wrapper, 'API Key')
-    await wrapper.get('[data-testid="copilot-sdk-toggle"]').setValue(true)
-    await wrapper.get('[data-testid="openai-provider-preset-free-astra-prism"]').trigger('click')
-    await wrapper.get('form#create-account-form input[type="password"]').setValue('prism-api-key')
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
-    await flushPromises()
-
-    expect(createAccountMock).toHaveBeenCalledWith(expect.objectContaining({
-      name: 'Free-Astra / Prism',
-      platform: 'openai',
-      type: 'apikey',
-      concurrency: 1,
-      load_factor: null,
-      upstream_billing_probe_enabled: false,
-      credentials: expect.objectContaining({
-        base_url: 'http://prism2api:8319/v1',
-        api_key: 'prism-api-key',
-        openai_capabilities: ['chat_completions'],
-        model_mapping: {
-          'gpt-6.1-sol': 'gpt-6.1-sol',
-          'gpt-6-luna': 'gpt-6-luna',
-          'gpt-6-astra': 'gpt-6-astra',
-          'gpt-5.6-sol': 'gpt-5.6-sol',
-          'gpt-5.6-terra': 'gpt-5.6-terra'
-        }
-      }),
-      extra: expect.objectContaining({
-        provider_preset: 'free_astra_prism',
-        openai_responses_mode: 'force_responses'
-      })
-    }))
-    expect(createAccountMock.mock.calls[0]?.[0]?.extra).not.toHaveProperty('openai_copilot_sdk')
-    expect(probeUpstreamBillingMock).not.toHaveBeenCalled()
-  })
-
-  it('allows a Prism endpoint outside the internal Docker network', async () => {
-    const wrapper = mountModal()
-    await selectButtonByText(wrapper, 'OpenAI')
-    await selectButtonByText(wrapper, 'API Key')
-    await wrapper.get('[data-testid="openai-provider-preset-free-astra-prism"]').trigger('click')
-    const baseUrlInput = wrapper.findAll<HTMLInputElement>('input[type="text"]')
-      .find(input => input.element.value === 'http://prism2api:8319/v1')
-    expect(baseUrlInput).toBeDefined()
-    await baseUrlInput?.setValue('https://prism.example.com/v1')
-    await wrapper.get('form#create-account-form input[type="password"]').setValue('prism-api-key')
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
-    await flushPromises()
-
-    expect(createAccountMock.mock.calls[0]?.[0]).toMatchObject({
-      credentials: { base_url: 'https://prism.example.com/v1' },
-      extra: { provider_preset: 'free_astra_prism', openai_responses_mode: 'force_responses' }
-    })
-  })
-
-  it('restores OpenAI defaults after switching away from the Prism preset', async () => {
-    const wrapper = mountModal()
-    await selectButtonByText(wrapper, 'OpenAI')
-    await selectButtonByText(wrapper, 'API Key')
-    await wrapper.get('[data-testid="openai-provider-preset-free-astra-prism"]').trigger('click')
-    await wrapper.get('[data-testid="openai-provider-preset-official"]').trigger('click')
-    await wrapper.get('form#create-account-form input[type="password"]').setValue('openai-api-key')
-    await wrapper.get('form#create-account-form').trigger('submit.prevent')
-    await flushPromises()
-
-    const payload = createAccountMock.mock.calls[0]?.[0]
-    expect(payload).toMatchObject({
-      platform: 'openai',
-      upstream_billing_probe_enabled: true,
-      credentials: {
-        base_url: 'https://api.openai.com'
-      }
-    })
-    expect(payload.credentials).not.toHaveProperty('openai_capabilities')
-    expect(payload.credentials.model_mapping).toMatchObject({
-      'gpt-5.4': 'gpt-5.4',
-      'gpt-image-2': 'gpt-image-2'
-    })
-    expect(payload.extra).not.toHaveProperty('provider_preset')
-    expect(payload.extra).not.toHaveProperty('openai_responses_mode')
-    expect(probeUpstreamBillingMock).toHaveBeenCalledWith(42)
   })
 
   it('waits for the initial upstream billing probe before refreshing the account list', async () => {

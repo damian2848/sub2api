@@ -1,8 +1,10 @@
 import { onMounted, onUnmounted, nextTick } from 'vue'
-import type { Driver, DriveStep } from 'driver.js'
+import { driver, type Driver, type DriveStep } from 'driver.js'
+import 'driver.js/dist/driver.css'
 import { useAuthStore as useUserStore } from '@/stores/auth'
 import { useOnboardingStore } from '@/stores/onboarding'
 import { useI18n } from 'vue-i18n'
+import { getAdminSteps, getUserSteps } from '@/components/Guide/steps'
 
 export interface OnboardingOptions {
   storageKey?: string
@@ -54,7 +56,6 @@ export function useOnboardingTour(options: OnboardingOptions) {
   } | null = null
   let autoStartTimer: ReturnType<typeof setTimeout> | null = null
   let globalKeyboardHandler: ((e: KeyboardEvent) => void) | null = null
-  let unmounted = false
 
   const getStorageKey = () => {
     const baseKey = options.storageKey ?? 'onboarding_tour'
@@ -91,14 +92,6 @@ export function useOnboardingTour(options: OnboardingOptions) {
   }
 
   const startTour = async (startIndex = 0) => {
-    const [{ driver }, { getAdminSteps, getUserSteps }] = await Promise.all([
-      import('driver.js'),
-      import('@/components/Guide/steps'),
-      import('driver.js/dist/driver.css'),
-      import('@/styles/onboarding.css'),
-    ])
-    if (unmounted) return
-
     // 动态获取当前用户角色和步骤
     const isAdmin = userStore.user?.role === 'admin'
     const isSimpleMode = userStore.isSimpleMode
@@ -112,7 +105,6 @@ export function useOnboardingTour(options: OnboardingOptions) {
     if (currentStep?.element && typeof currentStep.element === 'string') {
       await ensureElement(currentStep.element, TIMING.ELEMENT_TIMEOUT_MS)
     }
-    if (unmounted) return
 
     if (driverInstance) {
       driverInstance.destroy()
@@ -557,7 +549,6 @@ export function useOnboardingTour(options: OnboardingOptions) {
   })
 
   onUnmounted(() => {
-    unmounted = true
     if (autoStartTimer) {
       clearTimeout(autoStartTimer)
       autoStartTimer = null

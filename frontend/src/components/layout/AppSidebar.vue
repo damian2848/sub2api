@@ -221,7 +221,6 @@ import { sanitizeUrl } from '@/utils/url'
 import { FeatureFlags, makeSidebarFlag } from '@/utils/featureFlags'
 import { resolveSiteBillingMode } from '@/utils/siteBillingMode'
 import { useBatchImageAccess } from '@/composables/useBatchImageAccess'
-import { withChannelOperationsSearch } from '@/utils/channelOperations'
 
 interface NavItem {
   path: string
@@ -294,9 +293,14 @@ const siteVersion = computed(() => appStore.siteVersion)
 const settingsLoaded = computed(() => appStore.publicSettingsLoaded)
 
 // SVG Icon Components
-const RequestCaptureIcon = { render: () => h(Icon, { name: 'requestCapture' }) }
+const RequestCaptureIcon = { render: () => h(Icon, { name: 'requestCapture', size: 'sm' }) }
 const OpsMonitoringIcon = { render: () => h(Icon, { name: 'monitorPulse' }) }
 const SmartOpsIcon = { render: () => h(Icon, { name: 'cpu' }) }
+const QualityOpsIcon = { render: () => h(Icon, { name: 'badge', size: 'sm' }) }
+const AccountOpsIcon = { render: () => h(Icon, { name: 'userCog', size: 'sm' }) }
+const TokenGuardIcon = { render: () => h(Icon, { name: 'shieldKey', size: 'sm' }) }
+const CredentialOpsIcon = { render: () => h(Icon, { name: 'credentialOps', size: 'sm' }) }
+const PelicanTestsIcon = { render: () => h(Icon, { name: 'beaker', size: 'sm' }) }
 const SupportTicketIcon = { render: () => h(Icon, { name: 'chat' }) }
 const SupportTicketInboxIcon = { render: () => h(Icon, { name: 'inbox' }) }
 
@@ -493,6 +497,10 @@ const GlobeIcon = {
         })
       ]
     )
+}
+
+const FlowIcon = {
+  render: () => h(Icon, { name: 'swap', size: 'sm' })
 }
 
 const ServerIcon = {
@@ -832,7 +840,6 @@ const customMenuItemsForAdmin = computed(() => {
 const adminNavItems = computed((): NavItem[] => {
   const baseItems: NavItem[] = [
     { path: '/admin/dashboard', label: t('nav.dashboard'), icon: DashboardIcon },
-    { path: '/admin/request-captures', label: t('admin.requestCapture.title'), icon: RequestCaptureIcon, featureFlag: () => adminSettingsStore.requestCaptureEnabled },
     { path: '/admin/ops', label: t('nav.ops'), icon: OpsMonitoringIcon, featureFlag: flagOpsMonitoring },
     { path: '/admin/users', label: t('nav.users'), icon: UsersIcon, hideInSimpleMode: true },
     { path: '/admin/groups', label: t('nav.groups'), icon: FolderIcon },
@@ -850,7 +857,18 @@ const adminNavItems = computed((): NavItem[] => {
     // 「仅充值」站点连管理端的「订阅管理」入口也一并收起（路由本身不拦截）。
     { path: '/admin/subscriptions', label: t('nav.subscriptions'), icon: CreditCardIcon, hideInSimpleMode: true, featureFlag: flagSubscription },
     { path: '/admin/accounts', label: t('nav.accounts'), icon: GlobeIcon },
-    { path: '/admin/channel-ops', label: t('channelOperations.title'), icon: SmartOpsIcon },
+    { path: '/admin/smart-ops', label: t('accountOps.smartTitle'), icon: SmartOpsIcon, expandOnly: true, children: [
+      { path: '/admin/auto-config', label: t('autoConfig.title'), icon: AccountOpsIcon },
+      { path: '/admin/priority-scheduling', label: t('priorityScheduling.title'), icon: AccountOpsIcon },
+      { path: '/admin/account-quality', label: t('qualityOps.title'), icon: QualityOpsIcon },
+      { path: '/admin/controlled-experiments', label: t('controlledExperiments.title'), icon: QualityOpsIcon },
+      { path: '/admin/account-ops', label: t('accountOps.title'), icon: AccountOpsIcon },
+      { path: '/admin/token-guard', label: t('tokenGuard.title'), icon: TokenGuardIcon },
+      { path: '/admin/token-guard-v2', label: t('tokenGuardV2.title'), icon: CredentialOpsIcon },
+      { path: '/admin/pelican-tests', label: t('pelicanTests.title'), icon: PelicanTestsIcon },
+      { path: '/admin/request-captures', label: t('admin.requestCapture.title'), icon: RequestCaptureIcon, featureFlag: () => adminSettingsStore.requestCaptureEnabled },
+      { path: '/admin/harvest-flow', label: t('nav.harvestFlow'), icon: FlowIcon },
+    ] },
     { path: '/admin/plugins', label: t('nav.plugins'), icon: PluginIcon, featureFlag: flagPluginManagement },
     { path: '/admin/announcements', label: t('nav.announcements'), icon: BellIcon },
     { path: '/admin/support-tickets', label: t('nav.supportTickets'), icon: SupportTicketInboxIcon, featureFlag: flagSupportTickets, badge: () => supportTicketStore.adminPending },
@@ -919,10 +937,10 @@ const adminNavItems = computed((): NavItem[] => {
 })
 
 // Use exactly the visible navigation, including the personal section only when shown.
-const searchNavItems = computed(() => withChannelOperationsSearch([
+const searchNavItems = computed(() => [
   ...adminNavItems.value,
   ...(authStore.isSimpleMode ? [] : personalNavItems.value)
-], t))
+])
 
 function toggleSidebar() {
   appStore.toggleSidebar()

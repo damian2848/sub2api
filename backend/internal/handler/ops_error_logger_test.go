@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -904,39 +905,6 @@ func TestClassifyOpsLocalModelConfigurationRequiresMarkerAndReason(t *testing.T)
 	require.Equal(t, "upstream_http", source)
 }
 
-func TestNormalizeOpsLocalBalanceTypeDoesNotRewriteUpstreamText(t *testing.T) {
-	require.Equal(t, "billing_error", normalizeOpsLocalBalanceType(
-		"api_error", service.InsufficientUserBalanceMessage, "request", "client"))
-	require.Equal(t, "api_error", normalizeOpsLocalBalanceType(
-		"api_error", service.InsufficientUserBalanceMessage, "upstream", "provider"))
-}
-
-func TestSuppressOpsUpstreamAttributionForClientRejection(t *testing.T) {
-	accountID := int64(42)
-	status := http.StatusForbidden
-	message := "upstream error"
-	detail := "detail"
-	entry := &service.OpsInsertErrorLogInput{
-		AccountID:            &accountID,
-		UpstreamEndpoint:     "https://upstream.example",
-		UpstreamModel:        "upstream-model",
-		UpstreamStatusCode:   &status,
-		UpstreamErrorMessage: &message,
-		UpstreamErrorDetail:  &detail,
-		UpstreamErrors:       []*service.OpsUpstreamErrorEvent{{Message: "event"}},
-		ErrorOwner:           "client",
-		IsBusinessLimited:    true,
-	}
-	suppressOpsUpstreamAttributionForClientRejection(entry)
-	require.Nil(t, entry.AccountID)
-	require.Empty(t, entry.UpstreamEndpoint)
-	require.Empty(t, entry.UpstreamModel)
-	require.Nil(t, entry.UpstreamStatusCode)
-	require.Nil(t, entry.UpstreamErrorMessage)
-	require.Nil(t, entry.UpstreamErrorDetail)
-	require.Nil(t, entry.UpstreamErrors)
-}
-
 func TestOpsErrorLoggerMiddleware_LocalModelConfigurationFields(t *testing.T) {
 	setupOpsErrorLogTestQueue(t, 1)
 	gin.SetMode(gin.TestMode)
@@ -984,74 +952,6 @@ func TestOpsErrorLoggerMiddleware_LocalModelConfigurationFields(t *testing.T) {
 	require.Nil(t, job.entry.UpstreamErrorDetail)
 	require.Empty(t, job.entry.UpstreamModel)
 	require.Empty(t, job.entry.UpstreamEndpoint)
-}
-
-func TestOpsErrorLoggerMiddleware_LocalUserBalanceClearsUpstreamAttribution(t *testing.T) {
-	setupOpsErrorLogTestQueue(t, 1)
-	gin.SetMode(gin.TestMode)
-
-	ops := service.NewOpsService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-	router := gin.New()
-	router.Use(OpsErrorLoggerMiddleware(ops))
-	router.POST("/v1/chat/completions", func(c *gin.Context) {
-		c.Set(opsAccountIDKey, int64(99))
-		c.Set(opsUpstreamModelKey, "stale-upstream-model")
-		setActualUpstreamEndpoint(c, "/v1/chat/completions")
-		c.JSON(http.StatusForbidden, gin.H{"error": gin.H{
-			"type":    "api_error",
-			"message": service.InsufficientUserBalanceMessage,
-		}})
-	})
-
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
-	job := <-opsErrorLogQueue
-	require.Equal(t, "billing_error", job.entry.ErrorType)
-	require.Equal(t, "request", job.entry.ErrorPhase)
-	require.Equal(t, "client", job.entry.ErrorOwner)
-	require.Equal(t, "client_request", job.entry.ErrorSource)
-	require.True(t, job.entry.IsBusinessLimited)
-	require.Nil(t, job.entry.AccountID)
-	require.Nil(t, job.entry.UpstreamStatusCode)
-	require.Nil(t, job.entry.UpstreamErrors)
-}
-
-func TestOpsErrorLoggerMiddleware_UpstreamUserBalanceKeepsProviderAttribution(t *testing.T) {
-	setupOpsErrorLogTestQueue(t, 1)
-	gin.SetMode(gin.TestMode)
-
-	ops := service.NewOpsService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-	router := gin.New()
-	router.Use(OpsErrorLoggerMiddleware(ops))
-	router.POST("/v1/chat/completions", func(c *gin.Context) {
-		c.Set(opsAccountIDKey, int64(99))
-		c.Set(opsUpstreamModelKey, "provider-model")
-		setActualUpstreamEndpoint(c, "/v1/chat/completions")
-		c.Set(service.OpsUpstreamStatusCodeKey, http.StatusForbidden)
-		c.Set(service.OpsUpstreamErrorsKey, []*service.OpsUpstreamErrorEvent{{
-			UpstreamStatusCode: http.StatusForbidden,
-			Message:            service.InsufficientUserBalanceMessage,
-		}})
-		c.JSON(http.StatusForbidden, gin.H{"error": gin.H{
-			"type":    "api_error",
-			"message": service.InsufficientUserBalanceMessage,
-		}})
-	})
-
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
-	job := <-opsErrorLogQueue
-	require.Equal(t, "api_error", job.entry.ErrorType)
-	require.Equal(t, "upstream", job.entry.ErrorPhase)
-	require.Equal(t, "provider", job.entry.ErrorOwner)
-	require.Equal(t, "upstream_http", job.entry.ErrorSource)
-	require.False(t, job.entry.IsBusinessLimited)
-	require.NotNil(t, job.entry.AccountID)
-	require.Equal(t, int64(99), *job.entry.AccountID)
-	require.NotNil(t, job.entry.UpstreamStatusCode)
-	require.Equal(t, http.StatusForbidden, *job.entry.UpstreamStatusCode)
-	require.NotNil(t, job.entry.UpstreamErrorsJSON)
-	require.Contains(t, *job.entry.UpstreamErrorsJSON, `"upstream_status_code":403`)
 }
 
 func TestClassifyOpsAuthClientErrorsExcludedFromSLA(t *testing.T) {
@@ -2089,8 +1989,8 @@ func TestClassifyOpsIngressModelNotAllowedKeepsRequestPhase(t *testing.T) {
 	require.Equal(t, "client_request", errorSource)
 }
 
-// 调度阶段的账号模型映射拒绝也属于请求方选错模型，归类为 request/client。
-func TestClassifyOpsLocalModelConfigurationWithoutIngressMarkIsRequestRejection(t *testing.T) {
+// 调度诊断发现模型不在分组能力内时，也归为客户端请求拒绝。
+func TestClassifyOpsLocalModelConfigurationWithoutIngressMarkIsClientRejection(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonLocalModelConfiguration)
@@ -2394,4 +2294,65 @@ func TestOpsCaptureWriterFlushErrorPropagatesAndHonorsLease(t *testing.T) {
 	releaseOpsCaptureWriter(writer)
 	require.ErrorContains(t, writer.FlushError(), "released")
 	require.Equal(t, 1, rec.calls, "released handles must not reach the old transport")
+}
+
+func TestOpsErrorLoggerMiddleware_UserBalanceIsolation(t *testing.T) {
+	for _, upstream := range []bool{false, true} {
+		t.Run(fmt.Sprint("upstream=", upstream), func(t *testing.T) {
+			setupOpsErrorLogTestQueue(t, 1)
+			gin.SetMode(gin.TestMode)
+			ops := service.NewOpsService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+			router := gin.New()
+			router.Use(OpsErrorLoggerMiddleware(ops))
+			router.POST("/v1/responses", func(c *gin.Context) {
+				c.Set(opsAccountIDKey, int64(99)) // selected before a local billing recheck
+				if upstream {
+					c.Set(service.OpsUpstreamStatusCodeKey, http.StatusForbidden)
+				}
+				c.JSON(http.StatusForbidden, gin.H{"error": gin.H{"type": "api_error", "message": service.InsufficientUserBalanceMessage}})
+			})
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/responses", nil))
+			require.Equal(t, http.StatusForbidden, w.Code)
+			job := <-opsErrorLogQueue
+			if upstream {
+				require.Equal(t, "provider", job.entry.ErrorOwner)
+				require.Equal(t, "upstream", job.entry.ErrorPhase)
+				require.False(t, job.entry.IsBusinessLimited)
+				require.Equal(t, "api_error", job.entry.ErrorType)
+				require.NotNil(t, job.entry.AccountID)
+			} else {
+				require.Equal(t, "client", job.entry.ErrorOwner)
+				require.Equal(t, "client_request", job.entry.ErrorSource)
+				require.Equal(t, "request", job.entry.ErrorPhase)
+				require.True(t, job.entry.IsBusinessLimited)
+				require.Equal(t, "billing_error", job.entry.ErrorType)
+				require.Nil(t, job.entry.AccountID)
+			}
+		})
+	}
+}
+
+func TestLogOpsStreamError_UserBalanceClearsAccountAttribution(t *testing.T) {
+	setupOpsErrorLogTestQueue(t, 1)
+	gin.SetMode(gin.TestMode)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Set(opsAccountIDKey, int64(99))
+	c.Set(opsUpstreamModelKey, "previous-attempt-model")
+	c.Set(service.OpsUpstreamStatusCodeKey, http.StatusBadGateway)
+	ops := service.NewOpsService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	logOpsStreamErrorValue(c, ops, http.StatusOK, service.OpsStreamError{
+		ErrType: "api_error", Message: service.InsufficientUserBalanceMessage,
+		IntendedStatus: http.StatusForbidden, RequestScoped: true,
+	})
+	entry := (<-opsErrorLogQueue).entry
+	require.Equal(t, "client", entry.ErrorOwner)
+	require.Equal(t, "billing_error", entry.ErrorType)
+	require.True(t, entry.IsBusinessLimited)
+	require.Equal(t, http.StatusForbidden, entry.StatusCode)
+	require.Nil(t, entry.AccountID)
+	require.Nil(t, entry.UpstreamStatusCode)
+	require.Empty(t, entry.UpstreamModel)
+	require.Empty(t, entry.UpstreamEndpoint)
 }

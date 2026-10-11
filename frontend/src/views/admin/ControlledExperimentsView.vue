@@ -1,7 +1,7 @@
 <template>
-  <component :is="embedded ? 'div' : AppLayout">
+  <AppLayout>
     <div class="space-y-6">
-      <SmartOpsNav v-if="!embedded" />
+      <SmartOpsNav />
       <header class="flex flex-wrap items-start justify-between gap-4">
         <div><h1 class="text-2xl font-semibold text-gray-900 dark:text-gray-100">{{ t('controlledExperiments.title') }}</h1><p class="mt-2 max-w-4xl text-sm leading-6 text-gray-500">{{ t('controlledExperiments.intro') }}</p></div>
         <button class="btn btn-secondary" :disabled="loading || busy" @click="refresh">{{ t('controlledExperiments.refresh') }}</button>
@@ -114,7 +114,7 @@
         <div v-else class="card p-8 text-sm text-gray-500">{{ t('controlledExperiments.selectRun') }}</div>
       </div>
     </div>
-  </component>
+  </AppLayout>
 </template>
 
 <script setup lang="ts">
@@ -125,9 +125,8 @@ import SmartOpsNav from '@/components/admin/operations/SmartOpsNav.vue'
 import { list as listAccounts } from '@/api/admin/accounts'
 import { controlledExperimentsAPI, type ExperimentChannel, type ExperimentInput, type ExperimentReport, type ExperimentRun, type ExperimentTask } from '@/api/admin/controlledExperiments'
 
-withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
 const { t, te } = useI18n()
-const channels: ExperimentChannel[] = ['native_http', 'native_ws', 'bps']
+const channels: ExperimentChannel[] = ['native_http', 'native_ws', 'prism', 'bps']
 const efforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra']
 const accounts = ref<{ id: number; name: string }[]>([]), tasks = ref<ExperimentTask[]>([]), runs = ref<ExperimentRun[]>([])
 const report = ref<ExperimentReport | null>(null), selectedId = ref<number | null>(null)

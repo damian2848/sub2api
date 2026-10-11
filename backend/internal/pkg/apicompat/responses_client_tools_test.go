@@ -2,7 +2,6 @@ package apicompat
 
 import (
 	"encoding/json"
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -628,69 +627,6 @@ func TestResponsesClientToolStreamRestorer_CustomToolBuffersWrapperAndSequences(
 	require.Equal(t, 10, closed[0].SequenceNumber)
 	require.Equal(t, "custom_tool_call", closed[0].Item.Type)
 	require.Equal(t, "dir", closed[0].Item.Input)
-}
-
-// Prism answers one turn with a progress note plus several tool calls; every call keeps its own buffer.
-func TestResponsesClientToolStreamRestorer_RestoresSeveralCustomCallsInOneResponse(t *testing.T) {
-	restorer := NewResponsesClientToolStreamRestorer(ResponsesClientToolMapping{CustomTools: map[string]bool{"exec": true}})
-	seq := 0
-	next := func() int { seq++; return seq }
-
-	note := restorer.Restore(ResponsesStreamEvent{Type: "response.output_item.added", SequenceNumber: next(), OutputIndex: 0, Item: &ResponsesOutput{Type: "message", ID: "m1", Role: "assistant", Status: "in_progress"}})
-	require.Len(t, note, 1)
-	require.Equal(t, "message", note[0].Item.Type)
-
-	inputs := []string{"console.log(1)", "console.log(2)"}
-	for i, input := range inputs {
-		index := i + 1
-		itemID, callID := fmt.Sprintf("item_%d", index), fmt.Sprintf("call_%d", index)
-		arguments := `{"input":"` + input + `"}`
-		added := restorer.Restore(ResponsesStreamEvent{Type: "response.output_item.added", SequenceNumber: next(), OutputIndex: index, Item: &ResponsesOutput{Type: "function_call", ID: itemID, CallID: callID, Name: "exec", Status: "in_progress"}})
-		require.Len(t, added, 1)
-		require.Equal(t, "custom_tool_call", added[0].Item.Type)
-		require.Empty(t, restorer.Restore(ResponsesStreamEvent{Type: "response.function_call_arguments.delta", SequenceNumber: next(), OutputIndex: index, ItemID: itemID, Delta: arguments}))
-		done := restorer.Restore(ResponsesStreamEvent{Type: "response.function_call_arguments.done", SequenceNumber: next(), OutputIndex: index, ItemID: itemID, Arguments: arguments})
-		require.Len(t, done, 2)
-		require.Equal(t, "response.custom_tool_call_input.delta", done[0].Type)
-		require.Equal(t, input, done[0].Delta)
-		require.Equal(t, "response.custom_tool_call_input.done", done[1].Type)
-		require.Equal(t, input, done[1].Input)
-		closed := restorer.Restore(ResponsesStreamEvent{Type: "response.output_item.done", SequenceNumber: next(), OutputIndex: index, Item: &ResponsesOutput{Type: "function_call", ID: itemID, CallID: callID, Name: "exec", Arguments: arguments, Status: "completed"}})
-		require.Len(t, closed, 1)
-		require.Equal(t, "custom_tool_call", closed[0].Item.Type)
-		require.Equal(t, callID, closed[0].Item.CallID)
-		require.Equal(t, input, closed[0].Item.Input)
-	}
-}
-
-// Codex folds progress notes under "worked for ..." by the channel (phase) of each assistant message,
-// so restoring the tool calls around a message must leave its phase alone.
-func TestResponsesClientToolStreamRestorer_KeepsMessagePhase(t *testing.T) {
-	restorer := NewResponsesClientToolStreamRestorer(ResponsesClientToolMapping{CustomTools: map[string]bool{"exec": true}})
-	for _, event := range []string{
-		`{"type":"response.output_item.added","sequence_number":3,"output_index":0,"item":{"type":"message","id":"m1","role":"assistant","status":"in_progress","phase":"commentary","content":[]}}`,
-		`{"type":"response.output_item.done","sequence_number":9,"output_index":0,"item":{"type":"message","id":"m1","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Writing the page.","annotations":[]}]}}`,
-	} {
-		restored, _, err := restorer.RestoreEvent([]byte(event))
-		require.NoError(t, err)
-		require.Len(t, restored, 1)
-		require.Equal(t, "commentary", gjson.GetBytes(restored[0], "item.phase").String())
-	}
-
-	terminal := []byte(`{"type":"response.completed","sequence_number":20,"response":{"id":"resp_1","output":[` +
-		`{"type":"message","id":"m1","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Writing the page.","annotations":[]}]},` +
-		`{"type":"function_call","id":"fc_1","call_id":"call_1","name":"exec","arguments":"{\"input\":\"text(1)\"}","status":"completed"}]}}`)
-	restored, changed, err := restorer.RestoreEvent(terminal)
-	require.NoError(t, err)
-	require.True(t, changed)
-	require.Len(t, restored, 1)
-	require.Equal(t, "commentary", gjson.GetBytes(restored[0], "response.output.0.phase").String())
-	require.Equal(t, "custom_tool_call", gjson.GetBytes(restored[0], "response.output.1.type").String())
-	require.Equal(t, "text(1)", gjson.GetBytes(restored[0], "response.output.1.input").String())
-
-	final, _, err := restorer.RestoreEvent([]byte(`{"type":"response.completed","sequence_number":21,"response":{"output":[{"type":"message","id":"m2","role":"assistant","phase":"final_answer","content":[]}]}}`))
-	require.NoError(t, err)
-	require.Equal(t, "final_answer", gjson.GetBytes(final[0], "response.output.0.phase").String())
 }
 
 func TestResponsesClientToolStreamRestorer_ToolSearchAndFunction(t *testing.T) {

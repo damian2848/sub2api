@@ -46,12 +46,12 @@ generate_secret() {
     openssl rand -hex 32
 }
 
-# Generate a non-guessable login email for a fresh admin account.
+# Generate a random admin login email so new installs never use a guessable default
 generate_admin_email() {
     local suffix
     suffix=$(openssl rand -hex 6) || return 1
     [ -n "$suffix" ] || return 1
-    printf 'admin-%s@sub2api.local' "$suffix"
+    echo "admin-${suffix}@sub2api.local"
 }
 
 # Check if command exists
@@ -142,12 +142,19 @@ main() {
     chmod 600 .env
     echo ""
 
-    # Display completion message without exposing credentials in terminal output.
+    # Display completion message
     echo "=========================================="
     echo "  Preparation Complete!"
     echo "=========================================="
     echo ""
-    print_success "Generated credentials were saved to .env (mode 600); secret values are not printed."
+    echo "Generated secure credentials:"
+    echo "  POSTGRES_PASSWORD:     ${POSTGRES_PASSWORD}"
+    echo "  JWT_SECRET:            ${JWT_SECRET}"
+    echo "  TOTP_ENCRYPTION_KEY:   ${TOTP_ENCRYPTION_KEY}"
+    echo "  ADMIN_EMAIL:           ${ADMIN_EMAIL}  (admin login username)"
+    echo ""
+    print_warning "These credentials have been saved to .env file."
+    print_warning "Please keep them secure and do not share publicly!"
     echo ""
     echo "Directory structure:"
     echo "  docker-compose.yml        - Docker Compose configuration"
@@ -168,8 +175,8 @@ main() {
     echo "  4. Access Web UI:"
     echo "     http://localhost:8080"
     echo ""
-    print_info "If ADMIN_PASSWORD is empty, the first startup writes the generated admin credentials to data/admin-credentials.txt (mode 600)."
-    print_info "Read that file once, save the credentials securely, then delete it; the password is never written to logs."
+    print_info "If admin password is not set in .env, it will be auto-generated."
+    print_info "Check logs for the generated admin password on first startup."
     echo ""
 }
 

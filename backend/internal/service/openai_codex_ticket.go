@@ -810,6 +810,9 @@ func (s *OpenAIGatewayService) openAICodexTicketOutboundModel(account *Account, 
 // outboundModel 必须是真正会发给上游的模型名（openAICodexTicketOutboundModel），
 // 不是客户端原始模型：注入侧读的是出站 body.model，两侧口径必须一致。
 func (s *OpenAIGatewayService) openAICodexTicketBlocksAccount(account *Account, outboundModel string) bool {
+	if account.isPrismBrowserUpstreamModelEnabled(outboundModel) {
+		return false
+	}
 	if s == nil || !isOpenAICodexTicketAccount(account, outboundModel) || !s.openAICodexTicketEnabled() {
 		return false
 	}
@@ -1308,12 +1311,12 @@ func IsOpenAICodexTicketExtraKey(key string) bool {
 func MergeOpenAICodexTicketExtra(extra, current map[string]any) map[string]any {
 	result := maps.Clone(extra)
 	for key := range result {
-		if IsOpenAICodexTicketExtraKey(key) {
+		if IsOpenAICodexTicketExtraKey(key) || key == ExcelBPSCredentialStateExtraKey {
 			delete(result, key)
 		}
 	}
 	for key, value := range current {
-		if IsOpenAICodexTicketExtraKey(key) {
+		if IsOpenAICodexTicketExtraKey(key) || key == ExcelBPSCredentialStateExtraKey {
 			if result == nil {
 				result = make(map[string]any)
 			}

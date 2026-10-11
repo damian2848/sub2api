@@ -74,7 +74,7 @@ func (s *ControlledExperimentService) Create(ctx context.Context, input Controll
 	seen := map[string]bool{}
 	for _, route := range input.Routes {
 		switch route.Channel {
-		case "native_http", "native_ws", "bps":
+		case "native_http", "native_ws", "prism", "bps":
 		default:
 			return bad("invalid route channel")
 		}

@@ -753,33 +753,6 @@ describe("admin SettingsView payment visible method controls", () => {
     adminSettingsFetch.mockResolvedValue(undefined);
   });
 
-  it('enables passive aggregation alongside existing active probes and saves hybrid mode', async () => {
-    settingsRoute.query = { tab: 'features' };
-    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, channel_monitor_enabled: true, channel_monitor_mode: 'v1' });
-    const wrapper = mountView();
-    await flushPromises();
-    expect((wrapper.get('[data-testid="monitor-active-toggle"]').element as HTMLInputElement).checked).toBe(true);
-    expect((wrapper.get('[data-testid="monitor-passive-toggle"]').element as HTMLInputElement).checked).toBe(false);
-    await wrapper.get('[data-testid="monitor-passive-toggle"]').setValue(true);
-    await wrapper.find('form').trigger('submit.prevent');
-    await flushPromises();
-    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({ channel_monitor_enabled: true, channel_monitor_mode: 'hybrid' }));
-  });
-
-  it('loads both hybrid sources and disables the total monitor when neither remains enabled', async () => {
-    settingsRoute.query = { tab: 'features' };
-    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, channel_monitor_enabled: true, channel_monitor_mode: 'hybrid' });
-    const wrapper = mountView();
-    await flushPromises();
-    expect((wrapper.get('[data-testid="monitor-active-toggle"]').element as HTMLInputElement).checked).toBe(true);
-    expect((wrapper.get('[data-testid="monitor-passive-toggle"]').element as HTMLInputElement).checked).toBe(true);
-    await wrapper.get('[data-testid="monitor-active-toggle"]').setValue(false);
-    await wrapper.get('[data-testid="monitor-passive-toggle"]').setValue(false);
-    await wrapper.find('form').trigger('submit.prevent');
-    await flushPromises();
-    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({ channel_monitor_enabled: false, channel_monitor_mode: 'v2' }));
-  });
-
   it("opens the risk settings from a deep link after loading without changing switches", async () => {
     settingsRoute.query = { tab: 'features' };
     settingsRoute.hash = '#settings-section-features-risk-control';
@@ -832,6 +805,25 @@ describe("admin SettingsView payment visible method controls", () => {
     // Saving system settings must not overwrite what the Smart Ops page saved.
     expect(payload).not.toHaveProperty("pelican_showcase_enabled");
     expect(payload).not.toHaveProperty("pelican_showcase_config");
+    wrapper.unmount();
+  });
+
+  it("leaves the monitor mode alone unless it was changed here", async () => {
+    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, channel_monitor_enabled: true, channel_monitor_mode: "v3" });
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    // The monitor page may have switched the mode since this page loaded.
+    expect(updateSettings.mock.calls[0]?.[0]?.channel_monitor_mode).toBeUndefined();
+
+    const featuresTab = wrapper.findAll("button").find((node) => node.text().includes("admin.settings.tabs.features"));
+    await featuresTab?.trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="settings-monitor-mode-v1"]').trigger("click");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings.mock.calls[1]?.[0]).toMatchObject({ channel_monitor_mode: "v1" });
     wrapper.unmount();
   });
 
@@ -947,18 +939,17 @@ describe("admin SettingsView payment visible method controls", () => {
     wrapper.unmount();
   });
 
-  it("saves the BPS protocol switch", async () => {
+  it("saves the BPS and Prism protocol switches", async () => {
     const wrapper = mountView();
     await flushPromises();
     const tab = wrapper.findAll('button').find((node) => node.text().includes('admin.settings.tabs.features'));
     await tab?.trigger('click');
     const protocolSwitches = wrapper.get('[data-testid="protocol-feature-switches"]');
-    expect(protocolSwitches.findAll('input')).toHaveLength(1);
     await protocolSwitches.get('input').setValue(false);
+    await protocolSwitches.findAll('input')[1].setValue(true);
     await wrapper.find('form').trigger('submit.prevent');
     await flushPromises();
-    expect(updateSettings.mock.calls[0]?.[0]).toMatchObject({ excel_bps_enabled: false });
-    expect(updateSettings.mock.calls[0]?.[0]).not.toHaveProperty('prism_browser_enabled');
+    expect(updateSettings.mock.calls[0]?.[0]).toMatchObject({ excel_bps_enabled: false, prism_browser_enabled: true });
     wrapper.unmount();
   });
 
@@ -1125,6 +1116,18 @@ describe("admin SettingsView payment visible method controls", () => {
     expect(updateSettings).not.toHaveBeenCalled();
     expect(showError).toHaveBeenLastCalledWith('admin.settings.features.excelBpsImages.invalidCapacity');
     wrapper.unmount();
+  });
+
+  it.each([false, true])("loads and toggles request timezone binding from %s", async (enabled) => {
+    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, openai_request_timezone_enabled: enabled });
+    const wrapper = mountView();
+    await flushPromises();
+    const toggle = wrapper.get<HTMLInputElement>("#request-timezone-enabled");
+    expect(toggle.element.checked).toBe(enabled);
+    await toggle.setValue(!enabled);
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+    expect(updateSettings.mock.calls[0]?.[0].openai_request_timezone_enabled).toBe(!enabled);
   });
 
   it("submits the Codex ticket harvest toggle", async () => {

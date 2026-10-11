@@ -74,13 +74,7 @@ var ChannelMonitorV2ErrorCategories = []string{
 	"other",
 }
 
-// ChannelMonitorV2AccountingVersion identifies the aggregate semantics; upgrades
-// restart bounded historical recomputation rather than mixing old rollups.
-const ChannelMonitorV2AccountingVersion = 2
-
 type ChannelMonitorV2Filter struct {
-	// Source is all (or empty), business, or probe for actual API requests.
-	Source    string
 	Range     string
 	Platforms []string
 	GroupIDs  []int64
@@ -96,40 +90,26 @@ type ChannelMonitorV2Filter struct {
 }
 
 type ChannelMonitorV2Metric struct {
-	HasSamples bool `json:"has_samples"`
-	// HasSamples describes real generation requests from business and probe
-	// sources. Task observation counts below are diagnostic metadata only;
-	// quality verdicts do not supply transport availability.
-	ProbeSampleCount            int64                   `json:"probe_sample_count"`
-	ProbePassedCount            int64                   `json:"probe_passed_count"`
-	ProbeFailedCount            int64                   `json:"probe_failed_count"`
-	ProbeInconclusiveCount      int64                   `json:"probe_inconclusive_count"`
-	ProbeAvailability           *float64                `json:"probe_availability,omitempty"`
-	ProbeCheckedAt              *time.Time              `json:"probe_checked_at,omitempty"`
-	AvailabilitySource          string                  `json:"availability_source,omitempty"`
-	SuccessRequests             int64                   `json:"success_requests"`
-	ErrorRequests               int64                   `json:"error_requests"`
-	RequestCount                int64                   `json:"request_count"`
-	BusinessRequestCount        int64                   `json:"business_request_count"`
-	ProbeRequestCount           int64                   `json:"probe_request_count"`
-	UsageIncompleteRequestCount int64                   `json:"usage_incomplete_request_count"`
-	CostIncompleteRequestCount  int64                   `json:"cost_incomplete_request_count"`
-	InputTokens                 int64                   `json:"input_tokens"`
-	OutputTokens                int64                   `json:"output_tokens"`
-	CacheCreationTokens         int64                   `json:"cache_creation_tokens"`
-	CacheReadTokens             int64                   `json:"cache_read_tokens"`
-	TokenCount                  int64                   `json:"token_count"`
-	RPM                         float64                 `json:"rpm"`
-	TPM                         float64                 `json:"tpm"`
-	ErrorRate                   float64                 `json:"error_rate"`
-	SuccessRate                 float64                 `json:"success_rate"`
-	CacheRate                   float64                 `json:"cache_rate"`
-	CacheRateNumerator          int64                   `json:"cache_rate_numerator"`
-	CacheRateDenominator        int64                   `json:"cache_rate_denominator"`
-	TTFT                        ChannelMonitorV2Latency `json:"ttft"`
-	Duration                    ChannelMonitorV2Latency `json:"duration"`
-	UpstreamAffectedRequests    *int64                  `json:"upstream_affected_requests,omitempty"`
-	UpstreamAttemptCount        *int64                  `json:"upstream_attempt_count,omitempty"`
+	HasSamples               bool                    `json:"has_samples"`
+	SuccessRequests          int64                   `json:"success_requests"`
+	ErrorRequests            int64                   `json:"error_requests"`
+	RequestCount             int64                   `json:"request_count"`
+	InputTokens              int64                   `json:"input_tokens"`
+	OutputTokens             int64                   `json:"output_tokens"`
+	CacheCreationTokens      int64                   `json:"cache_creation_tokens"`
+	CacheReadTokens          int64                   `json:"cache_read_tokens"`
+	TokenCount               int64                   `json:"token_count"`
+	RPM                      float64                 `json:"rpm"`
+	TPM                      float64                 `json:"tpm"`
+	ErrorRate                float64                 `json:"error_rate"`
+	SuccessRate              float64                 `json:"success_rate"`
+	CacheRate                float64                 `json:"cache_rate"`
+	CacheRateNumerator       int64                   `json:"cache_rate_numerator"`
+	CacheRateDenominator     int64                   `json:"cache_rate_denominator"`
+	TTFT                     ChannelMonitorV2Latency `json:"ttft"`
+	Duration                 ChannelMonitorV2Latency `json:"duration"`
+	UpstreamAffectedRequests *int64                  `json:"upstream_affected_requests,omitempty"`
+	UpstreamAttemptCount     *int64                  `json:"upstream_attempt_count,omitempty"`
 }
 
 type ChannelMonitorV2Latency struct {
@@ -146,7 +126,7 @@ type ChannelMonitorV2Health struct {
 	TTFT      string `json:"ttft"`
 	Cache     string `json:"cache"`
 	// Score is 0–100 when samples are sufficient; omitted/null when unknown.
-	// Overall blends API error rate and TTFT p50. Cache is a separate efficiency signal.
+	// Overall blends error-rate, TTFT p50, and cache rate (weights in Thresholds).
 	Score          *float64                         `json:"score,omitempty"`
 	ErrorRateScore *float64                         `json:"error_rate_score,omitempty"`
 	TTFTScore      *float64                         `json:"ttft_score,omitempty"`
@@ -156,8 +136,7 @@ type ChannelMonitorV2Health struct {
 }
 
 type ChannelMonitorV2HealthThresholds struct {
-	// MinimumSample counts real requests before any signal is scored.
-	// TTFT also requires this many measured latency samples; token counts are not samples.
+	// MinimumSample is required before scoring request/latency/cache signals.
 	MinimumSample int64 `json:"minimum_sample"`
 	// WarningErrorRate / CriticalErrorRate map to discrete bands for legacy UI.
 	WarningErrorRate  float64 `json:"warning_error_rate"`
@@ -167,13 +146,12 @@ type ChannelMonitorV2HealthThresholds struct {
 	WarningTTFTMs  int64 `json:"warning_ttft_ms"`
 	CriticalTTFTMs int64 `json:"critical_ttft_ms"`
 	// WarningCacheRate / CriticalCacheRate: cache rate below these → warning/critical bands.
-	// Higher cache rate is better; zero/zero disables independent cache penalties by default.
+	// Higher cache rate is better; defaults 20% warning / 5% critical.
 	WarningCacheRate  float64 `json:"warning_cache_rate"`
 	CriticalCacheRate float64 `json:"critical_cache_rate"`
-	// Positive ErrorWeight and TTFTWeight are normalized over observed API signals.
+	// ErrorWeight + TTFTWeight + CacheWeight should sum to 1.0.
 	ErrorWeight float64 `json:"error_weight"`
 	TTFTWeight  float64 `json:"ttft_weight"`
-	// CacheWeight is retained for configuration compatibility, not API overall scoring.
 	CacheWeight float64 `json:"cache_weight"`
 }
 
@@ -216,7 +194,6 @@ type ChannelMonitorV2Bootstrap struct {
 
 // ChannelMonitorV2AggregationWatermark is the durable aggregator cursor state.
 type ChannelMonitorV2AggregationWatermark struct {
-	AccountingVersion  int
 	UsageCoverageStart time.Time
 	ErrorCoverageStart time.Time
 	DataThrough        time.Time
@@ -269,16 +246,15 @@ type ChannelMonitorV2ModelRow struct {
 }
 
 type ChannelMonitorV2MatrixRow struct {
-	CandyHistories      []*ChannelMonitorV2CandyHistory `json:"candy_histories,omitempty"`
-	Candy               *ChannelMonitorV2CandyHistory   `json:"candy,omitempty"`
-	GroupRateMultiplier *float64                        `json:"group_rate_multiplier,omitempty"`
-	Platform            string                          `json:"platform"`
-	GroupID             *int64                          `json:"group_id,omitempty"`
-	GroupName           string                          `json:"group_name,omitempty"`
-	Model               string                          `json:"model,omitempty"`
-	Metrics             ChannelMonitorV2Metric          `json:"metrics"`
-	Health              ChannelMonitorV2Health          `json:"health"`
-	Buckets             []ChannelMonitorV2TrendPoint    `json:"buckets"`
+	Candy               *ChannelMonitorV2CandyHistory `json:"candy,omitempty"`
+	GroupRateMultiplier *float64                      `json:"group_rate_multiplier,omitempty"`
+	Platform            string                        `json:"platform"`
+	GroupID             *int64                        `json:"group_id,omitempty"`
+	GroupName           string                        `json:"group_name,omitempty"`
+	Model               string                        `json:"model,omitempty"`
+	Metrics             ChannelMonitorV2Metric        `json:"metrics"`
+	Health              ChannelMonitorV2Health        `json:"health"`
+	Buckets             []ChannelMonitorV2TrendPoint  `json:"buckets"`
 }
 
 type ChannelMonitorV2Matrix struct {
@@ -414,7 +390,7 @@ func NewChannelMonitorV2Service(repo ChannelMonitorV2Repository) *ChannelMonitor
 	return &ChannelMonitorV2Service{repo: repo, now: func() time.Time { return time.Now().UTC() }}
 }
 
-// SetRuntimeReader wires runtime probe gates and viewer privacy settings.
+// SetRuntimeReader wires optional settings for privacy flags (hide throughput).
 func (s *ChannelMonitorV2Service) SetRuntimeReader(r channelMonitorRuntimeReader) {
 	if s == nil {
 		return
@@ -455,7 +431,7 @@ func (s *ChannelMonitorV2Service) getEnabledConfig(ctx context.Context) (*Channe
 	if err != nil {
 		return nil, err
 	}
-	if cfg == nil {
+	if cfg == nil || !cfg.Enabled {
 		return nil, ErrChannelMonitorDisabled
 	}
 	return cfg, nil
@@ -512,15 +488,6 @@ func (s *ChannelMonitorV2Service) Dimensions(ctx context.Context, filter Channel
 	if err != nil {
 		return nil, err
 	}
-	if targets, ok := s.repo.(interface {
-		ListMonitorObservationTargets(context.Context, ChannelMonitorV2Filter) ([]ChannelMonitorObservation, error)
-	}); ok {
-		rows, loadErr := targets.ListMonitorObservationTargets(ctx, filter)
-		if loadErr != nil {
-			return nil, loadErr
-		}
-		mergeMonitorObservationDimensions(dims, rows, filter, cfg)
-	}
 	// Dimension request_count is operational volume; strip for non-admin callers
 	// at the API edge. Dimensions is shared by user/admin routes — redaction is
 	// applied in the handler for user routes only, so keep raw here.
@@ -536,17 +503,6 @@ func (s *ChannelMonitorV2Service) Snapshot(ctx context.Context, filter ChannelMo
 	if err != nil {
 		return nil, err
 	}
-	if snap != nil {
-		probes, err := s.loadAvailabilityProbes(ctx, filter, cfg, admin)
-		if err != nil {
-			return nil, err
-		}
-		var total channelMonitorProbeAvailability
-		for _, probe := range probes {
-			total.add(probe.observation)
-		}
-		total.apply(&snap.Metrics, &snap.Health, cfg.HealthThresholds)
-	}
 	if !admin && snap != nil {
 		redactChannelMonitorV2Snapshot(snap, s.hideThroughputForViewer(ctx, admin))
 	}
@@ -561,13 +517,6 @@ func (s *ChannelMonitorV2Service) Models(ctx context.Context, filter ChannelMoni
 	list, err := s.repo.GetModels(ctx, filter, *cfg, admin)
 	if err != nil {
 		return nil, err
-	}
-	if list != nil {
-		probes, err := s.loadAvailabilityProbes(ctx, filter, cfg, admin)
-		if err != nil {
-			return nil, err
-		}
-		mergeModelProbeAvailability(list, probes, cfg.HealthThresholds)
 	}
 	if !admin && list != nil {
 		hideTP := s.hideThroughputForViewer(ctx, admin)
@@ -589,13 +538,6 @@ func (s *ChannelMonitorV2Service) Matrix(ctx context.Context, filter ChannelMoni
 	matrix, err := s.repo.GetMatrix(ctx, filter, *cfg, groupBy, admin)
 	if err != nil {
 		return nil, err
-	}
-	if matrix != nil {
-		probes, err := s.loadAvailabilityProbes(ctx, filter, cfg, admin)
-		if err != nil {
-			return nil, err
-		}
-		mergeMatrixProbeAvailability(matrix, probes, groupBy, cfg.HealthThresholds)
 	}
 	if !admin && matrix != nil {
 		hideTP := s.hideThroughputForViewer(ctx, admin)
@@ -713,17 +655,9 @@ func redactChannelMonitorV2Metric(m *ChannelMonitorV2Metric, hideThroughput bool
 		return
 	}
 	m.HasSamples = m.RequestCount > 0
-	m.ProbeSampleCount = 0
-	m.ProbePassedCount = 0
-	m.ProbeFailedCount = 0
-	m.ProbeInconclusiveCount = 0
 	m.SuccessRequests = 0
 	m.ErrorRequests = 0
 	m.RequestCount = 0
-	m.BusinessRequestCount = 0
-	m.ProbeRequestCount = 0
-	m.UsageIncompleteRequestCount = 0
-	m.CostIncompleteRequestCount = 0
 	m.InputTokens = 0
 	m.OutputTokens = 0
 	m.CacheCreationTokens = 0
@@ -886,8 +820,8 @@ func DefaultChannelMonitorV2HealthThresholds() ChannelMonitorV2HealthThresholds 
 		TargetTTFTMs:      3000,
 		WarningTTFTMs:     3000,
 		CriticalTTFTMs:    10000,
-		// A zero/zero cache threshold disables penalties on the independent cache
-		// indicator until an operator explicitly configures cache scoring.
+		// A zero/zero cache threshold means cache misses do not affect health
+		// until an operator explicitly configures cache scoring.
 		WarningCacheRate:  0,
 		CriticalCacheRate: 0,
 		ErrorWeight:       0.60,
@@ -1049,33 +983,24 @@ func ChannelMonitorV2HealthForWithThresholds(metrics ChannelMonitorV2Metric, thr
 		Overall: "unknown", ErrorRate: "unknown", TTFT: "unknown", Cache: "unknown",
 		MinimumSample: thresholds.MinimumSample, Thresholds: thresholds,
 	}
-	// A few long prompts must not supply enough "samples" through their token
-	// counts to turn otherwise unknown API health red (or green).
 	if metrics.RequestCount < result.MinimumSample {
 		return result
 	}
 
-	// Preserve legacy configuration, including cache-only weights, without
-	// letting cache decide API health or leaving such configurations unscorable.
-	errorWeight, ttftWeight := thresholds.ErrorWeight, thresholds.TTFTWeight
-	if errorWeight <= 0 && ttftWeight <= 0 {
-		defaults := DefaultChannelMonitorV2HealthThresholds()
-		errorWeight, ttftWeight = defaults.ErrorWeight, defaults.TTFTWeight
-	}
 	type scored struct {
 		score  float64
 		weight float64
+		band   string
 	}
-	parts := make([]scored, 0, 2)
+	parts := make([]scored, 0, 3)
 
-	errorScore := errorRateScore(metrics.ErrorRate, thresholds.CriticalErrorRate)
-	result.ErrorRateScore = &errorScore
-	result.ErrorRate = healthBand(metrics.ErrorRate, thresholds.WarningErrorRate, thresholds.CriticalErrorRate)
-	if errorWeight > 0 {
-		parts = append(parts, scored{score: errorScore, weight: errorWeight})
+	if metrics.RequestCount >= result.MinimumSample {
+		s := errorRateScore(metrics.ErrorRate, thresholds.CriticalErrorRate)
+		result.ErrorRateScore = &s
+		result.ErrorRate = healthBand(metrics.ErrorRate, thresholds.WarningErrorRate, thresholds.CriticalErrorRate)
+		parts = append(parts, scored{score: s, weight: thresholds.ErrorWeight, band: result.ErrorRate})
 	}
 	// Prefer p50 for TTFT scoring; fall back to p95 only if p50 is missing.
-	// Enough requests do not manufacture missing first-token observations.
 	if metrics.TTFT.SampleCount >= result.MinimumSample {
 		var ttftMs *int64
 		if metrics.TTFT.P50Ms != nil {
@@ -1087,21 +1012,20 @@ func ChannelMonitorV2HealthForWithThresholds(metrics ChannelMonitorV2Metric, thr
 			s := ttftP50Score(float64(*ttftMs), float64(thresholds.TargetTTFTMs), float64(thresholds.CriticalTTFTMs))
 			result.TTFTScore = &s
 			result.TTFT = healthBand(float64(*ttftMs), float64(thresholds.WarningTTFTMs), float64(thresholds.CriticalTTFTMs))
-			if ttftWeight > 0 {
-				parts = append(parts, scored{score: s, weight: ttftWeight})
-			}
+			parts = append(parts, scored{score: s, weight: thresholds.TTFTWeight, band: result.TTFT})
 		}
 	}
-	// Cache is an independent efficiency indicator. The request-sample gate
-	// above applies; its token denominator is only for computing the hit ratio.
-	if metrics.CacheRateDenominator > 0 {
+	// Cache: need a meaningful denominator; higher rate is better.
+	if metrics.CacheRateDenominator >= result.MinimumSample {
 		s := cacheRateScore(metrics.CacheRate)
 		if thresholds.WarningCacheRate <= 0 && thresholds.CriticalCacheRate <= 0 {
 			// A zero/zero cache threshold means "do not penalize cache misses".
 			s = 100
 		}
 		result.CacheScore = &s
+		// Invert for healthBand (lower is worse): use (1 - rate) against warning/critical floors.
 		result.Cache = cacheRateBand(metrics.CacheRate, thresholds.WarningCacheRate, thresholds.CriticalCacheRate)
+		parts = append(parts, scored{score: s, weight: thresholds.CacheWeight, band: result.Cache})
 	}
 
 	if len(parts) == 0 {
@@ -1111,6 +1035,9 @@ func ChannelMonitorV2HealthForWithThresholds(metrics ChannelMonitorV2Metric, thr
 	for _, p := range parts {
 		weightSum += p.weight
 		scoreSum += p.weight * p.score
+	}
+	if weightSum <= 0 {
+		return result
 	}
 	overall := scoreSum / weightSum
 	result.Score = &overall

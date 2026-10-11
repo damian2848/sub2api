@@ -15,11 +15,6 @@ on:
         required: false
         type: boolean
         default: false
-      publish_images:
-        description: 'Publish container images (binary releases work without registry permissions)'
-        required: false
-        type: boolean
-        default: true
       notify_release:
         description: 'Send the release announcement to Telegram (explicit opt-in)'
         required: false
@@ -41,7 +36,6 @@ permissions:
 env:
   SIMPLE_RELEASE: ${{ inputs.simple_release == true || vars.SIMPLE_RELEASE == 'true' }}
   DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
-  PUBLISH_IMAGES: ${{ vars.PUBLISH_CONTAINER_IMAGES != 'false' && (github.event_name != 'workflow_dispatch' || inputs.publish_images == true) }}
 
 jobs:
   prepare:
@@ -78,10 +72,6 @@ jobs:
           REQUESTED_REF: ${{ inputs.tag || github.ref_name }}
         run: |
           args=(--ref "$REQUESTED_REF")
-          if [[ "$SIMPLE_RELEASE" == true && "$PUBLISH_IMAGES" != true ]]; then
-            echo 'Simple releases require container publishing; use a full binary release instead.' >&2
-            exit 1
-          fi
           if [[ "$SIMPLE_RELEASE" == true ]]; then args+=(--simple); fi
           if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
           python "$RUNNER_TEMP/release-tools/release_matrix.py" plan "${args[@]}"
@@ -277,7 +267,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to DockerHub
-        if: ${{ env.PUBLISH_IMAGES == 'true' && env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && env.DOCKERHUB_USERNAME != '' }}
+        if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && env.DOCKERHUB_USERNAME != '' }}
         uses: docker/login-action@v3
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -285,14 +275,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Login to GitHub Container Registry
-        if: ${{ env.PUBLISH_IMAGES == 'true' && env.DRY_RUN != 'true' }}
+        if: ${{ env.DRY_RUN != 'true' }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build images and publish manifests
-        if: ${{ env.PUBLISH_IMAGES == 'true' }}
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME || 'skip' }}
         run: bash "$RUNNER_TEMP/release-tools/release-images.sh"
@@ -334,32 +323,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "$RELEASE_TAG" reauth-output/*.tar.gz --repo "$GITHUB_REPOSITORY"
-      # The optional Prism browser service is built by users from source, so ship that source with the
-      # compose file, env example and guide at exactly the released revision. Skipped for revisions that
-      # do not contain it and for the simple release.
-      - name: Package the Prism browser service
-        if: ${{ env.SIMPLE_RELEASE != 'true' }}
-        run: |
-          set -euo pipefail
-          paths=()
-          for path in tools/prism-browser deploy/docker-compose.prism-browser.yml deploy/.env.prism-browser.example deploy/PRISM_BROWSER.md; do
-            if git cat-file -e "$RELEASE_SHA:$path" 2>/dev/null; then paths+=("$path"); fi
-          done
-          if ! git cat-file -e "$RELEASE_SHA:tools/prism-browser/Dockerfile" 2>/dev/null; then
-            echo "This revision has no Prism browser service; nothing to package."
-            exit 0
-          fi
-          name="prism-browser_${RELEASE_VERSION}"
-          rm -rf prism-output && mkdir -p "prism-output/$name"
-          git archive "$RELEASE_SHA" -- "${paths[@]}" | tar -x -C "prism-output/$name"
-          tar -C prism-output -czf "prism-output/${name}.tar.gz" "$name"
-          (cd prism-output && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" && rm -rf "$name")
-          ls -l prism-output
-      - name: Publish the Prism browser service package
-        if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && hashFiles('prism-output/*.tar.gz') != '' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "$RELEASE_TAG" prism-output/*.tar.gz prism-output/*.tar.gz.sha256 --repo "$GITHUB_REPOSITORY"
       - name: Upload dry-run checksums and metadata
         if: ${{ env.DRY_RUN == 'true' }}
         uses: actions/upload-artifact@v7
@@ -369,13 +332,12 @@ jobs:
             dist/checksums.txt
             dist/artifacts.json
             dist/metadata.json
-            prism-output/*
           if-no-files-found: error
           retention-days: 3
 
       # Update DockerHub description
       - name: Update DockerHub description
-        if: ${{ env.PUBLISH_IMAGES == 'true' && env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && env.DOCKERHUB_USERNAME != '' && needs.prepare.outputs.prerelease != 'true' }}
+        if: ${{ env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && env.DOCKERHUB_USERNAME != '' && needs.prepare.outputs.prerelease != 'true' }}
         uses: peter-evans/dockerhub-description@v5
         env:
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}

@@ -41,7 +41,6 @@ type ChannelMonitor struct {
 	PrimaryModel    string
 	ExtraModels     []string
 	GroupName       string
-	GroupID         *int64
 	Enabled         bool
 	IntervalSeconds int
 	JitterSeconds   int // 每次调度 ± [0, jitter] 的随机偏移（秒），0 = 固定间隔
@@ -91,7 +90,6 @@ type ChannelMonitorCreateParams struct {
 	PrimaryModel     string
 	ExtraModels      []string
 	GroupName        string
-	GroupID          *int64
 	Enabled          bool
 	IntervalSeconds  int
 	JitterSeconds    int
@@ -116,7 +114,6 @@ type ChannelMonitorUpdateParams struct {
 	PrimaryModel    *string
 	ExtraModels     *[]string
 	GroupName       *string
-	GroupID         *int64 // nil keeps the binding; zero removes it.
 	Enabled         *bool
 	IntervalSeconds *int
 	JitterSeconds   *int
@@ -137,7 +134,6 @@ type ChannelMonitorUpdateParams struct {
 
 // CheckResult 单个模型一次检测的结果。
 type CheckResult struct {
-	Usage         *ChannelMonitorProbeUsage
 	Model         string
 	Status        string // operational / degraded / failed / error
 	LatencyMs     *int
@@ -203,8 +199,6 @@ type ModelDetail struct {
 
 // ChannelMonitorHistoryRow 历史记录入库行（service 层向 repository 提交的数据）。
 type ChannelMonitorHistoryRow struct {
-	Usage         *ChannelMonitorProbeUsage
-	Scope         *ChannelMonitorObservationScope
 	MonitorID     int64
 	Model         string
 	Status        string

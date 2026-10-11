@@ -204,6 +204,23 @@
         <!-- Tab: Gateway -->
         <div v-show="activeTab === 'gateway'" class="space-y-6">
           <ServerlessSettings v-if="activeTab === 'gateway'" />
+          <div class="card" data-testid="prism-browser-settings">
+            <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+              <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Prism 浏览器桥</h2>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">账号可单独选择 Prism 模型范围。</p>
+            </div>
+            <div class="space-y-4 p-6">
+              <label class="block">
+                <span class="mb-1 block text-sm text-gray-600 dark:text-gray-300">适配器 Base URL</span>
+                <input v-model="form.prism_browser_base_url" class="input w-full" placeholder="http://127.0.0.1:8319/v1" />
+              </label>
+              <label class="block">
+                <span class="mb-1 block text-sm text-gray-600 dark:text-gray-300">桥接 API Key（留空保持原值）</span>
+                <input v-model="form.prism_browser_api_key" type="password" autocomplete="new-password" class="input w-full" />
+              </label>
+              <p v-if="form.prism_browser_enabled && !form.prism_browser_api_key_configured" class="text-sm text-amber-600">启用前必须配置至少 32 个字符的适配器密钥。</p>
+            </div>
+          </div>
           <!-- Overload Cooldown (529) Settings -->
           <div class="card">
             <div
@@ -4503,6 +4520,7 @@
               </h2>
             </div>
             <div class="p-6 space-y-4">
+                <RequestTimezoneSettings v-model="form.openai_request_timezone_enabled" />
                 <div class="flex items-center justify-between gap-4">
                   <div class="min-w-0">
                     <h3 class="text-base font-semibold text-gray-900 dark:text-white">
@@ -7372,13 +7390,17 @@
         <div v-show="activeTab === 'features'" class="space-y-6">
         <div class="card" data-testid="protocol-feature-switches">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('admin.settings.features.protocolSwitches.title') }}</h2>
-            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.settings.features.protocolSwitches.description') }}</p>
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">协议功能</h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">关闭后立即停止使用对应协议，并隐藏账号编辑中的相关选项。</p>
           </div>
           <div class="space-y-5 p-6">
             <div class="flex items-center justify-between gap-4">
-              <span id="settings-excel-bps-enabled-label" class="font-medium text-gray-900 dark:text-white">{{ t('admin.settings.features.protocolSwitches.excelBps') }}</span>
-              <Toggle v-model="form.excel_bps_enabled" aria-labelledby="settings-excel-bps-enabled-label" data-testid="excel-bps-enabled-toggle" />
+              <span class="font-medium text-gray-900 dark:text-white">Excel / BPS 协议</span>
+              <Toggle v-model="form.excel_bps_enabled" />
+            </div>
+            <div class="flex items-center justify-between gap-4">
+              <span class="font-medium text-gray-900 dark:text-white">Prism 浏览器桥</span>
+              <Toggle v-model="form.prism_browser_enabled" />
             </div>
           </div>
         </div>
@@ -7400,7 +7422,128 @@
             <p class="text-xs text-amber-700 dark:text-amber-300">{{ t('admin.requestCapture.privacy') }}</p>
           </div>
         </div>
-        <BPSImageSettingsCard v-model="form" />
+        <div class="card" data-testid="excel-bps-image-settings">
+          <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+            <h2 id="settings-section-features-excel-bps-images" tabindex="-1" class="text-lg font-semibold text-gray-900 dark:text-white">
+              {{ t('admin.settings.features.excelBpsImages.title') }}
+            </h2>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+              {{ t('admin.settings.features.excelBpsImages.description') }}
+            </p>
+          </div>
+          <div class="space-y-5 p-6">
+            <div class="flex items-center justify-between gap-4">
+              <div>
+                <label for="excel-bps-image-enabled" class="text-sm font-medium text-gray-700 dark:text-gray-300">
+                  {{ t('admin.settings.features.excelBpsImages.enabled') }}
+                </label>
+                <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.features.excelBpsImages.enabledHint') }}
+                </p>
+              </div>
+              <Toggle id="excel-bps-image-enabled" v-model="form.excel_bps_image_relay_enabled" />
+            </div>
+            <div v-if="form.excel_bps_image_relay_enabled">
+              <label for="excel-bps-image-mode" class="input-label">{{ t('admin.settings.features.excelBpsImages.mode') }}</label>
+              <select id="excel-bps-image-mode" v-model="form.excel_bps_image_mode" class="input">
+                <option value="relay">{{ t('admin.settings.features.excelBpsImages.modeRelay') }}</option>
+                <option value="native">{{ t('admin.settings.features.excelBpsImages.modeNative') }}</option>
+              </select>
+              <p v-if="form.excel_bps_image_mode === 'native'" class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.settings.features.excelBpsImages.nativeHint') }}
+              </p>
+              <div v-if="form.excel_bps_image_mode === 'relay'" class="mt-5">
+                <label for="excel-bps-image-base-url" class="input-label">
+                  {{ t('admin.settings.features.excelBpsImages.baseUrl') }}
+                </label>
+                <input
+                  id="excel-bps-image-base-url"
+                  v-model.trim="form.excel_bps_image_base_url"
+                  type="url"
+                  class="input"
+                  placeholder="https://your-api.example.com"
+                  required
+                />
+                <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.features.excelBpsImages.baseUrlHint') }}
+                </p>
+              </div>
+              <div class="mt-5 space-y-3" data-testid="bps-image-policy">
+                <label class="input-label" for="bps-image-limit-policy">{{ t('admin.settings.features.excelBpsImages.policyTitle') }}</label>
+                <select id="bps-image-limit-policy" v-model="form.excel_bps_image_limit_policy" class="input">
+                  <option value="off">{{ t('admin.settings.features.excelBpsImages.policyOff') }}</option>
+                  <option value="auto_compact">{{ t('admin.settings.features.excelBpsImages.policyAuto') }}</option>
+                  <option value="warn">{{ t('admin.settings.features.excelBpsImages.policyWarn') }}</option>
+                </select>
+                <p class="text-xs text-gray-500">{{ t('admin.settings.features.excelBpsImages.policyHint') }}</p>
+                <div v-if="form.excel_bps_image_limit_policy === 'warn'" class="grid gap-4 sm:grid-cols-2">
+                  <label class="space-y-1"><span class="input-label">{{ t('admin.settings.features.excelBpsImages.policyWarning') }}</span><input id="bps-image-warning-remaining" v-model.number="form.excel_bps_image_warning_remaining" class="input" type="number" min="1" :max="excelBPSImageLimits.images" required /></label>
+                  <label class="space-y-1"><span class="input-label">{{ t('admin.settings.features.excelBpsImages.policyReserve') }}</span><input id="bps-image-compact-reserve" v-model.number="form.excel_bps_image_compact_reserve" class="input" type="number" min="1" :max="excelBPSImageLimits.images" required /></label>
+                  <p class="text-xs text-gray-500 sm:col-span-2">{{ t('admin.settings.features.excelBpsImages.policyMarginsHint') }}</p>
+                </div>
+              </div>
+              <h4 class="mt-6 input-label">{{ t('admin.settings.features.excelBpsImages.requestLimitsTitle') }}</h4>
+              <div class="mt-5 grid gap-4 sm:grid-cols-4">
+                <div class="space-y-1">
+                  <label for="excel-bps-image-body-limit" class="input-label">{{ t('admin.settings.features.excelBpsImages.bodyLimit') }}</label>
+                  <input id="excel-bps-image-body-limit" v-model.number="form.excel_bps_image_body_limit_mib" class="input" type="number" min="1" :max="excelBPSImageLimits.bodyMiB" step="1" required />
+                </div>
+                <div class="space-y-1">
+                  <label for="excel-bps-image-budget" class="input-label">{{ t('admin.settings.features.excelBpsImages.budget') }}</label>
+                  <input id="excel-bps-image-budget" v-model.number="form.excel_bps_image_budget_mib" class="input" type="number" :min="excelBPSImageLimits.minBudgetMiB" :max="excelBPSImageLimits.budgetMiB" step="1" required />
+                </div>
+                <div class="space-y-1">
+                  <label for="excel-bps-image-max-requests" class="input-label">{{ t('admin.settings.features.excelBpsImages.maxRequests') }}</label>
+                  <input id="excel-bps-image-max-requests" v-model.number="form.excel_bps_image_max_requests" class="input" type="number" min="1" :max="excelBPSImageLimits.requests" step="1" required />
+                </div>
+                <div class="space-y-1">
+                  <label for="excel-bps-image-max-images" class="input-label">{{ t('admin.settings.features.excelBpsImages.maxImages') }}</label>
+                  <input id="excel-bps-image-max-images" v-model.number="form.excel_bps_image_max_images" class="input" type="number" min="1" :max="excelBPSImageLimits.images" step="1" required />
+                  <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.settings.features.excelBpsImages.limitRange', { max: excelBPSImageLimits.images }) }}</p>
+                </div>
+              </div>
+              <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.settings.features.excelBpsImages.budgetHint', excelBPSImageLimits) }}
+              </p>
+              <p v-if="form.excel_bps_image_mode === 'native'" class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.settings.features.excelBpsImages.nativeRetentionHint', { maxImages: form.excel_bps_image_max_images }) }}
+              </p>
+              <template v-if="form.excel_bps_image_mode === 'relay'">
+                <h4 class="mt-6 input-label">{{ t('admin.settings.features.excelBpsImages.imageLimitsTitle') }}</h4>
+                <div class="mt-3 grid gap-4 sm:grid-cols-3">
+                  <div class="space-y-1">
+                    <label for="excel-bps-image-max-image-mib" class="input-label">{{ t('admin.settings.features.excelBpsImages.maxImageMiB') }}</label>
+                    <input id="excel-bps-image-max-image-mib" v-model.number="form.excel_bps_image_max_image_mib" class="input" type="number" min="1" :max="excelBPSImageLimits.imageMiB" step="1" required />
+                    <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.settings.features.excelBpsImages.limitRange', { max: excelBPSImageLimits.imageMiB }) }}</p>
+                  </div>
+                  <div class="space-y-1">
+                    <label for="excel-bps-image-max-total-mib" class="input-label">{{ t('admin.settings.features.excelBpsImages.maxTotalMiB') }}</label>
+                    <input id="excel-bps-image-max-total-mib" v-model.number="form.excel_bps_image_max_total_mib" class="input" type="number" min="1" :max="excelBPSImageLimits.totalMiB" step="1" required />
+                    <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.settings.features.excelBpsImages.limitRange', { max: excelBPSImageLimits.totalMiB }) }}</p>
+                  </div>
+                  <div class="space-y-1">
+                    <label for="excel-bps-image-storage-mib" class="input-label">{{ t('admin.settings.features.excelBpsImages.storageMiB') }}</label>
+                    <input id="excel-bps-image-storage-mib" v-model.number="form.excel_bps_image_storage_mib" class="input" type="number" min="1" :max="excelBPSImageLimits.storageMiB" step="1" required />
+                    <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.settings.features.excelBpsImages.limitRange', { max: excelBPSImageLimits.storageMiB }) }}</p>
+                  </div>
+                  <div class="space-y-1">
+                    <label for="excel-bps-image-storage-entries" class="input-label">{{ t('admin.settings.features.excelBpsImages.storageEntries') }}</label>
+                    <input id="excel-bps-image-storage-entries" v-model.number="form.excel_bps_image_storage_entries" class="input" type="number" min="1" :max="excelBPSImageLimits.storageEntries" step="1" required />
+                    <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.settings.features.excelBpsImages.limitRange', { max: excelBPSImageLimits.storageEntries }) }}</p>
+                  </div>
+                  <div class="space-y-1">
+                    <label for="excel-bps-image-ttl-minutes" class="input-label">{{ t('admin.settings.features.excelBpsImages.ttlMinutes') }}</label>
+                    <input id="excel-bps-image-ttl-minutes" v-model.number="form.excel_bps_image_ttl_minutes" class="input" type="number" min="1" :max="excelBPSImageLimits.ttlMinutes" step="1" required />
+                    <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.settings.features.excelBpsImages.limitRange', { max: excelBPSImageLimits.ttlMinutes }) }}</p>
+                  </div>
+                </div>
+                <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t('admin.settings.features.excelBpsImages.retentionHint') }}
+                </p>
+              </template>
+            </div>
+          </div>
+        </div>
 
         <div class="card">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
@@ -7438,22 +7581,32 @@
                 <label class="input-label">
                   {{ t('admin.settings.features.channelMonitor.mode') }}
                 </label>
-                <div class="mt-2 space-y-3">
-                  <div class="flex items-start justify-between gap-4">
-                    <div><p class="text-sm font-medium">{{ t('admin.settings.features.channelMonitor.modeV2') }}</p><p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.settings.features.channelMonitor.modeV2Hint') }}</p></div>
-                    <Toggle v-model="monitorPassiveEnabled" data-testid="monitor-passive-toggle" />
-                  </div>
-                  <div class="flex items-start justify-between gap-4">
-                    <div><p class="text-sm font-medium">{{ t('admin.settings.features.channelMonitor.modeV1') }}</p><p class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.settings.features.channelMonitor.modeV1Hint') }}</p></div>
-                    <Toggle v-model="monitorActiveEnabled" data-testid="monitor-active-toggle" />
-                  </div>
+                <div class="mt-1.5 inline-flex w-full max-w-xl rounded-lg border border-gray-200 bg-gray-50 p-1 dark:border-dark-600 dark:bg-dark-900/40">
+                  <button
+                    v-for="mode in channelMonitorModes"
+                    :key="mode"
+                    type="button"
+                    class="inline-flex flex-1 items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition"
+                    :class="
+                      form.channel_monitor_mode === mode
+                        ? 'bg-white text-primary-700 shadow-sm dark:bg-dark-800 dark:text-primary-300'
+                        : 'text-gray-600 hover:text-gray-900 dark:text-dark-300 dark:hover:text-white'
+                    "
+                    :data-testid="`settings-monitor-mode-${mode}`"
+                    @click="form.channel_monitor_mode = mode"
+                  >
+                    {{ t(`admin.settings.features.channelMonitor.mode${mode.toUpperCase()}`) }}
+                  </button>
                 </div>
+                <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                  {{ t(`admin.settings.features.channelMonitor.mode${(form.channel_monitor_mode || 'v1').toUpperCase()}Hint`) }}
+                </p>
                 <p class="mt-1 text-xs text-gray-400 dark:text-gray-500">
                   {{ t('admin.settings.features.channelMonitor.modeHint') }}
                 </p>
               </div>
 
-              <div v-if="monitorActiveEnabled">
+              <div v-if="form.channel_monitor_mode === 'v1'">
                 <label class="input-label">
                   {{ t('admin.settings.features.channelMonitor.defaultInterval') }}
                   <span class="text-red-500">*</span>
@@ -7470,7 +7623,7 @@
                 </p>
               </div>
 
-              <div v-if="monitorPassiveEnabled" class="space-y-4">
+              <div v-if="form.channel_monitor_mode === 'v2'" class="space-y-4">
                 <div class="flex items-start justify-between gap-4">
                   <div class="min-w-0">
                     <p class="text-sm font-medium text-gray-900 dark:text-white">
@@ -7495,7 +7648,7 @@
                 </div>
               </div>
 
-              <div v-if="monitorActiveEnabled" class="flex items-start justify-between gap-4">
+              <div v-if="form.channel_monitor_mode === 'v1'" class="flex items-start justify-between gap-4">
                 <div class="min-w-0">
                   <p class="text-sm font-medium text-gray-900 dark:text-white">
                     {{ t('admin.settings.features.channelMonitor.showQuota') }}
@@ -9394,8 +9547,8 @@ import PaymentProviderList from "@/components/payment/PaymentProviderList.vue";
 import PaymentProviderDialog from "@/components/payment/PaymentProviderDialog.vue";
 import GroupBadge from "@/components/common/GroupBadge.vue";
 import GroupOptionItem from "@/components/common/GroupOptionItem.vue";
+import RequestTimezoneSettings from "@/components/settings/RequestTimezoneSettings.vue";
 import Toggle from "@/components/common/Toggle.vue";
-import BPSImageSettingsCard from "@/components/admin/operations/BPSImageSettingsCard.vue";
 import ProxySelector from "@/components/common/ProxySelector.vue";
 import ImageUpload from "@/components/common/ImageUpload.vue";
 import BackupSettings from "@/views/admin/BackupView.vue";
@@ -10131,10 +10284,15 @@ type SettingsForm = Omit<
   // 系统全局平台限额 map；form 内始终归一化为全部平台对象（模板非空绑定依赖此不变量）
   default_platform_quotas: DefaultPlatformQuotasMap;
   account_scheduling_thresholds: ReturnType<typeof normalizeAccountSchedulingThresholdsMap>;
+  prism_browser_api_key: string;
 };
 
 const schedulingThresholdPlatforms = SCHEDULING_THRESHOLD_PLATFORMS;
 
+// The stored monitor mode; the save payload omits an unchanged mode so a switch
+// made on the monitor page is not overwritten by this page's older copy.
+let loadedChannelMonitorMode: 'v1' | 'v2' | 'v3' = 'v1'
+const channelMonitorModes = ['v1', 'v2', 'v3'] as const
 // 平台限额表格的行：平台清单顺序中、已在归一化 map 里的平台（清单晚于设置加载时
 // 不渲染尚未归一化的平台，保持模板非空绑定）。
 function platformQuotaRows(map: DefaultPlatformQuotasMap | undefined): string[] {
@@ -10143,6 +10301,10 @@ function platformQuotaRows(map: DefaultPlatformQuotasMap | undefined): string[] 
 
 const form = reactive<SettingsForm>({
   excel_bps_enabled: true,
+  prism_browser_enabled: false,
+  prism_browser_base_url: "http://127.0.0.1:8319/v1",
+  prism_browser_api_key_configured: false,
+  prism_browser_api_key: "",
   registration_enabled: true,
   email_verify_enabled: false,
   registration_email_suffix_whitelist: [],
@@ -10401,6 +10563,7 @@ const form = reactive<SettingsForm>({
   // 只读展示：自动同步任务写入的官方最新稳定版，不参与提交（提交载荷按字段显式构造）
   openai_codex_client_version_synced: "",
   openai_codex_version_auto_sync_enabled: true,
+  openai_request_timezone_enabled: false,
   openai_codex_ticket_enabled: false,
   openai_codex_ticket_fail_closed: false,
   openai_codex_ticket_strategy: 'standby',
@@ -10429,7 +10592,7 @@ const form = reactive<SettingsForm>({
   account_quota_notify_emails: [] as NotifyEmailEntry[],
   // Channel Monitor feature switch
   channel_monitor_enabled: true,
-  channel_monitor_mode: 'v1' as 'v1' | 'v2' | 'hybrid',
+  channel_monitor_mode: 'v1' as 'v1' | 'v2' | 'v3',
   channel_monitor_default_interval_seconds: 60,
   channel_monitor_hide_throughput: false,
   channel_monitor_show_quota: false,
@@ -10486,19 +10649,6 @@ function applyCaptchaSelection(provider: CaptchaProviderSelection | null): void 
 }
 
 // Keep the settings API representation as user IDs; the selector displays emails.
-function setMonitorCapabilities(passive: boolean, active: boolean) {
-  form.channel_monitor_enabled = passive || active;
-  if (passive || active) form.channel_monitor_mode = passive && active ? 'hybrid' : passive ? 'v2' : 'v1';
-}
-const monitorPassiveEnabled = computed({
-  get: () => form.channel_monitor_enabled && form.channel_monitor_mode !== 'v1',
-  set: (enabled: boolean) => setMonitorCapabilities(enabled, monitorActiveEnabled.value),
-});
-const monitorActiveEnabled = computed({
-  get: () => form.channel_monitor_enabled && form.channel_monitor_mode !== 'v2',
-  set: (enabled: boolean) => setMonitorCapabilities(monitorPassiveEnabled.value, enabled),
-});
-
 const riskControlAllowlistedUserIds = computed<number[]>({
   get: () => Array.from(new Set(
     form.cyber_policy_user_allowlist
@@ -11547,8 +11697,10 @@ async function loadSettings() {
     form.login_agreement_mode =
       settings.login_agreement_mode === "checkbox" ? "checkbox" : "modal";
     form.channel_monitor_mode =
-      settings.channel_monitor_mode === "v2" || settings.channel_monitor_mode === "hybrid"
-        ? settings.channel_monitor_mode : "v1";
+      settings.channel_monitor_mode === "v2" || settings.channel_monitor_mode === "v3"
+        ? settings.channel_monitor_mode
+        : "v1";
+    loadedChannelMonitorMode = form.channel_monitor_mode;
     form.channel_monitor_hide_throughput = Boolean(
       settings.channel_monitor_hide_throughput
     );
@@ -11559,6 +11711,10 @@ async function loadSettings() {
       settings.channel_monitor_hide_user_ranking
     );
     form.excel_bps_enabled = settings.excel_bps_enabled !== false;
+    form.prism_browser_enabled = Boolean(settings.prism_browser_enabled);
+    form.prism_browser_base_url = settings.prism_browser_base_url || "http://127.0.0.1:8319/v1";
+    form.prism_browser_api_key_configured = Boolean(settings.prism_browser_api_key_configured);
+    form.prism_browser_api_key = "";
     form.login_agreement_updated_at =
       settings.login_agreement_updated_at || "2026-03-31";
     form.login_agreement_documents =
@@ -11997,7 +12153,10 @@ async function saveSettings() {
     }
 
     const payload: UpdateSettingsRequest = {
+      prism_browser_enabled: form.prism_browser_enabled,
       excel_bps_enabled: form.excel_bps_enabled,
+      prism_browser_base_url: form.prism_browser_base_url,
+      ...(form.prism_browser_api_key ? { prism_browser_api_key: form.prism_browser_api_key } : {}),
       registration_enabled: form.registration_enabled,
       email_verify_enabled: form.email_verify_enabled,
       registration_email_suffix_whitelist:
@@ -12205,6 +12364,7 @@ async function saveSettings() {
         form.openai_codex_client_version?.trim() || "",
       openai_codex_version_auto_sync_enabled:
         form.openai_codex_version_auto_sync_enabled,
+      openai_request_timezone_enabled: form.openai_request_timezone_enabled,
       openai_codex_ticket_enabled: form.openai_codex_ticket_enabled,
       openai_codex_ticket_fail_closed: form.openai_codex_ticket_fail_closed,
       openai_codex_ticket_strategy: form.openai_codex_ticket_strategy || 'standby',
@@ -12322,7 +12482,9 @@ async function saveSettings() {
       ).filter((e) => e.email.trim() !== ""),
       // Channel Monitor feature switch
       channel_monitor_enabled: form.channel_monitor_enabled,
-      channel_monitor_mode: form.channel_monitor_mode,
+      // Sent only when changed here: the monitor page can switch the mode on its own.
+      channel_monitor_mode:
+        form.channel_monitor_mode === loadedChannelMonitorMode ? undefined : form.channel_monitor_mode,
       channel_monitor_default_interval_seconds:
         Number(form.channel_monitor_default_interval_seconds) || 60,
       channel_monitor_hide_throughput: Boolean(form.channel_monitor_hide_throughput),
@@ -12420,6 +12582,7 @@ async function saveSettings() {
       form.openai_oauth_scheduling_rate_multiplier = null;
     }
     Object.assign(authSourceDefaults, buildAuthSourceDefaultsState(updated));
+    loadedChannelMonitorMode = form.channel_monitor_mode || 'v1';
     form.default_platform_quotas = normalizePlatformQuotasMap(updated.default_platform_quotas);
     form.account_scheduling_thresholds = normalizeAccountSchedulingThresholdsMap(
       updated.account_scheduling_thresholds,

@@ -1,7 +1,7 @@
 <template>
-  <component :is="embedded ? 'div' : AppLayout">
+  <AppLayout>
     <div class="pelican-tests">
-      <SmartOpsNav v-if="!embedded" />
+      <SmartOpsNav />
       <header class="ops-heading">
         <div>
           <p class="eyebrow">{{ t('accountOps.smartTitle') }}</p>
@@ -328,7 +328,7 @@
       @confirm="removePlan"
       @cancel="deleting = null"
     />
-  </component>
+  </AppLayout>
 </template>
 
 <script setup lang="ts">
@@ -364,7 +364,6 @@ import { formatDateTimeToMinute } from '@/utils/format'
 import { PELICAN_PROMPT } from '@/utils/intelligenceTest'
 import { extractPelicanHtml } from '@/utils/pelicanHtml'
 import { platformBadgeLightClass, platformLabel } from '@/utils/platformColors'
-withDefaults(defineProps<{ embedded?: boolean }>(), { embedded: false })
 
 const SCHEDULES = [
   { key: 'every15m', cron: '*/15 * * * *' },

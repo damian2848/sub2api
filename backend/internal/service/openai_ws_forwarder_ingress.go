@@ -599,6 +599,9 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return admissionErr
 	}
 	account = latest
+	if account.IsPrismBrowserEnabledForModel(extractOpenAICodexTicketModel(firstClientMessage)) && s.prismBrowserGloballyEnabled(ctx) {
+		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "Prism accounts require HTTP/SSE", nil)
+	}
 	if account.IsExcelBPSEnabledForModel(extractOpenAICodexTicketModel(firstClientMessage)) && s.excelBPSGloballyEnabled(ctx) {
 		return NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "Excel BPS models require HTTP/SSE", nil)
 	}
@@ -645,7 +648,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	// a later bridge/ctx_pool account retry.
 	ingressReader := openAIWSGetIngressReader(c, clientConn)
 	ingressReader.setWaitFrameMode(false)
-	forceHTTPBridge := account.Platform == PlatformGrok || account.isPrismWSHTTPBridge() ||
+	forceHTTPBridge := account.Platform == PlatformGrok ||
 		(s.pluginManager != nil && s.pluginManager.ShouldRouteOpenAIOAuth(account))
 	modeRouterV2Enabled := s != nil && s.cfg != nil && s.cfg.Gateway.OpenAIWS.ModeRouterV2Enabled
 	ingressMode := OpenAIWSIngressModeCtxPool
@@ -730,10 +733,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	wsHost := "-"
 	wsPath := "-"
 	if forceHTTPBridge {
-		wsHost = "http-bridge"
-		if account.Platform == PlatformGrok {
-			wsHost = "xai-http-bridge"
-		}
+		wsHost = "xai-http-bridge"
 		wsPath = "/v1/responses"
 	} else {
 		var err error
@@ -839,6 +839,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		} else {
 			normalized = next
 		}
+		normalized = s.normalizeRequestTimezone(ctx, account, normalized, "ws")
 		responsesLite := isOpenAIResponsesLiteWebSocketPayload(normalized)
 		if compatibilityBody, compatibilityChanged, compatibilityErr := normalizeOpenAIResponsesWebSocketCompatibilityBody(normalized, account, responsesLite); compatibilityErr != nil {
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", compatibilityErr)
@@ -1011,15 +1012,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		// follow-up response.create frames may omit it and then reuse
 		// ingressSessionOriginalModel. We always write a concrete upstream model
 		// before evaluating policy, so whitelist / filter behavior remains stable.
-		var policyApplied []byte
-		var blocked *OpenAIFastBlockedError
-		var policyErr error
-		if account.IsManagedPrismAccount() {
-			// Prism has no Fast tier: neither force nor honor one on any frame.
-			policyApplied = stripPrismServiceTier(normalized)
-		} else {
-			policyApplied, blocked, policyErr = s.applyOpenAIFastPolicyToWSResponseCreate(ctx, account, upstreamModel, normalized)
-		}
+		policyApplied, blocked, policyErr := s.applyOpenAIFastPolicyToWSResponseCreate(ctx, account, upstreamModel, normalized)
 		if policyErr != nil {
 			return openAIWSClientPayload{}, NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, "invalid websocket request payload", policyErr)
 		}
@@ -1193,7 +1186,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		bridgeAccountFailoverInputExists := false
 		for turn := 1; ; turn++ {
 			if turn > 1 && hooks != nil && hooks.BeforeRequest != nil {
-				if err := hooks.BeforeRequest(turn, currentBridgePayload.rawForHash, currentBridgePayload.originalModel); err != nil {
+				if err := hooks.BeforeRequest(turn, currentBridgePayload.payloadRaw, currentBridgePayload.originalModel); err != nil {
 					s.invalidateOpenAIWSTurnStateAfterAdmissionFailureForRequest(
 						ctx,
 						c,
@@ -1285,15 +1278,6 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 					openAIWSRawPayloadHasToolCallOutput(currentBridgePayload.payloadRaw),
 				)
 			}
-			if account.IsManagedPrismAccount() && currentBridgePayload.previousResponseID != "" && bridgeReplayInputExists {
-				// The full history is replayed, so the continuation id has done its
-				// job. One that arrives without history (a resumed session) stays in
-				// the payload and makes the bridge decline the turn instead.
-				if stripped, deleteErr := sjson.DeleteBytes(bridgePayloadRaw, "previous_response_id"); deleteErr == nil {
-					bridgePayloadRaw = stripped
-					bridgePayloadBytes = len(stripped)
-				}
-			}
 			grokCacheIdentity := ""
 			if account.Platform == PlatformGrok {
 				grokCacheIdentity, err = resolveGrokWSCacheIdentity(
@@ -1371,14 +1355,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			// bridgeCurrentItems），保存历史必须经 combine 新建头，禁止就地 append。
 			bridgeReplayInput = turnReplayInput
 			bridgeReplayInputExists = turnReplayInputExists
-			replayItems, replayItemsExist := result.wsReplayInput, result.wsReplayInputExists
-			if account.IsManagedPrismAccount() && len(result.wsAccountFailoverReplayInput) > 0 {
-				// Prism cannot continue from previous_response_id: the next turn has
-				// to replay everything the model said, not only its tool calls.
-				replayItems, replayItemsExist = result.wsAccountFailoverReplayInput, true
-			}
-			if replayItemsExist {
-				bridgeReplayInput = combineOpenAIWSReplayItems(bridgeReplayInput, replayItems)
+			if result.wsReplayInputExists {
+				bridgeReplayInput = combineOpenAIWSReplayItems(bridgeReplayInput, result.wsReplayInput)
 				bridgeReplayInputExists = true
 			}
 			bridgeAccountFailoverInput = turnAccountFailoverInput
@@ -2018,8 +1996,6 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 
 	currentPayload := firstPayload.payloadRaw
 	currentClientWindowID := firstPayload.clientWindowID
-	// Admission hooks must see client model candidates before upstream mapping.
-	currentClientPayload := firstPayload.rawForHash
 	currentOriginalModel := firstPayload.originalModel
 	currentImageBillingModel := firstPayload.imageBillingModel
 	currentImageSizeTier := firstPayload.imageSizeTier
@@ -2223,7 +2199,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 			return err
 		}
 		if turn > 1 && !skipBeforeTurn && hooks != nil && hooks.BeforeRequest != nil {
-			if err := hooks.BeforeRequest(turn, currentClientPayload, currentOriginalModel); err != nil {
+			if err := hooks.BeforeRequest(turn, currentPayload, currentOriginalModel); err != nil {
 				s.invalidateOpenAIWSTurnStateAfterAdmissionFailureForRequest(
 					ctx,
 					c,
@@ -2779,7 +2755,6 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		}
 		currentPayload = nextPayload.payloadRaw
 		currentClientWindowID = nextPayload.clientWindowID
-		currentClientPayload = nextPayload.rawForHash
 		currentOriginalModel = nextPayload.originalModel
 		currentImageBillingModel = nextPayload.imageBillingModel
 		currentImageSizeTier = nextPayload.imageSizeTier

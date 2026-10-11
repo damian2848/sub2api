@@ -49,18 +49,6 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 	if strings.TrimSpace(model) == "" {
 		model = "grok-voice-latest"
 	}
-	// 余额模式在途预留（与计费同口径估算；计费任务扣减余额缓存后才释放）。
-	inflightDone, inflightErr := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, service.InflightEstimateRequest{Model: model, Kind: service.InflightEstimateAudio, AudioMode: "realtime", AudioUnits: 1})
-	if inflightErr != nil {
-		status, code, message, retryAfter := billingErrorDetails(inflightErr)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-		}
-		h.errorResponse(c, status, code, message)
-		return
-	}
-	defer inflightDone()
-
 	// Keep the HTTP response uncommitted while selecting and probing an account.
 	keyRelease, keyErr := h.concurrencyHelper.AcquireAPIKeySlot(c.Request.Context(), apiKey.ID, apiKey.ConcurrencyLimit)
 	if keyErr != nil {
@@ -72,6 +60,8 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 	// Realtime is not an HTTP streaming response; using reqStream=true here would
 	// let the wait queue flush an SSE ping before the WebSocket handshake succeeds.
 	failed := map[int64]struct{}{}
+	var forbiddenBudget grokForbiddenFailoverBudget
+	upstreamSwitchCount := 0
 	var selection *service.AccountSelectionResult
 	var release func()
 	var token string
@@ -109,6 +99,9 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		if credErr != nil {
 			release()
 			release = nil
+			if forbiddenBudget.active {
+				break
+			}
 			failed[account.ID] = struct{}{}
 			continue
 		}
@@ -118,13 +111,22 @@ func (h *OpenAIGatewayHandler) GrokRealtime(c *gin.Context) {
 		if openErr != nil {
 			reqLog.Warn("grok_realtime.pre_accept_failed", zap.Int64("account_id", account.ID), zap.Error(openErr))
 			statusCode := http.StatusBadGateway
+			var responseBody []byte
+			var responseHeaders http.Header
 			var dialErr *service.GrokRealtimeDialError
 			if errors.As(openErr, &dialErr) && dialErr.StatusCode > 0 {
 				statusCode = dialErr.StatusCode
+				responseBody = dialErr.ResponseBody
+				responseHeaders = dialErr.ResponseHeaders
 			}
-			h.gatewayService.HandleGrokRealtimeUpstreamError(c.Request.Context(), account, statusCode, []byte(openErr.Error()))
+			h.gatewayService.HandleGrokRealtimeUpstreamError(c.Request.Context(), account, statusCode, responseBody)
 			release()
 			release = nil
+			failoverErr := service.GrokRealtimeFailoverError(account, statusCode, responseHeaders, responseBody)
+			if !forbiddenBudget.canRetry(failoverErr, upstreamSwitchCount) {
+				break
+			}
+			upstreamSwitchCount++
 			failed[account.ID] = struct{}{}
 			continue
 		}
@@ -231,24 +233,14 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			return
 		}
 	}
-	// 余额模式在途预留（与计费同口径估算；计费任务扣减余额缓存后才释放）。
-	inflightDone, inflightErr := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, grokVoiceInflightEstimate(endpoint, body))
-	if inflightErr != nil {
-		status, code, message, retryAfter := billingErrorDetails(inflightErr)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-		}
-		h.errorResponse(c, status, code, message)
-		return
-	}
-	defer inflightDone()
-
 	contentType := c.GetHeader("Content-Type")
 	if strings.TrimSpace(contentType) == "" {
 		contentType = "application/json"
 	}
 
 	failed := map[int64]struct{}{}
+	var forbiddenBudget grokForbiddenFailoverBudget
+	upstreamSwitchCount := 0
 	var last *service.UpstreamFailoverError
 	reqLog := requestLogger(c, "handler.openai_gateway.grok_voice", zap.String("endpoint", endpoint))
 	selectionModel := "grok-4.5"
@@ -307,7 +299,12 @@ func (h *OpenAIGatewayHandler) GrokVoice(c *gin.Context, endpoint string) {
 			return
 		}
 		var failoverErr *service.UpstreamFailoverError
-		if errors.As(forwardErr, &failoverErr) && failoverErr.ShouldRetryNextAccount() {
+		if errors.As(forwardErr, &failoverErr) {
+			if c.Writer.Written() || !forbiddenBudget.canRetry(failoverErr, upstreamSwitchCount) {
+				h.handleFailoverExhausted(c, failoverErr, c.Writer.Written())
+				return
+			}
+			upstreamSwitchCount++
 			failed[account.ID] = struct{}{}
 			last = failoverErr
 			continue

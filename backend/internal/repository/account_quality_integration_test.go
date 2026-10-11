@@ -44,9 +44,12 @@ func TestQualityActionsRestoreOwnershipAndStaleRuns(t *testing.T) {
 			require.NoError(t, plans.TriggerQuality(ctx, plan.ID))
 			plan, err = plans.GetByID(ctx, plan.ID)
 			require.NoError(t, err)
-			require.NotNil(t, plan.NextRunAt)
-			// Use the database timestamp so VM clock skew cannot affect the due claim.
-			now := *plan.NextRunAt
+			now := time.Now().Truncate(time.Microsecond)
+			// The database and test host clocks may differ slightly. Test a due plan
+			// using its saved due time instead of depending on clock synchronization.
+			if plan.NextRunAt != nil && plan.NextRunAt.After(now) {
+				now = *plan.NextRunAt
+			}
 			until := now.Add(15 * time.Minute)
 			ok, err := plans.ClaimPelican(ctx, plan, now, until, now.Add(30*time.Minute))
 			require.NoError(t, err)

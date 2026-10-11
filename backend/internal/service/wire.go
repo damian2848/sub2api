@@ -12,6 +12,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/qualityqueue"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
@@ -282,7 +283,6 @@ func ProvideAccountUsageService(
 
 func ProvideAccountTestService(
 	accountRepo AccountRepository,
-	monitorRepo ChannelMonitorV2Repository,
 	geminiTokenProvider *GeminiTokenProvider,
 	claudeTokenProvider *ClaudeTokenProvider,
 	grokTokenProvider *GrokTokenProvider,
@@ -308,12 +308,28 @@ func ProvideAccountTestService(
 	service.SetOpenAIGatewayService(openAIGatewayService)
 	service.SetSettingService(settingService)
 	service.SetPluginManager(pluginManager)
-	if recorder, ok := monitorRepo.(ChannelMonitorProbeRecorder); ok {
-		service.SetProbeRecorder(recorder)
+	if p, ok := httpUpstream.(AstraGatewayRuntimeProvider); ok {
+		p.SetAstraGatewayPreparer(service.prepareAstraGatewaySource)
 	}
-	if recorder, ok := monitorRepo.(ProbeRequestFactRecorder); ok {
-		service.SetProbeRequestFactRecorder(recorder)
-		openAIGatewayService.SetProbeRequestFactRecorder(recorder)
+	settingService.SetAstraRoutingOnSaved(service.StartAstraAutomaticSetup)
+	if recorder, ok := httpUpstream.(AstraGatewayHistoryRecorder); ok {
+		if history, ok := settingService.settingRepo.(AstraGatewayHistoryRepository); ok {
+			recorder.SetAstraGatewayHistoryRecorder(func(row AstraGatewayHistoryRecord, passed bool) {
+				if row.Gateway == "" {
+					return
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				if err := history.RecordAstraGateway(ctx, row, passed); err != nil {
+					logger.L().Warn("astra gateway history persistence failed")
+				}
+			})
+		}
+	}
+	stopScheduling := service.startAstraAccountScheduling()
+	openAIGatewayService.stopAstraSetup = func() {
+		stopScheduling()
+		service.StopAstraAutomaticSetup()
 	}
 	return service
 }
@@ -552,9 +568,16 @@ func ProvideRateLimitService(
 	tokenCacheInvalidator TokenCacheInvalidator,
 	ollamaCloudUsage *OllamaCloudUsageService,
 	accountOps *AccountOpsService,
+	rdb *redis.Client,
 ) *RateLimitService {
 	svc := NewRateLimitService(accountRepo, usageRepo, cfg, geminiQuotaService, tempUnschedCache)
 	svc.accountOps = accountOps
+	if rdb != nil {
+		svc.qualityTrigger = &quality5xxTrigger{queue: qualityqueue.NewRedis(rdb)}
+	}
+	if svc.qualityTrigger != nil {
+		svc.qualityTrigger.immediate, _ = accountRepo.(quality5xxImmediateRepository)
+	}
 	if healthCache, ok := tempUnschedCache.(OpenAIAPIKeyHealthCache); ok {
 		svc.SetOpenAIAPIKeyHealthCache(healthCache)
 	}
@@ -689,9 +712,14 @@ func ProvideScheduledTestService(
 	planRepo ScheduledTestPlanRepository,
 	resultRepo ScheduledTestResultRepository,
 	templateRepo QualityRuleTemplateRepository,
+	accountTests *AccountTestService,
 ) *ScheduledTestService {
 	svc := NewScheduledTestService(planRepo, resultRepo)
 	svc.templateRepo = templateRepo
+	svc.accountTests = accountTests
+	if accountTests != nil {
+		svc.qualityModels = svc.accountQualityModels
+	}
 	return svc
 }
 
@@ -703,10 +731,14 @@ func ProvideScheduledTestRunnerService(
 	rateLimitSvc *RateLimitService,
 	cfg *config.Config,
 	judge *QualityJudgeService,
+	rdb *redis.Client,
 	groupTests *PelicanGroupTestService,
 	monitor *ChannelMonitorV2Service,
 ) *ScheduledTestRunnerService {
 	svc := NewScheduledTestRunnerService(planRepo, scheduledSvc, accountTestSvc, rateLimitSvc, cfg)
+	if rdb != nil {
+		svc.qualityTrigger = &quality5xxTrigger{queue: qualityqueue.NewRedis(rdb)}
+	}
 	svc.judgeQuality = judge.Judge
 	svc.groupTests = groupTests
 	svc.candyMonitor = monitor.candy
@@ -938,7 +970,6 @@ var ProviderSet = wire.NewSet(
 	ProvideBatchImageWorkerRuntime,
 	wire.Bind(new(AccountRuntimeBlocker), new(*OpenAIGatewayService)),
 	NewOAuthService,
-	ProvideClaudeResetCreditService,
 	ProvideOpenAIOAuthService,
 	ProvideOpenAIOAuthReauthService,
 	ProvideGrokOAuthService,
@@ -954,7 +985,6 @@ var ProviderSet = wire.NewSet(
 	ProvideAntigravityTokenProvider,
 	ProvideGrokTokenProvider,
 	ProvideOpenAITokenProvider,
-	ProvidePrismAccountServiceWithSettings,
 	ProvideOpenAIQuotaService,
 	ProvideOpenAIQuotaAutoResetService,
 	ProvideGrokQuotaService,
@@ -1045,6 +1075,7 @@ var ProviderSet = wire.NewSet(
 	NewChannelMonitorQuotaFetcher,
 	ProvideChannelMonitorV2Service,
 	ProvideChannelMonitorV2Aggregator,
+	ProvideChannelMonitorV3Service,
 	NewSupportTicketService,
 	NewChannelMonitorRequestTemplateService,
 	ProvideUserPlatformQuotaUsageFlusher,
@@ -1131,6 +1162,12 @@ func ProvideChannelMonitorV2Service(repo ChannelMonitorV2Repository, settingServ
 	return svc
 }
 
+// ProvideChannelMonitorV3Service wires the component status page. It reads
+// the V2 passive aggregates, which the V2 aggregator keeps in v2 and v3 mode.
+func ProvideChannelMonitorV3Service(repo ChannelMonitorV3Repository, groupRepo GroupRepository) *ChannelMonitorV3Service {
+	return NewChannelMonitorV3Service(repo, groupRepo)
+}
+
 // ProvideChannelMonitorV2Aggregator starts the passive minute-rollup worker.
 // Aggregation only runs when channel_monitor_enabled=true and mode=v2 (and V2 config enabled).
 // Set CHANNEL_MONITOR_V2_DISABLE_AGGREGATOR=1 to skip Start (local demo with seeded facts).
@@ -1178,12 +1215,4 @@ func ProvideCRSSyncService(accounts AccountRepository, proxies ProxyRepository, 
 	defaults := &adminServiceImpl{settingService: settings, groupRepo: groups}
 	svc.autoConfigure = defaults.ApplyOAuthAutoConfig
 	return svc
-}
-
-// ProvideClaudeResetCreditService wires the Claude reset query and, with the
-// idempotency store and Redis leases, manual redemption.
-func ProvideClaudeResetCreditService(accounts AccountRepository, tokens *ClaudeTokenProvider, proxies ProxyRepository, settings *SettingService, idem *IdempotencyCoordinator, locks LeaderLockCache) *ClaudeResetCreditService {
-	s := NewClaudeResetCreditService(accounts, tokens, proxies, settings)
-	s.ConfigureRedemption(idem, locks)
-	return s
 }

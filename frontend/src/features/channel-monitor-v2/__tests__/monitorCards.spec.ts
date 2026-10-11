@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { CANDY_HISTORY_LIMIT, candyDisplayState, candyHistorySlots, effectiveAvailability, hasAvailabilitySamples, hasMonitorSamples, monitorAvailabilitySource, monitorCardTimeline, monitorRefreshSeconds } from '../monitorCards'
+import { CANDY_HISTORY_LIMIT, candyDisplayState, candyHistorySlots, hasMonitorSamples, monitorCardTimeline, monitorRefreshSeconds } from '../monitorCards'
 import type { MonitorCandyHistory, MonitorCoverage, MonitorMatrixRow, MonitorMetric } from '@/api/channelMonitorV2'
 
 describe('monitor card data semantics', () => {
@@ -33,23 +33,6 @@ describe('monitor card data semantics', () => {
     expect(hasMonitorSamples({ request_count: 0, has_samples: false } as MonitorMetric)).toBe(false)
     expect(hasMonitorSamples({ request_count: 0, has_samples: true } as MonitorMetric)).toBe(true)
     expect(hasMonitorSamples({ request_count: 3 } as MonitorMetric)).toBe(true)
-  })
-  it('does not use task verdict summaries as API availability', () => {
-    for (const availability of [0, 0.75, 1]) {
-      const metric = { request_count: 0, has_samples: false, error_rate: 0, probe_sample_count: 0, probe_availability: availability, availability_source: 'probe' } as MonitorMetric
-      expect(effectiveAvailability(metric)).toBeNull()
-      expect(hasAvailabilitySamples(metric)).toBe(false)
-      expect(hasMonitorSamples(metric)).toBe(false)
-    }
-  })
-  it('keeps business availability authoritative even with failed probes', () => {
-    expect(effectiveAvailability({ request_count: 10, error_rate: 0.1, probe_availability: 0 } as MonitorMetric)).toBe(0.9)
-    expect(effectiveAvailability({ request_count: 0, has_samples: true, error_rate: 0.1, probe_availability: 0 } as MonitorMetric)).toBe(0.9)
-  })
-  it.each([undefined, null, Number.NaN, Infinity, -1, 2])('does not infer availability from missing or invalid probe rate %s', (availability) => {
-    const metric = { request_count: 0, error_rate: 0, probe_availability: availability } as MonitorMetric
-    expect(effectiveAvailability(metric)).toBeNull()
-    expect(hasAvailabilitySamples(metric)).toBe(false)
   })
   it('keeps empty time windows unknown and uses the worst observed health in each window', () => {
     const metric = { request_count: 0, has_samples: true } as MonitorMetric
@@ -89,78 +72,4 @@ describe('monitor card data semantics', () => {
     history.results[0].checked_at = '2026-09-28T00:55:00Z'
     expect(candyDisplayState(history, now)).toBe('stale')
   })
-})
-
-it.each(['probe', 'mixed', 'business'] as const)('uses real request buckets and retains %s source without inventing TTFT', source => {
- const metric = { has_samples: true, request_count: 0, availability_source: source, error_rate: 0.25, ttft: { p50_ms: null } } as MonitorMetric
- expect(effectiveAvailability(metric)).toBe(0.75)
- expect(monitorAvailabilitySource(metric)).toBe(source)
- const row = { buckets: [{ bucket_start: '2026-09-28T00:06:00Z', metrics: metric, health: { overall: 'warning' } }] } as MonitorMatrixRow
- const bars = monitorCardTimeline(row, { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage)
- expect(bars.filter(bar => bar.observed)).toHaveLength(1)
- expect(bars[1].buckets[0].metrics.ttft.p50_ms).toBeNull()
-})
-
-it('uses API health only in the timeline, preserving insufficient-sample unknown buckets', () => {
-  const metric = { has_samples: true, request_count: 0, error_rate: 0, cache_rate: 0, ttft: { p50_ms: 1000 } } as MonitorMetric
-  const row = { buckets: [
-    { bucket_start: '2026-09-28T00:06:00Z', metrics: metric, health: { overall: 'healthy', cache: 'critical', minimum_sample: 50 } },
-    { bucket_start: '2026-09-28T00:11:00Z', metrics: metric, health: { overall: 'critical', cache: 'healthy', minimum_sample: 50 } },
-    { bucket_start: '2026-09-28T00:16:00Z', metrics: { ...metric, request_count: 5 }, health: { overall: 'unknown', error_rate: 'unknown', ttft: 'unknown', cache: 'unknown', minimum_sample: 50 } },
-  ] } as MonitorMatrixRow
-  const bars = monitorCardTimeline(row, { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage)
-  expect(bars[1]).toMatchObject({ state: 'healthy', observed: true })
-  expect(bars[2]).toMatchObject({ state: 'critical', observed: true })
-  // Bucket with 5 requests (< 50 minimum) now derives health from error_rate
-  // instead of staying unknown: 0% errors → healthy, with lowSample flag.
-  expect(bars[3]).toMatchObject({ state: 'healthy', observed: true, lowSample: true })
-  expect(bars[3].buckets).toHaveLength(1)
-})
-
-it('derives timeline health from error rate when server says unknown due to low samples', () => {
-  const base = { has_samples: true, cache_rate: 0, ttft: { p50_ms: 1000 } } as MonitorMetric
-  const health = (overall: string) => ({ overall, error_rate: overall, ttft: 'unknown', cache: 'unknown', minimum_sample: 50, thresholds: { warning_error_rate: 0.05, critical_error_rate: 0.20 } })
-  const row = { buckets: [
-    // 3 requests, 0% error → should derive healthy
-    { bucket_start: '2026-09-28T00:06:00Z', metrics: { ...base, request_count: 3, error_rate: 0 }, health: health('unknown') },
-    // 5 requests, 10% error → should derive warning (≥ 0.05)
-    { bucket_start: '2026-09-28T00:11:00Z', metrics: { ...base, request_count: 5, error_rate: 0.10 }, health: health('unknown') },
-    // 4 requests, 50% error → should derive critical (≥ 0.20)
-    { bucket_start: '2026-09-28T00:16:00Z', metrics: { ...base, request_count: 4, error_rate: 0.50 }, health: health('unknown') },
-  ] } as MonitorMatrixRow
-  const bars = monitorCardTimeline(row, { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage)
-  expect(bars[1]).toMatchObject({ state: 'healthy', observed: true, lowSample: true })
-  expect(bars[2]).toMatchObject({ state: 'warning', observed: true, lowSample: true })
-  expect(bars[3]).toMatchObject({ state: 'critical', observed: true, lowSample: true })
-})
-
-it('marks bars with sufficient samples as not lowSample', () => {
-  const metric = { has_samples: true, request_count: 100, error_rate: 0, cache_rate: 0, ttft: { p50_ms: 1000 } } as MonitorMetric
-  const row = { buckets: [
-    { bucket_start: '2026-09-28T00:06:00Z', metrics: metric, health: { overall: 'healthy', minimum_sample: 50 } },
-  ] } as MonitorMatrixRow
-  const bars = monitorCardTimeline(row, { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage)
-  expect(bars[1]).toMatchObject({ state: 'healthy', observed: true, lowSample: false })
-})
-
-it('does not flag redacted non-admin buckets as low-sample when the server verdict is sufficient', () => {
-  // Non-admin responses redact request_count to 0 but keep has_samples + the server verdict.
-  const metric = { has_samples: true, request_count: 0, error_rate: 0, cache_rate: 0, ttft: { p50_ms: 1000 } } as MonitorMetric
-  const row = { buckets: [
-    { bucket_start: '2026-09-28T00:06:00Z', metrics: metric, health: { overall: 'healthy', minimum_sample: 50 } },
-  ] } as MonitorMatrixRow
-  const bars = monitorCardTimeline(row, { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage)
-  expect(bars[1]).toMatchObject({ state: 'healthy', lowSample: false })
-})
-
-it('keeps buckets with fewer than 3 visible requests unknown instead of painting one failure red', () => {
-  const base = { has_samples: true, error_rate: 1, cache_rate: 0, ttft: { p50_ms: null } } as MonitorMetric
-  const unknown = { overall: 'unknown', minimum_sample: 50 }
-  const row = { buckets: [
-    { bucket_start: '2026-09-28T00:06:00Z', metrics: { ...base, request_count: 1 }, health: unknown },
-    { bucket_start: '2026-09-28T00:11:00Z', metrics: { ...base, request_count: 3 }, health: unknown },
-  ] } as MonitorMatrixRow
-  const bars = monitorCardTimeline(row, { requested_start: '2026-09-28T00:00:00Z', requested_end: '2026-09-28T01:30:00Z' } as MonitorCoverage)
-  expect(bars[1]).toMatchObject({ state: 'unknown', observed: true, lowSample: false })
-  expect(bars[2]).toMatchObject({ state: 'critical', lowSample: true })
 })

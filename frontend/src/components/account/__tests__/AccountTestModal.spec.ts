@@ -118,6 +118,24 @@ describe('AccountTestModal', () => {
     localStorage.clear()
   })
 
+  it('only shows upstream status after a response and preserves HTTP 200 on terminal failure', async () => {
+    const wrapper = mount(AccountTestModal, { props: { show: true, account: buildAccount() }, global: { stubs: { BaseDialog: BaseDialogStub, Select: SelectStub, TextArea: TextAreaStub, Icon: true } } })
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.handleEvent({ type: 'test_start', model: 'alias' })
+    expect(wrapper.find('[data-testid="upstream-evidence"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('admin.accounts.connectedToApi')
+    vm.handleEvent({ type: 'upstream_response', upstream_status: 200, upstream_model: 'gpt-6-astra', request_id: 'req_example' })
+    vm.handleEvent({ type: 'error', error: 'stream ended early' })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="upstream-evidence"]').text()).toContain('200')
+    expect(wrapper.text()).toContain('req_example')
+    expect(wrapper.emitted('tested')).toHaveLength(1)
+    vm.resetState()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="upstream-evidence"]').exists()).toBe(false)
+  })
+
   it('posts compact mode for OpenAI compact probe', async () => {
     const wrapper = mount(AccountTestModal, {
       props: {
@@ -164,50 +182,6 @@ describe('AccountTestModal', () => {
     await flushPromises()
     const [, options] = (global.fetch as any).mock.calls[0]
     expect(JSON.parse(options.body)).toMatchObject({ model_id: 'gpt-5.4', mode: 'bps_tools' })
-    wrapper.unmount()
-  })
-
-  it('labels Prism API key accounts and offers only the supported default probe', async () => {
-    const account = {
-      ...buildAccount(),
-      name: 'Prism account',
-      type: 'apikey',
-      extra: { provider_preset: 'free_astra_prism' }
-    }
-    getAvailableModelsMock.mockResolvedValue([{ id: 'gpt-5.6-sol', display_name: 'GPT-5.6 Sol' }])
-    const wrapper = mount(AccountTestModal, {
-      props: { show: false, account },
-      global: { stubs: { BaseDialog: BaseDialogStub, Select: SelectStub, TextArea: TextAreaStub, Icon: true } }
-    })
-    await wrapper.setProps({ show: true })
-    await flushPromises()
-
-    expect(wrapper.text()).toContain('Free-Astra / Prism')
-    expect(wrapper.find('option[value="default"]').exists()).toBe(true)
-    expect(wrapper.find('option[value="compact"]').exists()).toBe(false)
-    expect(wrapper.find('option[value="bps_tools"]').exists()).toBe(false)
-    await (wrapper.vm as any).startTest()
-    await flushPromises()
-
-    const [, options] = (global.fetch as any).mock.calls[0]
-    expect(JSON.parse(options.body)).toMatchObject({ model_id: 'gpt-5.6-sol', mode: 'default' })
-    wrapper.unmount()
-  })
-
-  it.each([
-    { platform: 'openai', type: 'oauth', providerPreset: 'free_astra_prism', compact: true },
-    { platform: 'anthropic', type: 'apikey', providerPreset: 'free_astra_prism', compact: false },
-    { platform: 'openai', type: 'apikey', providerPreset: 'unknown_provider', compact: true }
-  ])('ignores the Prism marker for $platform / $type / $providerPreset', async ({ platform, type, providerPreset, compact }) => {
-    const account = { ...buildAccount(), platform, type, extra: { provider_preset: providerPreset } }
-    const wrapper = mount(AccountTestModal, {
-      props: { show: true, account },
-      global: { stubs: { BaseDialog: BaseDialogStub, Select: SelectStub, TextArea: TextAreaStub, Icon: true } }
-    })
-    await flushPromises()
-
-    expect(wrapper.text()).not.toContain('Free-Astra / Prism')
-    expect(wrapper.find('option[value="compact"]').exists()).toBe(compact)
     wrapper.unmount()
   })
 

@@ -1199,10 +1199,10 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_EnabledUsesAdvancedPrev
 	require.True(t, decision.StickyPreviousHit)
 }
 
-func TestOpenAIGatewayService_SelectAccountWithScheduler_IdleStickyWeightedSessionYieldsToHigherPriority(t *testing.T) {
+func TestOpenAIGatewayService_SelectAccountWithScheduler_StickyWeightedSessionInTopKUsesStickyFirst(t *testing.T) {
 	resetOpenAIAdvancedSchedulerSettingCacheForTest()
 
-	ctx := t.Context()
+	ctx := context.Background()
 	groupID := int64(101071)
 	accounts := []Account{
 		{
@@ -1239,7 +1239,7 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_IdleStickyWeightedSessi
 	}}
 	svc := &OpenAIGatewayService{
 		accountRepo:        schedulerTestOpenAIAccountRepo{accounts: accounts},
-		cache:              withIdleActivity(cache),
+		cache:              cache,
 		cfg:                cfg,
 		rateLimitService:   newOpenAIAdvancedSchedulerRateLimitService("true", "true"),
 		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{}),
@@ -1258,9 +1258,9 @@ func TestOpenAIGatewayService_SelectAccountWithScheduler_IdleStickyWeightedSessi
 	require.NoError(t, err)
 	require.NotNil(t, selection)
 	require.NotNil(t, selection.Account)
-	require.Equal(t, int64(37102), selection.Account.ID)
+	require.Equal(t, int64(37101), selection.Account.ID)
 	require.Equal(t, openAIAccountScheduleLayerLoadBalance, decision.Layer)
-	require.False(t, decision.StickySessionHit)
+	require.True(t, decision.StickySessionHit)
 	require.Equal(t, 2, decision.TopK)
 	if selection.ReleaseFunc != nil {
 		selection.ReleaseFunc()

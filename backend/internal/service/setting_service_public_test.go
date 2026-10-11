@@ -120,10 +120,12 @@ func TestSettingService_ChannelMonitorHideThroughputDefaultsToPrivate(t *testing
 
 func TestSettingService_PublicProtocolSwitchesAreAvailableAtBoot(t *testing.T) {
 	public, err := NewSettingService(&settingPublicRepoStub{values: map[string]string{
-		SettingKeyExcelBPSEnabled: "false",
+		SettingKeyExcelBPSEnabled:     "false",
+		SettingKeyPrismBrowserEnabled: "true",
 	}}, &config.Config{}).GetPublicSettings(context.Background())
 	require.NoError(t, err)
 	require.False(t, public.ExcelBPSEnabled)
+	require.True(t, public.PrismBrowserEnabled)
 
 	injected, err := NewSettingService(&settingPublicRepoStub{values: map[string]string{
 		SettingKeyExcelBPSEnabled: "false",
@@ -131,8 +133,8 @@ func TestSettingService_PublicProtocolSwitchesAreAvailableAtBoot(t *testing.T) {
 	require.NoError(t, err)
 	raw, err := json.Marshal(injected)
 	require.NoError(t, err)
-	require.True(t, gjson.GetBytes(raw, "excel_bps_enabled").Exists())
-	require.False(t, gjson.GetBytes(raw, "excel_bps_enabled").Bool())
+	require.Equal(t, false, gjson.GetBytes(raw, "excel_bps_enabled").Bool())
+	require.True(t, gjson.GetBytes(raw, "prism_browser_enabled").Exists())
 }
 
 func TestSettingService_ChannelMonitorShowQuotaFailsClosed(t *testing.T) {

@@ -201,9 +201,9 @@ func TestChannelMonitorV2ErrorTaxonomyPriority(t *testing.T) {
 	}
 }
 
-func TestChannelMonitorV2HealthBlendsAPISignalsAndKeepsCacheSeparate(t *testing.T) {
+func TestChannelMonitorV2HealthBlendsErrorTTFTAndCache(t *testing.T) {
 	// error 3%/5% → 40; ttft p50 2s → 100; cache 50% → 50
-	// API overall = (0.6*40 + 0.2*100) / 0.8 = 55 → warning; cache is independent.
+	// overall = (0.6*40 + 0.2*100 + 0.2*50) / 1.0 = 54 → warning
 	p50 := int64(2000)
 	p95 := int64(9000)
 	thresholds := ChannelMonitorV2HealthThresholds{
@@ -233,7 +233,7 @@ func TestChannelMonitorV2HealthBlendsAPISignalsAndKeepsCacheSeparate(t *testing.
 	require.NotNil(t, health.Score)
 	require.NotNil(t, health.CacheScore)
 	require.InDelta(t, 50.0, *health.CacheScore, 0.01)
-	require.InDelta(t, 55.0, *health.Score, 0.01)
+	require.InDelta(t, 54.0, *health.Score, 0.01)
 	require.Equal(t, "warning", health.Overall)
 
 	// Perfect signals → 100
@@ -311,10 +311,7 @@ func TestChannelMonitorV2HealthMinimumSampleBoundaries(t *testing.T) {
 			require.NotNil(t, health.TTFTScore)
 			require.NotNil(t, health.CacheScore)
 			require.NotNil(t, health.Score)
-			// This fork keeps cache out of the API overall score (CacheWeight is
-			// retained for configuration compatibility only), so a critical cache
-			// band does not pull a healthy API below 100.
-			require.InDelta(t, 100.0, *health.Score, 0.01)
+			require.InDelta(t, 80.0, *health.Score, 0.01)
 			require.Equal(t, "healthy", health.Overall)
 		})
 	}
@@ -449,10 +446,10 @@ func TestChannelMonitorV2TopUsersKeepsSelfOutsideLimit(t *testing.T) {
 	require.Equal(t, 12, out[10].Rank)
 }
 
-func TestChannelMonitorV2ReadAPIsKeepHistoryWhenCollectionDisabled(t *testing.T) {
+func TestChannelMonitorV2ReadAPIsRejectDisabledConfig(t *testing.T) {
 	repo := &channelMonitorV2RepoStub{config: ChannelMonitorV2Config{Enabled: false}}
 	_, err := NewChannelMonitorV2Service(repo).Matrix(context.Background(), ChannelMonitorV2Filter{}, ChannelMonitorV2GroupByPlatform, false)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrChannelMonitorDisabled)
 }
 
 func TestNormalizeChannelMonitorV2IgnoredCategories(t *testing.T) {

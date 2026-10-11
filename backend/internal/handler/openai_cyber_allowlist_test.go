@@ -41,28 +41,21 @@ func TestCyberAllowlistedUserBypassesExistingBlocksAndContinuesWebSocket(t *test
 	}))
 	defer upstream.Close()
 	harness := newOpenAIWSPassthroughHandlerHarness(t, upstream.URL, map[string]string{
-		service.SettingKeyCyberPolicyUserAllowlist:          "1751",
-		service.SettingKeyCyberSessionIdentityStrictEnabled: "true",
+		service.SettingKeyCyberPolicyUserAllowlist: "1751",
 	})
 	payload := []byte(`{"type":"response.create","model":"gpt-5.1","prompt_cache_key":"trusted-session","input":"test"}`)
+	// Session blocks only use explicit session identities in this fork, so the
+	// HTTP admission check uses its own pre-blocked session ID.
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(string(payload)))
-	c.Request.Header.Set("Session_id", "ws-test-session")
+	c.Request.Header.Set("session_id", "trusted-http-session")
 	explicitKey := service.CyberSessionExplicitBlockKey(harness.apiKey.ID, c, payload)
-	require.NotEmpty(t, explicitKey, "the test must seed a real explicit-session block")
+	require.NotEmpty(t, explicitKey)
 	store, ok := harness.gatewayCache.(service.CyberSessionBlockStore)
 	require.True(t, ok)
 	require.NoError(t, store.SetCyberSessionBlocked(context.Background(), "", []string{explicitKey}, time.Minute))
-	blocked, err := store.FindCyberSessionBlocked(context.Background(), []string{explicitKey})
-	require.NoError(t, err)
-	require.Equal(t, explicitKey, blocked)
 	for _, format := range []cyberSessionBlockFormat{cyberBlockFormatResponses, cyberBlockFormatChat, cyberBlockFormatAnthropic} {
 		require.False(t, harness.handler.rejectIfCyberSessionBlocked(c, harness.apiKey, payload, "gpt-5.1", format))
-	}
-	// Trusted users also bypass the fork's strict identity admission gate.
-	c.Request.Header.Del("Session_id")
-	for _, format := range []cyberSessionBlockFormat{cyberBlockFormatResponses, cyberBlockFormatChat, cyberBlockFormatAnthropic} {
-		require.False(t, harness.handler.rejectIfCyberSessionBlocked(c, harness.apiKey, []byte("{}"), "gpt-5.1", format))
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -74,9 +67,14 @@ func TestCyberAllowlistedUserBypassesExistingBlocksAndContinuesWebSocket(t *test
 		logs := harness.moderationRepo.logSnapshot()
 		return len(logs) == 1 && logs[0].Mode == service.ContentModerationModeCyberLogOnly
 	}, 3*time.Second, 10*time.Millisecond)
-	matched, err := store.FindCyberSessionBlocked(ctx, []string{explicitKey})
+	wsKeyCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	wsKeyCtx.Request = httptest.NewRequest(http.MethodPost, "/openai/v1/responses", strings.NewReader(string(payload)))
+	wsKeyCtx.Request.Header.Set("session_id", "ws-test-session")
+	wsBlockKey := service.CyberSessionExplicitBlockKey(harness.apiKey.ID, wsKeyCtx, payload)
+	require.NotEmpty(t, wsBlockKey)
+	matched, err := store.FindCyberSessionBlocked(ctx, []string{wsBlockKey})
 	require.NoError(t, err)
-	require.Equal(t, explicitKey, matched, "allowlisting must not erase an existing session block")
+	require.Empty(t, matched, "the cyber response must not write a new session block")
 	require.NoError(t, harness.clientConn.Write(ctx, coderws.MessageText, payload))
 	_, event, err = harness.clientConn.Read(ctx)
 	require.NoError(t, err)

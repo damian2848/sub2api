@@ -29,10 +29,10 @@ type openAIWSPassthroughHandlerHarness struct {
 	apiKey         *service.APIKey
 }
 
-func newOpenAIWSPassthroughHandlerHarness(t *testing.T, upstreamURL string, overrides ...map[string]string) *openAIWSPassthroughHandlerHarness {
-	extraSettings := make(map[string]string)
-	for _, settings := range overrides {
-		for key, value := range settings {
+func newOpenAIWSPassthroughHandlerHarness(t *testing.T, upstreamURL string, settings ...map[string]string) *openAIWSPassthroughHandlerHarness {
+	extraSettings := map[string]string{}
+	for _, overrides := range settings {
+		for key, value := range overrides {
 			extraSettings[key] = value
 		}
 	}

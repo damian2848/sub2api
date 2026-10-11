@@ -4,7 +4,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -71,31 +70,7 @@ func TestUpdateServicePerformUpdateNoUpdateReturnsSentinel(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrNoUpdateAvailable))
 	require.ErrorIs(t, err, ErrNoUpdateAvailable)
-	require.Equal(t, "damian2848/sub2api", githubClient.latestRepo)
-}
-
-func TestUpdateServiceIgnoresPreviousRepositoryCache(t *testing.T) {
-	for _, repository := range []string{"", "ranxi2001/sub2api"} {
-		t.Run(repository, func(t *testing.T) {
-			data, err := json.Marshal(map[string]any{
-				"repository": repository, "latest": "99.0.0", "timestamp": time.Now().Unix(),
-			})
-			require.NoError(t, err)
-			cache := &updateServiceCacheStub{data: string(data)}
-			client := &updateServiceGitHubClientStub{release: &GitHubRelease{TagName: "v2.9.7"}}
-			svc := NewUpdateService(cache, client, "2.9.7", "release")
-			info, err := svc.CheckUpdate(context.Background(), false)
-			require.NoError(t, err)
-			require.False(t, info.Cached)
-			require.Equal(t, "2.9.7", info.LatestVersion)
-			require.Equal(t, "damian2848/sub2api", client.latestRepo)
-			client.latestRepo = ""
-			info, err = svc.CheckUpdate(context.Background(), false)
-			require.NoError(t, err)
-			require.True(t, info.Cached)
-			require.Empty(t, client.latestRepo)
-		})
-	}
+	require.Equal(t, "ranxi2001/sub2api", githubClient.latestRepo)
 }
 
 func newRollbackTestService(current string, releases []*GitHubRelease) *UpdateService {

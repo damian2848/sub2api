@@ -49,7 +49,6 @@ func NewOAuthHandler(oauthService *service.OAuthService) *OAuthHandler {
 
 // AccountHandler handles admin account management
 type AccountHandler struct {
-	claudeResetCredits      claudeResetReader
 	adminService            service.AdminService
 	oauthService            *service.OAuthService
 	openaiOAuthService      *service.OpenAIOAuthService
@@ -3537,4 +3536,9 @@ func sanitizeExtraBaseRPM(extra map[string]any) {
 		v = 10000
 	}
 	extra["base_rpm"] = v
+}
+
+// GetOpenAIRequestTimezones returns the supported account request timezone catalog.
+func (h *AccountHandler) GetOpenAIRequestTimezones(c *gin.Context) {
+	response.Success(c, gin.H{"default": service.DefaultOpenAIRequestTimezone, "timezones": service.OpenAIRequestTimezoneOptions()})
 }

@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -27,14 +26,13 @@ import (
 
 // Config paths
 const (
-	ConfigFileName                = "config.yaml"
-	InstallLockFile               = ".installed"
-	defaultUserConcurrency        = 5
-	simpleModeAdminConcurrency    = 30
-	defaultMigrationTimeout       = 60 * time.Second
-	postgresBootstrapDatabase     = "postgres"
-	databasePingTimeout           = 5 * time.Second
-	generatedAdminCredentialsFile = "admin-credentials.txt"
+	ConfigFileName             = "config.yaml"
+	InstallLockFile            = ".installed"
+	defaultUserConcurrency     = 5
+	simpleModeAdminConcurrency = 30
+	defaultMigrationTimeout    = 60 * time.Second
+	postgresBootstrapDatabase  = "postgres"
+	databasePingTimeout        = 5 * time.Second
 )
 
 func setupDefaultAdminConcurrency() int {
@@ -440,12 +438,12 @@ func bootstrapAdminUser(ctx context.Context, db *sql.DB, cfg *SetupConfig) (bool
 	if err != nil {
 		return false, "", err
 	}
-	if emailGenerated || passwordGenerated {
-		path, err := writeGeneratedAdminCredentials(cfg.Admin, emailGenerated, passwordGenerated)
-		if err != nil {
-			return false, "", err
-		}
-		logger.LegacyPrintf("setup", "Generated admin credentials were saved to %s; read and remove this file securely", path)
+	if emailGenerated {
+		fmt.Printf("Generated admin email (login username): %s\n", cfg.Admin.Email)
+	}
+	if passwordGenerated {
+		fmt.Printf("Generated admin password (one-time): %s\n", cfg.Admin.Password)
+		fmt.Println("IMPORTANT: Save this password! It will not be shown again.")
 	}
 
 	admin := &service.User{
@@ -481,60 +479,11 @@ func bootstrapAdminUser(ctx context.Context, db *sql.DB, cfg *SetupConfig) (bool
 	return true, decision.reason, nil
 }
 
-// writeGeneratedAdminCredentials stores only values generated during bootstrap.
-// The file is created with O_EXCL and mode 0600 so an existing credential file
-// is never overwritten and the secret never needs to be written to stdout.
-func writeGeneratedAdminCredentials(admin AdminConfig, emailGenerated, passwordGenerated bool) (string, error) {
-	if !emailGenerated && !passwordGenerated {
-		return "", nil
-	}
-
-	dataDir := GetDataDir()
-	path := filepath.Join(dataDir, generatedAdminCredentialsFile)
-	var content strings.Builder
-	if _, err := content.WriteString("# Generated during first-run admin bootstrap. Save securely, then delete this file.\n"); err != nil {
-		return "", fmt.Errorf("failed to build generated admin credentials: %w", err)
-	}
-	if emailGenerated {
-		fmt.Fprintf(&content, "ADMIN_EMAIL=%s\n", admin.Email)
-	}
-	if passwordGenerated {
-		fmt.Fprintf(&content, "ADMIN_PASSWORD=%s\n", admin.Password)
-	}
-
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return "", fmt.Errorf("failed to save generated admin credentials: %w", err)
-	}
-	removeOnError := true
-	defer func() {
-		if removeOnError {
-			_ = os.Remove(path)
-		}
-	}()
-	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
-		return "", fmt.Errorf("failed to secure generated admin credentials: %w", err)
-	}
-	if _, err := file.WriteString(content.String()); err != nil {
-		_ = file.Close()
-		return "", fmt.Errorf("failed to write generated admin credentials: %w", err)
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return "", fmt.Errorf("failed to flush generated admin credentials: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return "", fmt.Errorf("failed to close generated admin credentials: %w", err)
-	}
-	removeOnError = false
-	return path, nil
-}
-
 // prepareAdminCredentials fills in missing admin credentials with random values
-// and rejects invalid user-supplied credentials. It runs only when the
-// database is empty and an admin is actually about to be created, so existing
-// deployments are not blocked by legacy values.
+// and rejects invalid user-supplied emails and weak passwords. It only runs
+// when an admin is actually about to be created, so existing deployments are
+// never affected. A random email keeps fresh installs off the well-known
+// default username that brute-force scanners target (issue #7850).
 func prepareAdminCredentials(admin *AdminConfig) (emailGenerated, passwordGenerated bool, err error) {
 	admin.Email = strings.TrimSpace(admin.Email)
 	if admin.Email == "" {

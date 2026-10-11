@@ -15,29 +15,11 @@ import (
 // Codex's local context compaction sends the full history with tools:[], so
 // every compaction after a web search fails (#7927).
 //
-// Declare a web_search tool for such requests. Responses Lite
+// Declare a cached-only web_search tool for such requests. Responses Lite
 // rejects hosted tools at the top level, so Lite requests carry it in an
 // input additional_tools item instead. When the caller declared no tools at
 // all, also pin tool_choice to "none" so the injected tool cannot be invoked
 // and the request keeps its no-tools semantics.
-
-// shouldDeclareOpenAIWebSearchToolForHistory reports whether the account's
-// upstream needs the injected declaration. OpenAI API key accounts are
-// included because they are commonly relays in front of the same ChatGPT
-// Codex OAuth pool (verified against a sub2api relay), except upstreams that
-// are not that endpoint: managed Prism, the Copilot SDK adapter and DeepSeek.
-func shouldDeclareOpenAIWebSearchToolForHistory(account *Account, requestedModel string) bool {
-	if account == nil {
-		return false
-	}
-	if account.IsOpenAIOAuthLike() {
-		return true
-	}
-	return account.IsOpenAIApiKey() &&
-		!account.IsManagedPrismAccount() &&
-		!account.IsCopilotSDKEnabled() &&
-		!isDeepSeekResponsesUpstream(account, requestedModel)
-}
 
 const (
 	openAIWebSearchCallItemType      = "web_search_call"
@@ -46,11 +28,9 @@ const (
 	openAIAdditionalToolsDefaultRole = "developer"
 )
 
-// external_web_access is deliberately omitted: the native Codex relay strips
-// it from client tools (stripOpenAICodexUnsupportedWebSearchFields) because
-// the endpoint has rejected it as an unknown parameter.
 var openAIWebSearchHistoryTool = map[string]any{
-	"type": "web_search",
+	"type":                "web_search",
+	"external_web_access": false,
 }
 
 func isOpenAIWebSearchToolType(toolType string) bool {
@@ -107,7 +87,7 @@ func ensureOpenAIOAuthWebSearchToolForHistory(reqBody map[string]any, responsesL
 	}
 	hasWebSearchCall := false
 	callerDeclaredTools := false
-	additionalToolsIndex := -1
+	var additionalToolsItem map[string]any
 	itemTypes := make([]string, len(input))
 	for i, rawItem := range input {
 		item, ok := rawItem.(map[string]any)
@@ -125,8 +105,8 @@ func ensureOpenAIOAuthWebSearchToolForHistory(reqBody map[string]any, responsesL
 			if tools, _ := item["tools"].([]any); len(tools) > 0 {
 				callerDeclaredTools = true
 			}
-			if additionalToolsIndex < 0 {
-				additionalToolsIndex = i
+			if additionalToolsItem == nil {
+				additionalToolsItem = item
 			}
 		}
 	}
@@ -139,10 +119,9 @@ func ensureOpenAIOAuthWebSearchToolForHistory(reqBody map[string]any, responsesL
 	switch {
 	case !responsesLite:
 		reqBody["tools"] = append(tools, cloneOpenAIWebSearchHistoryTool())
-	case additionalToolsIndex >= 0:
-		item, _ := input[additionalToolsIndex].(map[string]any)
-		existing, _ := item["tools"].([]any)
-		item["tools"] = append(existing, cloneOpenAIWebSearchHistoryTool())
+	case additionalToolsItem != nil:
+		existing, _ := additionalToolsItem["tools"].([]any)
+		additionalToolsItem["tools"] = append(existing, cloneOpenAIWebSearchHistoryTool())
 	default:
 		at := openAIAdditionalToolsInsertIndex(itemTypes)
 		additional := map[string]any{

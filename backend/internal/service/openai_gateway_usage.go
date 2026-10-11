@@ -393,8 +393,6 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		imageSizeBreakdown["image_cache_read_tokens"] = result.Usage.ImageCacheReadTokens
 	}
 	usageLog := &UsageLog{
-		APISuccess:               gatewayRequestOutcome(result.SucceededForScheduling() && !input.CyberBlocked),
-		Source:                   ChannelMonitorRequestSource(ctx),
 		UserID:                   user.ID,
 		APIKeyID:                 apiKey.ID,
 		AccountID:                account.ID,

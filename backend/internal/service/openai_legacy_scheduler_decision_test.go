@@ -44,8 +44,9 @@ func releaseLegacySchedulerDecisionSelection(selection *AccountSelectionResult) 
 	}
 }
 
-func TestLegacySchedulerDecision_PriorityFailbackLayer(t *testing.T) {
+func TestLegacySchedulerDecision_StickySessionLayer(t *testing.T) {
 	resetOpenAIAdvancedSchedulerSettingCacheForTest()
+	ctx := context.Background()
 	groupID := int64(38100)
 	for _, loadBatch := range []bool{true, false} {
 		name := "load_batch"
@@ -53,9 +54,7 @@ func TestLegacySchedulerDecision_PriorityFailbackLayer(t *testing.T) {
 			name = "priority_lru"
 		}
 		t.Run(name, func(t *testing.T) {
-			ctx := t.Context()
 			svc := newLegacySchedulerDecisionTestService(newLegacySchedulerDecisionTestAccounts(groupID, true), loadBatch, schedulerTestConcurrencyCache{})
-			svc.cache = withIdleActivity(svc.cache)
 			sessionHash := "legacy-sticky-session"
 			require.NoError(t, svc.setStickySessionAccountID(ctx, &groupID, sessionHash, 38102, time.Hour))
 
@@ -67,11 +66,11 @@ func TestLegacySchedulerDecision_PriorityFailbackLayer(t *testing.T) {
 			require.NotNil(t, selection)
 			require.NotNil(t, selection.Account)
 			releaseLegacySchedulerDecisionSelection(selection)
-			require.Equal(t, int64(38101), selection.Account.ID, "idle movable sticky sessions must return to available higher-priority capacity")
-			require.Equal(t, openAIAccountScheduleLayerPriorityFailback, decision.Layer)
-			require.False(t, decision.StickySessionHit)
+			require.Equal(t, int64(38102), selection.Account.ID, "sticky binding must win over priority order")
+			require.Equal(t, openAIAccountScheduleLayerSessionSticky, decision.Layer)
+			require.True(t, decision.StickySessionHit)
 			require.False(t, decision.StickyPreviousHit)
-			require.Equal(t, int64(38101), decision.SelectedAccountID)
+			require.Equal(t, int64(38102), decision.SelectedAccountID)
 			require.Equal(t, AccountTypeAPIKey, decision.SelectedAccountType)
 
 			selection, decision, err = svc.SelectAccountWithSchedulerForCapability(

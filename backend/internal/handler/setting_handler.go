@@ -104,7 +104,9 @@ func (h *SettingHandler) GetPublicSettings(c *gin.Context) {
 		BalanceLowNotifyThreshold:           settings.BalanceLowNotifyThreshold,
 		BalanceLowNotifyRechargeURL:         settings.BalanceLowNotifyRechargeURL,
 
-		ExcelBPSEnabled:                      settings.ExcelBPSEnabled,
+		ExcelBPSEnabled:     settings.ExcelBPSEnabled,
+		PrismBrowserEnabled: settings.PrismBrowserEnabled,
+
 		ChannelMonitorEnabled:                settings.ChannelMonitorEnabled,
 		ChannelMonitorMode:                   settings.ChannelMonitorMode,
 		ChannelMonitorDefaultIntervalSeconds: settings.ChannelMonitorDefaultIntervalSeconds,

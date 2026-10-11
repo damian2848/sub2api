@@ -300,7 +300,7 @@ export default {
         baseShort: 'Base',
         stickyShort: 'Sticky',
         ungrouped: 'Ungrouped',
-        hint: 'Displayed as "group / base score / sticky bonus". Base scores include load, queues, errors, first-token latency, reset windows, quota headroom and billing rates. Freely routed compatible requests across platforms compare health and account priority first, then scores within each priority. Soft sticky bonuses cannot promote a backup above a primary. Hard response and task ownership still take precedence.'
+        hint: 'Displayed as "group / base score / sticky bonus". The base score is computed within the current filtered candidate set and includes priority, load, queue depth, error rate, first-token latency, reset window, quota headroom, billing rate, and related factors. The sticky bonus applies only when sticky weighting is enabled for previous_response_id or session_hash. Higher scores are preferred.'
       },
       usageWindowsHint: '"5h / 7d" are the upstream account\'s official rolling usage windows (e.g. OpenAI ChatGPT, Claude). They are imposed by the upstream provider on the account itself — not configured by sub2api, and unrelated to the models you map. Usage resets automatically once each window rolls over, and the limit cannot be lifted from within sub2api.',
       ollamaCloud: {
@@ -656,35 +656,6 @@ export default {
       createSparkShadowConfirm: 'Create a spark shadow account linked to "{name}"? It shares the parent\'s credentials and serves only spark models.',
       createSparkShadowSuccess: 'Spark shadow account created',
       createSparkShadowFailed: 'Failed to create spark shadow account',
-      prism: {
-        create: 'Create Prism Account',
-        createConfirm: 'Create a Prism account using the OpenAI OAuth login for "{name}".',
-        inheritGroups: 'Inherit source account groups',
-        connectionStatus: 'Prism Connection Status',
-        reconnect: 'Reconnect',
-        phase: 'Connection status',
-        sourceAccount: 'Source OAuth account',
-        account: 'Prism account',
-        models: 'Available models',
-        modelsPending: 'Awaiting connection verification',
-        modelsUnavailable: 'The current Prism catalog has no available models.',
-        modelsLoadFailed: 'Unable to load the Prism model catalog. Refresh and retry.',
-        modelUnavailable: 'This model is unavailable in the current Prism catalog. Refresh the model list and select again.',
-        lastHeartbeat: 'Last heartbeat',
-        notConfigured: 'The Prism browser adapter is disabled or not configured. Contact your administrator.',
-        sourceUnavailable: 'The source OAuth account is unavailable. Check its login or authorize it again.',
-        browserFailed: 'The Prism browser connection failed. Check the adapter and retry.',
-        connectionFailed: 'Prism connection failed. Refresh the status or reconnect.',
-        requestTimeout: 'Request timed out. Initialization may still be running. Retrying will not create a duplicate account.',
-        phases: {
-          provisioning: 'Initializing',
-          session_ready: 'Session established',
-          sandbox_syncing: 'Syncing sandbox',
-          ready: 'Verified and ready',
-          error: 'Connection failed',
-          disabled: 'Disabled'
-        }
-      },
       duplicateAccount: 'Duplicate Account',
       duplicateSuccess: 'Account duplicated as "{name}" and paused. Review its credentials before enabling it.',
       duplicateFailed: 'Failed to duplicate account',
@@ -743,16 +714,18 @@ export default {
       },
       // OpenAI specific hints
       openai: {
+        requestTimezone: 'Request timezone',
+        requestTimezoneDesc: 'Applies when Bind request timezone is enabled in system settings. Defaults to Asia/Singapore.',
+        requestTimezoneLoadFailed: 'Could not load timezones. Please retry later.',
+
         baseUrlHint: 'Leave default for official OpenAI API',
+        prismBrowser: 'Use Prism browser protocol automatically',
+        prismBrowserDesc: 'Uses this OpenAI OAuth account with the server-managed Prism adapter. No separate credentials are needed. Supports text for these four models and client function/custom tools for 6.1 Sol.',
+        prismBrowserModels: 'Models to route through Prism',
+        prismBrowserModelsHint: 'Matches model names after account mapping. Only selected models use Prism; others keep their Codex / Excel routing. Selecting none disables Prism routing. Availability depends on the upstream account.',
+        prismBrowserManagedEndpoint: 'Selected models use HTTP/SSE. Tool requests require an updated server adapter. Hosted tools such as web search and image generation are unsupported.',
+        prismBrowserConcurrencyHint: 'Prism also has adapter concurrency limits; its requests do not affect this tier’s progress.',
         apiKeyHint: 'Your OpenAI API Key',
-        providerPreset: {
-          title: 'Provider preset',
-          officialDesc: 'Official OpenAI-compatible API',
-          freeAstraPrismDesc: 'Free-Astra / Prism2API sidecar',
-          baseUrlHint: 'Prism2API service URL, including /v1',
-          apiKeyHint: 'Use the same PRISM_API_KEY as the Prism2API service',
-          hint: 'The Prism preset uses the internal Docker service name. Change Base URL when Prism runs outside the Sub2API network.'
-        },
         oauthPassthrough: 'Auto passthrough (auth only)',
         excelBPS: 'Excel / BPS protocol',
         excelBPSOmitUnsupportedTools: 'Keep BPS and omit unsupported hosted tools',
@@ -1096,6 +1069,10 @@ export default {
           official: 'Official API'
         }
       },
+      grokSkipForbiddenPause: {
+        title: 'Keep scheduling after unclassified Grok 403',
+        hint: 'Off by default. When enabled, an unclassified inference 403 skips the default 30-minute account-wide pause and health penalty, with at most one alternate account per request. Explicit revocation, suspension, entitlement denial, content, billing/quota handling and admin rules remain in effect.'
+      },
       grokClientToolCache: {
         title: 'Client Tool Cache (May Change Automatic Tool Selection)',
         hint: 'For detected Grok Free OAuth accounts, this is enabled by default for client function tools such as Codex and Trae. Turn it off to opt out if the automatic tool-selection behavior is not acceptable.'
@@ -1132,47 +1109,7 @@ export default {
 	  autoPause5hDisabled: 'Disable 5h auto-pause',
 	  autoPause7dDisabled: 'Disable 7d auto-pause',
 	  autoPauseDisabledHint: 'When enabled, this account is never auto-paused (even if a global default threshold is configured).',
-	  claudeResetCredits: {
-	    count: 'Resets',
-	    countTooltipLoad: 'Check remaining Claude resets (read-only, never consumes one)',
-	    countTooltipRefresh: 'Refresh remaining Claude resets (read-only, never consumes one)',
-	    fetched: 'Checked at {time}',
-	    error: 'Could not check reset credits',
-	    ineligible: 'This account cannot use resets right now',
-	    cooldown: 'Cooldown until {time}',
-	    expiresAt: 'Expires {time}',
-	    expiresAtFull: 'Reset credit expires at: {time}',
-	    clears: 'Clears windows: {windows}',
-	    notUsableNow: 'Not usable now',
-	    requiresLimit: 'Usable only after hitting a limit',
-	    reset: 'Reset',
-	    resetTooltipNeedQuery: 'Check the count first; reset is available once a usable credit is found',
-	    resetTooltipNone: 'No reset can be used right now',
-	    resetTooltipReady: 'Consume 1 reset to clear limit windows (asks for confirmation)',
-	    confirmTitle: 'Confirm Claude Reset',
-	    confirmMessage: 'This will consume 1 reset credit to immediately restore the {windows} window(s) ({count} remaining). This action cannot be undone. Continue?',
-	    windows: {
-	      fiveHour: '5h',
-	      sevenDay: '7d',
-	      sevenDayOverage: '7d overage'
-	    },
-	    outcome: {
-	      reset: 'Reset applied; cleared: {windows}',
-	      alreadyUsed: 'This reset was already used; refreshing to confirm',
-	      cooldown: 'Resets are cooling down; try again later',
-	      cooldownUntil: 'Resets are cooling down until {time}',
-	      notLimited: 'Not at a limit, so nothing was reset and no credit was used',
-	      ineligible: 'This account cannot use resets right now',
-	      unknown: 'Result unconfirmed; further redemption is blocked for now. Check again later',
-	      unavailable: 'Reset service is temporarily unavailable; retry after a while',
-	      inProgress: 'This reset request is still processing; check again shortly',
-	      retryBackoff: 'This reset request just failed; retry after a moment',
-	      busy: 'Another reset is in progress; try again later',
-	      notAvailable: 'No reset can be used right now; no credit was used',
-	      failed: 'Reset request failed'
-	    }
-	  },
-      autoResetCredit: {
+	  autoResetCredit: {
 	    title: 'Automatically use reset credits',
 	    hint: 'Uses the earliest-expiring available credit only when actual usage reaches a threshold. Off by default; the account remains paused if no credit is available or reset fails.',
 	    threshold5h: '5h auto-reset threshold (%)',
@@ -1271,10 +1208,9 @@ export default {
       noProxy: 'No Proxy',
       concurrency: 'Concurrency',
       loadFactor: 'Load Factor',
-      concurrencyHint: 'Maximum simultaneous requests (hard limit). Extra requests wait or move to another account.',
-      loadFactorHint: 'Only affects which account is picked first within the same priority; it does not limit requests. Defaults to concurrency; a higher value makes the account look less busy.',
+      loadFactorHint: 'Higher load factor increases scheduling frequency',
       priority: 'Priority',
-      priorityHint: 'Lower numbers are used first; higher numbers are used only when lower ones are full or unavailable. Accounts with the same number share traffic by load, quality and latency. Movable sessions return to recovered higher-priority accounts with spare capacity. Response and task ownership is preserved.',
+      priorityHint: 'Lower value accounts are used first',
       billingRateMultiplier: 'Billing Rate Multiplier',
       costMultiplier: 'Cost multiplier',
       costMultiplierHint: 'Defaults to 0.1; follow upstream updates or turn off to enter your actual cost, without changing billing.',
@@ -1769,6 +1705,7 @@ export default {
       inputMethod: 'Input Method',
       reAuthorizedSuccess: 'Account re-authorized successfully',
       // Test Modal
+      testRequestStarted: 'Test request started; waiting for an upstream response',
       testAccountConnection: 'Test Account Connection',
       errorPrefix: 'Error: {message}',
       imagePreviewAlt: 'Test image {index}',
@@ -1778,6 +1715,16 @@ export default {
       connectingToApi: 'Connecting to API...',
       testCompleted: 'Test completed successfully!',
       testFailed: 'Test failed',
+      bpsCredentialState: {
+        unknown: 'Excel / BPS authorization unknown',
+        pending: 'Excel / BPS authorization pending',
+        not_expired: 'Excel / BPS token not expired (upstream unverified)',
+        expired: 'Excel / BPS token expired',
+        revoked: 'Excel / BPS token revoked',
+        auth_failed: 'Excel / BPS authentication failed',
+        expiresAt: 'Token expiry',
+        manualResume: 'Account is disabled or paused; restoring authorization does not enable it.',
+      },
       connectedToApi: 'Connected to API',
       usingModel: 'Using model: {model}',
       sendingTestMessage: 'Sending test message: "hi"',

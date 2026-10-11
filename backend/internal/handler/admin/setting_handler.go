@@ -305,6 +305,7 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		OpenAICodexClientVersion:                               settings.OpenAICodexClientVersion,
 		OpenAICodexClientVersionSynced:                         settings.OpenAICodexClientVersionSynced,
 		OpenAICodexVersionAutoSyncEnabled:                      settings.OpenAICodexVersionAutoSyncEnabled,
+		OpenAIRequestTimezoneEnabled:                           settings.OpenAIRequestTimezoneEnabled,
 		OpenAICodexTicketEnabled:                               settings.OpenAICodexTicketEnabled,
 		OpenAICodexTicketHarvestProxyURL:                       service.MaskProxyURL(settings.OpenAICodexTicketHarvestProxyURL),
 		OpenAICodexTicketStaticProxyURL:                        service.MaskProxyURL(settings.OpenAICodexTicketStaticProxyURL),
@@ -395,6 +396,9 @@ func (h *SettingHandler) GetSettings(c *gin.Context) {
 		ChannelMonitorHideThroughput:         settings.ChannelMonitorHideThroughput,
 		ChannelMonitorShowQuota:              settings.ChannelMonitorShowQuota,
 		ChannelMonitorHideUserRanking:        settings.ChannelMonitorHideUserRanking,
+		PrismBrowserEnabled:                  settings.PrismBrowserEnabled,
+		PrismBrowserBaseURL:                  settings.PrismBrowserBaseURL,
+		PrismBrowserAPIKeyConfigured:         settings.PrismBrowserAPIKeyConfigured,
 
 		GrokDefaultTextModel:           settings.GrokDefaultTextModel,
 		GrokCrossClientModelMapEnabled: settings.GrokCrossClientModelMapEnabled,

@@ -51,14 +51,12 @@ func (s *AccountTestService) runOpenAICodexStateProbeScheduled(ctx context.Conte
 	snapshot := *cfg
 	snapshot.ModelID = probe.Model
 	result := &ScheduledTestResult{
-		Usage:            probe.Usage,
-		ObservationScope: probe.Scope,
-		Status:           "failed",
-		ResponseText:     openAICodexStateScheduledSummary(probe),
-		LatencyMs:        probe.LatencyMs,
-		StartedAt:        probe.StartedAt,
-		FinishedAt:       probe.FinishedAt,
-		PelicanConfig:    &snapshot,
+		Status:        "failed",
+		ResponseText:  openAICodexStateScheduledSummary(probe),
+		LatencyMs:     probe.LatencyMs,
+		StartedAt:     probe.StartedAt,
+		FinishedAt:    probe.FinishedAt,
+		PelicanConfig: &snapshot,
 	}
 	switch probe.Verdict {
 	case OpenAICodexStateHealthy:

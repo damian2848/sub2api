@@ -3,7 +3,6 @@ package service
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -12,14 +11,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/requesttiming"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // normalizeOpenAIResponsesNamespaces keeps initial routing and a late WS-to-HTTP
@@ -53,23 +51,52 @@ func normalizeOpenAIResponsesNamespaces(c *gin.Context, account *Account, body [
 	return body, nil
 }
 
-// excelBPSGloballyEnabled reports the BPS protocol master switch. An unreadable
-// switch keeps BPS routing: treating a transient settings error as "off" would
-// silently send BPS-designated accounts (usually moved off because the native
-// channel is degraded) back through the native channel.
+func accountUsesPrismBrowser(account *Account, cfg *config.Config) bool {
+	return accountHasPrismBrowser(account) && cfg != nil && cfg.Gateway.PrismBrowser.Enabled
+}
+
+func accountHasPrismBrowser(account *Account) bool {
+	if account == nil || account.Platform != PlatformOpenAI || account.Type != AccountTypeOAuth || account.IsShadow() {
+		return false
+	}
+	enabled, _ := account.Extra["openai_prism_browser"].(bool)
+	return enabled
+}
+
+func (s *OpenAIGatewayService) prismBrowserGloballyEnabled(ctx context.Context) bool {
+	if s == nil || s.settingService == nil {
+		return s != nil && s.cfg != nil && s.cfg.Gateway.PrismBrowser.Enabled
+	}
+	return s.settingService.GetPrismBrowserRuntime(ctx).Enabled
+}
+
 func (s *OpenAIGatewayService) excelBPSGloballyEnabled(ctx context.Context) bool {
 	if s == nil || s.settingService == nil {
 		return true
 	}
 	enabled, err := s.settingService.GetProtocolFeatureEnabled(ctx, SettingKeyExcelBPSEnabled)
-	if err != nil {
-		return true
+	return err == nil && enabled
+}
+
+func prismBrowserResponsesURL(baseURL string) string {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if base == "" {
+		return ""
 	}
-	return enabled
+	if strings.HasSuffix(base, "/responses") {
+		return base
+	}
+	return base + "/responses"
 }
 
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (result *OpenAIForwardResult, resultErr error) {
+	body = s.normalizeRequestTimezone(ctx, account, body, "http")
+	if astraSchedulingAppliesToRequest(s.cfg.AstraRouting(ctx), account, gjson.GetBytes(body, "model").String(), getOpenAIGroupIDFromContext(c)) {
+		if err := s.checkAstraSchedulingRoute(ctx, account); err != nil {
+			return nil, err
+		}
+	}
 	defer func() {
 		outcome := "success"
 		if resultErr != nil {
@@ -90,11 +117,6 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return nil, markOpenAIInitialAdmissionError(admissionErr)
 	}
 	account = latest
-	if account.IsManagedPrismAccount() {
-		if err := validatePrismGatewayRequest(c, body, false); err != nil {
-			return nil, err
-		}
-	}
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	// A failed account attempt must not leave a bypass reason on a later BPS response.
@@ -141,9 +163,11 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	if err := s.checkControlledRoute(ctx, c, account, modelForBPS); err != nil {
 		return nil, err
 	}
-	// A BPS-only probe must not spend a native request when the global switch is off.
+	if !account.IsExcelOAuth() && account.IsPrismBrowserEnabledForModel(modelForBPS) && s.prismBrowserGloballyEnabled(ctx) {
+		return s.forwardPrismBrowser(ctx, c, account, body, startTime)
+	}
 	if c.GetBool(bpsAccountProbeRequiredContextKey) &&
-		(!account.IsExcelBPSEnabledForModel(modelForBPS) || account.excelBPSNativeFallbackReason(body) != "" || !s.excelBPSGloballyEnabled(ctx)) {
+		(!account.IsExcelBPSEnabledForModel(modelForBPS) || account.excelBPSNativeFallbackReason(body) != "") {
 		return nil, errors.New("bps probe path is unavailable")
 	}
 	if account.IsExcelBPSEnabledForModel(modelForBPS) && s.excelBPSGloballyEnabled(ctx) {
@@ -223,9 +247,21 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// HTTP SSE may opt into the native WS pool on ordinary OAuth accounts.
 	wsDecision = s.resolveOpenAIHTTPWSSSEDecision(c, account, body, wsDecision)
 	accelerateHTTPSSE := wsDecision.Reason == openAIOAuthWSSSEAccelerationReason
+	anchorCtx, anchorFinish, anchorErr := s.prepareCodexWSAnchor(ctx, c, account, body)
+	if anchorErr != nil {
+		return nil, anchorErr
+	}
+	if anchorFinish != nil {
+		ctx = anchorCtx
+		defer func() { anchorFinish(result, resultErr) }()
+		wsDecision = OpenAIWSProtocolDecision{Transport: OpenAIUpstreamTransportResponsesWebsocketV2, Reason: "private_astra_ws_anchor"}
+	}
 	if mode := controlledMode(ctx); mode != nil {
 		switch mode.channel {
 		case "native_http":
+			if anchorFinish != nil {
+				return nil, errors.New("controlled HTTP experiment cannot use a WS anchor")
+			}
 			wsDecision = openAIWSHTTPDecision("controlled_experiment_http")
 		case "native_ws":
 			if wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {
@@ -233,6 +269,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 		}
 	}
+
 	passthroughEnabled := account.IsOpenAIPassthroughEnabled()
 	compactPath := isOpenAIResponsesCompactPath(c)
 	body, err = normalizeOpenAIResponsesNamespaces(c, account, body, wsDecision.Transport, passthroughEnabled, compactPath)
@@ -246,14 +283,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	// adaptation 把顶层 custom 改写成 function，再进 fallback 时回程查不到 custom
 	// 映射，会把 custom_tool_call 降级成 function_call（Codex 判 unsupported call）。
 	// 因此进入 fallback 的请求必须跳过 adaptation。
-	if account.IsManagedPrismAccount() {
-		adaptedBody, mapping, adaptErr := adaptPrismResponsesClientTools(body)
-		if adaptErr != nil {
-			return nil, fmt.Errorf("adapt Prism Responses client tools: %w", adaptErr)
-		}
-		body = adaptedBody
-		setOpenAIResponsesClientToolMapping(c, mapping)
-	} else if shouldAdaptDeepSeekResponsesClientTools(account, body, compactPath) {
+	if shouldAdaptDeepSeekResponsesClientTools(account, body, compactPath) {
 		adaptedBody, mapping, adaptErr := adaptOpenAIResponsesClientTools(body)
 		if adaptErr != nil {
 			return nil, fmt.Errorf("adapt DeepSeek Responses client tools: %w", adaptErr)
@@ -310,19 +340,6 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		return s.forwardResponsesViaRawChatCompletions(ctx, c, account, body)
 	}
 	SetActualOpenAIUpstreamEndpoint(c, openAIResponsesUpstreamEndpoint)
-	// OAuth accounts get this in the Codex transform / passthrough
-	// normalization; API key relays have neither on the non-passthrough path.
-	if account.IsOpenAIApiKey() && !compactPath && shouldDeclareOpenAIWebSearchToolForHistory(account, reqModel) {
-		webSearchBody, webSearchChanged, webSearchErr := ensureOpenAIOAuthWebSearchToolForHistoryBody(body, responsesLite)
-		if webSearchErr != nil {
-			return nil, webSearchErr
-		}
-		if webSearchChanged {
-			body = webSearchBody
-			originalBody = webSearchBody
-			requestView = newOpenAIRequestView(body)
-		}
-	}
 	if account.IsOpenAI() && (account.IsOpenAIApiKey() || account.IsOpenAIOAuthLike()) {
 		normalizedReasoningBody, reasoningChanged, reasoningErr := normalizeOpenAIResponsesReasoningContentReplay(body)
 		if reasoningErr != nil {
@@ -785,11 +802,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 	}
 
 	rawTier := requestView.ServiceTier
-	if account.IsManagedPrismAccount() && rawTier != "" {
-		markPatchDelete("service_tier")
-		rawTier = ""
-	}
-	if !account.IsManagedPrismAccount() && openAIGroupForcesFast(ctx, account) {
+	if openAIGroupForcesFast(ctx, account) {
 		rawTier = OpenAIFastTierPriority
 		if requestView.ServiceTier != OpenAIFastTierPriority {
 			markPatchSet("service_tier", OpenAIFastTierPriority)
@@ -819,7 +832,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 				}
 			}
 		}
-	} else if !account.IsManagedPrismAccount() && s.shouldForceOpenAIFastPriorityForMissingTier(ctx, account, upstreamModel) {
+	} else if s.shouldForceOpenAIFastPriorityForMissingTier(ctx, account, upstreamModel) {
 		markPatchSet("service_tier", OpenAIFastTierPriority)
 	}
 
@@ -1052,6 +1065,10 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			if wsErr == nil {
 				break
 			}
+			var capacityFailover *UpstreamFailoverError
+			if errors.As(wsErr, &capacityFailover) && !c.Writer.Written() {
+				return nil, capacityFailover
+			}
 			if IsOpenAITurnAdmissionError(wsErr) {
 				return nil, wsErr
 			}
@@ -1072,11 +1089,14 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 			}
 			// previous_response_not_found 说明续链锚点不可用：
 			// 对非 function_call_output 场景，允许一次“去掉 previous_response_id 后重放”。
-			if reason == "previous_response_not_found" && recoverPrevResponseNotFound(attempt) {
+			if codexWSAnchorFromContext(ctx) == nil && reason == "previous_response_not_found" && recoverPrevResponseNotFound(attempt) {
 				continue
 			}
-			if reason == "invalid_encrypted_content" && recoverInvalidEncryptedContent(attempt) {
+			if codexWSAnchorFromContext(ctx) == nil && reason == "invalid_encrypted_content" && recoverInvalidEncryptedContent(attempt) {
 				continue
+			}
+			if codexWSAnchorFromContext(ctx) != nil {
+				break
 			}
 			if retryable && attempt < maxAttempts {
 				backoff := s.openAIWSRetryBackoff(attempt)
@@ -1226,7 +1246,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 
 		// Build upstream request
-		upstreamCtx, releaseUpstreamCtx := openaiAccountUpstreamContext(ctx, account)
+		upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 		var headerGuard *openAIFirstOutputHeaderGuard
 		if firstOutputTimeout > 0 {
 			upstreamCtx, headerGuard = newOpenAIFirstOutputHeaderGuard(
@@ -1725,72 +1745,6 @@ func isDeepSeekSemanticsAccount(account *Account) bool {
 	return accountMapsToDeepSeekModel(account)
 }
 
-func adaptPrismResponsesClientTools(body []byte) ([]byte, apicompat.ResponsesClientToolMapping, error) {
-	promoted, err := promotePrismResponsesClientTools(body)
-	if err != nil {
-		return body, apicompat.ResponsesClientToolMapping{}, err
-	}
-	return adaptOpenAIResponsesClientTools(promoted)
-}
-
-func promotePrismResponsesClientTools(body []byte) ([]byte, error) {
-	if !needsOpenAIResponsesClientToolAdaptation(body) {
-		return body, nil
-	}
-	// Codex declares its custom exec in input[].additional_tools. Promote it
-	// before using the same reversible custom-to-function adapter as other relays.
-	var declarations struct {
-		Tools []apicompat.ResponsesTool `json:"tools"`
-		Input json.RawMessage           `json:"input"`
-	}
-	if err := json.Unmarshal(body, &declarations); err != nil {
-		return body, err
-	}
-	tools, err := apicompat.EffectiveResponsesTools(&apicompat.ResponsesRequest{
-		Tools: declarations.Tools, Input: declarations.Input,
-	})
-	if err != nil {
-		return body, err
-	}
-	if len(tools) == 0 {
-		return body, nil
-	}
-	var promotedTools []apicompat.ResponsesTool
-	// Public custom tools use their unqualified name for Codex's default
-	// functions namespace; the shared native adapter only flattens functions.
-	for _, tool := range tools {
-		if tool.Type != "namespace" || tool.Name != "functions" {
-			promotedTools = append(promotedTools, tool)
-			continue
-		}
-		children := tool.Tools
-		if len(children) == 0 {
-			children = tool.Children
-		}
-		var remaining []apicompat.ResponsesTool
-		for _, child := range children {
-			if child.Type == "custom" && child.Name != "" {
-				promotedTools = append(promotedTools, child)
-			} else {
-				remaining = append(remaining, child)
-			}
-		}
-		if len(remaining) > 0 {
-			tool.Tools, tool.Children = remaining, nil
-			promotedTools = append(promotedTools, tool)
-		}
-	}
-	toolsJSON, err := json.Marshal(promotedTools)
-	if err != nil {
-		return body, err
-	}
-	promoted, err := sjson.SetRawBytes(body, "tools", toolsJSON)
-	if err != nil {
-		return body, err
-	}
-	return promoted, nil
-}
-
 // shouldAdaptDeepSeekResponsesClientTools 决定是否在进入原生 DeepSeek Responses 前
 // 改写 client-only 工具。需要走 Chat fallback 的请求（含 input[].additional_tools 的
 // Responses Lite 形状）必须跳过：fallback 会从原始 body 重新计算 custom / tool_search /
@@ -1962,14 +1916,14 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 		req.Header.Set("content-type", "application/json")
 	}
 
+	applyOpenAIAPIKeyIdentityHeaders(req.Header, account, s.codexIdentityOverrideUA(account))
+
 	// 官方 OpenCode / Command Code 上游收敛为规范客户端 UA：客户端透传的编程库
 	// UA 会命中其前置 Cloudflare bot 拦截（CF 1010/403），并被计入账号 403 strike。
 	applyOpenCodeUpstreamUserAgent(account, targetURL, req.Header)
 
 	// 账号级请求头覆写（仅 openai api_key 账号启用时生效；OAuth 路径 no-op）
 	account.ApplyHeaderOverrides(req.Header)
-	setPrismFailoverHeader(c, account, req.Header)
-	setPrismIsolationHeaders(c, account, req.Header, body)
 	applyOpenCodeSessionHeader(c, account, targetURL, req.Header, body, openCodeSessionHintBody(promptCacheKey))
 	// x-codex-beta-features：按真实 Codex 的会话级行为补注（在账号级覆写之后，
 	// 保证不被覆盖丢失）。
@@ -1988,6 +1942,9 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 // ForceCodexCLI 语义是「强制使用 Codex CLI 身份」，等价于使用网关规范身份，故返回空串；
 // 该优先级与历史行为一致（ForceCodexCLI 在账号自定义 UA 之后生效）。
 func (s *OpenAIGatewayService) codexIdentityOverrideUA(account *Account) string {
+	if account == nil {
+		return ""
+	}
 	if s != nil && s.cfg != nil && s.cfg.Gateway.ForceCodexCLI {
 		return ""
 	}

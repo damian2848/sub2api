@@ -65,7 +65,6 @@ func (s *GatewayService) SelectAccountForModelWithExclusions(ctx context.Context
 		platform = PlatformAnthropic
 	}
 	ctx = s.withGatewayProfitControlGate(ctx, groupID)
-	ctx = trackSessionActivity(ctx, s.cache, groupID, sessionHash)
 
 	// Claude Code 限制可能已将 groupID 解析为 fallback group，
 	// 渠道限制预检查必须使用解析后的分组。
@@ -74,13 +73,6 @@ func (s *GatewayService) SelectAccountForModelWithExclusions(ctx context.Context
 			"group_id", derefGroupID(groupID),
 			"model", requestedModel)
 		return nil, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
-	}
-
-	if _, attempted := ctx.Value(gatewayPriorityFailbackAttemptedKey{}).(bool); !attempted && sessionHash != "" && s.cache != nil && s.concurrencyService != nil {
-		stickyID, _ := s.cache.GetSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
-		if selection := s.tryPriorityStickyFailback(ctx, groupID, platform, hasForcePlatform, sessionHash, requestedModel, excludedIDs, stickyID, false); selection != nil {
-			return selection.Account, nil
-		}
 	}
 
 	// anthropic/gemini 分组支持混合调度（包含启用了 mixed_scheduling 的 antigravity 账户）
@@ -126,7 +118,6 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 	}
 	ctx = s.withGroupContext(ctx, group)
 	ctx = s.withGatewayProfitControlGate(ctx, groupID)
-	ctx = trackSessionActivity(ctx, s.cache, groupID, sessionHash)
 
 	// Claude Code 限制可能已将 groupID 解析为 fallback group，
 	// 渠道限制预检查必须使用解析后的分组。
@@ -169,15 +160,6 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] select entry: group_id=%v group_platform=%s model=%s session=%s sticky_account=%d load_batch=%v concurrency=%v",
 			derefGroupID(groupID), groupPlatform, requestedModel, shortSessionHash(sessionHash), stickyAccountID, cfg.LoadBatchEnabled, s.concurrencyService != nil)
 	}
-
-	platform, hasForcePlatform, err := s.resolvePlatform(ctx, groupID, group, requestedModel)
-	if err != nil {
-		return nil, err
-	}
-	if selection := s.tryPriorityStickyFailback(ctx, groupID, platform, hasForcePlatform, sessionHash, requestedModel, excludedIDs, stickyAccountID, true); selection != nil {
-		return selection, nil
-	}
-	ctx = context.WithValue(ctx, gatewayPriorityFailbackAttemptedKey{}, true)
 
 	if s.concurrencyService == nil || !cfg.LoadBatchEnabled {
 		// 复制排除列表，用于会话限制拒绝时的重试
@@ -229,6 +211,10 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 		}
 	}
 
+	platform, hasForcePlatform, err := s.resolvePlatform(ctx, groupID, group, requestedModel)
+	if err != nil {
+		return nil, err
+	}
 	preferOAuth := platform == PlatformGemini
 	if s.debugModelRoutingEnabled() && requestedModel != "" && modelRoutingAppliesToTargetPlatform(platform) {
 		logger.LegacyPrintf("service.gateway", "[ModelRoutingDebug] load-aware enabled: group_id=%v model=%s session=%s platform=%s", derefGroupID(groupID), requestedModel, shortSessionHash(sessionHash), platform)

@@ -242,7 +242,7 @@ func TestPriorityLoadFactorDoesNotHideActualConcurrency(t *testing.T) {
 	normal := scorePriorityCandidate(c, a, good, time.Now())
 	require.Equal(t, boosted.Score, normal.Score, "load-factor overrides must not inflate actual capacity")
 }
-func TestPriorityExplicitPriorityPrecedesExperienceTier(t *testing.T) {
+func TestPriorityExplicitPriorityWithinExperienceTier(t *testing.T) {
 	a, b, poor := priorityCandidate(1, 1, 0), priorityCandidate(2, 1, 0), priorityCandidate(3, 0, 0)
 	a.account.Priority = 1
 	b.account.Priority = 2
@@ -250,7 +250,6 @@ func TestPriorityExplicitPriorityPrecedesExperienceTier(t *testing.T) {
 	a.score = 410
 	b.score = 490
 	poor.score = 99
-	poor.priorityUnhealthy = true
 	s, ok := newDefaultOpenAIAccountScheduler(&OpenAIGatewayService{}, nil).(*defaultOpenAIAccountScheduler)
 	require.True(t, ok)
 	got := s.buildOpenAISelectionOrder(OpenAIAccountScheduleRequest{}, openAIAccountLoadPlan{priorityScheduling: true, topK: 1, candidates: []openAIAccountCandidateScore{b, poor, a}})
@@ -268,14 +267,14 @@ func TestPriorityOAuthProfitUsesUserChargeAndTheoreticalCost(t *testing.T) {
 	signal := PrioritySchedulingSignal{Samples: 20, P90TTFTMs: 500, QualityPassed: 10, QualitySamples: 10, ProfitSamples: 10, Revenue: 10, BaseCost: 60}
 	score := scorePriorityCandidate(c, a, signal, time.Now())
 	require.Equal(t, "usage", score.EconomicsSource)
-	require.InDelta(t, 4.0, *score.Profit, 1e-12)
+	require.Equal(t, 4.0, *score.Profit)
 	require.InDelta(t, 0.4, *score.Margin, 0.0001)
 	differentRate := 10.0
 	a.account.RateMultiplier = &differentRate
 	require.Equal(t, score.Score, scorePriorityCandidate(c, a, signal, time.Now()).Score, "OAuth profit must not be inferred from current account multiplier")
 	signal.BaseCost = 120
 	loss := scorePriorityCandidate(c, a, signal, time.Now())
-	require.InDelta(t, -2.0, *loss.Profit, 1e-12)
+	require.Equal(t, -2.0, *loss.Profit)
 	require.Equal(t, "degraded", loss.Tier)
 	signal.Revenue = 0
 	zero := scorePriorityCandidate(c, a, signal, time.Now())

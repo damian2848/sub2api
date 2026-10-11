@@ -3,9 +3,10 @@ package service
 import (
 	"bytes"
 	"encoding/json"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"net/url"
 	"strings"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 )
 
 var codexToolCapabilityFields = []string{
@@ -119,17 +120,6 @@ func accountCodexToolCapabilities(account *Account, modelID string) map[string]j
 	if account.isExcelBPSUpstreamModelEnabled(modelID) {
 		capabilities["multi_agent_version"] = json.RawMessage("null")
 		capabilities["multi_agent_reasoning_effort"] = json.RawMessage("null")
-	}
-	// API Astra publicly supports Ultrafast. OAuth must advertise it in its
-	// account manifest; a subscription label alone does not grant the capability.
-	if account.IsOpenAIApiKey() && isOfficialOpenAIModelsBaseURL(baseURL) && isOpenAIGPT6AstraModel(modelID) {
-		tiers := configuredCodexServiceTiersForModel(modelID)
-		tiers = append(tiers, configuredCodexServiceTier{ID: OpenAIFastTierUltrafast, Name: "Ultrafast", Description: "Lowest latency; 6x Standard token pricing."})
-		encoded, err := json.Marshal(tiers)
-		if err != nil {
-			panic(err)
-		}
-		applyCodexToolCapabilities(capabilities, map[string]json.RawMessage{"service_tiers": encoded}, false)
 	}
 	return capabilities
 }

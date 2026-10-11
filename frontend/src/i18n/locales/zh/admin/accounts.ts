@@ -143,7 +143,7 @@ export default {
         baseShort: '普通',
         stickyShort: '粘性',
         ungrouped: '未分组',
-        hint: '显示格式为“分组名 / 基础分 / 粘性加分”。基础分包含负载、排队、错误率、首包延迟、重置窗口、额度余量及计费倍率等因子。各平台兼容调度器的自由选路先比较健康状态与账号优先级，同级内再按评分分流；软粘性加分不能让备用账号越级。响应或任务的硬归属仍优先。'
+        hint: '显示格式为“分组名 / 基础分 / 粘性加分”。基础分按当前筛选条件限定的候选账号计算，包含优先级、负载、排队、错误率、首包延迟、重置窗口、额度余量、计费倍率等因子；粘性加分只在开启粘性加权时用于 previous_response_id 或 session_hash。分数越大越优先。'
       },
       usageWindowsHint: '“5h / 7d”是上游账号（如 OpenAI ChatGPT、Claude）官方的滚动用量窗口限制，由上游对账号设定，并非 sub2api 配置，也与你映射的模型无关。窗口滚动到期后用量会自动重置，无法在 sub2api 端解除该限制。',
       ollamaCloud: {
@@ -775,35 +775,6 @@ export default {
       createSparkShadowConfirm: '为「{name}」创建链接型 Spark 影子账号?影子共享母账号凭据、仅服务 spark 模型。',
       createSparkShadowSuccess: 'Spark 影子账号已创建',
       createSparkShadowFailed: '创建 Spark 影子账号失败',
-      prism: {
-        create: '创建 Prism 账号',
-        createConfirm: '使用「{name}」的 OpenAI OAuth 登录创建 Prism 账号。',
-        inheritGroups: '继承源账号分组',
-        connectionStatus: 'Prism 连接状态',
-        reconnect: '重新连接',
-        phase: '连接状态',
-        sourceAccount: '源 OAuth 账号',
-        account: 'Prism 账号',
-        models: '可用模型',
-        modelsPending: '等待连接验证',
-        modelsUnavailable: '当前 Prism 目录没有可用模型。',
-        modelsLoadFailed: '无法加载 Prism 模型目录，请刷新后重试。',
-        modelUnavailable: 'Prism 当前目录不提供此模型，请刷新模型列表后重新选择。',
-        lastHeartbeat: '最近心跳',
-        notConfigured: 'Prism 浏览器适配器未启用或未配置，请联系管理员。',
-        sourceUnavailable: '源 OAuth 账号不可用，请检查登录状态或重新授权。',
-        browserFailed: 'Prism 浏览器连接失败，请检查适配器状态后重试。',
-        connectionFailed: 'Prism 连接失败，请刷新状态或重新连接。',
-        requestTimeout: '请求超时。后台初始化可能仍在进行，重试不会重复创建账号。',
-        phases: {
-          provisioning: '正在初始化',
-          session_ready: '登录会话已建立',
-          sandbox_syncing: '正在同步沙箱',
-          ready: '已验证可用',
-          error: '连接失败',
-          disabled: '未启用'
-        }
-      },
       duplicateAccount: '复制账号',
       duplicateSuccess: '账号已复制为「{name}」，已暂停调度，请确认凭据后再启用',
       duplicateFailed: '复制账号失败',
@@ -861,16 +832,18 @@ export default {
       },
       // OpenAI specific hints
       openai: {
+        requestTimezone: '请求时区',
+        requestTimezoneDesc: '仅在系统设置中开启“请求时区绑定”后生效，未配置时使用 Asia/Singapore。',
+        requestTimezoneLoadFailed: '加载时区列表失败，请稍后重试。',
+
         baseUrlHint: '留空使用官方 OpenAI API',
+        prismBrowser: '自动使用 Prism 浏览器协议',
+        prismBrowserDesc: '使用此 OpenAI OAuth 账号接入服务器管理的 Prism 适配器，无需另填 Prism 凭据。支持以下四个模型的文本请求，以及 6.1 Sol 的客户端函数和自定义工具。',
+        prismBrowserModels: '勾选使用 Prism 的模型',
+        prismBrowserModelsHint: '按账号映射后的模型名称匹配。仅勾选模型走 Prism；未选模型保留原 Codex / Excel 路由。全部取消时不使用 Prism。模型权限仍以上游账号为准。',
+        prismBrowserManagedEndpoint: '所选模型使用 HTTP/SSE。工具请求需同步升级服务器适配器；联网搜索、图片生成等托管工具不受支持。',
+        prismBrowserConcurrencyHint: 'Prism 另受适配器并发限制，其请求不计入本档升降级统计。',
         apiKeyHint: '您的 OpenAI API Key',
-        providerPreset: {
-          title: 'Provider 预设',
-          officialDesc: '官方 OpenAI 兼容 API',
-          freeAstraPrismDesc: 'Free-Astra / Prism2API sidecar',
-          baseUrlHint: 'Prism2API 服务地址，包含 /v1',
-          apiKeyHint: '与 Prism2API 服务的 PRISM_API_KEY 保持一致',
-          hint: 'Prism 预设使用 Docker 内部服务名；如果 Prism 不在 Sub2API 网络内，请改成实际可访问的 Base URL。'
-        },
         oauthPassthrough: '自动透传（仅替换认证）',
         excelBPS: 'Excel / BPS 协议',
         excelBPSOmitUnsupportedTools: '保持 BPS，省略不支持的托管工具',
@@ -1197,6 +1170,10 @@ export default {
           official: '官方 API'
         }
       },
+      grokSkipForbiddenPause: {
+        title: '未分类 Grok 403 后保持调度',
+        hint: '默认关闭。开启后，未分类的推理 403 不再触发默认 30 分钟全账号暂停或健康惩罚，每次请求最多尝试一个备用账号。明确的凭据撤销、封禁、资格拒绝、内容、计费/配额处理及管理员规则仍然生效。'
+      },
       grokClientToolCache: {
         title: '客户端工具缓存（可能改变自动工具选择）',
         hint: '仅对已识别为 Free 的 Grok OAuth 账号生效，默认会为 Codex、Trae 等客户端函数工具请求启用上游提示缓存；如不接受自动工具选择行为，可关闭此开关退出。'
@@ -1233,47 +1210,7 @@ export default {
 	  autoPause5hDisabled: '禁用 5h 自动暂停',
 	  autoPause7dDisabled: '禁用 7d 自动暂停',
 	  autoPauseDisabledHint: '开启后该账号永不进入自动暂停（即使全局默认阈值已配置）。',
-	  claudeResetCredits: {
-	    count: '次数',
-	    countTooltipLoad: '点击查询 Claude 剩余重置次数（只读，不会消耗）',
-	    countTooltipRefresh: '点击刷新 Claude 剩余重置次数（只读，不会消耗）',
-	    fetched: '查询时间：{time}',
-	    error: '无法查询重置次数',
-	    ineligible: '此账号当前不可使用重置',
-	    cooldown: '冷却至 {time}',
-	    expiresAt: '到期 {time}',
-	    expiresAtFull: '重置次数到期时间：{time}',
-	    clears: '可清除窗口：{windows}',
-	    notUsableNow: '暂不可用',
-	    requiresLimit: '需达到限额后才能使用',
-	    reset: '重置',
-	    resetTooltipNeedQuery: '请先点「次数」查询；查询到可用的重置后才能使用',
-	    resetTooltipNone: '当前没有可立即使用的重置',
-	    resetTooltipReady: '消耗 1 次重置，清除限额窗口（需确认）',
-	    confirmTitle: '确认使用 Claude 重置',
-	    confirmMessage: '将消耗 1 次重置次数，立即恢复 {windows} 窗口，剩余 {count} 次。此操作不可撤销，确定继续吗？',
-	    windows: {
-	      fiveHour: '5h',
-	      sevenDay: '7d',
-	      sevenDayOverage: '7d 超额'
-	    },
-	    outcome: {
-	      reset: '重置成功，已清除：{windows}',
-	      alreadyUsed: '该重置已被使用，正在刷新确认',
-	      cooldown: '重置处于冷却中，请稍后再试',
-	      cooldownUntil: '重置处于冷却中，冷却至 {time}',
-	      notLimited: '当前未达到限额，无需重置，未消耗次数',
-	      ineligible: '此账号当前不可使用重置',
-	      unknown: '结果未确认，已阻止再次兑换，请稍后查询',
-	      unavailable: '重置服务暂时不可用，未确认消耗，请稍后再试',
-	      inProgress: '该重置请求仍在处理中，请稍后查询结果',
-	      retryBackoff: '该重置请求刚刚失败，请稍后再试',
-	      busy: '另一个重置正在进行中，请稍后再试',
-	      notAvailable: '当前没有可立即使用的重置，未消耗次数',
-	      failed: '重置请求失败'
-	    }
-	  },
-      autoResetCredit: {
+	  autoResetCredit: {
 	    title: '自动使用重置卡',
 	    hint: '仅在实际用量达到阈值时使用最早到期的可用卡；默认关闭。无卡或失败时账号保持暂停。',
 	    threshold5h: '5h 自动用卡阈值(%)',
@@ -1372,10 +1309,9 @@ export default {
       noProxy: '无代理',
       concurrency: '并发数',
       loadFactor: '负载因子',
-      concurrencyHint: '同时最多处理的请求数（硬上限），占满后新请求排队或换号。',
-      loadFactorHint: '只影响同优先级内谁先被选，不限制请求数。留空等于并发数；调大会让该账号更晚显示为繁忙。',
+      loadFactorHint: '提高负载因子可以提高对账号的调度频率',
       priority: '优先级',
-      priorityHint: '先用数值小的；小的用不了（满载/不可用）才用大的。同数值内按占用、质量、延迟均衡。可迁移会话在高优先级账号恢复且有余量时自动回迁；响应续链与任务归属保留。',
+      priorityHint: '优先级越小的账号优先使用',
       billingRateMultiplier: '账号计费倍率',
       costMultiplier: '成本倍率',
       costMultiplierHint: '默认 0.1，跟随上游自动更新，关闭后可手填实际成本，不影响账单。',
@@ -1858,6 +1794,7 @@ export default {
       inputMethod: '输入方式',
       reAuthorizedSuccess: '账号重新授权成功',
       // Test Modal
+      testRequestStarted: '测试请求已开始，等待上游响应',
       testAccountConnection: '测试账号连接',
       errorPrefix: '错误：{message}',
       imagePreviewAlt: '测试图片 {index}',
@@ -1866,6 +1803,16 @@ export default {
       readyToTest: '准备测试。点击"开始测试"按钮开始...',
       connectingToApi: '连接 API 中...',
       testCompleted: '测试完成！',
+      bpsCredentialState: {
+        unknown: 'Excel / BPS 授权状态未知',
+        pending: 'Excel / BPS 等待授权',
+        not_expired: 'Excel / BPS 凭证未过期（未验证上游）',
+        expired: 'Excel / BPS 凭证已过期',
+        revoked: 'Excel / BPS 凭证已撤销',
+        auth_failed: 'Excel / BPS 认证失败',
+        expiresAt: '凭证到期',
+        manualResume: '账号当前停用或暂停；授权恢复不会自动启用账号。',
+      },
       connectedToApi: '已连接到 API',
       usingModel: '使用模型：{model}',
       sendingTestMessage: '发送测试消息："hi"',

@@ -165,10 +165,10 @@ func RegisterUserRoutes(
 			showcase.GET("/items/:id", h.PelicanShowcase.GetItem)
 		}
 
-		// Usage history remains available while active-only collection is selected.
+		// V2 passive views require feature on + mode=v2.
 		monitorV2 := authenticated.Group("/channel-monitor-v2")
 		monitorV2.Use(panelRateLimiter.Heavy())
-		monitorV2.Use(channelMonitorFeatureGuard(settingService))
+		monitorV2.Use(channelMonitorModeV2Guard(settingService))
 		{
 			monitorV2.GET("/dimensions", h.ChannelMonitorV2.Dimensions)
 			monitorV2.GET("/snapshot", h.ChannelMonitorV2.Snapshot)
@@ -176,7 +176,15 @@ func RegisterUserRoutes(
 			monitorV2.GET("/matrix", h.ChannelMonitorV2.Matrix)
 			monitorV2.GET("/errors", h.ChannelMonitorV2.Errors)
 			monitorV2.GET("/users", h.ChannelMonitorV2.Users)
-			monitorV2.GET("/observations", h.ChannelMonitorV2.Observations)
+		}
+
+		// V3 component status page requires feature on + mode=v3.
+		monitorV3 := authenticated.Group("/channel-monitor-v3")
+		monitorV3.Use(panelRateLimiter.Heavy())
+		monitorV3.Use(channelMonitorModeV3Guard(settingService))
+		{
+			monitorV3.GET("/status", h.ChannelMonitorV3.Status)
+			monitorV3.GET("/incidents", h.ChannelMonitorV3.Incidents)
 		}
 	}
 }

@@ -27,7 +27,6 @@
               <span v-else-if="snapshot?.coverage.data_through">
                 {{ t('channelMonitorV2.updatedTo', { time: formatTime(snapshot.coverage.data_through) }) }}
               </span>
-              <span v-else-if="observations?.computed_at">{{ t('channelMonitorV2.updatedTo', { time: formatTime(observations.computed_at) }) }}</span>
               <span v-else class="text-gray-400">{{ t('common.loading') }}</span>
               <span
                 v-if="snapshot && !snapshot.coverage.coverage_complete && !bootstrapActive"
@@ -45,12 +44,6 @@
             </div>
           </div>
           <div class="flex items-center gap-2">
-          <label class="flex items-center gap-1.5 text-xs text-gray-500">
-            <span>{{ t('channelMonitorV2.cards.pageRefresh') }}</span>
-            <select v-model.number="refreshInterval" class="input !w-20 !py-1 text-xs" data-testid="monitor-page-refresh">
-              <option :value="30">30s</option><option :value="60">60s</option><option :value="300">5 min</option><option :value="0">{{ t('channelMonitorV2.cards.refreshPaused') }}</option>
-            </select>
-          </label>
           <button type="button" class="btn btn-secondary btn-sm" data-testid="monitor-layout-toggle" @click="analytics = !analytics">{{ t(analytics ? 'channelMonitorV2.cards.showCards' : 'channelMonitorV2.cards.showAnalytics') }}</button>
           <button
             class="btn btn-secondary btn-icon flex h-8 w-8 items-center justify-center rounded-lg bg-gray-100 text-gray-500 hover:bg-gray-200 dark:bg-dark-700 dark:text-gray-400 dark:hover:bg-dark-600"
@@ -100,9 +93,9 @@
         </div>
 
         <!-- Single compact toolbar row: range · filters · view controls -->
-        <div class="monitor-toolbar grid grid-cols-3 items-center gap-1.5 px-4 py-3 sm:flex sm:flex-nowrap sm:gap-2 sm:overflow-x-auto sm:px-5">
+        <div class="monitor-toolbar flex flex-nowrap items-center gap-1.5 overflow-x-auto px-4 py-3 sm:gap-2 sm:px-5">
           <div
-            class="tabs col-span-3 inline-flex w-max shrink-0 sm:w-auto"
+            class="tabs inline-flex shrink-0"
             role="group"
             :aria-label="t('channelMonitorV2.timeRange')"
           >
@@ -118,6 +111,7 @@
             </button>
           </div>
 
+          <template v-if="analytics">
           <span class="mx-0.5 hidden h-5 w-px shrink-0 bg-gray-200 dark:bg-dark-700 sm:block" aria-hidden="true"></span>
 
           <FilterMultiSelect
@@ -150,27 +144,18 @@
           >
             {{ t('channelMonitorV2.clearFilters') }}
           </button>
-          <label class="flex shrink-0 items-center gap-1.5 text-xs text-gray-500">
-            <span>{{ t('channelMonitorV2.filters.source') }}</span>
-            <select v-model="filter.source" class="input !w-auto !py-1 text-xs" data-testid="monitor-request-source">
-              <option value="all">{{ t('channelMonitorV2.sources.all') }}</option>
-              <option value="business">{{ t('channelMonitorV2.sources.business') }}</option>
-              <option value="probe">{{ t('channelMonitorV2.sources.probe') }}</option>
-            </select>
-          </label>
 
-          <template v-if="analytics">
           <span class="mx-0.5 hidden h-5 w-px shrink-0 bg-gray-200 dark:bg-dark-700 md:block" aria-hidden="true"></span>
 
           <Select
             v-model="matrixGroupBy"
             :options="matrixGroupOptions"
             :placeholder="t('channelMonitorV2.groupBy.label')"
-            class="monitor-toolbar-select col-span-3 w-full shrink-0 sm:w-[8.5rem]"
+            class="monitor-toolbar-select w-[7.5rem] shrink-0 sm:w-[8.5rem]"
           />
 
           <div
-            class="tabs col-span-3 inline-flex w-max shrink-0 sm:w-auto"
+            class="tabs inline-flex shrink-0"
             role="group"
             :aria-label="t('channelMonitorV2.trendView.label')"
           >
@@ -194,7 +179,7 @@
 
           <div
             v-if="trendView === 'pulse'"
-            class="tabs col-span-3 inline-flex w-max shrink-0 sm:w-auto"
+            class="tabs inline-flex shrink-0"
             role="group"
             :aria-label="t('channelMonitorV2.healthMode.label')"
           >
@@ -211,8 +196,9 @@
           </div>
           </template>
           <template v-else>
-            <span class="col-span-2 text-xs text-gray-500 dark:text-gray-400 sm:ml-3 sm:shrink-0">{{ t('channelMonitorV2.cards.passive') }}</span>
-            <span v-if="snapshot && hasAvailabilitySamples(snapshot.metrics)" class="ml-auto hidden text-xs text-gray-500 dark:text-gray-400 md:inline">{{ t('channelMonitorV2.cards.availability') }} {{ formatAvailability(snapshot.metrics) }}<template v-if="monitorAvailabilitySource(snapshot.metrics)"> · {{ t('channelMonitorV2.sources.' + monitorAvailabilitySource(snapshot.metrics)) }}</template><template v-if="hasMonitorSamples(snapshot.metrics)"> · {{ t('channelMonitorV2.cards.cache') }} {{ formatPercent(snapshot.metrics.cache_rate) }}</template></span>
+            <span class="ml-3 text-xs text-gray-500 dark:text-gray-400">{{ t('channelMonitorV2.cards.passive') }}</span>
+            <button v-if="hasDimensionFilter" class="btn btn-ghost btn-sm" @click="clearDimensions">{{ t('channelMonitorV2.clearFilters') }}</button>
+            <span v-if="snapshot && hasMonitorSamples(snapshot.metrics)" class="ml-auto hidden text-xs text-gray-500 dark:text-gray-400 md:inline">{{ t('channelMonitorV2.cards.availability') }} {{ formatPercent(1 - snapshot.metrics.error_rate) }} · {{ t('channelMonitorV2.cards.cache') }} {{ formatPercent(snapshot.metrics.cache_rate) }}</span>
           </template>
         </div>
       </section>
@@ -228,9 +214,8 @@
       >
         <MetricCell
           :label="t('channelMonitorV2.metrics.successRate')"
-          :value="formatAvailability(snapshot.metrics)"
-          :detail="availabilityDetail(snapshot.metrics)"
-          :title="t('channelMonitorV2.cards.availabilityHint')"
+          :value="formatPercent(1 - snapshot.metrics.error_rate)"
+          :detail="t('channelMonitorV2.metrics.errorRateValue', { value: formatPercent(snapshot.metrics.error_rate) })"
           :state="snapshot.health.error_rate"
         />
         <MetricCell
@@ -249,10 +234,9 @@
         />
         <MetricCell
           :label="t('channelMonitorV2.metrics.cacheRate')"
-          :value="hasMonitorSamples(snapshot.metrics) ? formatPercent(snapshot.metrics.cache_rate) : '—'"
+          :value="formatPercent(snapshot.metrics.cache_rate)"
           :detail="t('channelMonitorV2.metrics.cacheDetail')"
-          :title="t('channelMonitorV2.cards.cacheHint')"
-          :state="snapshot.health.cache || 'unknown'"
+          :state="snapshot.health.cache || snapshot.health.overall"
         />
         <MetricCell
           v-if="showThroughput"
@@ -346,15 +330,15 @@
                     </div>
                   </td>
                   <td>
-                    <span class="block">{{ formatAvailability(row.metrics) }}</span>
-                    <small class="text-xs text-gray-400">{{ availabilityDetail(row.metrics) }}</small>
+                    <span class="block">{{ formatPercent(1 - row.metrics.error_rate) }}</span>
+                    <small class="text-xs text-gray-400">{{ t('channelMonitorV2.metrics.errorRateValue', { value: formatPercent(row.metrics.error_rate) }) }}</small>
                   </td>
                   <td>
                     <span class="block">{{ formatMs(row.metrics.ttft.p50_ms) }}</span>
                     <small class="text-xs text-gray-400">{{ latencyDetail(row.metrics.ttft) }}</small>
                   </td>
                   <td v-if="showThroughput" :title="exactTps(row.metrics.tpm)">{{ formatTps(row.metrics.tpm) }}</td>
-                  <td>{{ hasMonitorSamples(row.metrics) ? formatPercent(row.metrics.cache_rate) : '—' }}</td>
+                  <td>{{ formatPercent(row.metrics.cache_rate) }}</td>
                   <td v-if="showThroughput">{{ formatRate(row.metrics.rpm) }}</td>
                 </tr>
               </tbody>
@@ -413,7 +397,6 @@
           </div>
 
           <div v-else class="table-container border-0">
-            <p class="mb-3 text-xs text-gray-500">{{ t('channelMonitorV2.users.businessScope') }}</p>
             <table class="table monitor-table min-w-[640px]">
               <thead>
                 <tr>
@@ -448,15 +431,15 @@
                     </strong>
                   </td>
                   <td>
-                    <span class="block">{{ formatAvailability(row.metrics) }}</span>
-                    <small class="text-xs text-gray-400">{{ availabilityDetail(row.metrics) }}</small>
+                    <span class="block">{{ formatPercent(1 - row.metrics.error_rate) }}</span>
+                    <small class="text-xs text-gray-400">{{ t('channelMonitorV2.metrics.errorRateValue', { value: formatPercent(row.metrics.error_rate) }) }}</small>
                   </td>
                   <td>
                     <span class="block">{{ formatMs(row.metrics.ttft.p50_ms) }}</span>
                     <small class="text-xs text-gray-400">{{ latencyDetail(row.metrics.ttft) }}</small>
                   </td>
                   <td v-if="showThroughput" :title="exactTps(row.metrics.tpm)">{{ formatTps(row.metrics.tpm) }}</td>
-                  <td>{{ hasMonitorSamples(row.metrics) ? formatPercent(row.metrics.cache_rate) : '—' }}</td>
+                  <td>{{ formatPercent(row.metrics.cache_rate) }}</td>
                   <td v-if="showThroughput">{{ formatRate(row.metrics.rpm) }}</td>
                 </tr>
               </tbody>
@@ -483,7 +466,6 @@
         </div>
       </section>
       </template>
-      <MonitorObservationsPanel :data="observations" :loading="refreshing || loading" :exact-business="isAdmin" :show-usage="isAdmin" />
     </div>
   </AppLayout>
 </template>
@@ -498,8 +480,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner.vue'
 import Select from '@/components/common/Select.vue'
 import FilterMultiSelect from '@/features/channel-monitor-v2/FilterMultiSelect.vue'
 import MonitorStatusCards from '@/features/channel-monitor-v2/MonitorStatusCards.vue'
-import MonitorObservationsPanel from '@/features/channel-monitor-v2/MonitorObservationsPanel.vue'
-import { effectiveAvailability, hasAvailabilitySamples, hasMonitorSamples, monitorAvailabilitySource } from '@/features/channel-monitor-v2/monitorCards'
+import { hasMonitorSamples, monitorRefreshSeconds } from '@/features/channel-monitor-v2/monitorCards'
 import MetricCell from '@/features/channel-monitor-v2/MetricCell.vue'
 import MonitorRankBadge from '@/features/channel-monitor-v2/MonitorRankBadge.vue'
 import MonitorTrendChart from '@/features/channel-monitor-v2/MonitorTrendChart.vue'
@@ -517,12 +498,9 @@ import type {
   MonitorHealth,
   MonitorMatrixGroupBy,
   MonitorMatrixResponse,
-  MonitorMetric,
   MonitorModelRow,
   MonitorRange,
-  MonitorRequestSource,
   MonitorSnapshot,
-  MonitorObservations,
   MonitorUserRow,
 } from '@/api/channelMonitorV2'
 import {
@@ -550,8 +528,7 @@ const { t, te, locale } = useI18n()
 const analytics = ref(false)
 const clockNow = ref(Date.now())
 const nextRefreshAt = ref(0)
-const refreshInterval = ref(60)
-const countdown = computed(() => refreshInterval.value === 0 ? -1 : Math.max(0, Math.ceil((nextRefreshAt.value - clockNow.value) / 1000)))
+const countdown = computed(() => Math.max(0, Math.ceil((nextRefreshAt.value - clockNow.value) / 1000)))
 let clockTimer: ReturnType<typeof setInterval> | undefined
 const isAdmin = computed(() => authStore.isAdmin)
 /** Admins always see RPM/TPM; users honor the hide-throughput system setting. */
@@ -590,7 +567,6 @@ const healthModeOptions = computed(() => [
 
 const filter = ref<MonitorFilter>({
   range: parseRange(route.query.range),
-  source: parseSource(route.query.source),
   platforms: csv(route.query.platform),
   groupIds: csv(route.query.group).map(Number).filter(Boolean),
   models: csv(route.query.model),
@@ -602,7 +578,6 @@ const trendView = ref<TrendView>(parseTrendView(route.query.trend_view))
 const dimensions = ref<MonitorDimensions>({ platforms: [], groups: [], models: [] })
 const snapshot = ref<MonitorSnapshot | null>(null)
 const matrix = ref<MonitorMatrixResponse | null>(null)
-const observations = ref<MonitorObservations | null>(null)
 const modelRows = ref<MonitorModelRow[]>([])
 const errorRows = ref<MonitorErrorRow[]>([])
 const userRows = ref<MonitorUserRow[]>([])
@@ -615,7 +590,7 @@ let sequence = 0
 let autoRefreshTimer: number | null = null
 
 const hasDimensionFilter = computed(
-  () => filter.value.platforms.length + filter.value.groupIds.length + filter.value.models.length > 0 || filter.value.source !== 'all'
+  () => filter.value.platforms.length + filter.value.groupIds.length + filter.value.models.length > 0
 )
 // Full platform catalog (never pruned). Groups/models cascade by selected platforms
 // so choosing a platform narrows the other pickers without collapsing platforms.
@@ -731,9 +706,6 @@ function parseHealthMode(value: unknown): HealthMode {
   const allowed: HealthMode[] = ['overall', 'success', 'ttft', 'cache']
   return allowed.includes(value as HealthMode) ? (value as HealthMode) : 'overall'
 }
-function parseSource(value: unknown): MonitorRequestSource {
-  return value === 'business' || value === 'probe' ? value : 'all'
-}
 function parseTrendView(value: unknown): TrendView {
   return value === 'line' ? 'line' : 'pulse'
 }
@@ -741,7 +713,6 @@ function syncQuery() {
   void router.replace({
     query: {
       range: filter.value.range,
-      source: filter.value.source !== 'all' ? filter.value.source : undefined,
       platform: filter.value.platforms.join(',') || undefined,
       group: filter.value.groupIds.join(',') || undefined,
       model: filter.value.models.join(',') || undefined,
@@ -754,6 +725,7 @@ function syncQuery() {
 }
 /** Dimensions catalog: range only — never re-filtered by platform/group/model selection. */
 async function loadDimensions(signal?: AbortSignal, id = sequence) {
+  if (!analytics.value) return
   const rangeOnly: MonitorFilter = {
     range: filter.value.range,
     platforms: [],
@@ -766,15 +738,13 @@ async function loadDimensions(signal?: AbortSignal, id = sequence) {
 }
 
 async function loadMetrics(signal?: AbortSignal, id = sequence) {
-  const [nextSnapshot, nextMatrix, nextObservations] = await Promise.all([
+  const [nextSnapshot, nextMatrix] = await Promise.all([
     api.getSnapshot(filter.value, isAdmin.value, signal),
     api.getMatrix(filter.value, analytics.value ? matrixGroupBy.value : 'platform_group', isAdmin.value, signal),
-    api.getObservations(filter.value, isAdmin.value, signal, analytics.value ? matrixGroupBy.value : 'platform_group'),
   ])
   if (id !== sequence) return
   snapshot.value = nextSnapshot
   matrix.value = nextMatrix
-  observations.value = nextObservations
   scheduleAutoRefresh()
   await loadTab(signal, id)
 }
@@ -855,7 +825,6 @@ function clearDimensions() {
   // Replace arrays so deep watch always fires and metrics reload full window.
   filter.value = {
     ...filter.value,
-    source: 'all',
     platforms: [],
     groupIds: [],
     models: [],
@@ -866,8 +835,11 @@ function scheduleAutoRefresh() {
     window.clearInterval(autoRefreshTimer)
     autoRefreshTimer = null
   }
-  if (!refreshInterval.value) return
-  const seconds = bootstrapActive.value ? Math.min(10, refreshInterval.value) : refreshInterval.value
+  const seconds = monitorRefreshSeconds(
+    snapshot.value?.config?.refresh_interval_seconds,
+    matrixRows.value,
+    bootstrapActive.value,
+  )
   clockNow.value = Date.now()
   nextRefreshAt.value = clockNow.value + seconds * 1000
   autoRefreshTimer = window.setInterval(() => {
@@ -896,16 +868,6 @@ function exactTps(tpm: number | null | undefined) {
 }
 function formatPercent(value: number) {
   return formatMonitorPercent(value)
-}
-function formatAvailability(metric: MonitorMetric) {
-  const availability = effectiveAvailability(metric)
-  return availability == null ? '—' : formatPercent(availability)
-}
-function availabilityDetail(metric: MonitorMetric) {
-  if (!hasMonitorSamples(metric)) return t('channelMonitorV2.cards.health.unknown')
-  const detail = t('channelMonitorV2.metrics.errorRateValue', { value: formatPercent(metric.error_rate) })
-  const source = monitorAvailabilitySource(metric)
-  return source ? detail + ' · ' + t('channelMonitorV2.sources.' + source) : detail
 }
 function formatMs(value: number | null) {
   return formatMonitorMs(value)
@@ -988,7 +950,6 @@ watch(showUserRanking, (allowed) => {
   }
 })
 watch(analytics, () => { void reload(false) })
-watch(refreshInterval, scheduleAutoRefresh)
 onMounted(() => {
   clockTimer = setInterval(() => { clockNow.value = Date.now() }, 1000)
   void reload(false)

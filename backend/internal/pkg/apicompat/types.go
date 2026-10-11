@@ -69,9 +69,8 @@ type AnthropicContentBlock struct {
 	Signature string `json:"signature,omitempty"`
 	Data      string `json:"data,omitempty"` // redacted_thinking
 
-	// type=image or document
+	// type=image
 	Source *AnthropicImageSource `json:"source,omitempty"`
-	Title  string                `json:"title,omitempty"`
 
 	// type=tool_use
 	ID    string          `json:"id,omitempty"`
@@ -112,10 +111,9 @@ func (b AnthropicContentBlock) MarshalJSON() ([]byte, error) {
 
 // AnthropicImageSource describes the source data for an image content block.
 type AnthropicImageSource struct {
-	Type      string `json:"type"` // "base64" | "url" | "text"
-	MediaType string `json:"media_type,omitempty"`
-	Data      string `json:"data,omitempty"`
-	URL       string `json:"url,omitempty"`
+	Type      string `json:"type"` // "base64"
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
 }
 
 // AnthropicTool describes a tool available to the model.
@@ -328,7 +326,6 @@ type ResponsesContentPart struct {
 	Filename string `json:"filename,omitempty"`
 	FileData string `json:"file_data,omitempty"` // data URI
 	FileID   string `json:"file_id,omitempty"`
-	FileURL  string `json:"file_url,omitempty"`
 }
 
 // ResponsesTool describes a tool in the Responses API.

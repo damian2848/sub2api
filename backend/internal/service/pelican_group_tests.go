@@ -11,7 +11,6 @@ import (
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
-	"github.com/google/uuid"
 )
 
 // Pelican group tests ask a group the Pelican question on a schedule. For every sample
@@ -73,28 +72,23 @@ type PelicanGroupTestAttempt struct {
 // PelicanGroupTestResult is one sample. AccountID is the account that gave the final
 // answer (0 when the scheduler found none); only admins see it.
 type PelicanGroupTestResult struct {
-	ID             int64                        `json:"id"`
-	PlanID         int64                        `json:"plan_id"`
-	GroupID        int64                        `json:"group_id"`
-	GroupName      string                       `json:"group_name,omitempty"`
-	AccountID      int64                        `json:"account_id"`
-	AccountName    string                       `json:"account_name"`
-	Attempts       []PelicanGroupTestAttempt    `json:"attempts"`
-	Status         string                       `json:"status"`
-	ResponseText   string                       `json:"response_text,omitempty"`
-	ErrorMessage   string                       `json:"error_message"`
-	LatencyMs      int64                        `json:"latency_ms"`
-	CostUSD        *float64                     `json:"cost_usd"`
-	CostIncomplete bool                         `json:"cost_incomplete"`
-	Platform       string                       `json:"platform,omitempty"`
-	UpstreamModel  string                       `json:"upstream_model,omitempty"`
-	AttemptCount   int                          `json:"attempt_count"`
-	Usage          *ChannelMonitorProbeUsage    `json:"usage,omitempty"`
-	ProbeAttempts  []ChannelMonitorProbeAttempt `json:"-"`
-	PelicanConfig  *PelicanTestConfig           `json:"pelican_config,omitempty"`
-	StartedAt      time.Time                    `json:"started_at"`
-	FinishedAt     time.Time                    `json:"finished_at"`
-	CreatedAt      time.Time                    `json:"created_at"`
+	ID             int64                     `json:"id"`
+	PlanID         int64                     `json:"plan_id"`
+	GroupID        int64                     `json:"group_id"`
+	GroupName      string                    `json:"group_name,omitempty"`
+	AccountID      int64                     `json:"account_id"`
+	AccountName    string                    `json:"account_name"`
+	Attempts       []PelicanGroupTestAttempt `json:"attempts"`
+	Status         string                    `json:"status"`
+	ResponseText   string                    `json:"response_text,omitempty"`
+	ErrorMessage   string                    `json:"error_message"`
+	LatencyMs      int64                     `json:"latency_ms"`
+	CostUSD        *float64                  `json:"cost_usd"`
+	CostIncomplete bool                      `json:"cost_incomplete"`
+	PelicanConfig  *PelicanTestConfig        `json:"pelican_config,omitempty"`
+	StartedAt      time.Time                 `json:"started_at"`
+	FinishedAt     time.Time                 `json:"finished_at"`
+	CreatedAt      time.Time                 `json:"created_at"`
 }
 
 // PelicanGroupTestPlanInput is what an admin edits; the question is always the HTML drawing kind.
@@ -150,14 +144,13 @@ type pelicanGroupTestGroups interface {
 }
 
 type PelicanGroupTestService struct {
-	repo                     PelicanGroupTestRepository
-	groups                   pelicanGroupTestGroups
-	router                   pelicanGroupRouter
-	runAccount               func(ctx context.Context, accountID int64, model string, cfg *PelicanTestConfig) (*ScheduledTestResult, error)
-	showcase                 *PelicanShowcaseService
-	billing                  *BillingService
-	probeRequestFactRecorder ProbeRequestFactRecorder
-	now                      func() time.Time
+	repo       PelicanGroupTestRepository
+	groups     pelicanGroupTestGroups
+	router     pelicanGroupRouter
+	runAccount func(ctx context.Context, accountID int64, model string, cfg *PelicanTestConfig) (*ScheduledTestResult, error)
+	showcase   *PelicanShowcaseService
+	billing    *BillingService
+	now        func() time.Time
 	// runs tracks background runs so tests can wait for them.
 	runs sync.WaitGroup
 }
@@ -172,19 +165,14 @@ func NewPelicanGroupTestService(
 	showcase *PelicanShowcaseService,
 	billing *BillingService,
 ) *PelicanGroupTestService {
-	var recorder ProbeRequestFactRecorder
-	if accountTest != nil {
-		recorder = accountTest.probeRequestFactRecorder
-	}
 	return &PelicanGroupTestService{
-		repo:                     repo,
-		groups:                   groupRepo,
-		router:                   &gatewayPelicanGroupRouter{gateway: gateway, openai: openai, concurrency: concurrency, slotWait: pelicanGroupTestSlotWait},
-		runAccount:               accountTest.RunPelicanBackground,
-		showcase:                 showcase,
-		billing:                  billing,
-		probeRequestFactRecorder: recorder,
-		now:                      time.Now,
+		repo:       repo,
+		groups:     groupRepo,
+		router:     &gatewayPelicanGroupRouter{gateway: gateway, openai: openai, concurrency: concurrency, slotWait: pelicanGroupTestSlotWait},
+		runAccount: accountTest.RunPelicanBackground,
+		showcase:   showcase,
+		billing:    billing,
+		now:        time.Now,
 	}
 }
 
@@ -427,17 +415,8 @@ func (s *PelicanGroupTestService) runSamples(ctx context.Context, plan *PelicanG
 // in its own goroutine outside Gin's recovery, so a panic becomes a failed result.
 func (s *PelicanGroupTestService) runSample(ctx context.Context, plan *PelicanGroupTestPlan, group *Group) (result *PelicanGroupTestResult) {
 	started := s.now()
-	runID, logicalID := uuid.NewString(), uuid.NewString()
-	var facts []ProbeRequestFact
-	defer func() {
-		finalizeProbeFacts(facts)
-		saveProbeFacts(s.probeRequestFactRecorder, facts)
-	}()
 	var costUSD float64
 	priced, attempted, incomplete := false, false, false
-	probeUsage := &ChannelMonitorProbeUsage{Source: "probe"}
-	probeAttempts := []ChannelMonitorProbeAttempt{}
-	var platform, upstreamModel string
 	defer func() {
 		if result != nil {
 			if priced || !attempted {
@@ -446,11 +425,6 @@ func (s *PelicanGroupTestService) runSample(ctx context.Context, plan *PelicanGr
 				result.CostUSD = nil
 			}
 			result.CostIncomplete = incomplete || (attempted && !priced)
-			result.Platform, result.UpstreamModel = platform, upstreamModel
-			result.AttemptCount = len(probeAttempts)
-			result.ProbeAttempts = probeAttempts
-			probeUsage.CostUSD, probeUsage.CostIncomplete = result.CostUSD, result.CostIncomplete
-			result.Usage = probeUsage
 		}
 	}()
 	defer func() {
@@ -475,18 +449,11 @@ func (s *PelicanGroupTestService) runSample(ctx context.Context, plan *PelicanGr
 		}
 		var sample *ScheduledTestResult
 		attempted = true
-		platform = route.account.Platform
-		usage := &pelicanTestUsageCollector{model: route.account.GetMappedModel(route.model), requestedModel: plan.ModelID, runID: runID, logicalRequestID: logicalID, role: "generation", groupID: &group.ID}
+		usage := &pelicanTestUsageCollector{model: route.account.GetMappedModel(route.model)}
 		func() {
 			defer route.release()
 			defer func() {
-				facts = append(facts, usage.facts(s.billing, route.account)...)
 				cost, partial := usage.cost(s.billing, route.account)
-				snapshot := usage.snapshot()
-				snapshot.CostUSD, snapshot.CostIncomplete = cost, partial
-				probeUsage.Add(snapshot)
-				upstreamModel = usage.upstreamModel()
-				probeAttempts = append(probeAttempts, ChannelMonitorProbeAttempt{AccountID: route.account.ID, Platform: route.account.Platform, RequestedModel: plan.ModelID, UpstreamModel: upstreamModel, Usage: snapshot})
 				incomplete = incomplete || partial
 				if cost != nil {
 					costUSD += *cost

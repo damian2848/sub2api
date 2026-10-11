@@ -57,7 +57,7 @@ func TestCategoryToFilter(t *testing.T) {
 		t.Fatalf("quota => phases=%v types=%v", phases, types)
 	}
 	phases, types = CategoryToFilter("invalid_request")
-	if len(phases) != 1 || phases[0] != "request" || len(types) != 2 || types[0] != "invalid_request_error" || types[1] != "model_not_found" {
+	if len(types) != 2 || types[0] != "invalid_request_error" || types[1] != "model_not_found" || len(phases) != 1 || phases[0] != "request" {
 		t.Fatalf("invalid_request => phases=%v types=%v", phases, types)
 	}
 	phases, types = CategoryToFilter("other")

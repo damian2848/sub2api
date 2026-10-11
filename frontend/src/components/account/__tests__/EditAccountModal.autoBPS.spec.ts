@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
   updatePlan: vi.fn(),
   showError: vi.fn(),
   showWarning: vi.fn(),
-  publicSettings: { excel_bps_enabled: true }
+  publicSettings: { excel_bps_enabled: true, prism_browser_enabled: true }
 }))
 
 vi.mock('@/stores/app', () => ({
@@ -92,20 +92,66 @@ async function submit(wrapper: ReturnType<typeof mountModal>) {
 
 const toggleSelector = '[data-testid="account-auto-bps-toggle"]'
 
-describe('EditAccountModal global BPS switch', () => {
+describe('EditAccountModal Prism OAuth switch', () => {
   beforeEach(() => {
-    Object.values(mocks).forEach(mock => {
-      if (typeof mock === 'function') mock.mockReset()
+    Object.entries(mocks).forEach(([key, mock]) => {
+      if (key !== 'publicSettings') mock.mockReset()
     })
+    mocks.publicSettings = { excel_bps_enabled: true, prism_browser_enabled: true }
+    mocks.updateAccount.mockImplementation(async (_id: number, payload: Record<string, unknown>) => ({ ...buildOAuthAccount(), ...payload }))
     mocks.listByAccount.mockResolvedValue([])
   })
 
-  it('hides BPS account settings when the global switch is off', () => {
-    mocks.publicSettings = { excel_bps_enabled: false }
+  it('hides BPS and Prism account settings when the global switches are off', () => {
+    mocks.publicSettings = { excel_bps_enabled: false, prism_browser_enabled: false }
     const wrapper = mountModal()
+    expect(wrapper.find('[data-testid="openai-prism-browser-oauth-settings"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="excel-bps-all-models"]').exists()).toBe(false)
     wrapper.unmount()
-    mocks.publicSettings = { excel_bps_enabled: true }
+  })
+
+  it('persists the Prism switch while preserving unrelated extra fields', async () => {
+    const wrapper = mountModal(buildOAuthAccount({ extra: { fixture_flag: true } }))
+    await flushPromises()
+    await wrapper.get('[data-testid="openai-prism-browser-oauth-toggle"]').setValue(true)
+    await submit(wrapper)
+    expect(mocks.updateAccount).toHaveBeenCalledTimes(1)
+    expect(mocks.updateAccount.mock.calls[0][1].extra).toMatchObject({ fixture_flag: true, openai_prism_browser: true,
+      openai_prism_browser_models: ['gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-luna'] })
+  })
+
+  it('removes the flag when disabled', async () => {
+    const wrapper = mountModal(buildOAuthAccount({ extra: { openai_prism_browser: true, openai_prism_browser_models: ['gpt-6.1-sol'] } }))
+    await flushPromises()
+    await wrapper.get('[data-testid="openai-prism-browser-oauth-toggle"]').setValue(false)
+    await submit(wrapper)
+    expect(mocks.updateAccount.mock.calls[0][1].extra.openai_prism_browser).toBeUndefined()
+    expect(mocks.updateAccount.mock.calls[0][1].extra.openai_prism_browser_models).toBeUndefined()
+  })
+
+  it('limits legacy accounts to the four supported models and persists a subset', async () => {
+    const wrapper = mountModal(buildOAuthAccount({ extra: { openai_prism_browser: true } }))
+    await flushPromises()
+    expect(wrapper.findAll('[data-testid="prism-model-scope"] input:checked')).toHaveLength(4)
+    for (const model of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-luna']) {
+      await wrapper.get(`[data-testid="prism-model-${model}"]`).setValue(false)
+    }
+    await submit(wrapper)
+    expect(mocks.updateAccount.mock.calls[0][1].extra.openai_prism_browser_models).toEqual(['gpt-6.1-sol'])
+  })
+
+  it.each([[], ['gpt-4o-audio-preview'], 'malformed'])('does not widen an empty or invalid scope: %j', async (models) => {
+    const wrapper = mountModal(buildOAuthAccount({ extra: { openai_prism_browser: true, openai_prism_browser_models: models } }))
+    await flushPromises()
+    expect(wrapper.findAll('[data-testid="prism-model-scope"] input:checked')).toHaveLength(0)
+    await submit(wrapper)
+    expect(mocks.updateAccount.mock.calls[0][1].extra.openai_prism_browser_models).toEqual([])
+  })
+
+  it('hides Prism for API-key accounts', async () => {
+    const wrapper = mountModal(buildOAuthAccount({ type: 'apikey' }))
+    await flushPromises()
+    expect(wrapper.find('[data-testid="openai-prism-browser-oauth-toggle"]').exists()).toBe(false)
   })
 })
 
@@ -115,6 +161,7 @@ describe('EditAccountModal auto BPS switch', () => {
       if (typeof mock === 'function') mock.mockReset()
     })
     mocks.publicSettings.excel_bps_enabled = true
+    mocks.publicSettings.prism_browser_enabled = true
     mocks.updateAccount.mockImplementation(async (_id: number, payload: Record<string, unknown>) => ({ ...buildOAuthAccount(), ...payload }))
     mocks.listByAccount.mockResolvedValue([])
     mocks.createPlan.mockImplementation(async (request: Record<string, unknown>) => ({ ...buildRule(), ...request, id: 40 }))

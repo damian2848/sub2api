@@ -517,25 +517,16 @@ func usageRecordContext(parent context.Context, base context.Context) context.Co
 	if requestID, _ := parent.Value(ctxkey.RequestID).(string); strings.TrimSpace(requestID) != "" {
 		base = context.WithValue(base, ctxkey.RequestID, strings.TrimSpace(requestID))
 	}
-	base = service.CopyChannelMonitorRequestSource(parent, base)
 	return requesttiming.With(base, requesttiming.From(parent))
 }
 
-// wrapUsageRecordTaskContext 包装计费任务：复制请求级 context 值，并接管请求的在途余额预留引用。
-// 返回的 abandon 在任务未被执行（被丢弃）时必须调用以归还预留引用；任务执行结束时（含 panic）
-// 自动归还，此时余额缓存已在计费路径中同步扣减。
-func wrapUsageRecordTaskContext(parent context.Context, task service.UsageRecordTask) (service.UsageRecordTask, func()) {
+func wrapUsageRecordTaskContext(parent context.Context, task service.UsageRecordTask) service.UsageRecordTask {
 	if task == nil {
-		return nil, func() {}
-	}
-	done := func() {}
-	if parent != nil {
-		done = service.InflightReservationFromContext(parent).Acquire()
+		return nil
 	}
 	return func(ctx context.Context) {
-		defer done()
 		task(usageRecordContext(parent, ctx))
-	}, done
+	}
 }
 
 func openAICompatibleRequestPlatform(ctx context.Context, apiKey *service.APIKey) string {
@@ -902,19 +893,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		return
 	}
 
-	// 余额模式在途预留：防止并发请求在预检时看到同一份余额而集体透支。
-	inflightRelease, err := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
-	if err != nil {
-		reqLog.Info("openai.inflight_reservation_rejected", zap.Error(err))
-		status, code, message, retryAfter := billingErrorDetails(err)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-		}
-		h.handleStreamingAwareError(c, status, code, message, streamStarted)
-		return
-	}
-	defer inflightRelease()
-
 	// Generate session hash (header first; fallback to prompt_cache_key)
 	sessionHash := h.gatewayService.GenerateSessionHash(c, sessionHashBody)
 	if h.rejectIfCyberSessionBlocked(c, apiKey, sessionHashBody, reqModel, cyberBlockFormatResponses) {
@@ -927,6 +905,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
+	var forbiddenBudget grokForbiddenFailoverBudget
 	firstOutputTimeoutSwitchCount := 0
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
@@ -1101,7 +1080,6 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		// 从不可变的 canonical forwardBody 派生本次尝试 body 并整块剔除上游私有的加密
 		// reasoning item（含耦合的 id/summary），避免非透传上游 400 拒绝 Kiro reasoning 形态。
 		attemptBody := h.deriveOpenAIForwardAttemptBody(reqLog, forwardBody, account, &passthroughFailoverState)
-		h.gatewayService.SetPrismFailover(c, apiKey.GroupID, reqModel, account, failedAccountIDs)
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
 				if accountReleaseFunc != nil {
@@ -1226,17 +1204,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					if c.Writer.Written() {
 						streamStarted = true
 					}
-					if skipPrismUnsupportedAccount(failoverErr, account.ID, failedAccountIDs, &lastFailoverErr) {
-						reqLog.Info("openai.prism_account_skipped_unsupported_request",
-							zap.Int64("account_id", account.ID),
-							zap.String("reason", string(failoverErr.Reason)),
-						)
-						continue
-					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, forwardModel, requireCompact, nil), false, nil, err)
 					}
-					if !failoverErr.ShouldRetryNextAccount() {
+					if !forbiddenBudget.canRetry(failoverErr, switchCount) {
 						h.handleFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -1604,18 +1575,6 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		return
 	}
 
-	// 余额模式在途预留（与计费同口径估算；计费任务扣减余额缓存后才释放）。
-	inflightDone, inflightErr := reserveInflightBalance(c, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, body))
-	if inflightErr != nil {
-		status, code, message, retryAfter := billingErrorDetails(inflightErr)
-		if retryAfter > 0 {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-		}
-		h.anthropicStreamingAwareError(c, status, code, message, streamStarted)
-		return
-	}
-	defer inflightDone()
-
 	sessionHash := h.gatewayService.GenerateSessionHash(c, body)
 	promptCacheKey := h.gatewayService.ExtractSessionID(c, body)
 	sessionHash, promptCacheKey = resolveOpenAIMessagesMetadataSession(c, sessionHash, promptCacheKey, reqModel, body)
@@ -1625,6 +1584,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
+	var forbiddenBudget grokForbiddenFailoverBudget
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
@@ -1737,7 +1697,6 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 		defaultMappedModel := strings.TrimSpace(effectiveMappedModel)
 		// 应用渠道模型映射到请求体
 		forwardBody := mappedBodyForMessages(channelMappingMsg.Mapped, channelMappingMsg.MappedModel)
-		h.gatewayService.SetPrismFailover(c, apiKey.GroupID, reqModel, account, failedAccountIDs)
 		writerSizeBeforeForward := c.Writer.Size()
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer func() {
@@ -1833,17 +1792,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 						h.handleAnthropicFailoverExhausted(c, failoverErr, true)
 						return
 					}
-					if skipPrismUnsupportedAccount(failoverErr, account.ID, failedAccountIDs, &lastFailoverErr) {
-						reqLog.Info("openai_messages.prism_account_skipped_unsupported_request",
-							zap.Int64("account_id", account.ID),
-							zap.String("reason", string(failoverErr.Reason)),
-						)
-						continue
-					}
 					if failoverErr.ShouldReportAccountScheduleFailure() {
 						h.gatewayService.ReportOpenAIAccountScheduleResult(account, openAIAccountScheduleModel(c, account, currentRoutingModel, false, nil), false, nil, err)
 					}
-					if !failoverErr.ShouldRetryNextAccount() {
+					if !forbiddenBudget.canRetry(failoverErr, switchCount) {
 						h.handleAnthropicFailoverExhausted(c, failoverErr, streamStarted)
 						return
 					}
@@ -1985,10 +1937,6 @@ func (h *OpenAIGatewayHandler) anthropicStreamingAwareError(c *gin.Context, stat
 func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, streamStarted bool) {
 	if failoverErr != nil {
 		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
-	}
-	if failoverErr.IsPrismRequestUnsupported() {
-		h.anthropicStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", failoverErr.ClientMessage, streamStarted)
-		return
 	}
 	if failoverErr != nil && failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
@@ -2975,7 +2923,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	}
 
 	cyberSessionBlockEnabled, _ := h.gatewayService.CyberSessionBlockRuntime(c.Request.Context())
-	cyberSessionIdentityStrict := !h.cyberPolicyLogOnly(c, apiKey) && cyberSessionBlockEnabled && h.gatewayService.CyberSessionIdentityStrictEnabled(c.Request.Context())
+	cyberSessionIdentityStrict := cyberSessionBlockEnabled && h.gatewayService.CyberSessionIdentityStrictEnabled(c.Request.Context())
 	cyberIdentityBinding := &openAIWSCyberIdentityBinding{}
 	firstIdentityDecision := cyberIdentityBinding.resolve(apiKey.ID, c, firstMessage, cyberSessionBlockEnabled, cyberSessionIdentityStrict)
 	observeOpenAICyberSessionIdentity(firstIdentityDecision.observed, firstIdentityDecision.reject, firstIdentityDecision.identitySwap)
@@ -3080,17 +3028,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		return
 	}
 
-	// 余额模式在途预留（会话级）：按首帧估算一次，会话期间续期；每轮计费任务接管引用，
-	// 会话结束且所有轮次扣减落地后释放。
-	inflightCtx, inflightDone, inflightErr := reserveInflightBalanceCtx(ctx, h.billingCacheService, h.gatewayService, apiKey, subscription, tokenInflightEstimate(reqModel, firstMessage))
-	if inflightErr != nil {
-		reqLog.Info("openai.websocket_inflight_reservation_rejected", zap.Error(inflightErr))
-		closeOpenAIClientWS(wsConn, coderws.StatusPolicyViolation, "billing check failed")
-		return
-	}
-	defer inflightDone()
-	ctx = inflightCtx
-
 	// A WebSocket may outlive a key's remaining spending window. Recheck
 	// after acquiring turn slots, including the first account-selection wait.
 	// Restrict this extra check to the opt-in mode so standard-mode RPM checks
@@ -3113,6 +3050,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	ctx = service.WithOpenAIGuardianParentAffinity(ctx, c, firstMessage, reqModel)
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
+	var forbiddenBudget grokForbiddenFailoverBudget
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
@@ -3157,14 +3095,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		if !service.OpenAIWSIngressCanFailover(ctx, c) {
 			return false
 		}
-		if skipPrismUnsupportedAccount(failoverErr, account.ID, failedAccountIDs, &lastFailoverErr) {
-			reqLog.Info("openai.websocket_prism_account_skipped_unsupported_request",
-				zap.Int64("account_id", account.ID),
-				zap.String("reason", string(failoverErr.Reason)),
-			)
-			return ctx.Err() == nil && ensureUserSlotHeld()
-		}
-		if !failoverErr.ShouldRetryNextAccount() {
+		if !forbiddenBudget.canRetry(failoverErr, switchCount) {
 			closeOpenAIWSFailoverExhausted(c, wsConn, failoverErr)
 			return false
 		}
@@ -3340,7 +3271,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		// captured by the previous failover account before credential lookup.
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 		currentAccountRelease = accountReleaseFunc
-		h.gatewayService.SetPrismFailover(c, apiKey.GroupID, reqModel, account, failedAccountIDs)
 		if err := h.gatewayService.BindStickySessionAfterProfitAdmission(ctx, apiKey.GroupID, sessionHash, account.ID); err != nil {
 			reqLog.Warn("openai.websocket_bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 		}
@@ -3444,7 +3374,6 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				return nil
 			},
 			BeforeRequest: func(turn int, payload []byte, originalModel string) error {
-				h.gatewayService.SetPrismFailover(c, apiKey.GroupID, originalModel, account, failedAccountIDs)
 				c.Set(securityAuditWSTurnContextKey, turn)
 				service.BeginOpsStreamTurn(c, turn)
 				// 连接级 cyber session gate 也在 BeforeRequest 先执行，使 native 与
@@ -3468,7 +3397,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					model = reqModel
 				}
 				cyberEnabled, _ := h.gatewayService.CyberSessionBlockRuntime(c.Request.Context())
-				cyberStrict := !h.cyberPolicyLogOnly(c, apiKey) && cyberEnabled && h.gatewayService.CyberSessionIdentityStrictEnabled(c.Request.Context())
+				cyberStrict := cyberEnabled && h.gatewayService.CyberSessionIdentityStrictEnabled(c.Request.Context())
 				identityDecision := cyberIdentityBinding.resolve(apiKey.ID, c, payload, cyberEnabled, cyberStrict)
 				observeOpenAICyberSessionIdentity(identityDecision.observed, identityDecision.reject, identityDecision.identitySwap)
 				if identityDecision.reject {
@@ -3477,7 +3406,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					h.enqueueCyberSessionIdentityRejectedOpsEntry(c, apiKey, model, metadata)
 					return newOpenAIWSLocalAdmissionCloseError("invalid or conflicting session identity")
 				}
-				if cyberBlockKey := h.gatewayService.FindCyberSessionBlockedForIdentity(c.Request.Context(), identityDecision.effective); cyberBlockKey != "" && !h.cyberPolicyLogOnly(c, apiKey) {
+				if cyberBlockKey := h.gatewayService.FindCyberSessionBlockedForIdentity(c.Request.Context(), identityDecision.effective); cyberBlockKey != "" {
 					writeCyberSessionBlockedWSError(c.Request.Context(), wsConn)
 					h.enqueueCyberSessionBlockedOpsEntry(c, apiKey, model, cyberBlockKey)
 					return newOpenAIWSLocalAdmissionCloseError(cyberSessionBlockedClientMsg)
@@ -4008,12 +3937,9 @@ func (h *OpenAIGatewayHandler) submitUsageRecordTask(parent context.Context, tas
 	if task == nil {
 		return
 	}
-	task, abandon := wrapUsageRecordTaskContext(parent, task)
+	task = wrapUsageRecordTaskContext(parent, task)
 	if h.usageRecordWorkerPool != nil {
 		if mode := h.usageRecordWorkerPool.Submit(task); mode != service.UsageRecordSubmitModeDroppedStopped {
-			if mode.Dropped() {
-				abandon()
-			}
 			return
 		}
 		// 池已停止（进程关停窗口）：计费任务不能静默丢失，降级为内联同步执行。
@@ -4050,7 +3976,7 @@ func (h *OpenAIGatewayHandler) submitMandatoryUsageRecordTask(parent context.Con
 	if task == nil {
 		return
 	}
-	task, _ = wrapUsageRecordTaskContext(parent, task)
+	task = wrapUsageRecordTaskContext(parent, task)
 	if h.usageRecordWorkerPool != nil {
 		if mode := h.usageRecordWorkerPool.Submit(task); !mode.Dropped() {
 			return
@@ -4114,10 +4040,6 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 			service.OpenAIRequestBodyTooLargeClientMessage,
 			streamStarted,
 		)
-		return
-	}
-	if failoverErr.IsPrismRequestUnsupported() {
-		h.handleStreamingAwareErrorWithCode(c, http.StatusBadRequest, "invalid_request_error", string(failoverErr.Reason), failoverErr.ClientMessage, streamStarted, false)
 		return
 	}
 	if failoverErr.Reason == service.OpenAIHTTPContinuationUnsupportedReason {
@@ -4206,22 +4128,6 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 	// 使用默认的错误映射
 	status, errType, errMsg := h.mapUpstreamError(statusCode)
 	h.handleStreamingAwareError(c, status, errType, errMsg, streamStarted)
-}
-
-// skipPrismUnsupportedAccount excludes a managed Prism account that declined the
-// request itself (image input, previous_response_id, compact) from the rest of
-// this request. Unlike an upstream fault it spends no account-switch budget, and
-// it never reaches the scheduler health or cooldown paths. A fault already
-// remembered from another account stays the final answer if nothing can serve.
-func skipPrismUnsupportedAccount(failoverErr *service.UpstreamFailoverError, accountID int64, failedAccountIDs map[int64]struct{}, lastFailoverErr **service.UpstreamFailoverError) bool {
-	if !failoverErr.IsPrismRequestUnsupported() {
-		return false
-	}
-	failedAccountIDs[accountID] = struct{}{}
-	if *lastFailoverErr == nil {
-		*lastFailoverErr = failoverErr
-	}
-	return true
 }
 
 func credentialFailoverClientResponse(failoverErr *service.UpstreamFailoverError) (int, string) {
@@ -4460,7 +4366,7 @@ func openAIForwardErrorAlreadyCommunicated(c *gin.Context, writerSizeBeforeForwa
 }
 
 func openAIForwardMayFailover(c *gin.Context, writerSizeBeforeForward int, failoverErr *service.UpstreamFailoverError) bool {
-	if c == nil || c.Writer == nil || service.IsPrismStreamCommitted(c) {
+	if c == nil || c.Writer == nil {
 		return false
 	}
 	if service.OpenAICompactKeepaliveAdjustedWrittenSize(c) == writerSizeBeforeForward {
@@ -4596,12 +4502,6 @@ func closeOpenAIWSFailoverExhausted(c *gin.Context, conn *coderws.Conn, failover
 		if reason := strings.TrimSpace(string(failoverErr.Reason)); reason != "" {
 			errorCode = reason
 		}
-		if failoverErr.IsPrismRequestUnsupported() {
-			// The client's request is at fault, not the upstream: say so plainly.
-			service.MarkOpsStreamFailure(c, "invalid_request_error", errorCode, failoverErr.ClientMessage, http.StatusBadRequest)
-			closeOpenAIClientWS(conn, coderws.StatusPolicyViolation, failoverErr.ClientMessage)
-			return
-		}
 		if failoverErr.Stage == service.GatewayFailureStageAccountAuth {
 			intendedStatus = http.StatusServiceUnavailable
 			errorType = "api_error"
@@ -4718,7 +4618,6 @@ const cyberPolicyRecordedKey = "ops_cyber_recorded"
 // async goroutine for building the cyber ops_error_logs entry.
 type cyberPolicyOpsErrorMeta struct {
 	RequestID         string
-	Source            string
 	ClientRequestID   string
 	Platform          string
 	Model             string
@@ -4747,7 +4646,6 @@ func buildCyberPolicyOpsErrorEntry(meta cyberPolicyOpsErrorMeta, mark *service.C
 	rt := int16(service.RequestTypeCyberBlocked)
 	entry := &service.OpsInsertErrorLogInput{
 		RequestID:         meta.RequestID,
-		Source:            meta.Source,
 		ClientRequestID:   meta.ClientRequestID,
 		Platform:          meta.Platform,
 		Model:             meta.Model,
@@ -4796,7 +4694,6 @@ func buildCyberSessionBlockedOpsEntry(meta cyberPolicyOpsErrorMeta) *service.Ops
 	rt := int16(service.RequestTypeCyberBlocked)
 	entry := &service.OpsInsertErrorLogInput{
 		RequestID:         meta.RequestID,
-		Source:            meta.Source,
 		ClientRequestID:   meta.ClientRequestID,
 		Platform:          meta.Platform,
 		Model:             meta.Model,
@@ -4837,7 +4734,6 @@ func buildCyberSessionIdentityRejectedOpsEntry(meta cyberPolicyOpsErrorMeta) *se
 	rt := int16(service.RequestTypeCyberBlocked)
 	entry := &service.OpsInsertErrorLogInput{
 		RequestID:         meta.RequestID,
-		Source:            meta.Source,
 		ClientRequestID:   meta.ClientRequestID,
 		Platform:          meta.Platform,
 		Model:             meta.Model,
@@ -4908,13 +4804,13 @@ func (h *OpenAIGatewayHandler) rejectIfCyberSessionBlocked(c *gin.Context, apiKe
 	}
 	identity := service.ResolveCyberSessionIdentity(apiKey.ID, c, body)
 	enabled, _ := h.gatewayService.CyberSessionBlockRuntime(c.Request.Context())
-	strictRejected := !h.cyberPolicyLogOnly(c, apiKey) && enabled && h.gatewayService.CyberSessionIdentityStrictEnabled(c.Request.Context()) && !identity.Resolved()
+	strictRejected := enabled && h.gatewayService.CyberSessionIdentityStrictEnabled(c.Request.Context()) && !identity.Resolved()
 	observeOpenAICyberSessionIdentity(identity, strictRejected, false)
 	if strictRejected {
 		h.writeCyberSessionIdentityRejected(c, apiKey, model, format, identity.Metadata)
 		return true
 	}
-	if !enabled || h.cyberPolicyLogOnly(c, apiKey) {
+	if !enabled {
 		return false
 	}
 	key := h.findBlockedCyberSessionForIdentity(c, apiKey, identity)
@@ -5026,7 +4922,6 @@ func (h *OpenAIGatewayHandler) enqueueCyberSessionBlockedOpsEntry(c *gin.Context
 		requestCtx = c.Request.Context()
 	}
 	meta.Platform = resolveOpsPlatform(requestCtx, apiKey, guessPlatformFromPath(meta.RequestPath))
-	meta.Source = service.ChannelMonitorRequestSource(requestCtx)
 	if c.Request != nil {
 		meta.ClientRequestID, _ = c.Request.Context().Value(ctxkey.ClientRequestID).(string)
 		meta.UserAgent = c.GetHeader("User-Agent")
@@ -5069,7 +4964,6 @@ func (h *OpenAIGatewayHandler) enqueueCyberSessionIdentityRejectedOpsEntry(c *gi
 		meta.ClientIP = strings.TrimSpace(ip.GetClientIP(c))
 	}
 	meta.Platform = resolveOpsPlatform(requestCtx, apiKey, guessPlatformFromPath(meta.RequestPath))
-	meta.Source = service.ChannelMonitorRequestSource(requestCtx)
 	meta.APIKeyID = apiKey.ID
 	meta.GroupID = apiKey.GroupID
 	meta.APIKeyPrefix = keyPrefix(apiKey.Key, 8)
@@ -5159,7 +5053,6 @@ func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarkedWithIdentity(c *gin.Cont
 	}
 	opsMeta := cyberPolicyOpsErrorMeta{
 		RequestID:         requestID,
-		Source:            service.ChannelMonitorRequestSource(requestCtx),
 		ClientRequestID:   clientRequestID,
 		Platform:          platform,
 		Model:             model,
@@ -5187,9 +5080,8 @@ func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarkedWithIdentity(c *gin.Cont
 			cancel()
 		}
 	}
-	usageParent := service.CopyChannelMonitorRequestSource(requestCtx, context.Background())
 	go func() {
-		ctx, cancel := context.WithTimeout(usageParent, 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if cmSvc != nil {
 			cmSvc.RecordCyberPolicyEvent(ctx, service.CyberPolicyRecordInput{

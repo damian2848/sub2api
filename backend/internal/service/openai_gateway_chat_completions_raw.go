@@ -74,11 +74,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	// control-plane context for the pre-send admission as well; otherwise a
 	// client cancellation would prevent the request from reaching the same
 	// drain path that existed before admission was added.
-	admissionCtx := ctx
-	if !account.IsManagedPrismAccount() {
-		admissionCtx = context.WithoutCancel(ctx)
-	}
-	latest, admissionErr := s.admitOpenAITurn(admissionCtx, c, account, originalModel)
+	latest, admissionErr := s.admitOpenAITurn(context.WithoutCancel(ctx), c, account, originalModel)
 	if admissionErr != nil {
 		return nil, admissionErr
 	}
@@ -99,14 +95,12 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 		// anchored to the client's stable conversation prefix.
 		grokCacheIdentity = resolveGrokCacheIdentity(c, body, "", upstreamModel)
 	}
-	// The Prism sidecar emulates tools itself, so the Chat-only tool limits of
-	// the official GPT-6 upstreams do not apply to it.
-	if !account.IsManagedPrismAccount() && openai.IsGPT61SolModelSpelling(upstreamModel) && (len(gjson.GetBytes(body, "tools").Array()) > 0 || len(gjson.GetBytes(body, "functions").Array()) > 0) {
+	if openai.IsGPT61SolModelSpelling(upstreamModel) && (len(gjson.GetBytes(body, "tools").Array()) > 0 || len(gjson.GetBytes(body, "functions").Array()) > 0) {
 		err := fmt.Errorf("gpt-6.1-sol requires Responses for tool calls; this account only supports Chat Completions")
 		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, err
 	}
-	if !account.IsManagedPrismAccount() && openai.IsGPT6SolOrLunaModelSpelling(upstreamModel) && (len(gjson.GetBytes(body, "tools").Array()) > 0 || len(gjson.GetBytes(body, "functions").Array()) > 0) && gjson.GetBytes(body, "reasoning_effort").String() != "none" {
+	if openai.IsGPT6SolOrLunaModelSpelling(upstreamModel) && (len(gjson.GetBytes(body, "tools").Array()) > 0 || len(gjson.GetBytes(body, "functions").Array()) > 0) && gjson.GetBytes(body, "reasoning_effort").String() != "none" {
 		err := fmt.Errorf("%s requires Responses for tool calls with reasoning; this account only supports Chat Completions. Use reasoning_effort=none or a Responses-capable account", upstreamModel)
 		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, err
@@ -121,20 +115,16 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 	}
 
 	// 4. Apply OpenAI fast policy on the CC body
-	if account.IsManagedPrismAccount() {
-		upstreamBody = stripPrismServiceTier(upstreamBody)
-	} else {
-		updatedBody, policyErr := s.applyOpenAIFastPolicyToBody(ctx, account, upstreamModel, upstreamBody)
-		if policyErr != nil {
-			var blocked *OpenAIFastBlockedError
-			if errors.As(policyErr, &blocked) {
-				MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
-				writeChatCompletionsError(c, http.StatusForbidden, "permission_error", blocked.Message)
-			}
-			return nil, policyErr
+	updatedBody, policyErr := s.applyOpenAIFastPolicyToBody(ctx, account, upstreamModel, upstreamBody)
+	if policyErr != nil {
+		var blocked *OpenAIFastBlockedError
+		if errors.As(policyErr, &blocked) {
+			MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
+			writeChatCompletionsError(c, http.StatusForbidden, "permission_error", blocked.Message)
 		}
-		upstreamBody = updatedBody
+		return nil, policyErr
 	}
+	upstreamBody = updatedBody
 	// Keep the final outbound tier separate from the observed response tier so
 	// usage recording can apply the selected credential's response contract.
 	serviceTier := extractOpenAIServiceTierFromBody(upstreamBody)
@@ -251,7 +241,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 			s.handleGrokAccountUpstreamError(withGrokTeamRateLimitModel(ctx, upstreamModel), account, resp.StatusCode, resp.Header, respBody)
 			if s.shouldFailoverGrokUpstreamError(resp.StatusCode, respBody) {
 				retryable, retryDelay, retryDeadline, retryMax := grokSameAccountRetryMetadata(account, resp.StatusCode, respBody)
-				return nil, &UpstreamFailoverError{
+				return nil, (&UpstreamFailoverError{
 					StatusCode:               resp.StatusCode,
 					ResponseBody:             respBody,
 					ResponseHeaders:          resp.Header.Clone(),
@@ -260,7 +250,7 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletions(
 					SameAccountRetryDelay:    retryDelay,
 					SameAccountRetryDeadline: retryDeadline,
 					SameAccountRetryMax:      retryMax,
-				}
+				}).WithGrokForbiddenPolicy(account)
 			}
 			return s.handleChatCompletionsErrorResponse(resp, c, account, billingModel)
 		}
@@ -332,57 +322,11 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	clientDisconnected := false
 	clientOutputStarted := false
 	pendingLines := make([]string, 0, 8)
-	isPrism := account.IsManagedPrismAccount()
-	prismEventHasData := false
-	prismEventStartsTTFT := false
-	prismEventPayloads := make([]string, 0, 1)
-	prismErrorDelivered := false
-	prismErrorMessage := ""
 	refusalDetector := newOpenAIChatSilentRefusalDetector(requestBodyLen)
 	var terminal openAIRawStreamTerminalState
 
 	writeLine := func(line string) {
 		if clientDisconnected {
-			return
-		}
-		if isPrism {
-			pendingLines = append(pendingLines, line)
-			if line != "" {
-				return
-			}
-			writeStreamHeaders()
-			if prismEventHasData {
-				MarkPrismStreamCommitted(c)
-			}
-			for _, pending := range pendingLines {
-				n, err := c.Writer.WriteString(pending + "\n")
-				if !prismEventHasData {
-					recordOpenAIStreamKeepaliveBytes(c, n)
-				}
-				if err != nil {
-					clientDisconnected = true
-					return
-				}
-			}
-			if prismEventHasData {
-				clientOutputStarted = true
-			}
-			for _, payload := range prismEventPayloads {
-				terminal.ObserveDataLine(payload)
-				if gjson.Get(payload, "error").IsObject() {
-					prismErrorDelivered = true
-					prismErrorMessage = extractUpstreamErrorMessage([]byte(payload))
-					MarkResponseCommitted(c)
-				}
-			}
-			if prismEventStartsTTFT && firstTokenMs == nil {
-				elapsed := int(time.Since(startTime).Milliseconds())
-				firstTokenMs = &elapsed
-			}
-			pendingLines = pendingLines[:0]
-			prismEventHasData = false
-			prismEventStartsTTFT = false
-			prismEventPayloads = prismEventPayloads[:0]
 			return
 		}
 		if !clientOutputStarted && !refusalDetector.ShouldReleaseClientOutput() {
@@ -418,12 +362,7 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		refusalDetector.ObserveSSELine(line)
 		if payload, ok := extractOpenAISSEDataLine(line); ok {
 			trimmedPayload := strings.TrimSpace(payload)
-			if isPrism && trimmedPayload != "" {
-				prismEventHasData = true
-				prismEventPayloads = append(prismEventPayloads, trimmedPayload)
-			} else if !isPrism {
-				terminal.ObserveDataLine(trimmedPayload)
-			}
+			terminal.ObserveDataLine(trimmedPayload)
 			if trimmedPayload != "[DONE]" {
 				observer.ObserveOpenAI([]byte(payload), strings.TrimSpace(gjson.Get(payload, "type").String()))
 				usageOnlyChunk := isOpenAIChatUsageOnlyStreamChunk(payload)
@@ -431,25 +370,8 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 					usage = *u
 				}
 				if firstTokenMs == nil && !usageOnlyChunk {
-					if isPrism {
-						for _, choice := range gjson.Get(payload, "choices").Array() {
-							delta := choice.Get("delta")
-							if delta.Get("content").String() != "" || delta.Get("refusal").String() != "" ||
-								delta.Get("function_call.name").String() != "" || delta.Get("function_call.arguments").String() != "" {
-								prismEventStartsTTFT = true
-								break
-							}
-							for _, toolCall := range delta.Get("tool_calls").Array() {
-								if toolCall.Get("id").String() != "" || toolCall.Get("function.name").String() != "" || toolCall.Get("function.arguments").String() != "" {
-									prismEventStartsTTFT = true
-									break
-								}
-							}
-						}
-					} else {
-						elapsed := int(time.Since(startTime).Milliseconds())
-						firstTokenMs = &elapsed
-					}
+					elapsed := int(time.Since(startTime).Milliseconds())
+					firstTokenMs = &elapsed
 				}
 			}
 		}
@@ -459,12 +381,12 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		line = s.replaceModelInSSELine(line, upstreamModel, originalModel)
 		writeLine(line)
 		if line == "" {
-			if !clientDisconnected && (clientOutputStarted || isPrism) {
+			if !clientDisconnected && clientOutputStarted {
 				c.Writer.Flush()
 			}
 			continue
 		}
-		if !clientDisconnected && clientOutputStarted && !isPrism {
+		if !clientDisconnected && clientOutputStarted {
 			c.Writer.Flush()
 		}
 	}
@@ -489,15 +411,6 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	}
 
 	scanErr := scanner.Err()
-	if scanErr == nil && isPrism && len(pendingLines) > 0 && !clientDisconnected {
-		writeLine("")
-		if !clientDisconnected {
-			c.Writer.Flush()
-		}
-	}
-	if prismErrorDelivered {
-		return resultWithUsage(), fmt.Errorf("upstream response failed: %s", prismErrorMessage)
-	}
 	if scanErr != nil && !errors.Is(scanErr, context.Canceled) && !errors.Is(scanErr, context.DeadlineExceeded) {
 		logger.L().Warn("openai chat_completions raw: stream read error",
 			zap.Error(scanErr),

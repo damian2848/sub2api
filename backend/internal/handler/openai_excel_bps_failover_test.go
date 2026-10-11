@@ -38,7 +38,6 @@ type excelBPSFailoverUpstream struct {
 	accountIDs []int64
 	bodies     [][]byte
 	urls       []string
-	headers    []http.Header
 	answer     func(call int) *http.Response
 	onDo       func(call int)
 }
@@ -50,7 +49,6 @@ func (u *excelBPSFailoverUpstream) Do(req *http.Request, _ string, accountID int
 	u.accountIDs = append(u.accountIDs, accountID)
 	u.bodies = append(u.bodies, body)
 	u.urls = append(u.urls, req.URL.String())
-	u.headers = append(u.headers, req.Header.Clone())
 	u.mu.Unlock()
 	if u.onDo != nil {
 		u.onDo(call)

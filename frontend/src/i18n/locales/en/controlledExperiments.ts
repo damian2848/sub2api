@@ -6,8 +6,8 @@ export default {
   split: 'Task set', screen: 'Screening · 12 tasks', confirm: 'Confirmation · 32 tasks',
   repetitions: 'Repetitions', maxCalls: 'Submission budget', timeout: 'Timeout per request (seconds)',
   routes: 'Experiment channels', account: 'Select an account', addRoute: 'Add channel', remove: 'Remove',
-  channel: 'Expected channel', native_http: 'Native HTTP / SSE', native_ws: 'Native WebSocket', bps: 'Excel / BPS',
-  channelHint: 'WS and BPS must already be enabled for the selected account and model. Managed Prism accounts are not supported. Experiments use the account credentials, proxy and model mapping.',
+  channel: 'Expected channel', native_http: 'Native HTTP / SSE', native_ws: 'Native WebSocket', prism: 'Prism', bps: 'Excel / BPS',
+  channelHint: 'WS, Prism and BPS must already be enabled for the selected account and model. Experiments use the account credentials, proxy and model mapping.',
   wsPrerequisiteHint: 'Enable the account WebSocket Mode (such as ctx_pool) and allow WS v2 in the gateway first. Selecting an experiment channel does not change those settings. Mode off, forced HTTP or an upstream without WS support prevents the test. Create a new experiment after fixing the configuration; skipped channels are not rerun in the original experiment.',
   tasks: 'Fixed task bank', selectAll: 'Select all', selectNone: 'Select none', selected: '{count} tasks selected',
   coding: 'SQL', constraints: 'Constraints', long_context: 'Long context', tools: 'Tool continuation',
@@ -29,6 +29,7 @@ export default {
   preflightReason: {
     configuration_available: 'Configuration allows execution; generation eligibility still needs probing',
     websocket_not_enabled: 'Native WebSocket is disabled or restricted by the gateway',
+    prism_not_enabled_for_account_model: 'Prism is disabled for the selected account/model or by its global switch',
     bps_not_enabled_for_account_model: 'BPS is disabled for the selected account/model or by its global switch',
     account_model_uses_another_adapter: 'Another transport adapter is configured for this account/model',
     account_not_active_or_schedulable: 'The account is not active and schedulable',

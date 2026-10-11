@@ -264,8 +264,7 @@ func loginTestUser(t *testing.T) string {
 	t.Helper()
 
 	// 先尝试用管理员账户登录
-	// Fresh installs generate a random admin email when ADMIN_EMAIL is unset.
-	// Require both values before attempting the admin login.
+	// 管理员邮箱不再有固定默认值（未设置时安装阶段随机生成），需同时提供邮箱与密码。
 	adminEmail := getEnv("ADMIN_EMAIL", "")
 	adminPassword := getEnv("ADMIN_PASSWORD", "")
 

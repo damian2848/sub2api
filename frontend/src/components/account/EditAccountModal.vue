@@ -31,55 +31,31 @@
         <p class="input-hint">{{ t('priorityScheduling.modelAliasesHint') }}</p>
       </div>
 
-      <!-- API Key fields (only for apikey type) -->
-      <div v-if="account.type === 'apikey' && !isManagedPrism" class="space-y-4">
-        <div
-          v-if="account.platform === 'openai'"
-          class="rounded-lg border border-gray-200 p-4 dark:border-dark-600"
-        >
-          <label class="input-label mb-2">{{ t('admin.accounts.openai.providerPreset.title') }}</label>
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <button
-              type="button"
-              data-testid="edit-openai-provider-preset-official"
-              @click="selectOpenAIProviderPreset('openai')"
-              :class="[
-                'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
-                openAIProviderPreset === 'openai'
-                  ? 'border-green-500 bg-green-50 dark:bg-green-900/20'
-                  : 'border-gray-200 hover:border-green-300 dark:border-dark-600 dark:hover:border-green-700'
-              ]"
-            >
-              <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400">
-                <Icon name="sparkles" size="sm" />
-              </div>
-              <div>
-                <span class="block text-sm font-medium text-gray-900 dark:text-white">OpenAI</span>
-                <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.providerPreset.officialDesc') }}</span>
-              </div>
-            </button>
-            <button
-              type="button"
-              data-testid="edit-openai-provider-preset-free-astra-prism"
-              @click="selectOpenAIProviderPreset('free_astra_prism')"
-              :class="[
-                'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
-                openAIProviderPreset === 'free_astra_prism'
-                  ? 'border-fuchsia-500 bg-fuchsia-50 dark:bg-fuchsia-900/20'
-                  : 'border-gray-200 hover:border-fuchsia-300 dark:border-dark-600 dark:hover:border-fuchsia-700'
-              ]"
-            >
-              <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-fuchsia-500 text-white">
-                <Icon name="bolt" size="sm" />
-              </div>
-              <div>
-                <span class="block text-sm font-medium text-gray-900 dark:text-white">Free-Astra / Prism</span>
-                <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.openai.providerPreset.freeAstraPrismDesc') }}</span>
-              </div>
-            </button>
+      <div
+        v-if="account.platform === 'openai' && account.type === 'oauth' && !isSparkShadow && globalPrismEnabled"
+        class="rounded-lg border border-gray-200 p-3 dark:border-dark-600"
+        data-testid="openai-prism-browser-oauth-settings"
+      >
+        <label class="flex items-center gap-2 text-sm">
+          <input v-model="prismBrowserEnabled" type="checkbox" data-testid="openai-prism-browser-oauth-toggle" />
+          <span>{{ t('admin.accounts.openai.prismBrowser') }}</span>
+        </label>
+        <p class="input-hint">{{ t('admin.accounts.openai.prismBrowserDesc') }}</p>
+        <fieldset v-if="prismBrowserEnabled" class="mt-3" data-testid="prism-model-scope">
+          <legend class="input-label">{{ t('admin.accounts.openai.prismBrowserModels') }}</legend>
+          <div class="grid grid-cols-2 gap-2">
+            <label v-for="model in prismSupportedModels" :key="model" class="flex items-center gap-2 text-sm">
+              <input v-model="prismBrowserModels" type="checkbox" :value="model" :data-testid="`prism-model-${model}`" />
+              <span>{{ model }}</span>
+            </label>
           </div>
-          <p class="input-hint">{{ t('admin.accounts.openai.providerPreset.hint') }}</p>
-        </div>
+          <p class="input-hint">{{ t('admin.accounts.openai.prismBrowserModelsHint') }}</p>
+          <p class="mt-2 text-xs text-primary-600 dark:text-primary-400">{{ t('admin.accounts.openai.prismBrowserManagedEndpoint') }}</p>
+        </fieldset>
+      </div>
+
+      <!-- API Key fields (only for apikey type) -->
+      <div v-if="account.type === 'apikey'" class="space-y-4">
         <div v-if="!isCNApiKeyAccount || editApiProtocol !== 'adaptive'">
           <label class="input-label">{{ t('admin.accounts.baseUrl') }}</label>
           <input
@@ -288,9 +264,7 @@
             data-lpignore="true"
             data-bwignore="true"
             :placeholder="
-              isFreeAstraPrismPreset
-                ? 'PRISM_API_KEY'
-                : account.platform === 'openai'
+              account.platform === 'openai'
                 ? 'sk-proj-...'
                 : account.platform === 'gemini'
                   ? 'AIza...'
@@ -302,7 +276,6 @@
             "
           />
           <p class="input-hint">{{ t('admin.accounts.leaveEmptyToKeep') }}</p>
-          <p v-if="isFreeAstraPrismPreset" class="input-hint">{{ t('admin.accounts.openai.providerPreset.apiKeyHint') }}</p>
         </div>
 
         <!-- Model Restriction Section (不适用于 Antigravity) -->
@@ -653,6 +626,26 @@
           </div>
         </div>
 
+      </div>
+
+      <div
+        v-if="account.platform === 'grok'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div class="min-w-0">
+            <label class="input-label mb-0">{{ t('admin.accounts.grokSkipForbiddenPause.title') }}</label>
+            <p id="grok-skip-forbidden-pause-hint" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.grokSkipForbiddenPause.hint') }}
+            </p>
+          </div>
+          <Toggle
+            v-model="grokSkipForbiddenPause"
+            data-testid="grok-skip-forbidden-pause-toggle"
+            :aria-label="t('admin.accounts.grokSkipForbiddenPause.title')"
+            aria-describedby="grok-skip-forbidden-pause-hint"
+          />
+        </div>
       </div>
 
       <!-- Grok OAuth client-tool prompt cache opt-in -->
@@ -1738,7 +1731,6 @@
           <label class="input-label">{{ t('admin.accounts.concurrency') }}</label>
           <input v-model.number="form.concurrency" type="number" min="1" class="input"
             @input="form.concurrency = Math.max(1, form.concurrency || 1)" />
-          <p class="input-hint">{{ t('admin.accounts.concurrencyHint') }}</p>
         </div>
         <div>
           <label class="input-label">{{ t('admin.accounts.loadFactor') }}</label>
@@ -1866,7 +1858,7 @@
         </p>
       </div>
 
-      <div v-if="account?.platform === 'openai' && account?.type === 'apikey' && !isManagedPrism" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="account?.platform === 'openai' && account?.type === 'apikey'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <label class="flex items-center gap-2">
           <input v-model="copilotSDKEnabled" type="checkbox" data-testid="copilot-sdk-toggle" />
           <span>Copilot SDK</span>
@@ -2000,7 +1992,7 @@
 
       <!-- OpenAI 自动透传开关（OAuth/API Key） -->
       <div
-        v-if="account?.platform === 'openai' && !isManagedPrism && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
+        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -2027,6 +2019,9 @@
           </button>
         </div>
       </div>
+
+      <OpenAIRequestTimezoneField v-if="account?.platform === 'openai'" v-model="openAIRequestTimezone" />
+      <ExcelBPSCredentialStatus :state="account?.excel_bps_credential_state" />
 
       <!-- OpenAI Codex namespace 工具摊平（兼容开关，仅 OAuth） -->
       <div
@@ -2061,7 +2056,7 @@
 
       <!-- OpenAI Codex hosted image_generation bridge policy -->
       <div
-        v-if="account?.platform === 'openai' && !isManagedPrism && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
+        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="overflow-hidden rounded-lg border border-sky-100 bg-sky-50/60 shadow-sm dark:border-sky-900/50 dark:bg-sky-950/20">
@@ -2121,7 +2116,7 @@
 
       <!-- OpenAI WS Mode 三态（off/ctx_pool/passthrough） -->
       <div
-        v-if="account?.platform === 'openai' && !isManagedPrism && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
+        v-if="account?.platform === 'openai' && (account?.type === 'oauth' || account?.type === 'setup-token' || account?.type === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -2159,7 +2154,7 @@
 
       <!-- OpenAI APIKey Responses API support mode -->
       <div
-        v-if="account?.platform === 'openai' && account?.type === 'apikey' && !isManagedPrism"
+        v-if="account?.platform === 'openai' && account?.type === 'apikey'"
         class="space-y-4 border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between gap-4">
@@ -3333,6 +3328,8 @@
 </template>
 
 <script setup lang="ts">
+import OpenAIRequestTimezoneField from '@/components/account/OpenAIRequestTimezoneField.vue'
+import ExcelBPSCredentialStatus from './ExcelBPSCredentialStatus.vue'
 import { DEFAULT_ACCOUNT_COST_MULTIPLIER, isValidAccountCostMultiplier, readAccountCostMultiplier } from '@/utils/accountCost'
 
 import { ref, reactive, computed, watch, nextTick, onMounted } from 'vue'
@@ -3371,7 +3368,6 @@ import Toggle from '@/components/common/Toggle.vue'
 import AccountRpmSettings from '@/components/account/AccountRpmSettings.vue'
 import { applyAccountRPMSettings } from '@/components/account/accountRpm'
 import Icon from '@/components/icons/Icon.vue'
-import { isManagedPrismAccount } from '@/utils/prism'
 import ProxySelector from '@/components/common/ProxySelector.vue'
 import ProxyAdBanner from '@/components/common/ProxyAdBanner.vue'
 import GroupSelector from '@/components/common/GroupSelector.vue'
@@ -3415,12 +3411,6 @@ import {
   cnSupportsNativeResponses,
   defaultCNAdaptiveBaseUrls,
   defaultCNBaseUrl,
-  FREE_ASTRA_PRISM_BASE_URL,
-  FREE_ASTRA_PRISM_MODEL_MAPPINGS,
-  FREE_ASTRA_PRISM_PROVIDER_PRESET,
-  ACCOUNT_PROVIDER_PRESET_KEY,
-  isFreeAstraPrismProviderPreset,
-  type OpenAIProviderPreset,
   isCNProviderPlatform,
   HEADER_OVERRIDE_ENABLED_CREDENTIAL_KEY,
   HEADER_OVERRIDES_CREDENTIAL_KEY,
@@ -3478,6 +3468,7 @@ const { t } = useI18n()
 const appStore = useAppStore()
 const authStore = useAuthStore()
 const globalBpsEnabled = computed(() => appStore.cachedPublicSettings?.excel_bps_enabled !== false)
+const globalPrismEnabled = computed(() => appStore.cachedPublicSettings?.prism_browser_enabled === true)
 const browserTimeZone = getBrowserTimeZone()
 
 const selectableGroups = computed(() => {
@@ -3620,7 +3611,6 @@ onMounted(() => {
 
 // Platform-specific hint for Base URL
 const baseUrlHint = computed(() => {
-  if (isFreeAstraPrismPreset.value) return t('admin.accounts.openai.providerPreset.baseUrlHint')
   if (!props.account) return t('admin.accounts.baseUrlHint')
   if (props.account.platform === 'openai') return t('admin.accounts.openai.baseUrlHint')
   if (props.account.platform === 'gemini') return t('admin.accounts.gemini.baseUrlHint')
@@ -3648,39 +3638,9 @@ interface TempUnschedRuleForm {
 const submitting = ref(false)
 const editBaseUrl = ref('https://api.anthropic.com')
 const editApiKey = ref('')
-const openAIProviderPreset = ref<OpenAIProviderPreset>('openai')
-const isManagedPrism = computed(() => isManagedPrismAccount(props.account))
-const isFreeAstraPrismPreset = computed(
-  () => props.account?.platform === 'openai' && props.account?.type === 'apikey' && openAIProviderPreset.value === 'free_astra_prism'
-)
-
-function selectOpenAIProviderPreset(preset: OpenAIProviderPreset) {
-  openAIProviderPreset.value = preset
-  if (preset === 'free_astra_prism') {
-    editBaseUrl.value = FREE_ASTRA_PRISM_BASE_URL
-    form.proxy_id = null
-    form.concurrency = 1
-    form.load_factor = null
-    upstreamBillingAutoProbeEnabled.value = false
-    upstreamBillingRateSyncEnabled.value = false
-    copilotSDKEnabled.value = false
-    openaiPassthroughEnabled.value = false
-    openaiAPIKeyResponsesWebSocketV2Mode.value = OPENAI_WS_MODE_OFF
-    openAIResponsesMode.value = 'force_responses'
-    openAIEndpointCapabilities.value = ['chat_completions']
-    modelRestrictionMode.value = 'mapping'
-    modelMappings.value = FREE_ASTRA_PRISM_MODEL_MAPPINGS.map(mapping => ({ ...mapping }))
-    allowedModels.value = []
-    return
-  }
-
-  if (editBaseUrl.value === FREE_ASTRA_PRISM_BASE_URL) editBaseUrl.value = 'https://api.openai.com'
-  openAIResponsesMode.value = 'auto'
-  openAIEndpointCapabilities.value = ['chat_completions', 'embeddings']
-  modelRestrictionMode.value = 'whitelist'
-  modelMappings.value = []
-  allowedModels.value = []
-}
+const prismBrowserEnabled = ref(false)
+const prismSupportedModels = ['gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-luna']
+const prismBrowserModels = ref<string[]>([...prismSupportedModels])
 
 // ── 国产供应商（Kimi / Zhipu / DeepSeek）account_mode / api_protocol 编辑 ──
 // account_mode 决定额度/余额监控路径，api_protocol 决定转发端点与格式；
@@ -3861,6 +3821,7 @@ const allowedModels = ref<string[]>([])
 const DEFAULT_POOL_MODE_RETRY_COUNT = 3
 const MAX_POOL_MODE_RETRY_COUNT = 10
 const DEFAULT_POOL_MODE_RETRY_STATUS_CODES = [401, 403, 429]
+const GROK_SKIP_FORBIDDEN_PAUSE_EXTRA_KEY = 'grok_skip_forbidden_pause'
 const GROK_CLIENT_TOOL_CACHE_EXTRA_KEY = 'grok_client_tool_cache_enabled'
 const poolModeEnabled = ref(false)
 const poolModeRetryCount = ref(DEFAULT_POOL_MODE_RETRY_COUNT)
@@ -3910,6 +3871,7 @@ const headerOverrideCapable = computed(
 // Grok OAuth 自定义上游地址（仅转发端点；OAuth 授权/令牌刷新不受影响）
 const grokOAuthCustomBaseUrlEnabled = ref(false)
 const grokOAuthBaseUrl = ref('')
+const grokSkipForbiddenPause = ref(false)
 // Grok Free OAuth accounts use client-tool prompt caching by default. Keep an
 // explicit false in the account extra as the opt-out signal.
 const grokClientToolCacheEnabled = ref(true)
@@ -4067,6 +4029,7 @@ const excelBPS403GroupOptions = computed(() => [
     .map(group => ({ value: group.id, label: group.name }))
 ])
 const copilotSDKEnabled = ref(false)
+const openAIRequestTimezone = ref('Asia/Singapore')
 const openaiPassthroughEnabled = ref(false)
 // OpenAI Codex namespace 工具摊平兼容开关（仅 OAuth），缺省关闭即原样保留
 const openaiFlattenNamespacesEnabled = ref(false)
@@ -4546,9 +4509,6 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   mixedScheduling.value = false
   allowOverages.value = false
 	const extra = newAccount.extra as Record<string, unknown> | undefined
-	openAIProviderPreset.value = isFreeAstraPrismProviderPreset(extra?.[ACCOUNT_PROVIDER_PRESET_KEY])
-	  ? FREE_ASTRA_PRISM_PROVIDER_PRESET
-	  : 'openai'
 	mixedScheduling.value = extra?.mixed_scheduling === true
 	allowOverages.value = extra?.allow_overages === true
 	upstreamRequestIdHeader.value = readUpstreamRequestIdHeader(extra)
@@ -4581,7 +4541,10 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   excelBPSIgnoreEncryptedContent.value = false
   excelBPSAutoMoveOn403.value = false
   excelBPS403TargetGroupID.value = ''
+  prismBrowserEnabled.value = false
+  prismBrowserModels.value = [...prismSupportedModels]
   copilotSDKEnabled.value = false
+  openAIRequestTimezone.value = 'Asia/Singapore'
   openaiPassthroughEnabled.value = false
   openaiFlattenNamespacesEnabled.value = false
   openAILongContextBillingEnabled.value = false
@@ -4601,6 +4564,12 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
   webSearchEmulationMode.value = 'default'
   if (newAccount.platform === 'openai' && (newAccount.type === 'oauth' || newAccount.type === 'setup-token' || newAccount.type === 'apikey')) {
+    prismBrowserEnabled.value = newAccount.type === 'oauth' && extra?.openai_prism_browser === true
+    if (Object.prototype.hasOwnProperty.call(extra ?? {}, 'openai_prism_browser_models')) {
+      prismBrowserModels.value = Array.isArray(extra?.openai_prism_browser_models)
+        ? extra.openai_prism_browser_models.filter((model): model is string => typeof model === 'string' && prismSupportedModels.includes(model))
+        : []
+    }
     excelBPSEnabled.value = newAccount.type === 'oauth' && extra?.openai_excel_bps === true
     excelBPSMode.value = extra?.openai_excel_bps_config_mode === 'defaults' ? 'defaults' : 'initial'
     excelBPSAllModels.value = excelBPSEnabled.value && !Object.prototype.hasOwnProperty.call(extra ?? {}, 'openai_excel_bps_models')
@@ -4621,6 +4590,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     const targetGroupID = extra?.openai_excel_bps_403_target_group_id
     excelBPS403TargetGroupID.value = typeof targetGroupID === 'number' && Number.isSafeInteger(targetGroupID) && targetGroupID >= 0 ? targetGroupID : ''
     copilotSDKEnabled.value = newAccount.type === 'apikey' && extra?.openai_copilot_sdk === true
+    openAIRequestTimezone.value = typeof extra?.openai_request_timezone === 'string' ? extra.openai_request_timezone : 'Asia/Singapore'
     openaiPassthroughEnabled.value = extra?.openai_passthrough === true || extra?.openai_oauth_passthrough === true
     openaiFlattenNamespacesEnabled.value =
       newAccount.type === 'oauth' && extra?.openai_responses_flatten_namespaces === true
@@ -4779,6 +4749,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   // Load Grok OAuth custom upstream URL state（存储的官方地址视同未定制）
   grokOAuthCustomBaseUrlEnabled.value = false
   grokOAuthBaseUrl.value = ''
+  grokSkipForbiddenPause.value =
+    newAccount.platform === 'grok' && newAccount.extra?.[GROK_SKIP_FORBIDDEN_PAUSE_EXTRA_KEY] === true
   const grokClientToolCacheSetting =
     newAccount.platform === 'grok' && newAccount.type === 'oauth'
       ? newAccount.extra?.[GROK_CLIENT_TOOL_CACHE_EXTRA_KEY]
@@ -5554,7 +5526,6 @@ const saveAutoBPSRule = async (accountID: number) => {
 }
 
 const submitUpdateAccount = async (accountID: number, updatePayload: Record<string, unknown>) => {
-  if (isManagedPrism.value) delete updatePayload.credentials
   submitting.value = true
   try {
     let updatedAccount = await adminAPI.accounts.update(accountID, withAntigravityConfirmFlag(updatePayload))
@@ -5971,6 +5942,14 @@ const handleSubmit = async () => {
       updatePayload.extra = newExtra
     }
 
+    if (props.account.platform === 'grok') {
+      updatePayload.extra = {
+        ...((props.account.extra as Record<string, unknown>) || {}),
+        ...((updatePayload.extra as Record<string, unknown>) || {}),
+        [GROK_SKIP_FORBIDDEN_PAUSE_EXTRA_KEY]: grokSkipForbiddenPause.value
+      }
+    }
+
     // OpenAI: 手动覆盖订阅档位 plan_type（Plus / Pro 20x / Pro 5x / Business Standard / Business Premium / Free）。
     // 仅 OAuth 非影子账号：
     // 影子账号凭据由母账号管理(且后端会 sanitize),setup-token 无订阅调度语义。
@@ -6129,6 +6108,7 @@ const handleSubmit = async () => {
     if (props.account.platform === 'openai' && (props.account.type === 'oauth' || props.account.type === 'setup-token' || props.account.type === 'apikey')) {
       const currentExtra = (props.account.extra as Record<string, unknown>) || {}
       const newExtra: Record<string, unknown> = { ...currentExtra }
+      newExtra.openai_request_timezone = openAIRequestTimezone.value
       if (props.account.type === 'oauth') {
         applyAccountRPMSettings(newExtra, {
           enabled: rpmLimitEnabled.value,
@@ -6247,6 +6227,15 @@ const handleSubmit = async () => {
       } else {
         newExtra.openai_compact_mode = openAICompactMode.value
       }
+      if (props.account.type === 'oauth') {
+        if (prismBrowserEnabled.value) {
+          newExtra.openai_prism_browser = true
+          newExtra.openai_prism_browser_models = prismSupportedModels.filter(model => prismBrowserModels.value.includes(model))
+        } else {
+          delete newExtra.openai_prism_browser
+          delete newExtra.openai_prism_browser_models
+        }
+      }
 		if (props.account.type === 'apikey') {
         if (!openAITextGenerationCapabilityEnabled.value || openAIResponsesMode.value === 'auto') {
           delete newExtra.openai_responses_mode
@@ -6258,13 +6247,6 @@ const handleSubmit = async () => {
         } else {
           delete newExtra.images_url_to_b64_json
         }
-			if (isManagedPrism.value) {
-				newExtra[ACCOUNT_PROVIDER_PRESET_KEY] = 'prism_browser'
-			} else if (isFreeAstraPrismPreset.value) {
-				newExtra[ACCOUNT_PROVIDER_PRESET_KEY] = FREE_ASTRA_PRISM_PROVIDER_PRESET
-			} else {
-				delete newExtra[ACCOUNT_PROVIDER_PRESET_KEY]
-			}
 		}
 		if (autoPause5hThreshold.value != null && autoPause5hThreshold.value > 0) {
 			newExtra.auto_pause_5h_threshold = autoPause5hThreshold.value / 100

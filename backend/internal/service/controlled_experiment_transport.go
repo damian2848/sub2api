@@ -15,6 +15,8 @@ type controlledExperimentMode struct {
 	channel       string
 	submissions   atomic.Int32
 	actualChannel string
+	prismIdentity string
+	prismTurnID   string
 	httpStatus    atomic.Int32
 }
 
@@ -55,22 +57,25 @@ func (s *OpenAIGatewayService) controlledRouteReason(ctx context.Context, accoun
 	if account.Status != StatusActive || !account.Schedulable {
 		return "account_not_active_or_schedulable"
 	}
-	// Managed Prism accounts relay through the fork's own sidecar; they are not
-	// a native channel and this fork has no separate Prism experiment channel.
-	if account.IsOpenAIAgentIdentity() || account.IsOpenAIPersonalAccessToken() || account.IsCopilotSDKEnabled() || account.IsOpenAIPassthroughEnabled() || account.IsManagedPrismAccount() {
+	if account.IsOpenAIAgentIdentity() || account.IsOpenAIPersonalAccessToken() || account.IsCopilotSDKEnabled() || account.IsOpenAIPassthroughEnabled() {
 		return "unsupported_credential_or_adapter"
 	}
 	if s.pluginManager != nil && s.pluginManager.ShouldRouteOpenAIOAuth(account) {
 		return "plugin_route_not_supported"
 	}
+	prism := account.IsPrismBrowserEnabledForModel(model) && s.prismBrowserGloballyEnabled(ctx)
 	bps := account.IsExcelBPSEnabledForModel(model) && s.excelBPSGloballyEnabled(ctx)
 	switch channel {
+	case "prism":
+		if !prism {
+			return "prism_not_enabled_for_account_model"
+		}
 	case "bps":
-		if !bps {
+		if prism || !bps {
 			return "bps_not_enabled_for_account_model"
 		}
 	case "native_http", "native_ws":
-		if bps {
+		if prism || bps {
 			return "account_model_uses_another_adapter"
 		}
 		if channel == "native_ws" && s.getOpenAIWSProtocolResolver().Resolve(account).Transport != OpenAIUpstreamTransportResponsesWebsocketV2 {

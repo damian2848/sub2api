@@ -31,7 +31,10 @@
       role="status"
     >
       {{
-        t('channelMonitorV2.settings.modeBanner')
+        t('channelMonitorV2.settings.modeBanner', {
+          mode: systemModeLabel,
+          modeV2: t('channelMonitorV2.settings.modeV2'),
+        })
       }}
       <router-link class="ml-1 font-medium underline" to="/admin/settings">{{ t('admin.settings.tabs.features') }}</router-link>
     </div>
@@ -202,7 +205,6 @@
           <label class="block">
             <span class="input-label">{{ t('channelMonitorV2.settings.fields.minimumSample') }}</span>
             <input v-model.number="draft.health_thresholds.minimum_sample" class="input" type="number" min="1" max="10000" />
-            <span class="mt-1 block text-[10px] text-gray-500 dark:text-gray-400">{{ t('channelMonitorV2.settings.minimumSampleHint') }}</span>
           </label>
           <label class="block">
             <span class="input-label">{{ t('channelMonitorV2.settings.fields.warningError') }}</span>
@@ -226,12 +228,11 @@
           </label>
           <label class="block">
             <span class="input-label">{{ t('channelMonitorV2.settings.fields.warningCache') }}</span>
-            <input v-model.number="warningCachePercent" class="input" type="number" min="0" max="100" step="0.1" data-testid="warning-cache-threshold" />
+            <input v-model.number="warningCachePercent" class="input" type="number" min="0" max="100" step="0.1" />
           </label>
           <label class="block">
             <span class="input-label">{{ t('channelMonitorV2.settings.fields.criticalCache') }}</span>
-            <input v-model.number="criticalCachePercent" class="input" type="number" min="0" max="100" step="0.1" data-testid="critical-cache-threshold" />
-            <span class="mt-1 block text-[10px] text-gray-500 dark:text-gray-400">{{ t('channelMonitorV2.settings.cacheThresholdHint') }}</span>
+            <input v-model.number="criticalCachePercent" class="input" type="number" min="0" max="100" step="0.1" />
           </label>
         </div>
       </div>
@@ -269,7 +270,7 @@ import MonitorCandySettings from './MonitorCandySettings.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useAppStore } from '@/stores/app'
 import { extractApiErrorMessage } from '@/utils/apiError'
-import { isChannelMonitorV2Mode } from '@/utils/featureFlags'
+import { getChannelMonitorMode, isChannelMonitorV2Mode } from '@/utils/featureFlags'
 import {
   getConfig,
   updateConfig,
@@ -297,6 +298,16 @@ const countedErrorCategoryCount = computed(
 )
 /** System settings mode must be v2 for aggregation to run; config remains editable for prep. */
 const systemModeV2 = computed(() => isChannelMonitorV2Mode())
+const systemModeLabel = computed(() => {
+  if (!appStore.cachedPublicSettings?.channel_monitor_enabled) {
+    return t('channelMonitorV2.settings.modeClosed')
+  }
+  const mode = getChannelMonitorMode()
+  if (mode === 'v3') return t('channelMonitorV3.modes.v3')
+  return mode === 'v1'
+    ? t('channelMonitorV2.settings.modeV1')
+    : t('channelMonitorV2.settings.modeV2')
+})
 const defaultThresholds = {
   minimum_sample: 50,
   warning_error_rate: 0.05,
@@ -304,9 +315,9 @@ const defaultThresholds = {
   target_ttft_ms: 3000,
   warning_ttft_ms: 3000,
   critical_ttft_ms: 10000,
-  // Match backend defaults: cache scoring is opt-in and never affects API health.
-  warning_cache_rate: 0,
-  critical_cache_rate: 0,
+  // Higher is better: below 85% watch, below 60% critical.
+  warning_cache_rate: 0.85,
+  critical_cache_rate: 0.60,
   error_weight: 0.60,
   ttft_weight: 0.20,
   cache_weight: 0.20,

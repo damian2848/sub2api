@@ -104,9 +104,6 @@ func (s *defaultOpenAIAccountScheduler) shouldRebalancePrioritySticky(ctx contex
 		req.Platform != PlatformOpenAI || !req.UseUpstreamTokenCost || req.RequiredImageCapability != "" {
 		return false
 	}
-	if !sessionActivityAllowsMigration(ctx, req.GroupID, s.service.openAISessionCacheKey(req.SessionHash)) {
-		return false
-	}
 	cfg := s.service.prioritySchedulingRuntimeConfig()
 	if !cfg.applies(req.GroupID, req.RequestedModel) {
 		return false
@@ -182,7 +179,7 @@ func (s *defaultOpenAIAccountScheduler) shouldRebalancePrioritySticky(ctx contex
 		}
 		for _, item := range buildPrioritySelectionOrder(historyPool, req) {
 			if item.account.ID == sticky.ID && item.priorityAPIStandby {
-				return sessionActivityAllowsMigration(ctx, req.GroupID, s.service.openAISessionCacheKey(req.SessionHash))
+				return true
 			}
 		}
 	}
@@ -207,7 +204,7 @@ func (s *defaultOpenAIAccountScheduler) shouldRebalancePrioritySticky(ctx contex
 		otherUtilization := float64(load.CurrentConcurrency) / float64(max(1, account.Concurrency))
 		otherWeight := prioritySelectionWeight(openAIAccountCandidateScore{account: account, loadInfo: load, loadKnown: true, score: 50}, now)
 		if utilization-otherUtilization >= 0.20 && otherWeight > 2*weight {
-			return sessionActivityAllowsMigration(ctx, req.GroupID, s.service.openAISessionCacheKey(req.SessionHash))
+			return true
 		}
 	}
 	return false
@@ -233,16 +230,14 @@ func buildPrioritySelectionOrder(pool []openAIAccountCandidateScore, req OpenAIA
 		if a.priorityUnhealthy != b.priorityUnhealthy {
 			return !a.priorityUnhealthy
 		}
-		// Explicit priorities define primary/backup cohorts. Balance capacity
-		// and experience within a cohort, keeping every backup for slot races.
-		if a.account.Priority != b.account.Priority {
-			return a.account.Priority < b.account.Priority
-		}
 		if choices[i].band != choices[j].band {
 			return choices[i].band < choices[j].band
 		}
 		if int(a.score/200) != int(b.score/200) {
 			return a.score > b.score
+		}
+		if a.account.Priority != b.account.Priority {
+			return a.account.Priority < b.account.Priority
 		}
 		if choices[i].key != choices[j].key {
 			return choices[i].key < choices[j].key

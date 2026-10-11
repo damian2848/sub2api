@@ -62,7 +62,6 @@
             </div>
             <strong class="summary-value bg-white text-xs font-medium tabular-nums text-gray-600 dark:bg-dark-800 dark:text-gray-300">
               {{ successRate(entry.row.metrics) }}
-              <small v-if="monitorAvailabilitySource(entry.row.metrics)" class="block text-[10px] text-gray-400">{{ t('channelMonitorV2.sources.' + monitorAvailabilitySource(entry.row.metrics)) }}</small>
             </strong>
             <strong
               class="summary-value bg-white text-xs font-medium tabular-nums text-gray-600 dark:bg-dark-800 dark:text-gray-300"
@@ -80,7 +79,7 @@
             <strong
               class="summary-value bg-white text-xs font-medium tabular-nums text-gray-600 dark:bg-dark-800 dark:text-gray-300"
             >
-              {{ hasMonitorSamples(entry.row.metrics) ? formatPercent(entry.row.metrics.cache_rate) : '—' }}
+              {{ formatPercent(entry.row.metrics.cache_rate) }}
             </strong>
             <div class="pulse-track grid items-stretch" :style="pulseStyle">
               <span
@@ -182,13 +181,13 @@ import {
   formatLatencyPrivacy,
   formatMonitorMs,
   formatMonitorPercent,
+  formatMonitorSuccessRateFromError,
   formatMonitorThroughput,
   formatMonitorTokensPerSecond,
   tokensPerSecondFromTpm,
   healthModeScore,
   healthScoreClass,
 } from '@/features/channel-monitor-v2/monitorFormat'
-import { effectiveAvailability, hasMonitorSamples, monitorAvailabilitySource } from './monitorCards'
 import {
   applyWheelZoom,
   clientXRatio,
@@ -360,8 +359,12 @@ function rowKey(row: MonitorMatrixRow): string {
 }
 
 function successRate(metrics: MonitorMetric): string {
-  const availability = effectiveAvailability(metrics)
-  return availability == null ? '—' : formatPercent(availability)
+  // Empty traffic: no request count and no throughput signal.
+  // When throughput is hidden for privacy, still show success from error_rate.
+  const noCount = metrics.request_count <= 0
+  const noTP = (metrics.rpm || 0) <= 0 && (metrics.tpm || 0) <= 0
+  if (noCount && noTP && props.showThroughput) return '-'
+  return formatMonitorSuccessRateFromError(metrics.error_rate)
 }
 
 function formatScore(health: MonitorHealth): string {

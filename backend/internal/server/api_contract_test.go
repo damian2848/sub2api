@@ -922,6 +922,7 @@ func TestAPIContracts(t *testing.T) {
 						"table_page_size_options": [10, 20, 50, 100],
 					"min_claude_code_version": "",
 					"max_claude_code_version": "",
+					"openai_request_timezone_enabled": false,
 					"openai_codex_ticket_enabled": false,
 					"openai_codex_ticket_fail_closed": false,
 					"openai_codex_ticket_strategy": "standby",
@@ -1046,6 +1047,9 @@ func TestAPIContracts(t *testing.T) {
 						"max_open_per_user": 5,
 						"notice": ""
 					},
+					"prism_browser_enabled": false,
+					"prism_browser_base_url": "http://127.0.0.1:8319/v1",
+					"prism_browser_api_key_configured": false,
 					"risk_control_enabled": false,
 					"cyber_policy_user_allowlist": "",
 					"cyber_session_block_enabled": false,
@@ -1297,6 +1301,7 @@ func TestAPIContracts(t *testing.T) {
 					"rewrite_message_cache_control": false,
 					"enable_client_dateline_normalization": true,
 					"antigravity_user_agent_version": "",
+					"openai_request_timezone_enabled": false,
 					"openai_codex_ticket_enabled": false,
 					"openai_codex_ticket_fail_closed": false,
 					"openai_codex_ticket_strategy": "standby",
@@ -1407,6 +1412,9 @@ func TestAPIContracts(t *testing.T) {
 						"max_open_per_user": 5,
 						"notice": ""
 					},
+					"prism_browser_enabled": false,
+					"prism_browser_base_url": "http://127.0.0.1:8319/v1",
+					"prism_browser_api_key_configured": false,
 					"risk_control_enabled": false,
 					"cyber_policy_user_allowlist": "",
 					"cyber_session_block_enabled": false,
@@ -1575,7 +1583,7 @@ func newContractDeps(t *testing.T) *contractDeps {
 	settingRepo := newStubSettingRepo()
 	settingService := service.NewSettingService(settingRepo, cfg)
 
-	adminService := service.NewAdminService(nil, userRepo, groupRepo, &accountRepo, proxyRepo, apiKeyRepo, redeemRepo, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	adminService := service.NewAdminService(nil, userRepo, groupRepo, &accountRepo, proxyRepo, apiKeyRepo, redeemRepo, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	authHandler := handler.NewAuthHandler(cfg, nil, userService, settingService, nil, redeemService, nil, nil)
 	apiKeyHandler := handler.NewAPIKeyHandler(apiKeyService)
 	usageHandler := handler.NewUsageHandler(usageService, apiKeyService, nil, nil)
@@ -1964,14 +1972,7 @@ func (s *stubAccountRepo) GetByID(ctx context.Context, id int64) (*service.Accou
 }
 
 func (s *stubAccountRepo) GetByIDs(ctx context.Context, ids []int64) ([]*service.Account, error) {
-	accounts := make([]*service.Account, 0, len(ids))
-	for _, id := range ids {
-		accounts = append(accounts, &service.Account{
-			ID: id, Platform: service.PlatformOpenAI, Type: service.AccountTypeAPIKey,
-			Status: service.StatusActive, Schedulable: true,
-		})
-	}
-	return accounts, nil
+	return nil, errors.New("not implemented")
 }
 
 func (s *stubAccountRepo) ExistsByID(ctx context.Context, id int64) (bool, error) {

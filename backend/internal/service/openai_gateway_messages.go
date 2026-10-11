@@ -43,11 +43,6 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		return nil, admissionErr
 	}
 	account = latest
-	if account.IsManagedPrismAccount() {
-		if failoverErr := prismUnsupportedRequest(c, body, true); failoverErr != nil {
-			return nil, failoverErr
-		}
-	}
 	// 工具 Schema 清洗必须先于所有分流：下游每条路径（原生 Anthropic 直通、
 	// Chat Completions 转换、Responses 转换）都会把 tools 原样带给上游，而
 	// xAI / Moonshot 等严格校验方会因 input_schema 里的 required:null 或
@@ -153,9 +148,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	// ChatGPT/Codex credentials rely on session_id + x-codex-turn-state; trimming to a
 	// sliding 12-message window makes the cached prefix stall at system/tools.
 	// Keep full replay there so upstream prompt caching can grow turn by turn.
-	// Prism cannot continue from previous_response_id, so trimming the replay would
-	// drop history the sidecar never sees again.
-	if compatReplayGuardEnabled && !account.UsesOpenAICodexProtocol() && !account.IsManagedPrismAccount() && previousResponseID == "" && !compatContinuationDisabled {
+	if compatReplayGuardEnabled && !account.UsesOpenAICodexProtocol() && previousResponseID == "" && !compatContinuationDisabled {
 		compatReplayTrimmed = applyAnthropicCompatFullReplayGuard(&anthropicReq)
 	}
 
@@ -172,7 +165,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	isStream := true
 
 	// 3b. Handle BetaFastMode → service_tier: "priority"
-	if containsBetaToken(c.GetHeader("anthropic-beta"), claude.BetaFastMode) && !account.IsManagedPrismAccount() {
+	if containsBetaToken(c.GetHeader("anthropic-beta"), claude.BetaFastMode) {
 		responsesReq.ServiceTier = "priority"
 	}
 
@@ -325,20 +318,16 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	// 4c. Apply OpenAI fast policy (may filter service_tier or block the request).
 	// Mirrors the Claude anthropic-beta "fast-mode-2026-02-01" filter, but keyed
 	// on the body-level service_tier field (priority/flex).
-	if account.IsManagedPrismAccount() {
-		responsesBody = stripPrismServiceTier(responsesBody)
-	} else {
-		updatedBody, policyErr := s.applyOpenAIFastPolicyToBody(ctx, account, upstreamModel, responsesBody)
-		if policyErr != nil {
-			var blocked *OpenAIFastBlockedError
-			if errors.As(policyErr, &blocked) {
-				MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
-				writeAnthropicError(c, http.StatusForbidden, "forbidden_error", blocked.Message)
-			}
-			return nil, policyErr
+	updatedBody, policyErr := s.applyOpenAIFastPolicyToBody(ctx, account, upstreamModel, responsesBody)
+	if policyErr != nil {
+		var blocked *OpenAIFastBlockedError
+		if errors.As(policyErr, &blocked) {
+			MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
+			writeAnthropicError(c, http.StatusForbidden, "forbidden_error", blocked.Message)
 		}
-		responsesBody = updatedBody
+		return nil, policyErr
 	}
+	responsesBody = updatedBody
 	responsesReq.ServiceTier = normalizedOpenAIServiceTierValue(gjson.GetBytes(responsesBody, "service_tier").String())
 	grokCacheIdentity := ""
 	if account.Platform == PlatformGrok {
@@ -358,14 +347,6 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		}
 	}
 
-	// Decide before any credential or sidecar session work: image blocks only
-	// exist as input_image parts once the Anthropic body has been converted.
-	if account.IsManagedPrismAccount() {
-		if failoverErr := prismUnsupportedRequest(c, responsesBody, false); failoverErr != nil {
-			return nil, failoverErr
-		}
-	}
-
 	// 5. Get access token
 	token, _, err := s.getRequestCredential(ctx, c, account)
 	if err != nil {
@@ -379,7 +360,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 		// 既有 body/session/conversation 行为。身份头在 post-build 阶段统一恢复。
 		setOpenAICompatMessagesBridgeContext(c, true)
 	}
-	upstreamCtx, releaseUpstreamCtx := openaiAccountUpstreamContext(ctx, account)
+	upstreamCtx, releaseUpstreamCtx := detachUpstreamContext(ctx)
 	var upstreamReq *http.Request
 	if account.Platform == PlatformGrok {
 		upstreamReq, err = buildGrokResponsesRequest(upstreamCtx, c, account, responsesBody, token, grokCacheIdentity, s.cfg, s.settingService)

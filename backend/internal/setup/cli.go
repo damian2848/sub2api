@@ -157,6 +157,7 @@ func RunCLI() error {
 	fmt.Println()
 	fmt.Println("── Admin Account ──")
 
+	// 默认值使用随机邮箱，避免直接回车得到可被猜中的固定管理员用户名（issue #7850）。
 	defaultAdminEmail, err := generateAdminEmail()
 	if err != nil {
 		return err
@@ -171,6 +172,7 @@ func RunCLI() error {
 
 	for {
 		cfg.Admin.Password = promptPassword("Admin Password")
+		// SECURITY: Match Web API password requirements
 		if err := validatePassword(cfg.Admin.Password); err != nil {
 			fmt.Printf("  Invalid password: %v\n", err)
 			continue

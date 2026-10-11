@@ -1,6 +1,6 @@
 import { apiClient } from '../client'
 
-export type ExperimentChannel = 'native_http' | 'native_ws' | 'bps'
+export type ExperimentChannel = 'native_http' | 'native_ws' | 'prism' | 'bps'
 export interface ExperimentTask {
   id: string
   family: string

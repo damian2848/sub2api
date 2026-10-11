@@ -147,6 +147,7 @@ func RegisterAdminRoutes(
 		// 渠道监控
 		registerChannelMonitorRoutes(admin, h, settingService)
 		registerChannelMonitorV2Routes(admin, h, settingService)
+		registerChannelMonitorV3Routes(admin, h, settingService)
 
 		// 风控中心
 		registerContentModerationRoutes(admin, h)
@@ -388,6 +389,7 @@ func registerGroupRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAuth middleware.StepUpAuthMiddleware) {
 	accounts := admin.Group("/accounts")
 	{
+		accounts.GET("/openai-request-timezones", h.Admin.Account.GetOpenAIRequestTimezones)
 		accounts.GET("", h.Admin.Account.List)
 		accounts.GET("/management-capabilities", h.Admin.Setting.GetAccountManagementCapabilities)
 		accounts.GET("/upstream-billing-rates", h.Admin.Account.GetUpstreamBillingRates)
@@ -396,6 +398,9 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/upstream-billing-probe/batch", h.Admin.Account.ProbeUpstreamBillingBatch)
 		accounts.GET("/ollama-cloud-usage/settings", h.Admin.Account.GetOllamaCloudUsageSettings)
 		accounts.PUT("/ollama-cloud-usage/settings", h.Admin.Account.UpdateOllamaCloudUsageSettings)
+		accounts.GET("/astra-gateway/status", h.Admin.Account.AstraGatewayStatus)
+		accounts.GET("/astra-gateway/history", h.Admin.Account.AstraGatewayHistory)
+		accounts.POST("/astra-gateway/test", h.Admin.Account.AstraGatewayTest)
 		accounts.GET("/codex-harvest-flow", h.Admin.Account.GetCodexHarvestFlow)
 		accounts.GET("/codex-harvest-controls", h.Admin.Account.GetCodexHarvestControls)
 		accounts.PUT("/codex-harvest-controls", h.Admin.Account.UpdateCodexHarvestControls)
@@ -415,16 +420,8 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 			accounts.PUT("/:id/openai-reauth/email", h.Admin.OpenAIOAuthReauth.SaveConfig)
 			accounts.POST("/:id/openai-reauth", h.Admin.OpenAIOAuthReauth.CreateTask)
 		}
-		accounts.GET("/:id/claude/reset-credits", h.Admin.Account.ClaudeResetCredits)
-		// Same protection as the Codex reset-quota route (admin auth, audit, compliance guard).
-		accounts.POST("/:id/claude/reset-credits/redeem", h.Admin.Account.RedeemClaudeResetCredit)
 		accounts.POST("", h.Admin.Account.Create)
 		accounts.POST("/:id/duplicate", h.Admin.Account.Duplicate)
-		if h.Admin.Prism != nil {
-			accounts.POST("/:id/prism", h.Admin.Prism.Create)
-			accounts.GET("/:id/prism/status", h.Admin.Prism.Status)
-			accounts.POST("/:id/prism/reconnect", h.Admin.Prism.Reconnect)
-		}
 		accounts.POST("/check-mixed-channel", h.Admin.Account.CheckMixedChannel)
 		accounts.POST("/import/codex-session", h.Admin.Account.ImportCodexSession)
 		accounts.POST("/sync/crs", h.Admin.Account.SyncFromCRS)
@@ -657,15 +654,10 @@ func registerPromoCodeRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	adminSettings := admin.Group("/settings")
 	{
+		adminSettings.GET("/astra-routing", h.Admin.Setting.GetAstraRouting)
+		adminSettings.PUT("/astra-routing", h.Admin.Setting.UpdateAstraRouting)
 		adminSettings.GET("", h.Admin.Setting.GetSettings)
 		adminSettings.PUT("", h.Admin.Setting.UpdateSettings)
-		if h.Admin.Prism != nil {
-			adminSettings.GET("/prism", h.Admin.Prism.GetConfiguration)
-			adminSettings.PUT("/prism", h.Admin.Prism.UpdateConfiguration)
-			adminSettings.DELETE("/prism", h.Admin.Prism.ResetConfiguration)
-			adminSettings.GET("/prism/restart", h.Admin.Prism.GetRestartStatus)
-			adminSettings.POST("/prism/restart", h.Admin.Prism.Restart)
-		}
 		adminSettings.POST("/test-smtp", h.Admin.Setting.TestSMTPConnection)
 		adminSettings.POST("/send-test-email", h.Admin.Setting.SendTestEmail)
 		adminSettings.GET("/email-templates", h.Admin.Setting.ListEmailTemplates)
@@ -846,6 +838,8 @@ func registerScheduledTestRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	admin.GET("/account-ops/alerts", h.Admin.AccountOps.List)
 	admin.GET("/account-ops/balance-accounts", h.Admin.AccountOps.BalanceAccounts)
 	admin.GET("/account-ops/threshold-accounts", h.Admin.AccountOps.ThresholdAccounts)
+	admin.GET("/account-ops/groups", h.Admin.AccountOps.Groups)
+	admin.PUT("/account-ops/groups", h.Admin.AccountOps.SaveGroups)
 	admin.POST("/account-ops/webhooks/:id/test", h.Admin.AccountOps.TestWebhook)
 	// 智能运维 → 凭证守护：账号令牌巡检 / 自动重登 / 错误态自愈
 	admin.GET("/account-ops/token-guard/status", h.Admin.AccountTokenGuard.Status)
@@ -970,7 +964,7 @@ func registerChannelRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerChannelMonitorRoutes(admin *gin.RouterGroup, h *handler.Handlers, settingService *service.SettingService) {
-	guard := channelMonitorFeatureGuard(settingService)
+	guard := channelMonitorAdminFeatureGuard(settingService)
 	monitors := admin.Group("/channel-monitors")
 	monitors.Use(guard)
 	{
@@ -1019,23 +1013,56 @@ func registerAffiliateRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 }
 
 func registerChannelMonitorV2Routes(admin *gin.RouterGroup, h *handler.Handlers, settingService *service.SettingService) {
-	// Stored usage stays readable in every mode; runtime gates control collection.
+	// Config GET/PUT: feature enabled only (operators can prepare V2 before flipping mode).
+	// Read/matrix endpoints: require mode=v2 so V1 deployments do not serve passive data.
+	featureGuard := channelMonitorAdminFeatureGuard(settingService)
+	modeV2Guard := channelMonitorModeV2Guard(settingService)
+
 	monitor := admin.Group("/channel-monitor-v2")
-	monitor.Use(channelMonitorFeatureGuard(settingService))
 	{
-		monitor.GET("/config", h.ChannelMonitorV2.GetConfig)
-		monitor.PUT("/config", h.ChannelMonitorV2.UpdateConfig)
-		monitor.GET("/dimensions", h.ChannelMonitorV2.Dimensions)
-		monitor.GET("/snapshot", h.ChannelMonitorV2.AdminSnapshot)
-		monitor.GET("/models", h.ChannelMonitorV2.AdminModels)
-		monitor.GET("/matrix", h.ChannelMonitorV2.AdminMatrix)
-		monitor.GET("/errors", h.ChannelMonitorV2.Errors)
-		monitor.GET("/users", h.ChannelMonitorV2.AdminUsers)
-		monitor.GET("/observations", h.ChannelMonitorV2.AdminObservations)
+		config := monitor.Group("")
+		config.Use(featureGuard)
+		{
+			config.GET("/config", h.ChannelMonitorV2.GetConfig)
+			config.PUT("/config", h.ChannelMonitorV2.UpdateConfig)
+		}
+		reads := monitor.Group("")
+		reads.Use(modeV2Guard)
+		{
+			reads.GET("/dimensions", h.ChannelMonitorV2.Dimensions)
+			reads.GET("/snapshot", h.ChannelMonitorV2.AdminSnapshot)
+			reads.GET("/models", h.ChannelMonitorV2.AdminModels)
+			reads.GET("/matrix", h.ChannelMonitorV2.AdminMatrix)
+			reads.GET("/errors", h.ChannelMonitorV2.Errors)
+			reads.GET("/users", h.ChannelMonitorV2.AdminUsers)
+		}
 	}
 }
 
-func channelMonitorFeatureGuard(settingService *service.SettingService) gin.HandlerFunc {
+// registerChannelMonitorV3Routes keeps editing and previewing available in any
+// mode so a site can be prepared before switching. The preview has data
+// whenever the passive aggregation runs (v2 or v3).
+func registerChannelMonitorV3Routes(admin *gin.RouterGroup, h *handler.Handlers, settingService *service.SettingService) {
+	admin.PUT("/channel-monitor-mode", h.ChannelMonitorV3.SetMode)
+
+	monitor := admin.Group("/channel-monitor-v3")
+	monitor.Use(channelMonitorAdminFeatureGuard(settingService))
+	{
+		monitor.GET("/settings", h.ChannelMonitorV3.GetSettings)
+		monitor.PUT("/config", h.ChannelMonitorV3.UpdateConfig)
+		monitor.POST("/categories", h.ChannelMonitorV3.CreateCategory)
+		monitor.PUT("/categories/:id", h.ChannelMonitorV3.UpdateCategory)
+		monitor.DELETE("/categories/:id", h.ChannelMonitorV3.DeleteCategory)
+		monitor.POST("/components", h.ChannelMonitorV3.CreateComponent)
+		monitor.PUT("/components/:id", h.ChannelMonitorV3.UpdateComponent)
+		monitor.DELETE("/components/:id", h.ChannelMonitorV3.DeleteComponent)
+		monitor.POST("/reorder", h.ChannelMonitorV3.Reorder)
+		monitor.GET("/status", h.ChannelMonitorV3.Status)
+		monitor.GET("/incidents", h.ChannelMonitorV3.Incidents)
+	}
+}
+
+func channelMonitorAdminFeatureGuard(settingService *service.SettingService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if settingService != nil && settingService.GetChannelMonitorRuntime(c.Request.Context()).Enabled {
 			c.Next()
@@ -1043,5 +1070,37 @@ func channelMonitorFeatureGuard(settingService *service.SettingService) gin.Hand
 		}
 		response.ErrorFrom(c, service.ErrChannelMonitorDisabled)
 		c.Abort()
+	}
+}
+
+// channelMonitorModeV2Guard requires feature enabled and channel_monitor_mode=v2.
+func channelMonitorModeV2Guard(settingService *service.SettingService) gin.HandlerFunc {
+	return channelMonitorModeGuard(settingService, service.ChannelMonitorRuntime.V2Active)
+}
+
+// channelMonitorModeV3Guard requires feature enabled and channel_monitor_mode=v3.
+func channelMonitorModeV3Guard(settingService *service.SettingService) gin.HandlerFunc {
+	return channelMonitorModeGuard(settingService, service.ChannelMonitorRuntime.V3Active)
+}
+
+func channelMonitorModeGuard(settingService *service.SettingService, allowed func(service.ChannelMonitorRuntime) bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if settingService == nil {
+			response.ErrorFrom(c, service.ErrChannelMonitorDisabled)
+			c.Abort()
+			return
+		}
+		rt := settingService.GetChannelMonitorRuntime(c.Request.Context())
+		if !rt.Enabled {
+			response.ErrorFrom(c, service.ErrChannelMonitorDisabled)
+			c.Abort()
+			return
+		}
+		if !allowed(rt) {
+			response.ErrorFrom(c, service.ErrChannelMonitorModeMismatch)
+			c.Abort()
+			return
+		}
+		c.Next()
 	}
 }

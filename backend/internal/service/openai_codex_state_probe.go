@@ -14,6 +14,7 @@ import (
 	"time"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/google/uuid"
 )
 
@@ -57,13 +58,11 @@ var ErrOpenAICodexStateProbeBusy = infraerrors.Conflict("STATE_PROBE_BUSY", "该
 
 // OpenAICodexStateProbeResult 是一次门票探针的完整结果，可直接作为接口 JSON 返回。
 type OpenAICodexStateProbeResult struct {
-	Usage     *ChannelMonitorProbeUsage       `json:"usage,omitempty"`
-	Scope     *ChannelMonitorObservationScope `json:"-"`
-	AccountID int64                           `json:"account_id"`
-	Model     string                          `json:"model"`
-	Verdict   OpenAICodexStateVerdict         `json:"verdict"`
-	Reason    string                          `json:"reason"`
-	Failure   string                          `json:"failure,omitempty"`
+	AccountID int64                   `json:"account_id"`
+	Model     string                  `json:"model"`
+	Verdict   OpenAICodexStateVerdict `json:"verdict"`
+	Reason    string                  `json:"reason"`
+	Failure   string                  `json:"failure,omitempty"`
 	// Detail 是脱敏截断后的上游报错原文，便于看出「模型不支持」之类的具体原因。
 	Detail string `json:"detail,omitempty"`
 
@@ -107,19 +106,7 @@ func (s *OpenAIGatewayService) ProbeOpenAICodexState(ctx context.Context, accoun
 func (s *OpenAIGatewayService) probeOpenAICodexState(ctx context.Context, account *Account, model string, ignoreBPS bool) *OpenAICodexStateProbeResult {
 	started := time.Now()
 	result := &OpenAICodexStateProbeResult{Verdict: OpenAICodexStateInconclusive, StartedAt: started}
-	collector := &pelicanTestUsageCollector{model: model, requestedModel: model, role: "state_probe", runID: uuid.NewString(), logicalRequestID: uuid.NewString()}
-	ctx = context.WithValue(ctx, pelicanTestUsageKey{}, collector)
-	result.Scope = accountObservationScope(account)
 	defer func() {
-		facts := collector.facts(s.billingService, account)
-		finalizeProbeFacts(facts)
-		recorder, _ := ctx.Value(probeRequestFactRecorderContextKey{}).(ProbeRequestFactRecorder)
-		if recorder == nil {
-			recorder = s.probeRequestFactRecorder
-		}
-		saveProbeFacts(recorder, facts)
-		usage := collector.probeUsage(s.billingService, account)
-		result.Usage = &usage
 		result.FinishedAt = time.Now()
 		result.LatencyMs = result.FinishedAt.Sub(started).Milliseconds()
 		if result.Reason == "" {
@@ -138,7 +125,6 @@ func (s *OpenAIGatewayService) probeOpenAICodexState(ctx context.Context, accoun
 		upstreamModel = normalizeOpenAIModelForUpstream(account, account.GetMappedModel(requested))
 	}
 	result.Model = upstreamModel
-	collector.model, collector.requestedModel = upstreamModel, requested
 
 	if reason := openAICodexStateProbeUnsupportedReason(account, requested, ignoreBPS); reason != "" {
 		result.fail(OpenAICodexStateFailureUnsupported, reason, "")
@@ -164,25 +150,41 @@ func (s *OpenAIGatewayService) probeOpenAICodexState(ctx context.Context, accoun
 	}
 	proxy := openAIAccountProxyURL(account)
 
-	mint, err := s.fireOpenAICodexStateShot(ctx, account, token, upstreamModel, proxy, "", "")
+	runOpenAICodexStateProbe(ctx, result, "", func(state, cookie string) (openAICodexStateShot, error) {
+		return s.fireOpenAICodexStateShot(ctx, account, token, upstreamModel, proxy, state, cookie)
+	})
+	return result
+}
+
+// The account probe and gateway borrowing share the same two-shot verdict.
+func runOpenAICodexStateProbe(ctx context.Context, result *OpenAICodexStateProbeResult, seed string, fire func(string, string) (openAICodexStateShot, error)) {
+	mint, err := fire("", seed)
 	result.MintStatus = mint.status
 	result.TicketLength = len(mint.state)
 	if !result.shotUsable(ctx, "打票", mint, err) {
-		return result
+		return
 	}
 	if mint.state == "" {
 		result.fail(OpenAICodexStateFailureNoTicket, "打票成功但未返回门票头（x-codex-turn-state），无法进行续接判据", "")
-		return result
+		return
 	}
 	result.Minted = true
-
-	cont, err := s.fireOpenAICodexStateShot(ctx, account, token, upstreamModel, proxy, mint.state, strings.Join(mint.cookies, "; "))
+	cookies := strings.Join(mint.cookies, "; ")
+	if seed != "" {
+		// A borrowed route remains pinned when mint only returns __cflb.
+		h := http.Header{"Cookie": []string{cookies}}
+		request := &http.Request{Header: http.Header{"Cookie": []string{seed}}}
+		if pinned, err := request.Cookie("__oailb"); err == nil {
+			replaceCodexWSAnchorCookie(h, pinned.Value)
+		}
+		cookies = h.Get("Cookie")
+	}
+	cont, err := fire(mint.state, cookies)
 	result.ContinueStatus = cont.status
 	result.ContinueTicketLength = len(cont.state)
 	if !result.shotUsable(ctx, "门票续接", cont, err) {
-		return result
+		return
 	}
-
 	result.NewTicket = cont.state != "" && cont.state != mint.state
 	result.ReportedModel = cont.model
 	if result.ReportedModel == "" {
@@ -192,6 +194,53 @@ func (s *OpenAIGatewayService) probeOpenAICodexState(ctx context.Context, accoun
 		result.Verdict = OpenAICodexStateDegraded
 	} else {
 		result.Verdict = OpenAICodexStateHealthy
+	}
+}
+
+// ProbeOpenAICodexStateRoute validates a borrowed route using only the target's
+// credentials. Both shots use the same leased exit and __oailb cookie. This
+// bypasses the borrowing wrapper to avoid recursive validation; tickets stay local.
+func ProbeOpenAICodexStateRoute(ctx context.Context, upstream HTTPUpstream, template *http.Request, proxy string, accountID int64, concurrency int, profile *tlsfingerprint.Profile) *OpenAICodexStateProbeResult {
+	result := &OpenAICodexStateProbeResult{AccountID: accountID, Model: OpenAICodexStateProbeDefaultModel, Verdict: OpenAICodexStateInconclusive, StartedAt: time.Now()}
+	defer func() {
+		result.FinishedAt = time.Now()
+		result.LatencyMs = result.FinishedAt.Sub(result.StartedAt).Milliseconds()
+		if result.Reason == "" {
+			result.Reason = openAICodexStateVerdictReason(result.Verdict)
+		}
+	}()
+	if upstream == nil || template == nil {
+		result.fail(OpenAICodexStateFailureUnsupported, "缺少网关探针请求", "")
+		return result
+	}
+	pinned, err := template.Cookie("__oailb")
+	if err != nil || pinned.Value == "" {
+		result.fail("route_changed", "缺少借用路由", "")
+		return result
+	}
+	routeChanged := false
+	runOpenAICodexStateProbe(ctx, result, pinned.String(), func(state, cookie string) (openAICodexStateShot, error) {
+		return fireOpenAICodexStateShotRequest(ctx, template.Header, result.Model, state, cookie, func(req *http.Request) (*http.Response, error) {
+			req = req.WithContext(WithHTTPUpstreamRedirectsDisabled(req.Context()))
+			resp, err := upstream.DoWithTLS(req, proxy, accountID, concurrency, profile)
+			if resp != nil {
+				for _, got := range resp.Cookies() {
+					if got.Name == "__oailb" && (got.Value != pinned.Value || got.MaxAge < 0 || (!got.Expires.IsZero() && !time.Now().Before(got.Expires))) {
+						routeChanged = true
+					}
+				}
+			}
+			if routeChanged {
+				if resp != nil && resp.Body != nil {
+					_ = resp.Body.Close()
+				}
+				return nil, errors.New("target_route_changed")
+			}
+			return resp, err
+		})
+	})
+	if routeChanged {
+		result.fail("route_changed", "探针期间网关路由已改变", "")
 	}
 	return result
 }
@@ -272,10 +321,30 @@ func openAICodexStateProbeUnsupportedReason(account *Account, requestedModel str
 // 「续接回新票 = 降智」这条判据只在这种完整请求（门票长度 780）上实测验证过，
 // lite 形态（292/332 长度的票）上没有验证。每发用新的 session_id，也与验证时一致。
 func (s *OpenAIGatewayService) fireOpenAICodexStateShot(ctx context.Context, account *Account, token, model, proxy, turnState, cookie string) (openAICodexStateShot, error) {
+
+	headers := make(http.Header)
+	headers.Set("Authorization", "Bearer "+token)
+	if err := resolveAndSetOpenAIChatGPTAccountHeaders(ctx, s.accountRepo, headers, account); err != nil {
+		return openAICodexStateShot{}, err
+	}
+	applyOpenAICodexTicketHarvestIdentity(headers, model)
+	return fireOpenAICodexStateShotRequest(ctx, headers, model, turnState, cookie, func(req *http.Request) (*http.Response, error) {
+		return s.httpUpstream.Do(req, proxy, account.ID, account.Concurrency)
+	})
+}
+
+type openAICodexStateProbeContextKey struct{}
+
+func IsOpenAICodexStateProbeRequest(ctx context.Context) bool {
+	value, _ := ctx.Value(openAICodexStateProbeContextKey{}).(bool)
+	return value
+}
+
+func fireOpenAICodexStateShotRequest(ctx context.Context, headers http.Header, model, turnState, cookie string, send func(*http.Request) (*http.Response, error)) (openAICodexStateShot, error) {
 	var out openAICodexStateShot
+	ctx = context.WithValue(ctx, openAICodexStateProbeContextKey{}, true)
 	shotCtx, cancel := context.WithTimeout(ctx, openAICodexStateProbeShotTimeout)
 	defer cancel()
-
 	body := []byte(`{"model":` + jsonString(model) + `,"instructions":"Reply with OK.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Reply with OK."}]}],"stream":true,"store":false,"parallel_tool_calls":true,"include":["reasoning.encrypted_content"]}`)
 	req, err := http.NewRequestWithContext(shotCtx, http.MethodPost, chatgptCodexURL, bytes.NewReader(body))
 	if err != nil {
@@ -284,16 +353,15 @@ func (s *OpenAIGatewayService) fireOpenAICodexStateShot(ctx context.Context, acc
 	req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAIHarvest))
 	req.Close = true
 	req.Host = "chatgpt.com"
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header = headers.Clone()
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("OpenAI-Beta", "responses=experimental")
 	req.Header.Set("session_id", uuid.NewString())
-	if err := resolveAndSetOpenAIChatGPTAccountHeaders(shotCtx, s.accountRepo, req.Header, account); err != nil {
-		return out, err
+	// Never carry a business turn, request size, or compressed/lite body into a probe.
+	for _, name := range []string{responsesLiteHeaderKey, openAICodexTurnStateHeader, "Cookie", "Content-Length", "Content-Encoding", "conversation_id", "x-codex-turn-metadata"} {
+		req.Header.Del(name)
 	}
-	applyOpenAICodexTicketHarvestIdentity(req.Header, model)
-	req.Header.Del(responsesLiteHeaderKey)
 	if turnState = strings.TrimSpace(turnState); turnState != "" {
 		req.Header.Set(openAICodexTurnStateHeader, turnState)
 	}
@@ -301,7 +369,7 @@ func (s *OpenAIGatewayService) fireOpenAICodexStateShot(ctx context.Context, acc
 		req.Header.Set("Cookie", cookie)
 	}
 
-	resp, err := observeProbeHTTPRequest(req, func() (*http.Response, error) { return s.httpUpstream.Do(req, proxy, account.ID, account.Concurrency) })
+	resp, err := send(req)
 	if err != nil {
 		if resp != nil && resp.Body != nil {
 			_ = resp.Body.Close()
@@ -453,15 +521,7 @@ func openAICodexStateStreamErrorPayload(data []byte) []byte {
 // ProbeOpenAICodexState 按账号 ID 跑一次门票探针。同一账号同一时刻只允许一次探针，
 // 避免并发的两发互相干扰门票判据。
 func (s *AccountTestService) ProbeOpenAICodexState(ctx context.Context, accountID int64, model string) (*OpenAICodexStateProbeResult, error) {
-	result, err := s.probeOpenAICodexState(ctx, accountID, model, false)
-	if err == nil && s.probeRecorder != nil && result != nil {
-		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if saveErr := s.probeRecorder.RecordStateProbe(saveCtx, result); saveErr != nil {
-			return result, fmt.Errorf("save state probe observation: %w", saveErr)
-		}
-	}
-	return result, err
+	return s.probeOpenAICodexState(ctx, accountID, model, false)
 }
 
 func (s *AccountTestService) probeOpenAICodexState(ctx context.Context, accountID int64, model string, ignoreBPS bool) (*OpenAICodexStateProbeResult, error) {
@@ -480,7 +540,6 @@ func (s *AccountTestService) probeOpenAICodexState(ctx context.Context, accountI
 		return nil, ErrOpenAICodexStateProbeBusy
 	}
 	defer release()
-	ctx = context.WithValue(ctx, probeRequestFactRecorderContextKey{}, s.probeRequestFactRecorder)
 	return s.openaiGatewayService.probeOpenAICodexState(ctx, account, model, ignoreBPS), nil
 }
 

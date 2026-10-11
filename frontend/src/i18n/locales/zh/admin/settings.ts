@@ -14,11 +14,6 @@ export default {
         payment: '支付设置',
       },
       features: {
-        protocolSwitches: {
-          title: '协议功能',
-          description: '关闭后立即停止使用对应协议，并隐藏账号编辑中的相关选项。',
-          excelBps: 'Excel / BPS 协议',
-        },
         excelBpsImages: {
           mode: '图片传输方式',
           modeRelay: '临时 HTTPS 中转（默认）',
@@ -60,18 +55,20 @@ export default {
         },
         channelMonitor: {
           title: '渠道监控',
-          description: '真实用量汇总与主动探测可同时启用。',
+          description: '启用后在 V1 主动探测、V2 被动用量监控、V3 组件状态页中三选一。关闭后所有模式的后台任务均停止，用户端入口隐藏。',
           configureLink: '前往 渠道管理 > 渠道监控 配置监控项',
           enabled: '启用渠道监控',
-          enabledHint: '关闭后停止所有监控任务，保留配置与历史。',
-          mode: '监控来源',
-          modeHint: '两个来源可独立启用；均关闭时停止渠道监控。',
-          modeV2: '真实用量汇总',
-          modeV1: '主动探测',
-          modeV2Hint: '汇总真实业务请求的用量、延迟与健康指标。',
-          modeV1Hint: '定时检查连通性、额度与质量，产生独立检测流量。',
+          enabledHint: '关闭后 V1 调度器与真实请求统计（V2、V3 共用）均停止；已有配置与历史保留。',
+          mode: '监控模式',
+          modeHint: '默认 V1（主动探测）。同一时间只能启用一种实现；也可以在「渠道监控」页面顶部直接切换。',
+          modeV2: 'V2 被动监控',
+          modeV1: 'V1 主动探测',
+          modeV3: 'V3 组件状态页',
+          modeV2Hint: '需主动选择：基于真实网关流量聚合健康指标，不向上游发送探活请求；启用期间 V1 探测停止。',
+          modeV1Hint: '默认模式：按配置的渠道监控项定时发起上游健康检查（产生探测流量）。',
+          modeV3Hint: '按分类和组件展示状态条，状态来自本站真实用户请求的统计（和 V2 同一份数据，不额外发请求）；启用期间 V1 探测停止，V2 页面对用户隐藏。组件在「渠道监控」页面配置。',
           defaultInterval: '默认检测间隔（秒）',
-          defaultIntervalHint: '新建主动任务的默认间隔，各任务可独立调整。范围 15 – 3600 秒。',
+          defaultIntervalHint: '仅 V1 模式使用：新建渠道监控时表单的默认值，可被单个渠道覆盖。范围 15 – 3600 秒。',
           hideThroughput: '对用户隐藏吞吐速率（RPM / TPM）',
           hideThroughputHint:
             '开启后，用户端渠道监控页面与用户 API 不返回 RPM/TPM，避免用「速率 × 时间窗」反推集群规模。管理员仍可见完整指标；错误率、延迟、缓存率照常展示。',
@@ -80,7 +77,7 @@ export default {
             '开启后，配额模式的渠道监控会在用户端渠道状态页展示关联账号的用量滚动窗口/余额。默认关闭；管理员始终可见。',
           hideUserRanking: '对用户隐藏用户排行',
           hideUserRankingHint:
-            '开启后，用户端渠道监控隐藏用户排行；管理员仍可查看。',
+            '开启后，用户端渠道监控 V2 不再显示「用户排行」页，用户 API 也不返回排行数据。管理员仍可查看。',
         },
         availableChannels: {
           title: '可用渠道',
@@ -625,6 +622,8 @@ export default {
         claudeCodeVersionAutoSyncHint: '每小时从官方发布渠道获取最新版本的 Claude Code 客户端版本号，无需为了跟版本而升级本服务。关闭后停止获取新版本，已同步的版本仍可使用；上方手填版本始终优先。',
         claudeCodeVersionSyncedValue: '当前同步到：{version}',
         codexHardeningTitle: 'Codex 设置',
+        requestTimezoneEnabled: '请求时区绑定',
+        requestTimezoneEnabledDesc: '开启后，按 OpenAI 账号配置替换环境上下文和网页搜索工具中已有的时区，默认 Asia/Singapore。保留日期和普通对话原文；关闭后不改写时区。此功能不保证改善模型表现。',
         codexTicketEnabled: '780 打票',
         codexTicketEnabledDesc:
           '关闭后不打票、不注入 x-codex-turn-state，按原链路转发。开启后后台打票，并在业务请求中覆盖该头。',
