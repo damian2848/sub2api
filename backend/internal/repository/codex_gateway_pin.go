@@ -368,21 +368,6 @@ func (s *codexGatewayPinUpstream) currentCookie(path string, now time.Time) (*ht
 	return nil, 0
 }
 
-func replaceCodexGatewayCookie(req *http.Request, cookie *http.Cookie) {
-	var kept []string
-	for _, header := range req.Header.Values("Cookie") {
-		for _, part := range strings.Split(header, ";") {
-			part = strings.TrimSpace(part)
-			name, _, ok := strings.Cut(part, "=")
-			if part != "" && (!ok || strings.TrimSpace(name) != "__oailb") {
-				kept = append(kept, part)
-			}
-		}
-	}
-	kept = append(kept, (&http.Cookie{Name: "__oailb", Value: cookie.Value}).String())
-	req.Header.Set("Cookie", strings.Join(kept, "; "))
-}
-
 // The observer forwards bytes unchanged and buffers at most one bounded SSE
 // event. Early close, malformed/oversized events, model mismatch and stream errors
 // cannot qualify a route. Model labels are not a capability benchmark.
