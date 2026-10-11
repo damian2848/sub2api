@@ -19,7 +19,7 @@ export function normalizeAstraGateway(value: AstraGatewaySettings): AstraGateway
       rotate_nodes: value.cookie_pool.rotate_nodes ?? false,
       max_node_attempts: value.cookie_pool.max_node_attempts || 3,
       node_cooldown_seconds: value.cookie_pool.node_cooldown_seconds || 3600,
-      ttl_seconds: value.cookie_pool.ttl_seconds || 230,
+      ttl_seconds: value.cookie_pool.ttl_seconds || 240,
       source_account_ids: [...(value.cookie_pool.source_account_ids || [])],
       target_account_ids: [...(value.cookie_pool.target_account_ids || [])]
     },

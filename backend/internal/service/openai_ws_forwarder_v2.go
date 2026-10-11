@@ -224,19 +224,20 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		return nil, wrapOpenAIWSFallback("codex_ticket_unavailable", pinErr)
 	}
 	defer releaseHarvest()
-	if anchor != nil && anchor.connID == "" {
+	var borrowedRoute AstraGatewayWSRoute
+	if (anchor != nil && anchor.connID == "") || (anchor == nil && s.usesAstraBorrowedTicket(ctx, account, mappedModel)) {
 		if pool, ok := s.httpUpstream.(interface {
-			CodexGatewayPinWSRequest(context.Context, http.Header, string, int64, int) (string, string, func(), error)
+			CodexGatewayPinWSRequest(context.Context, http.Header, string, int64, int) (AstraGatewayWSRoute, error)
 		}); ok {
-			route, effectiveProxy, releaseRoute, err := pool.CodexGatewayPinWSRequest(ctx, wsHeaders, proxyURL, account.ID, account.Concurrency)
+			route, err := pool.CodexGatewayPinWSRequest(ctx, wsHeaders, proxyURL, account.ID, account.Concurrency)
 			if err != nil {
 				return nil, s.astraRouteFailover(ctx, account, err)
 			}
-			defer releaseRoute()
-			proxyURL = effectiveProxy
-			anchor.cookie = route
-			if route != "" {
-				replaceCodexWSAnchorCookie(wsHeaders, route)
+			defer route.Release()
+			borrowedRoute = route
+			proxyURL = route.ProxyURL
+			if anchor != nil {
+				anchor.cookie = route.Cookie
 			}
 		}
 	}
@@ -285,10 +286,21 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			if anchor != nil && anchor.cookie != "" {
 				replaceCodexWSAnchorCookie(headers, anchor.cookie)
 			}
+			if borrowedRoute.Apply != nil {
+				if err := borrowedRoute.Apply(headers); err != nil {
+					return nil, s.astraRouteFailover(factoryCtx, latest, err)
+				}
+			}
 			return s.refreshOpenAIAgentIdentityHeaders(factoryCtx, account, headers)
 		},
 		BindHandshake: func(headers http.Header) *openAIWSTurnBinding {
-			return s.bindOpenAIWSHandshake(account, mappedModel, headers)
+			binding := s.bindOpenAIWSHandshake(account, mappedModel, headers)
+			if borrowedRoute.Apply != nil {
+				settings := s.cfg.AstraRouting(ctx)
+				binding.borrowedSettings = &settings
+				binding.ticket = nil
+			}
+			return binding
 		},
 		CheckBinding: func(checkCtx context.Context, b *openAIWSTurnBinding) error {
 			latest, err := s.admitOpenAITurnForGroup(checkCtx, groupID, enforceGroup, account, mappedModel)

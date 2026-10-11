@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"net/http"
 	"testing"
@@ -27,7 +26,7 @@ func TestAstraReadinessRequiresCurrentTargetPass(t *testing.T) {
 	require.Equal(t, "candidate", snapshot.Sources[0].State)
 	require.Nil(t, snapshot.Sources[0].ExpiresAt)
 	require.Zero(t, snapshot.Sources[0].RemainingSeconds)
-	pool.targetChecks = map[int64]astraTargetValidation{300: {cookieFingerprint: sha256.Sum256([]byte("first")), sourceID: 299, passed: false, checked: now, expires: route.expires, reason: "target_probe_degraded"}}
+	pool.targetChecks = map[int64]astraTargetValidation{300: {routeFingerprint: route.fingerprint(), sourceID: 299, passed: false, checked: now, expires: route.expires, reason: "target_probe_degraded"}}
 	snapshot = wrapper.AstraGatewaySnapshot(t.Context())
 	require.Zero(t, snapshot.ReadyRoutes)
 	require.Equal(t, "source_passed_target_failed", snapshot.Sources[0].Reason)

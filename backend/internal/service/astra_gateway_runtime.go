@@ -178,7 +178,7 @@ func (s *AccountTestService) TestAstraGateway(ctx context.Context, action string
 		return AstraGatewayTestResult{}, errors.New("test_already_running")
 	}
 	defer s.astraGatewayActionMu.Unlock()
-	// Borrowing always uses the state probe; legacy test_kind values cannot bypass it.
+	// Borrowing always verifies the same donor ticket; legacy test_kind values cannot bypass it.
 	kind := "state_probe"
 	question := astraQuestion{Prompt: "Reply with OK only."}
 

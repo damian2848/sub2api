@@ -38,7 +38,7 @@ func astraAccountSchedulingReady(settings config.AstraRoutingSettings, snapshot 
 	}
 	for _, row := range snapshot.Targets {
 		if row.AccountID == id {
-			return row.State == "ready" && row.Reason == "target_probe_passed" && row.ExpiresAt != nil && now.Before(*row.ExpiresAt)
+			return row.State == "ready" && (row.Reason == "target_probe_passed" || row.Reason == "target_probe_ticket_rotated") && row.ExpiresAt != nil && now.Before(*row.ExpiresAt)
 		}
 	}
 	return false

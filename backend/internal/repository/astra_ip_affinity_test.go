@@ -59,11 +59,11 @@ func TestAstraGatewayIPAffinity(t *testing.T) {
 			resp, err = wrapper.Do(target, "http://target.invalid:80", 300, 1)
 			consumeAffinityResponse(t, resp, err)
 			require.Equal(t, 3, calls, "validation and actual request must share egress")
-			cookie, proxy, release, err := wrapper.CodexGatewayPinWSRequest(t.Context(), target.Header, "http://target.invalid:80", 300, 1)
+			lease, err := wrapper.CodexGatewayPinWSRequest(t.Context(), target.Header, "http://target.invalid:80", 300, 1)
 			require.NoError(t, err)
-			release()
-			require.Equal(t, "source-route", cookie)
-			require.Equal(t, tc.want, proxy, "WS must dial the validated egress")
+			lease.Release()
+			require.Equal(t, "source-route", lease.Cookie)
+			require.Equal(t, tc.want, lease.ProxyURL, "WS must dial the validated egress")
 			require.Equal(t, 3, calls, "HTTP and WS can reuse the same validated identity")
 			raw, err := json.Marshal(wrapper.AstraGatewaySnapshot(t.Context()))
 			require.NoError(t, err)
@@ -100,7 +100,7 @@ func TestAstraGatewayIPAffinityRevalidatesChangedEgress(t *testing.T) {
 	consumeAffinityResponse(t, resp, err)
 	require.Equal(t, []string{"old-source", "old-source", "old-source", "new-source", "new-source", "new-source"}, proxies)
 	// A backup source must bring its own egress along with its Cookie.
-	backup := codexGatewayRoute{cookie: http.Cookie{Name: "__oailb", Value: "backup", Path: "/"}, proxy: "backup-source", expires: time.Now().Add(time.Minute)}
+	backup := codexGatewayRoute{ticket: "fixture-state", cookie: http.Cookie{Name: "__oailb", Value: "backup", Path: "/"}, proxy: "backup-source", expires: time.Now().Add(time.Minute)}
 	pool.recordSource(298, time.Now(), &backup, true)
 	pool.recordSource(299, time.Now(), nil, false)
 	resp, err = wrapper.Do(pinRequest(t), "target", 300, 1)
@@ -134,7 +134,7 @@ func TestAstraGatewayIPAffinityRejectsFailedTarget(t *testing.T) {
 	_, err = wrapper.Do(pinRequest(t), "target", 300, 1)
 	require.Error(t, err)
 	require.Equal(t, 1, calls, "do not forward actual target request after failure")
-	_, _, _, err = wrapper.CodexGatewayPinWSRequest(t.Context(), http.Header{}, "target", 300, 1)
+	_, err = wrapper.CodexGatewayPinWSRequest(t.Context(), http.Header{}, "target", 300, 1)
 	require.Error(t, err)
 	require.Equal(t, 1, calls, "failed validation stays in cooldown")
 }

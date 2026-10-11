@@ -20,7 +20,7 @@ func (s *OpenAIGatewayService) astraRouteFailover(ctx context.Context, account *
 	disable := true
 	switch err.Error() {
 	case "astra_rotation_unavailable", "astra_rotation_use_once", "astra_rotation_no_nodes", "astra_rotation_node_unavailable", "astra_rotation_exhausted", "astra_rotation_cooling", "target_probe_degraded", "target_route_changed", "target_probe_failed", "target_not_verified", "no_qualified_source_route", "source_probe_cooldown", "astra_route_not_ready":
-	case "target_validation_in_progress", "preparation_in_progress", "configuration_changed":
+	case "target_validation_in_progress", "preparation_in_progress", "configuration_changed", "route_expired":
 		disable = false // Another request/configuration may already have a valid route.
 	default:
 		return err

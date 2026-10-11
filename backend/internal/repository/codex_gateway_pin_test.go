@@ -76,9 +76,9 @@ func TestCodexGatewayPinAccountIsolation(t *testing.T) {
 		require.Same(t, profile, f)
 		require.Equal(t, "Bearer target-test-token", r.Header.Get("Authorization"))
 		require.Equal(t, "target-test-account", r.Header.Get("ChatGPT-Account-ID"))
-		require.Equal(t, "target-test-state", r.Header.Get("X-Codex-Turn-State"))
+		require.Equal(t, "fixture-state", r.Header.Get("X-Codex-Turn-State"))
 		require.Equal(t, "target-test-session", r.Header.Get("Session_id"))
-		require.Equal(t, "__cflb=target-cf; custom=keep; __oailb=source-route", r.Header.Get("Cookie"))
+		require.Equal(t, "custom=keep; __oailb=source-route", r.Header.Get("Cookie"))
 		// A target response must never overwrite the source route.
 		return pinResponse("__oailb=target-route; Path=/; Secure; Max-Age=3600"), nil
 	}}
@@ -102,13 +102,15 @@ func TestCodexGatewayPinLifetime(t *testing.T) {
 	path := "/backend-api/codex/responses"
 	pin := &codexGatewayPinUpstream{config: pinConfig()}
 	route := codexGatewayRouteFromResponse(pinResponse("__oailb=first; Path=/backend-api; Secure; Max-Age=3600"), path, now)
-	require.Equal(t, now.Add(230*time.Second), route.expires)
+	require.Equal(t, now.Add(240*time.Second), route.expires)
 	pin.recordSource(299, now, route, true)
-	c, id := pin.currentCookie(path, now.Add(229*time.Second))
+	c, id := pin.currentCookie(path, now.Add(239*time.Second))
 	require.Equal(t, int64(299), id)
 	require.Equal(t, "first", c.Value)
-	c, _ = pin.currentCookie(path, now.Add(230*time.Second))
+	c, _ = pin.currentCookie(path, now.Add(240*time.Second))
 	require.Nil(t, c)
+	// Reset the fixture clock/pool for the independent shorter-cookie case.
+	pin = &codexGatewayPinUpstream{config: pinConfig()}
 	route = codexGatewayRouteFromResponse(pinResponse("__oailb=second; Path=/; Secure; Max-Age=60"), path, now)
 	pin.recordSource(298, now, route, true)
 	c, id = pin.currentCookie(path, now)
@@ -245,7 +247,7 @@ func TestAstraGatewayRuntimeRevisionClearsPool(t *testing.T) {
 	wrapper := &astraRoutingUpstream{cfg: cfg}
 	first := wrapper.current(t.Context())
 	now := time.Now()
-	first.recordSource(299, now, &codexGatewayRoute{cookie: http.Cookie{Name: "__oailb", Value: "route", Path: "/"}, expires: now.Add(time.Minute)}, true)
+	first.recordSource(299, now, &codexGatewayRoute{ticket: "fixture-state", cookie: http.Cookie{Name: "__oailb", Value: "route", Path: "/"}, expires: now.Add(time.Minute)}, true)
 	cookie, err := wrapper.CodexGatewayPinWSHeader(300)
 	require.NoError(t, err)
 	require.Equal(t, "route", cookie)
@@ -322,7 +324,7 @@ func TestAstraGatewayAutomaticPrepareAndCooldown(t *testing.T) {
 		if id == 299 {
 			return errors.New("unavailable")
 		}
-		p.recordSource(id, now, &codexGatewayRoute{cookie: http.Cookie{Name: "__oailb", Value: "qualified", Path: "/"}, expires: now.Add(time.Minute)}, true)
+		p.recordSource(id, now, &codexGatewayRoute{ticket: "fixture-state", cookie: http.Cookie{Name: "__oailb", Value: "qualified", Path: "/"}, expires: now.Add(time.Minute)}, true)
 		return nil
 	})
 	require.NoError(t, wrapper.PrepareAstraGateway(t.Context()))
@@ -360,7 +362,7 @@ func TestAstraGatewayTargetPreparesSourceBeforeForwarding(t *testing.T) {
 	}}
 	wrapper.SetAstraGatewayPreparer(func(_ context.Context, id int64) error {
 		now := time.Now()
-		wrapper.current(t.Context()).recordSource(id, now, &codexGatewayRoute{cookie: http.Cookie{Name: "__oailb", Value: "ready", Path: "/"}, expires: now.Add(time.Minute)}, true)
+		wrapper.current(t.Context()).recordSource(id, now, &codexGatewayRoute{ticket: "fixture-state", cookie: http.Cookie{Name: "__oailb", Value: "ready", Path: "/"}, expires: now.Add(time.Minute)}, true)
 		return nil
 	})
 	resp, err := wrapper.Do(pinRequest(t), "", 300, 1)

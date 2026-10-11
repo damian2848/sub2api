@@ -27,6 +27,8 @@ func rotationFixture(t *testing.T, limit int, successNode string) (*astraRouting
 	leases := 0
 	active := map[string]string{}
 	serial := 0
+	nodeTargetCalls := map[string]int{}
+	sourceTickets := 0
 	wrapper := &astraRoutingUpstream{cfg: cfg, listNodes: func() ([]mihomo.AstraNode, error) { return nodes, nil }}
 	wrapper.pinNode = func(ctx context.Context, node mihomo.AstraNode) (string, func(), error) {
 		require.NoError(t, ctx.Err())
@@ -47,7 +49,10 @@ func rotationFixture(t *testing.T, limit int, successNode string) (*astraRouting
 		require.Equal(t, service.HTTPUpstreamProfileOpenAIHarvest, service.HTTPUpstreamProfileFromContext(r.Context()))
 		calls = append(calls, fmt.Sprintf("%s:%d", node, id))
 		if id == 299 {
-			return pinResponse("__oailb=" + node + "; Path=/; Secure; Max-Age=230"), nil
+			sourceTickets++
+			resp := pinResponse("__oailb=" + node + "; Path=/; Secure; Max-Age=230")
+			resp.Header.Set("X-Codex-Turn-State", fmt.Sprintf("source-ticket-%d", sourceTickets))
+			return resp, nil
 		}
 		require.Equal(t, int64(300), id)
 		require.Equal(t, "Bearer target-only", r.Header.Get("Authorization"))
@@ -55,8 +60,9 @@ func rotationFixture(t *testing.T, limit int, successNode string) (*astraRouting
 		require.NoError(t, err)
 		require.Equal(t, node, cookie.Value)
 		resp := pinResponse("")
-		if node != successNode && r.Header.Get("X-Codex-Turn-State") != "" {
-			resp.Header.Set("X-Codex-Turn-State", "different-ticket")
+		nodeTargetCalls[node]++
+		if node != successNode && nodeTargetCalls[node]%2 == 0 {
+			resp.StatusCode = http.StatusServiceUnavailable
 		}
 		return resp, nil
 	}}
@@ -94,12 +100,12 @@ func TestAstraGatewayRotationRejectsBadNodeAndPinsSuccessfulNode(t *testing.T) {
 	resp, err = s.Do(rotationTarget(t), "target-original", 300, 1)
 	consumeAffinityResponse(t, resp, err)
 	require.Len(t, *calls, 8)
-	cookie, proxy, release, err := s.CodexGatewayPinWSRequest(t.Context(), rotationTarget(t).Header, "target-original", 300, 1)
+	lease, err := s.CodexGatewayPinWSRequest(t.Context(), rotationTarget(t).Header, "target-original", 300, 1)
 	require.NoError(t, err)
-	require.Equal(t, "good", cookie)
-	require.Contains(t, proxy, "127.0.0.1")
+	require.Equal(t, "good", lease.Cookie)
+	require.Contains(t, lease.ProxyURL, "127.0.0.1")
 	require.Equal(t, 1, *leases)
-	release()
+	lease.Release()
 	require.Zero(t, *leases)
 	require.Len(t, *calls, 8, "WS reuses node qualification while owning its own dial lease")
 	// Expiration picks the next eligible exit rather than extending old Cookie lifetime.
