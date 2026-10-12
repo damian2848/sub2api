@@ -306,7 +306,7 @@
             />
           </template>
           <template #cell-groups="{ row }">
-            <AccountGroupsCell :groups="accountGroupsForRow(row)" :max-display="4" />
+            <AccountGroupsCell :groups="accountGroupsForRow(row)" />
           </template>
           <template #header-usage="{ column }">
             <div class="flex items-center">

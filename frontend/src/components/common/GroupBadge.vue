@@ -8,7 +8,7 @@
     <!-- Platform logo -->
     <PlatformIcon v-if="platform" :platform="platform" size="sm" />
     <!-- Group name -->
-    <span class="truncate">{{ name }}</span>
+    <span :class="truncateName ? 'truncate' : 'min-w-0 whitespace-normal break-all'">{{ name }}</span>
     <!-- Right side label -->
     <span v-if="showLabel" :class="labelClass">
       <template v-if="hasCustomRate">
@@ -36,6 +36,7 @@ import PlatformIcon from './PlatformIcon.vue'
 
 interface Props {
   name: string
+  truncateName?: boolean
   platform?: GroupPlatform
   subscriptionType?: SubscriptionType
   rateMultiplier?: number
@@ -56,6 +57,7 @@ interface Props {
 
 const props = withDefaults(defineProps<Props>(), {
   subscriptionType: 'standard',
+  truncateName: true,
   showRate: true,
   daysRemaining: null,
   userRateMultiplier: null,
