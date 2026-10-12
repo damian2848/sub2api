@@ -3,7 +3,9 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -270,4 +272,46 @@ func TestBuildPlatformSections_CompositeWithoutModelsKeepsEmptyCompositeSection(
 	require.Equal(t, service.PlatformComposite, sections[0].Platform)
 	require.Len(t, sections[0].Groups, 1)
 	require.Empty(t, sections[0].SupportedModels)
+}
+
+type channelModelSupportStub struct{ err error }
+
+func (s channelModelSupportStub) FilterSupportedChannelModels(_ context.Context, group *service.Group, platform string, models []service.SupportedModel) ([]service.SupportedModel, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	out := []service.SupportedModel{}
+	for _, model := range models {
+		if model.Platform == platform && group.ModelAllowlist.Allows(model.Name) {
+			out = append(out, model)
+		}
+	}
+	return out, nil
+}
+
+func TestSupportedPlatformSections_IndependentGroups(t *testing.T) {
+	h := &AvailableChannelHandler{modelSupport: channelModelSupportStub{}}
+	ch := service.AvailableChannel{SupportedModels: []service.SupportedModel{
+		{Name: "gpt-5", Platform: "openai"}, {Name: "gpt-4o", Platform: "openai"}, {Name: "pricing-only", Platform: "openai"},
+	}}
+	groups := []userAvailableGroup{{ID: 1, Platform: "openai"}, {ID: 2, Platform: "openai"}, {ID: 3, Platform: "openai"}}
+	configs := map[int64]*service.Group{
+		1: {ID: 1, ModelAllowlist: service.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5"}}},
+		2: {ID: 2, ModelAllowlist: service.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-4o"}}},
+		3: {ID: 3, ModelAllowlist: service.GroupModelAllowlist{Enabled: true, Models: []string{"unconfigured"}}},
+	}
+	sections, err := h.supportedPlatformSections(context.Background(), ch, groups, configs)
+	require.NoError(t, err)
+	require.Len(t, sections, 1)
+	require.Len(t, sections[0].Groups, 2)
+	require.Equal(t, "gpt-5", sections[0].Groups[0].SupportedModels[0].Name)
+	require.Equal(t, "gpt-4o", sections[0].Groups[1].SupportedModels[0].Name)
+	require.Len(t, sections[0].SupportedModels, 2)
+	empty, err := h.supportedPlatformSections(context.Background(), ch, groups[2:], configs)
+	require.NoError(t, err)
+	require.Empty(t, empty)
+	h.modelSupport = channelModelSupportStub{err: errors.New("lookup failed")}
+	failed, err := h.supportedPlatformSections(context.Background(), ch, groups, configs)
+	require.Error(t, err)
+	require.Nil(t, failed)
 }

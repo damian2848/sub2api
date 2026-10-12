@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"sort"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
@@ -23,6 +24,11 @@ type AvailableChannelHandler struct {
 	channelService *service.ChannelService
 	apiKeyService  *service.APIKeyService
 	settingService *service.SettingService
+	modelSupport   channelModelSupport
+}
+
+type channelModelSupport interface {
+	FilterSupportedChannelModels(context.Context, *service.Group, string, []service.SupportedModel) ([]service.SupportedModel, error)
 }
 
 // NewAvailableChannelHandler 创建用户侧可用渠道 handler。
@@ -30,11 +36,13 @@ func NewAvailableChannelHandler(
 	channelService *service.ChannelService,
 	apiKeyService *service.APIKeyService,
 	settingService *service.SettingService,
+	gatewayService *service.GatewayService,
 ) *AvailableChannelHandler {
 	return &AvailableChannelHandler{
 		channelService: channelService,
 		apiKeyService:  apiKeyService,
 		settingService: settingService,
+		modelSupport:   gatewayService,
 	}
 }
 
@@ -52,16 +60,17 @@ func (h *AvailableChannelHandler) featureEnabled(c *gin.Context) bool {
 // 订阅视觉加深），并展示默认倍率与高峰倍率规则；用户专属倍率前端走
 // /groups/rates，和 API 密钥页面保持一致。
 type userAvailableGroup struct {
-	ID                 int64   `json:"id"`
-	Name               string  `json:"name"`
-	Platform           string  `json:"platform"`
-	SubscriptionType   string  `json:"subscription_type"`
-	RateMultiplier     float64 `json:"rate_multiplier"`
-	PeakRateEnabled    bool    `json:"peak_rate_enabled"`
-	PeakStart          string  `json:"peak_start"`
-	PeakEnd            string  `json:"peak_end"`
-	PeakRateMultiplier float64 `json:"peak_rate_multiplier"`
-	IsExclusive        bool    `json:"is_exclusive"`
+	SupportedModels    []userSupportedModel `json:"supported_models"`
+	ID                 int64                `json:"id"`
+	Name               string               `json:"name"`
+	Platform           string               `json:"platform"`
+	SubscriptionType   string               `json:"subscription_type"`
+	RateMultiplier     float64              `json:"rate_multiplier"`
+	PeakRateEnabled    bool                 `json:"peak_rate_enabled"`
+	PeakStart          string               `json:"peak_start"`
+	PeakEnd            string               `json:"peak_end"`
+	PeakRateMultiplier float64              `json:"peak_rate_multiplier"`
+	IsExclusive        bool                 `json:"is_exclusive"`
 }
 
 // userSupportedModelPricing 用户可见的定价字段白名单。
@@ -104,8 +113,7 @@ type userSupportedModel struct {
 }
 
 // userChannelPlatformSection 单渠道内某个平台的子视图：用户可见的分组 + 该平台
-// 支持的模型。按 platform 聚合后让前端可以把渠道名作为 row-group 一次渲染，
-// 后面的平台行按 sections 顺序铺开。
+// 支持的模型。每个分组附带独立支持模型列表，平台列表保留过滤后的并集。
 type userChannelPlatformSection struct {
 	Platform        string               `json:"platform"`
 	Groups          []userAvailableGroup `json:"groups"`
@@ -144,8 +152,10 @@ func (h *AvailableChannelHandler) List(c *gin.Context) {
 		return
 	}
 	allowedGroupIDs := make(map[int64]struct{}, len(userGroups))
+	groupsByID := make(map[int64]*service.Group, len(userGroups))
 	for i := range userGroups {
 		allowedGroupIDs[userGroups[i].ID] = struct{}{}
+		groupsByID[userGroups[i].ID] = &userGroups[i]
 	}
 
 	channels, err := h.channelService.ListAvailable(c.Request.Context())
@@ -163,7 +173,11 @@ func (h *AvailableChannelHandler) List(c *gin.Context) {
 		if len(visibleGroups) == 0 {
 			continue
 		}
-		sections := buildPlatformSections(ch, visibleGroups)
+		sections, err := h.supportedPlatformSections(c.Request.Context(), ch, visibleGroups, groupsByID)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
 		if len(sections) == 0 {
 			continue
 		}
@@ -175,6 +189,43 @@ func (h *AvailableChannelHandler) List(c *gin.Context) {
 	}
 
 	response.Success(c, out)
+}
+
+// supportedPlatformSections keeps a separate model list per accessible group.
+// The platform list is the union of those filtered lists for older clients.
+func (h *AvailableChannelHandler) supportedPlatformSections(ctx context.Context, ch service.AvailableChannel, visibleGroups []userAvailableGroup, groupsByID map[int64]*service.Group) ([]userChannelPlatformSection, error) {
+	sections := buildPlatformSections(ch, visibleGroups)
+	out := make([]userChannelPlatformSection, 0, len(sections))
+	for _, section := range sections {
+		groups := make([]userAvailableGroup, 0, len(section.Groups))
+		supportedNames := make(map[string]struct{})
+		for _, group := range section.Groups {
+			models, err := h.modelSupport.FilterSupportedChannelModels(ctx, groupsByID[group.ID], section.Platform, ch.SupportedModels)
+			if err != nil {
+				return nil, err
+			}
+			if len(models) == 0 {
+				continue
+			}
+			group.SupportedModels = toUserSupportedModels(models, nil)
+			groups = append(groups, group)
+			for _, model := range models {
+				supportedNames[model.Name] = struct{}{}
+			}
+		}
+		if len(groups) == 0 {
+			continue
+		}
+		models := make([]userSupportedModel, 0, len(supportedNames))
+		for _, model := range section.SupportedModels {
+			if _, ok := supportedNames[model.Name]; ok {
+				models = append(models, model)
+			}
+		}
+		section.Groups, section.SupportedModels = groups, models
+		out = append(out, section)
+	}
+	return out, nil
 }
 
 // buildPlatformSections 把一个渠道按 visibleGroups 的平台集合拆成有序的 section 列表：

@@ -7,6 +7,8 @@ import { apiClient } from './client'
 import type { BillingMode } from '@/constants/channel'
 
 export interface UserAvailableGroup {
+  /** Models supported by this group within its enclosing platform. */
+  supported_models: UserSupportedModel[]
   id: number
   name: string
   platform: string
@@ -60,8 +62,7 @@ export interface UserSupportedModel {
 
 /**
  * 渠道下单个平台的子视图：用户可访问的分组 + 该平台支持的模型。
- * 后端把一个渠道按平台聚合成 sections，前端可以把渠道名作为 row-group
- * 一次渲染，后面按 sections 顺序用 rowspan 铺开。
+ * 分组的 supported_models 是实际展示来源；section 的模型列表为各分组的并集。
  */
 export interface UserChannelPlatformSection {
   platform: string

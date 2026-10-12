@@ -715,8 +715,8 @@ export default {
   // Available Channels (user-facing)
   availableChannels: {
     title: 'Available Channels',
-    description: 'Channels you can access, along with their supported models and pricing',
-    searchPlaceholder: 'Search channels or models...',
+    description: 'Browse supported models by platform and group',
+    searchPlaceholder: 'Search platforms, groups or models...',
     empty: 'No available channels',
     noModels: 'No models configured',
     noPricing: 'Pricing not configured',
