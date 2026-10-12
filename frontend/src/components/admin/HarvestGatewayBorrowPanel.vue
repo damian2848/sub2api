@@ -1,6 +1,6 @@
 <template>
-  <section class="card overflow-hidden" aria-labelledby="gateway-borrow-title" data-testid="gateway-borrow-panel">
-    <div class="flex flex-wrap items-start justify-between gap-4 p-5">
+  <section :class="embedded ? 'border-t border-gray-100 pt-5 dark:border-dark-700' : 'card overflow-hidden'" aria-labelledby="gateway-borrow-title" data-testid="gateway-borrow-panel">
+    <div :class="embedded ? 'flex flex-wrap items-start justify-between gap-4' : 'flex flex-wrap items-start justify-between gap-4 p-5'">
       <div class="min-w-0 flex-1">
         <div class="flex flex-wrap items-center gap-2">
           <h2 id="gateway-borrow-title" class="text-sm font-semibold text-gray-900 dark:text-white">{{ t(`${p}.borrowTitle`) }}</h2>
@@ -13,7 +13,7 @@
       </div>
       <button type="button" class="btn btn-secondary btn-sm" data-testid="expand-borrow" :aria-expanded="expanded" aria-controls="gateway-borrow-content" @click="expanded = !expanded">{{ t(expanded ? `${p}.collapse` : `${p}.expand`) }}</button>
     </div>
-    <div v-if="expanded" id="gateway-borrow-content" class="space-y-5 border-t border-gray-100 p-5 dark:border-dark-700">
+    <div v-if="expanded" id="gateway-borrow-content" :class="embedded ? 'mt-5 space-y-5' : 'space-y-5 border-t border-gray-100 p-5 dark:border-dark-700'">
       <header class="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h3 class="text-sm font-semibold text-gray-900 dark:text-white">{{ t(`${p}.configuration`) }}</h3>
@@ -138,6 +138,8 @@ import AstraGatewayHistory from '@/components/admin/AstraGatewayHistory.vue'
 import AstraAccountPicker from '@/components/admin/AstraAccountPicker.vue'
 import { list } from '@/api/admin/accounts'
 import { getAstraGateway, saveAstraGateway, normalizeAstraGateway, resolveAstraDependencies, type AstraGatewaySettings } from '@/api/admin/astraGateway'
+const props = defineProps<{ embedded?: boolean }>()
+const embedded = computed(() => props.embedded === true)
 const schedulingRecords = ref<{ checked_at: string; account_id: number; schedulable: boolean; reason: string; mode?: string }[]>([])
 const p = 'admin.astraGateway'
 const { t, te } = useI18n()

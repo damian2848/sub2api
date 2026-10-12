@@ -35,10 +35,11 @@ func (s *OpenAIGatewayService) astraRouteFailover(ctx context.Context, account *
 			logger.L().Warn("astra_account_scheduling_update_failed", zap.Int64("account_id", account.ID), zap.Bool("schedulable", false), zap.String("reason", err.Error()), zap.String("trigger", "request_failover"), zap.String("mode", settings.EffectiveSchedulingMode()))
 		} else if action.Changed {
 			astraRecentScheduling.add(AstraSchedulingRecord{CheckedAt: time.Now(), AccountID: account.ID, Schedulable: false, Reason: err.Error(), Mode: action.Action})
+			recordCodexHarvestScheduling(account, action.Action, err.Error(), false)
 			logger.L().Info("astra_account_scheduling_changed", zap.Int64("account_id", account.ID), zap.Bool("previous_schedulable", true), zap.Bool("schedulable", false), zap.String("reason", err.Error()), zap.String("revision", settings.Revision), zap.String("trigger", "request_failover"), zap.String("mode", settings.EffectiveSchedulingMode()))
 		}
 	}
-	return &UpstreamFailoverError{StatusCode: http.StatusServiceUnavailable, ResponseBody: []byte(`{"error":{"type":"upstream_error","message":"No verified Astra route available"}}`)}
+	return &UpstreamFailoverError{StatusCode: http.StatusServiceUnavailable, ResponseBody: []byte(`{"error":{"type":"upstream_error","message":"No Astra source route available"}}`)}
 }
 
 func (s *OpenAIGatewayService) checkAstraSchedulingRoute(ctx context.Context, account *Account) error {

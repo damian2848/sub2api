@@ -363,7 +363,7 @@ func TestAstraGatewayTargetPreparesSourceBeforeForwarding(t *testing.T) {
 		wrapper.current(t.Context()).recordSource(id, now, &codexGatewayRoute{cookie: http.Cookie{Name: "__oailb", Value: "ready", Path: "/"}, expires: now.Add(time.Minute)}, true)
 		return nil
 	})
-	resp, err := wrapper.Do(pinRequest(t), "", 300, 1)
+	resp, err := wrapper.Do(forceAstraProbe(pinRequest(t)), "", 300, 1)
 	require.NoError(t, err)
 	require.NoError(t, resp.Body.Close())
 	require.Equal(t, 3, calls)

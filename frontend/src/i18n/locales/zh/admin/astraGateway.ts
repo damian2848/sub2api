@@ -1,10 +1,10 @@
 export default {
   astraGateway: {
     probeHint: '复用门票探针：两次短请求均完整成功，续接不换票才可借用；换票、请求失败或路由改变均不计为可用。探针只反映本次门票状态。',
-    borrowTitle: '网关借票',
-    borrowDescription: '从来源账号获取 Astra 网关路由，目标账号复验通过后，在有效期内借用。',
-    borrowSummary: '来源账号 {sources} 个 · 目标账号 {targets} 个 · 仅用于 Astra',
-    expand: '配置与运行状态', collapse: '收起', configuration: '借票配置',
+    borrowTitle: 'Astra 快速复用',
+    borrowDescription: '优先复用已入库来源票；缺票时回退到自采。目标账号复验通过后，将完整票据写入统一门票库。',
+    borrowSummary: '来源账号 {sources} 个 · 目标账号 {targets} 个 · 与后台打票共用票库',
+    expand: '配置与运行状态', collapse: '收起', configuration: '复用与自采配置',
     schedulingLog: '最近 3 条调度记录',
     schedulingLogHint: '仅记录实际调度或分组变更，每 5 秒刷新；当前实例保存，重启后清空。',
     schedulingLogEmpty: '暂无调度变更记录',

@@ -15,6 +15,13 @@ function value() { return { cookie_pool: { enabled: false, source_account_ids: [
 function render() { const wrapper = mount(HarvestGatewayBorrowPanel, { global: { stubs: { RouterLink: { template: '<a><slot /></a>' } } } }); void wrapper.get('[data-testid="expand-borrow"]').trigger('click'); return wrapper }
 beforeEach(() => { vi.clearAllMocks(); mocks.get.mockResolvedValue(value()); mocks.list.mockResolvedValue({ items: [{ id: 299, name: 'source' }, { id: 300, name: 'target' }], pages: 1 }); mocks.save.mockImplementation(v => Promise.resolve({ ...v, revision: 'two' })) })
 describe('Astra gateway configuration', () => {
+  it('renders as a section without a second card when embedded in harvest controls', async () => {
+    const w = mount(HarvestGatewayBorrowPanel, { props: { embedded: true }, global: { stubs: { RouterLink: true } } })
+    await flushPromises()
+    expect(w.get('[data-testid="gateway-borrow-panel"]').classes()).not.toContain('card')
+    w.unmount()
+  })
+
   it('keeps gateway borrowing in its own collapsed card and preserves edits when collapsed', async () => {
     const w = mount(HarvestGatewayBorrowPanel, { global: { stubs: { RouterLink: true } } })
     await flushPromises()

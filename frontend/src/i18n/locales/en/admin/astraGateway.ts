@@ -1,10 +1,10 @@
 export default {
   astraGateway: {
     probeHint: 'Reuses the two-shot ticket probe. Both short requests must complete without issuing a different continuation ticket. A new ticket, failed request, or changed route is not usable. Results describe this probe only.',
-    borrowTitle: 'Gateway borrowing',
-    borrowDescription: 'Acquire an Astra route from a source account and reuse it within its lifetime after target verification.',
-    borrowSummary: '{sources} source accounts · {targets} target accounts · Astra only',
-    expand: 'Configuration and status', collapse: 'Collapse', configuration: 'Borrowing configuration',
+    borrowTitle: 'Astra fast reuse',
+    borrowDescription: 'Reuse a stored source ticket first and fall back to self-harvesting when none is available. Store the complete bundle after target verification.',
+    borrowSummary: '{sources} source accounts · {targets} target accounts · shared with background harvest',
+    expand: 'Configuration and status', collapse: 'Collapse', configuration: 'Reuse and harvest configuration',
     schedulingLog: 'Last 3 scheduling changes',
     schedulingLogHint: 'Actual changes only; refreshes every 5 seconds. Cleared on instance restart.',
     schedulingLogEmpty: 'No scheduling changes yet',

@@ -38,13 +38,13 @@ func TestAstraAccountSchedulingLifecycle(t *testing.T) {
 	repo := &astraSchedulingRepo{accounts: map[int64]*Account{299: source, 300: target}}
 	provider := &astraSetupUpstream{snapshot: AstraGatewayRuntime{Revision: "one"}}
 	svc := &AccountTestService{cfg: cfg, accountRepo: repo, httpUpstream: provider}
-	// No target pass: disable even if source has passed. No HTTP/preparation mock
-	// exists: accidentally probing would panic rather than silently pass.
+	// Without a current source route, target scheduling remains disabled; no target
+	// quality probe is required.
 	svc.syncAstraAccountScheduling(t.Context())
 	require.False(t, target.Schedulable)
 	require.True(t, source.Schedulable)
 	expiry := time.Now().Add(time.Minute)
-	provider.snapshot.Targets = []AstraRouteStatus{{AccountID: 300, State: "ready", Reason: "target_probe_passed", ExpiresAt: &expiry}}
+	provider.snapshot.RouteExpiresAt = &expiry
 	svc.syncAstraAccountScheduling(t.Context())
 	require.True(t, target.Schedulable)
 	svc.syncAstraAccountScheduling(t.Context())
@@ -55,10 +55,9 @@ func TestAstraAccountSchedulingLifecycle(t *testing.T) {
 	expiry = time.Now().Add(time.Minute)
 	svc.syncAstraAccountScheduling(t.Context())
 	require.True(t, target.Schedulable, "a new valid result restores scheduling")
-	provider.snapshot.Targets[0].State = "rejected"
+	provider.snapshot.RouteExpiresAt = nil
 	svc.syncAstraAccountScheduling(t.Context())
-	require.False(t, target.Schedulable, "29/failure closes scheduling")
-	provider.snapshot.Targets[0].State = "ready"
+	require.False(t, target.Schedulable, "missing source route closes scheduling")
 	settings.AccountScheduling = false
 	svc.syncAstraAccountScheduling(t.Context())
 	require.False(t, target.Schedulable, "off switch preserves current flags")
@@ -67,6 +66,7 @@ func TestAstraAccountSchedulingLifecycle(t *testing.T) {
 	svc.syncAstraAccountScheduling(t.Context())
 	require.False(t, target.Schedulable, "old configuration is not evidence")
 	provider.snapshot.Revision = "one"
+	provider.snapshot.RouteExpiresAt = &expiry
 	repo.fail = true
 	svc.syncAstraAccountScheduling(t.Context())
 	require.False(t, target.Schedulable)
