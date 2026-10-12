@@ -237,7 +237,7 @@
         </div>
       </div>
 
-      <MonitorCandySettings v-model="draft.candy_probes" :groups="groups" />
+      <MonitorCandySettings v-model="draft.candy_probes" v-model:history-limit="draft.candy_history_limit" :groups="groups" />
 
       <div class="space-y-2">
         <div class="rounded-2xl border border-primary-200 bg-primary-50/80 px-4 py-3 text-sm text-primary-900 dark:border-primary-800/50 dark:bg-primary-900/20 dark:text-primary-100">
@@ -276,7 +276,9 @@ import {
   updateConfig,
   MONITOR_ERROR_CATEGORIES,
   type MonitorConfig,
+  type MonitorCandyProbe,
 } from '@/api/channelMonitorV2'
+import { CANDY_HISTORY_LIMIT, CANDY_HISTORY_LIMIT_MAX, CANDY_HISTORY_LIMIT_MIN } from './monitorCards'
 import { adminAPI } from '@/api/admin'
 import type { AdminGroup } from '@/types'
 
@@ -401,11 +403,26 @@ function platformLabel(value: string) {
   )[value] || value
 }
 
+function candyProbeIdentity(probe: MonitorCandyProbe) {
+  return `${probe.group_id}\0${probe.model.trim()}\0${(probe.reasoning_effort || 'medium').trim().toLowerCase()}`
+}
+
+function hasDuplicateCandyProbe(probes: MonitorCandyProbe[]) {
+  const seen = new Set<string>()
+  for (const probe of probes) {
+    const identity = candyProbeIdentity(probe)
+    if (seen.has(identity)) return true
+    seen.add(identity)
+  }
+  return false
+}
+
 function normalizeConfig(value: MonitorConfig): MonitorConfig {
   const ignored = value.ignored_error_categories
   return {
     ...value,
     candy_probes: value.candy_probes || [],
+    candy_history_limit: value.candy_history_limit && value.candy_history_limit > 0 ? value.candy_history_limit : CANDY_HISTORY_LIMIT,
     health_thresholds: { ...defaultThresholds, ...(value.health_thresholds || {}) },
     // Preserve explicit empty arrays from the server (operator cleared all).
     ignored_error_categories: [
@@ -433,6 +450,15 @@ async function save() {
   if (!draft.value) return
   if (draft.value.candy_probes?.some(probe => !probe.model.trim() || !Number.isInteger(probe.interval_minutes) || probe.interval_minutes < 1 || probe.interval_minutes > 1440)) {
     appStore.showError(t('channelMonitorV2.candy.invalid'))
+    return
+  }
+  if (hasDuplicateCandyProbe(draft.value.candy_probes || [])) {
+    appStore.showError(t('channelMonitorV2.candy.duplicateModel'))
+    return
+  }
+  const historyLimit = draft.value.candy_history_limit
+  if (historyLimit == null || !Number.isInteger(historyLimit) || historyLimit < CANDY_HISTORY_LIMIT_MIN || historyLimit > CANDY_HISTORY_LIMIT_MAX) {
+    appStore.showError(t('channelMonitorV2.candy.historyLimitInvalid'))
     return
   }
   saving.value = true

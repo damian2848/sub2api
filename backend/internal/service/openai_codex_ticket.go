@@ -1075,6 +1075,9 @@ func (s *OpenAIGatewayService) StartOpenAICodexTicketHarvester() {
 	s.openaiCodexTicketDone = done
 	go func() {
 		defer close(done)
+		coverageDone := make(chan struct{})
+		go func() { defer close(coverageDone); s.harvestCoverageLoop(ctx) }()
+		defer func() { cancel(); <-coverageDone }()
 		s.openAICodexTicketHarvestLoop(ctx)
 	}()
 	logger.L().Info("openai_codex_ticket harvester started",

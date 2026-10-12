@@ -85,11 +85,18 @@ func (s *astraRoutingUpstream) DoWithTLS(r *http.Request, p string, a int64, n i
 		if s.unifiedTickets(r.Context()) {
 			settings := s.cfg.AstraRouting(r.Context())
 			if slices.Contains(settings.CookiePool.TargetAccountIDs, a) && codexGatewayPinAstra(r) {
-				proxy, release, err := s.tickets.ApplyStoredAstraTarget(r.Context(), r.Header, a, "sse")
+				borrowed := r.Clone(r.Context())
+				proxy, release, err := s.tickets.ApplyStoredAstraTarget(r.Context(), borrowed.Header, a, "sse")
 				if err != nil {
-					return nil, err
+					if release != nil {
+						release()
+					}
+					if r.Context().Err() != nil {
+						return nil, r.Context().Err()
+					}
+					return s.delegate.DoWithTLS(r, p, a, n, f)
 				}
-				r = astraFreshRequest(r.Clone(service.WithHTTPUpstreamRedirectsDisabled(r.Context())))
+				r = astraFreshRequest(borrowed.Clone(service.WithHTTPUpstreamRedirectsDisabled(r.Context())))
 				r.Close = true
 				resp, err := s.delegate.DoWithTLS(r, proxy, a, n, f)
 				if resp != nil {
@@ -125,19 +132,9 @@ func (s *astraRoutingUpstream) DoWithTLS(r *http.Request, p string, a int64, n i
 func (s *astraRoutingUpstream) CodexGatewayPinWSHeader(a int64) (string, error) {
 	if pool := s.current(context.Background()); pool != nil {
 		value, err := pool.CodexGatewayPinWSHeader(a)
-		if err != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
-			defer cancel()
-			if e := s.PrepareAstraGateway(ctx); e != nil {
-				return "", e
-			}
-			pool = s.current(ctx)
-			if pool == nil {
-				return "", nil
-			}
-			return pool.CodexGatewayPinWSHeader(a)
+		if err == nil {
+			return value, nil
 		}
-		return value, nil
 	}
 	return "", nil
 }

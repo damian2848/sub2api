@@ -46,25 +46,27 @@
           </div>
 
           <section class="mt-4 border-t border-gray-100 pt-3 dark:border-dark-700/70" data-testid="candy-history">
-            <template v-if="row.candy">
-              <div class="flex items-center justify-between gap-2 text-xs">
-                <h4 class="font-medium text-gray-700 dark:text-gray-200">{{ t('channelMonitorV2.candy.title') }}</h4>
-                <span class="flex items-center gap-1.5 text-[10px] text-gray-500 dark:text-gray-400"><i class="h-2 w-2 rounded-full" :class="candyColor[candyDisplayState(row.candy, now)]" />{{ t(`channelMonitorV2.candy.states.${candyDisplayState(row.candy, now)}`) }}</span>
+            <template v-if="candyHistories(row).length">
+              <h4 class="text-xs font-medium text-gray-700 dark:text-gray-200">{{ t('channelMonitorV2.candy.title') }}</h4>
+              <div v-for="(history, historyIndex) in candyHistories(row)" :key="`${history.model}-${history.reasoning_effort}-${historyIndex}`" class="mt-2" data-testid="candy-model-history">
+                <div class="flex items-center justify-between gap-2 text-xs">
+                  <p class="min-w-0 break-words text-[10px] leading-relaxed text-gray-500 dark:text-gray-400">{{ history.model }} · {{ history.reasoning_effort }} · {{ t('channelMonitorV2.candy.cadence', { minutes: history.interval_minutes }) }} · {{ t('channelMonitorV2.candy.window', { count: candyHistoryLimit(history) }) }}</p>
+                  <span class="flex shrink-0 items-center gap-1.5 text-[10px] text-gray-500 dark:text-gray-400"><i class="h-2 w-2 rounded-full" :class="candyColor[candyDisplayState(history, now)]" />{{ t(`channelMonitorV2.candy.states.${candyDisplayState(history, now)}`) }}</span>
+                </div>
+                <div class="mt-2 flex h-5 gap-px" role="group" :aria-label="t('channelMonitorV2.candy.historyCount', { count: Math.min(history.results.length, candyHistoryLimit(history)), limit: candyHistoryLimit(history) })" data-testid="candy-history-slots">
+                  <template v-for="(result, index) in candyHistorySlots(history)" :key="index">
+                    <button v-if="result" type="button"
+                    class="min-w-0 flex-1 cursor-help rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-400"
+                    :class="candyColor[result.verdict]" :aria-label="candyTooltip(result, history.model, history.reasoning_effort)" :aria-describedby="isCandyDetail(row, result, history.model, history.reasoning_effort) ? tooltipId : undefined"
+                    data-testid="candy-history-bar" @mouseenter="openDetail($event, { kind: 'candy', row, result, model: history.model, effort: history.reasoning_effort })"
+                    @focus="openDetail($event, { kind: 'candy', row, result, model: history.model, effort: history.reasoning_effort })" @click="openDetail($event, { kind: 'candy', row, result, model: history.model, effort: history.reasoning_effort })"
+                    @mouseleave="scheduleClose" @blur="scheduleClose" />
+                    <span v-else class="min-w-0 flex-1 rounded-sm bg-gray-200 dark:bg-dark-600" aria-hidden="true" :title="t('channelMonitorV2.candy.notChecked')" data-testid="candy-history-placeholder" />
+                  </template>
+                </div>
+                <p v-if="!history.results.length" class="mt-3 text-[10px] text-gray-400">{{ t('channelMonitorV2.candy.waiting') }}</p>
               </div>
-              <p class="mt-1 break-words text-[10px] leading-relaxed text-gray-500 dark:text-gray-400">{{ row.candy.model }} · {{ row.candy.reasoning_effort }} · {{ t('channelMonitorV2.candy.cadence', { minutes: row.candy.interval_minutes }) }} · {{ t('channelMonitorV2.candy.window', { count: CANDY_HISTORY_LIMIT }) }}</p>
-              <div class="mt-2 flex h-5 gap-px" role="group" :aria-label="t('channelMonitorV2.candy.historyCount', { count: Math.min(row.candy.results.length, CANDY_HISTORY_LIMIT), limit: CANDY_HISTORY_LIMIT })" data-testid="candy-history-slots">
-                <template v-for="(result, index) in candyHistorySlots(row.candy)" :key="index">
-                  <button v-if="result" type="button"
-                  class="min-w-0 flex-1 cursor-help rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary-400"
-                  :class="candyColor[result.verdict]" :aria-label="candyTooltip(result)" :aria-describedby="isCandyDetail(row, result) ? tooltipId : undefined"
-                  data-testid="candy-history-bar" @mouseenter="openDetail($event, { kind: 'candy', row, result })"
-                  @focus="openDetail($event, { kind: 'candy', row, result })" @click="openDetail($event, { kind: 'candy', row, result })"
-                  @mouseleave="scheduleClose" @blur="scheduleClose" />
-                  <span v-else class="min-w-0 flex-1 rounded-sm bg-gray-200 dark:bg-dark-600" aria-hidden="true" :title="t('channelMonitorV2.candy.notChecked')" data-testid="candy-history-placeholder" />
-                </template>
-              </div>
-              <p v-if="!row.candy.results.length" class="mt-3 text-[10px] text-gray-400">{{ t('channelMonitorV2.candy.waiting') }}</p>
-              <div class="mt-2 flex items-center justify-between gap-2 text-[9px] text-gray-500 dark:text-gray-400"><span>{{ t('channelMonitorV2.candy.legend') }}</span><span>{{ row.candy.results.length ? time(row.candy.results.at(-1)!.checked_at) : '—' }}</span></div>
+              <div class="mt-2 flex items-center justify-between gap-2 text-[9px] text-gray-500 dark:text-gray-400"><span>{{ t('channelMonitorV2.candy.legend') }}</span><span>{{ latestCandyTime(row) }}</span></div>
             </template>
             <template v-else>
               <div class="flex items-center justify-between gap-2 text-xs">
@@ -94,7 +96,7 @@
               <p v-for="bucket in detail.bar.buckets" :key="bucket.bucket_start" class="mt-1" data-testid="monitor-card-tooltip-sample">{{ trafficSample(bucket) }}</p>
             </template>
           </template>
-          <p v-else class="mt-1 whitespace-pre-wrap">{{ candyTooltip(detail.result) }}</p>
+          <p v-else class="mt-1 whitespace-pre-wrap">{{ candyTooltip(detail.result, detail.model, detail.effort) }}</p>
         </div>
       </div>
     </Teleport>
@@ -108,12 +110,12 @@ import type { MonitorCandyResult, MonitorCoverage, MonitorMatrixBucket, MonitorM
 import ProviderIcon from '@/components/user/monitor/ProviderIcon.vue'
 import { useChannelMonitorFormat } from '@/composables/useChannelMonitorFormat'
 import { formatMonitorMs, formatMonitorPercent } from './monitorFormat'
-import { CANDY_HISTORY_LIMIT, candyDisplayState, candyHistorySlots, hasMonitorSamples, monitorCardTimeline } from './monitorCards'
+import { candyDisplayState, candyHistoryLimit, candyHistorySlots, hasMonitorSamples, monitorCandyHistories, monitorCardTimeline } from './monitorCards'
 
 const props = defineProps<{ items: MonitorMatrixRow[]; coverage?: MonitorCoverage; countdown: number; loading: boolean; now: number }>()
 const { t, locale } = useI18n()
 type TrafficBar = ReturnType<typeof monitorCardTimeline>[number]
-type CardDetail = { kind: 'traffic'; row: MonitorMatrixRow; bar: TrafficBar } | { kind: 'candy'; row: MonitorMatrixRow; result: MonitorCandyResult }
+type CardDetail = { kind: 'traffic'; row: MonitorMatrixRow; bar: TrafficBar } | { kind: 'candy'; row: MonitorMatrixRow; result: MonitorCandyResult; model: string; effort: string }
 const tooltipId = useId()
 const detail = shallowRef<CardDetail | null>(null)
 const anchor = shallowRef<HTMLElement | null>(null)
@@ -168,8 +170,21 @@ function onKeydown(event: KeyboardEvent) {
 function isTrafficDetail(row: MonitorMatrixRow, bar: TrafficBar) {
   return detail.value?.kind === 'traffic' && detail.value.row === row && detail.value.bar.start === bar.start
 }
-function isCandyDetail(row: MonitorMatrixRow, result: MonitorCandyResult) {
-  return detail.value?.kind === 'candy' && detail.value.row === row && detail.value.result.checked_at === result.checked_at
+function isCandyDetail(row: MonitorMatrixRow, result: MonitorCandyResult, model: string, effort: string) {
+  return detail.value?.kind === 'candy' && detail.value.row === row && detail.value.model === model && detail.value.effort === effort && detail.value.result.checked_at === result.checked_at
+}
+function candyHistories(row: MonitorMatrixRow) {
+  return monitorCandyHistories(row)
+}
+function latestCandyTime(row: MonitorMatrixRow) {
+  // Each history is ordered oldest-first. Compare instants, not ISO text:
+  // fractional seconds do not sort lexicographically.
+  let latest = Number.NEGATIVE_INFINITY
+  for (const history of candyHistories(row)) {
+    const parsed = Date.parse(history.results.at(-1)?.checked_at || '')
+    if (Number.isFinite(parsed) && parsed > latest) latest = parsed
+  }
+  return Number.isFinite(latest) ? time(latest) : '—'
 }
 watch([() => props.items, () => props.coverage], closeDetail)
 onMounted(() => {
@@ -220,8 +235,9 @@ function trafficSample(bucket: MonitorMatrixBucket) {
     cache: formatMonitorPercent(bucket.metrics.cache_rate), ttft: formatMonitorMs(bucket.metrics.ttft.p50_ms),
   })
 }
-function candyTooltip(result: MonitorCandyResult) {
-  return dateTime(result.checked_at) + ' · ' + t('channelMonitorV2.candy.states.' + result.verdict)
+function candyTooltip(result: MonitorCandyResult, model?: string, effort?: string) {
+  const label = [model, effort].filter(Boolean).join(' · ')
+  return (label ? label + ' · ' : '') + dateTime(result.checked_at) + ' · ' + t('channelMonitorV2.candy.states.' + result.verdict)
     + ' · ' + t('channelMonitorV2.metrics.durationValue', { value: formatMonitorMs(result.latency_ms) })
     + (result.answer_preview ? '\n' + result.answer_preview : '')
 }

@@ -226,6 +226,17 @@ func (s *astraRoutingUpstream) prepareRotatedSource(ctx context.Context, pool *c
 }
 
 func (s *astraRoutingUpstream) targetRoute(req *http.Request, proxy string, id int64, n int, profile *tlsfingerprint.Profile) (*http.Cookie, [32]byte, string, func(), error) {
+	force, _ := req.Context().Value(astraForceProbeKey{}).(bool)
+	if !force {
+		cookie, key, effective, release, err := s.targetRouteOnce(req, proxy, id, n, profile)
+		if err != nil && req.Context().Err() == nil {
+			// No business request has been sent. A missing/stale route or failed
+			// optional exit lease must not gate forwarding on the account's exit.
+			release()
+			return nil, key, proxy, func() {}, nil
+		}
+		return cookie, key, effective, release, err
+	}
 	pool := s.current(req.Context())
 	if pool == nil || !pool.config.RotateNodes {
 		return s.targetRouteOnce(req, proxy, id, n, profile)

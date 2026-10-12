@@ -44,35 +44,7 @@
           <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
             {{ t("admin.settings.gatewayForwarding.codexTicketModelsDesc") }}
           </p>
-          <fieldset class="mt-3 rounded-lg border border-gray-200 p-3 dark:border-dark-600">
-            <legend class="px-1 text-sm font-semibold">{{ localText('自动打票范围', 'Automatic harvest scope') }}</legend>
-            <select id="codex-ticket-harvest-scope" v-model="form.openai_codex_ticket_harvest_scope.mode" class="input">
-              <option value="all">{{ localText('全部 OpenAI 账号', 'All OpenAI accounts') }}</option>
-              <option value="selected">{{ localText('仅指定分组', 'Selected groups only') }}</option>
-            </select>
-            <label class="mt-3 block text-sm" for="codex-ticket-account-policy">{{ localText('账号采集策略', 'Account harvest policy') }}</label>
-            <select id="codex-ticket-account-policy" v-model="form.openai_codex_ticket_harvest_scope.account_policy" class="input mt-2">
-              <option value="schedulable_only">{{ localText('仅可调度账号（默认）', 'Schedulable accounts only (default)') }}</option>
-              <option value="prioritize_schedulable">{{ localText('可调度优先，手动停调账号排队', 'Prioritize schedulable; queue manually disabled accounts') }}</option>
-            </select>
-            <div v-if="form.openai_codex_ticket_harvest_scope.mode === 'selected'" class="mt-3 space-y-2">
-              <p v-if="codexHarvestGroupsLoadFailed" class="text-sm text-amber-600">{{ localText('分组加载失败，已选范围保留，请刷新后重试。', 'Could not load groups. Saved selection is preserved; refresh to retry.') }}</p>
-              <label v-for="group in codexHarvestGroupChoices" :key="group.id" class="flex items-center gap-2 text-sm">
-                <input :id="'codex-ticket-group-' + group.id" v-model="form.openai_codex_ticket_harvest_scope.group_ids" type="checkbox" :value="group.id" />
-                <span>{{ group.name }} (#{{ group.id }})</span>
-              </label>
-              <p v-if="form.openai_codex_ticket_harvest_scope.group_ids.length === 0" class="text-sm text-amber-600">{{ localText('未选择分组：不会自动打票，不会退回全部账号。', 'No groups selected: automatic harvesting is paused, not broadened to all accounts.') }}</p>
-            </div>
-            <p class="mt-2 text-xs text-gray-500">{{ localText('控制后台采集。范围外账号不再自动补票；缺票拦截开启时，范围外遗留门票也不再参与门控选号。账号级「不打票」只停采集，不停调度。限流、过载、临时冷却、过期和配额耗尽账号始终跳过。兼容模式只会把手动关闭「参与调度」的账号放到后排。保存后下轮生效。', 'Controls background harvesting. Out-of-scope accounts are not probed, and fail-closed routing will not spend leftover tickets on them. Per-account skip-harvest only stops probing — the account stays schedulable. Rate-limited, overloaded, cooling-down, expired, and quota-exhausted accounts are always skipped. Compatibility mode only defers accounts whose scheduling switch was manually disabled. Changes apply next round.') }}</p>
-          </fieldset>
-          <label class="mt-3 block text-sm" for="codex-ticket-strategy">{{ localText('票据刷新策略', 'Ticket refresh strategy') }}</label>
-          <select id="codex-ticket-strategy" v-model="form.openai_codex_ticket_strategy" class="input mt-2">
-            <option value="standby">{{ localText('提前准备备用（默认）', 'Prepare standby (default)') }}</option>
-            <option value="fixed">{{ localText('固定主用，失效后再采集', 'Keep primary until invalid') }}</option>
-          </select>
-          <label class="mt-3 flex items-center gap-2 text-sm"><input id="codex-ticket-strict" type="checkbox" v-model="form.openai_codex_ticket_strict_response" />{{ localText('严格拦截票据响应不匹配（默认关闭）', 'Reject mismatched ticket responses (off by default)') }}</label>
-          <p class="mt-1 text-xs text-gray-500">{{ localText('仅在 HTTP 响应头明确不匹配时拦截正文；当前请求可能已计费，不会自动重放。关闭时只更新后续票据调度。', 'Rejects the body when HTTP response state headers mismatch. The upstream may have charged; the request is not replayed. When off, only future ticket scheduling changes.') }}</p>
-          <p class="mt-1 text-xs text-gray-500">{{ localText('切换策略保留有效主备票据和冷却。固定主用可能在失效后短暂等待新票。', 'Switching preserves valid tickets and cooldowns. Fixed primary may briefly wait for a new ticket after expiry.') }}</p>
+
           <div class="mt-3 grid gap-3 sm:grid-cols-2">
             <label class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300">
               <input
@@ -93,20 +65,49 @@
               <span>Sol (gpt-5.6-sol)</span>
             </label>
           </div>
+          <fieldset class="mt-3 rounded-lg border border-gray-200 p-3 dark:border-dark-600">
+            <legend class="px-1 text-sm font-semibold">{{ localText('自动打票范围', 'Automatic harvest scope') }}</legend>
+            <select id="codex-ticket-harvest-scope" v-model="form.openai_codex_ticket_harvest_scope.mode" class="input" @change="changeHarvestScope">
+              <option v-if="form.openai_codex_ticket_harvest_scope.mode === 'selected'" value="selected" disabled>{{ localText('旧分组范围（请选择账号范围）', 'Legacy group scope (choose an account scope)') }}</option>
+              <option value="all">{{ localText('全部 OAuth 账号', 'All OAuth accounts') }}</option>
+              <option value="selected_accounts">{{ localText('指定 OAuth 账号', 'Selected OAuth accounts') }}</option>
+            </select>
+            <p v-if="form.openai_codex_ticket_harvest_scope.mode === 'selected'" class="mt-2 text-xs text-amber-600">{{ localText('当前仍使用旧分组范围。切换并保存后，改为按 OAuth 账号打票。', 'The saved group scope remains active until you choose and save an OAuth account scope.') }}</p>
+            <p v-else-if="form.openai_codex_ticket_harvest_scope.mode === 'all'" class="mt-2 text-xs text-gray-500">{{ localText('默认给全部 OAuth 账号打票，手动设为「不打票」的账号除外。新增 OAuth 账号自动纳入。', 'Harvest all OAuth accounts except those manually set to Skip harvest. New OAuth accounts are included by default.') }}</p>
+            <p v-else-if="form.openai_codex_ticket_harvest_scope.mode === 'selected_accounts'" class="mt-2 text-xs text-gray-500">{{ localText('只给下方「门票账号」中明确开启打票的 OAuth 账号打票。不按分组筛选；未选择账号时不自动打票。', 'Only harvest OAuth accounts explicitly enabled in Ticket accounts below, regardless of groups. No accounts selected means no automatic harvesting.') }}</p>
+            <p class="mt-2 text-xs text-gray-500">{{ localText('只控制给哪些账号自动打票。票据有效后的加组、恢复模型或恢复账号调度，仍由原来的「号池调度」设置控制。', 'Controls which accounts are harvested. The existing pool scheduling settings still control group membership, model restoration and account scheduling after ticket validation.') }}</p>
+          </fieldset>
+          <label class="mt-3 block text-sm" for="codex-ticket-strategy">{{ localText('票据刷新策略', 'Ticket refresh strategy') }}</label>
+          <select id="codex-ticket-strategy" v-model="form.openai_codex_ticket_strategy" class="input mt-2">
+            <option value="standby">{{ localText('提前准备备用（默认）', 'Prepare standby (default)') }}</option>
+            <option value="fixed">{{ localText('固定主用，失效后再采集', 'Keep primary until invalid') }}</option>
+          </select>
+          <div class="mt-3 rounded-lg border border-gray-200 p-3 dark:border-dark-600">
+            <label class="flex items-center gap-2 text-sm" for="codex-ticket-candy-observation">
+              <input id="codex-ticket-candy-observation" type="checkbox" v-model="form.openai_codex_ticket_candy_observation" />
+              <span>{{ localText('启用糖果测试验证使用后的票据', 'Enable candy tests to observe tickets after use') }}</span>
+              <span class="rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">Beta</span>
+            </label>
+            <p class="mt-1 text-xs text-gray-500">{{ localText('默认关闭。SSE Astra 票据用于真实请求后，异步发送一发糖果题并记录结果，额外消耗上游额度。结果不影响调度、票据或账号状态。', 'Off by default. After an SSE Astra ticket serves a real request, asynchronously send one candy question and record the result, using additional upstream quota. Results do not change scheduling, tickets, or account state.') }}</p>
+          </div>
+          <label class="mt-3 flex items-center gap-2 text-sm"><input id="codex-ticket-strict" type="checkbox" v-model="form.openai_codex_ticket_strict_response" />{{ localText('严格拦截票据响应不匹配（默认关闭）', 'Reject mismatched ticket responses (off by default)') }}</label>
+          <p class="mt-1 text-xs text-gray-500">{{ localText('仅在 HTTP 响应头明确不匹配时拦截正文；当前请求可能已计费，不会自动重放。关闭时只更新后续票据调度。', 'Rejects the body when HTTP response state headers mismatch. The upstream may have charged; the request is not replayed. When off, only future ticket scheduling changes.') }}</p>
+          <p class="mt-1 text-xs text-gray-500">{{ localText('切换策略保留有效主备票据和冷却。固定主用可能在失效后短暂等待新票。', 'Switching preserves valid tickets and cooldowns. Fixed primary may briefly wait for a new ticket after expiry.') }}</p>
+
         </div>
       </fieldset>
       <button type="submit" data-testid="save-harvest-policy" class="btn btn-primary btn-sm" :disabled="saving">{{ localText('保存打票策略', 'Save harvest policy') }}</button>
     </form>
+    <HarvestPoolSchedulingPanel />
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Toggle from '@/components/common/Toggle.vue'
+import HarvestPoolSchedulingPanel from './HarvestPoolSchedulingPanel.vue'
 import { getSettings, updateSettings, type SystemSettings } from '@/api/admin/settings'
-import { getAll } from '@/api/admin/groups'
-import type { AdminGroup } from '@/types'
 import { useAppStore } from '@/stores'
 
 const emit = defineEmits<{ saved: [] }>()
@@ -116,8 +117,6 @@ const appStore = useAppStore()
 const saving = ref(false)
 const loading = ref(true)
 const error = ref('')
-const codexHarvestGroups = ref<AdminGroup[]>([])
-const codexHarvestGroupsLoadFailed = ref(false)
 let disposed = false
 function policyOf(settings: SystemSettings) {
   const scope = settings.openai_codex_ticket_harvest_scope
@@ -126,6 +125,7 @@ function policyOf(settings: SystemSettings) {
     openai_codex_ticket_fail_closed: settings.openai_codex_ticket_fail_closed ?? false,
     openai_codex_ticket_models: [...(settings.openai_codex_ticket_models ?? ['gpt-6-astra', 'gpt-5.6-sol'])],
     openai_codex_ticket_strategy: settings.openai_codex_ticket_strategy || 'standby',
+    openai_codex_ticket_candy_observation: settings.openai_codex_ticket_candy_observation ?? false,
     openai_codex_ticket_strict_response: settings.openai_codex_ticket_strict_response ?? false,
     openai_codex_ticket_harvest_scope: {
       mode: scope?.mode || 'all', group_ids: [...(scope?.group_ids ?? [])],
@@ -134,15 +134,12 @@ function policyOf(settings: SystemSettings) {
   }
 }
 const form = ref<ReturnType<typeof policyOf> | null>(null)
-const codexHarvestGroupChoices = computed(() => {
-  const known = new Set(codexHarvestGroups.value.map(group => group.id))
-  return [
-    ...codexHarvestGroups.value.map(group => ({ id: group.id, name: group.name })),
-    ...(form.value?.openai_codex_ticket_harvest_scope.group_ids ?? []).filter(id => !known.has(id)).map(id => ({
-      id, name: localText('不可用或已删除的分组', 'Unavailable or deleted group') + ' #' + id
-    }))
-  ]
-})
+function changeHarvestScope() {
+  if (!form.value) return
+  form.value.openai_codex_ticket_harvest_scope.group_ids = []
+  // Pool scheduling may disable an account until harvesting restores its ticket.
+  form.value.openai_codex_ticket_harvest_scope.account_policy = 'prioritize_schedulable'
+}
 function toggleCodexTicketModel(model: string, checked: boolean) {
   if (!form.value) return
   const models = new Set(form.value.openai_codex_ticket_models)
@@ -153,12 +150,10 @@ function toggleCodexTicketModel(model: string, checked: boolean) {
 async function load() {
   loading.value = true
   error.value = ''
-  const [settings, groups] = await Promise.allSettled([getSettings(), getAll()])
+  const [settings] = await Promise.allSettled([getSettings()])
   if (disposed) return
   if (settings.status === 'fulfilled') form.value = policyOf(settings.value)
   else error.value = localText('无法加载打票策略，请重试。', 'Could not load harvest policy. Please retry.')
-  codexHarvestGroupsLoadFailed.value = groups.status === 'rejected'
-  codexHarvestGroups.value = groups.status === 'fulfilled' ? groups.value.filter(group => group.platform === 'openai') : []
   loading.value = false
 }
 async function save() {

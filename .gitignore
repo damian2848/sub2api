@@ -211,3 +211,6 @@ issues/
 !docs/screenshots/2fa-rotation/
 **/totp-recovery/
 **/*.sealed
+
+!docs/astra-candy-beta.md
+!docs/screenshots/astra-candy-beta/

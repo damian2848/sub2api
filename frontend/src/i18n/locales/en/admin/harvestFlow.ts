@@ -1,5 +1,15 @@
 export default {
   harvestFlow: {
+    coverageAccountTitle: 'Account ticket coverage',
+    coverageAccountDurations: 'With / without ticket: {ready} / {missing}',
+    coverageAccountSince: 'Account observed since {time}',
+    coverageTitle: 'Average account ticket coverage',
+    coverageDurations: 'Average with / without ticket: {ready} / {missing}',
+    coverageWaiting: 'Waiting for observed samples',
+    coverageSince: 'Since {time} · {n} accounts',
+    coverageStale: 'Background sampling is delayed; showing the last snapshot',
+    coverageHint: 'Estimated every 5 seconds for currently eligible accounts in the harvest scope. Any enabled model with a valid ticket counts as covered. Average of each account’s covered / (covered + uncovered) time. Restarts, scope/model changes or disabling harvest reset statistics; excluded accounts and sampling gaps do not count.',
+
     transportLabel: 'Mint transport',
     edgeLabel: 'Edge IP (optional)',
     edgeHint: 'Dial this public IP while keeping chatgpt.com Host, TLS SNI and certificate verification. Leave empty for DNS. The edge IP controls the connection, not probe admission.',
@@ -27,7 +37,8 @@ export default {
     failOpen: 'Fail-open',
     strategy: 'Strategy',
     scope: 'Harvest scope',
-    scopeAll: 'All accounts',
+    scopeAll: 'All OAuth accounts',
+    scopeSelectedAccounts: 'Selected OAuth accounts',
     scopeSelected: 'Selected groups {n}',
     scopeUnavailable: 'Scope unavailable; harvesting paused',
     policySchedulable: 'Schedulable only',
@@ -164,6 +175,8 @@ export default {
       idle: 'Idle'
     },
     kinds: {
+      candy_pass: 'Beta candy passed',
+      candy_fail: 'Beta candy failed',
       schedule_join: 'Added to pool',
       schedule_leave: 'Removed from pool',
       schedule_enable: 'Scheduling restored',
@@ -179,6 +192,18 @@ export default {
       unavailable: 'Select failed'
     },
     reasons: {
+      candy_disabled: 'Beta candy observation disabled',
+      candy_passed: 'Beta candy passed (scheduling unchanged)',
+      candy_incorrect: 'Beta candy answer incorrect (scheduling unchanged)',
+      candy_error: 'Beta candy request failed',
+      candy_timeout: 'Beta candy timed out',
+      candy_stale: 'Beta candy skipped: expired ticket or changed account',
+      candy_unavailable: 'Beta candy egress unavailable',
+      candy_route_changed: 'Beta candy route changed',
+      candy_ticket_changed: 'Beta candy ticket reissued',
+      candy_model_mismatch: 'Beta candy response model mismatch',
+
+      ticket_ready: 'Ticket ready',
       ticket_unavailable: 'No probe-verified ticket for this model',
       harvest_excluded: 'Out of harvest scope; leftover tickets are not spent',
       unavailable: 'No available account'

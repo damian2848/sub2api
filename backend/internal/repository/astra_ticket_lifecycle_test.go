@@ -18,6 +18,7 @@ type unifiedAstraProvider struct {
 	enabled                             bool
 	calls, released, prepared, verified int
 	err                                 error
+	mutateOnFailure                     bool
 }
 
 func (p *unifiedAstraProvider) UnifiedAstraTicketsEnabled(context.Context) bool { return p.enabled }
@@ -35,6 +36,10 @@ func (p *unifiedAstraProvider) StoredAstraSnapshot(context.Context) service.Astr
 func (p *unifiedAstraProvider) ApplyStoredAstraTarget(_ context.Context, h http.Header, _ int64, protocol string) (string, func(), error) {
 	p.calls++
 	if p.err != nil {
+		if p.mutateOnFailure {
+			h.Set("Cookie", "partial-borrow")
+			h.Set("Authorization", "partial-auth")
+		}
 		return "", func() {}, p.err
 	}
 	h.Set("Cookie", "__cflb=target-lb; __oailb=target-route")
@@ -84,13 +89,12 @@ func TestUnifiedAstraAdapterForwardsOneCompleteBundleAndReleases(t *testing.T) {
 	}
 }
 
-func TestUnifiedAstraAdapterUsesSharedReadinessAndRejectsFailedAdmission(t *testing.T) {
+func TestUnifiedAstraAdapterKeepsDiagnosticsSeparateFromForwarding(t *testing.T) {
 	p := &unifiedAstraProvider{enabled: true}
 	cfg := &config.Config{}
 	cfg.Gateway.CodexGatewayPin = pinConfig()
 	s := &astraRoutingUpstream{cfg: cfg, tickets: p, delegate: gatewayPinDelegate{call: func(*http.Request, string, int64, int, *tlsfingerprint.Profile) (*http.Response, error) {
-		t.Fatal("business must not run after failed admission")
-		return nil, nil
+		return pinResponse(""), nil
 	}}}
 	require.NoError(t, s.PrepareAstraGateway(t.Context()))
 	require.Equal(t, 1, p.prepared)
@@ -98,8 +102,8 @@ func TestUnifiedAstraAdapterUsesSharedReadinessAndRejectsFailedAdmission(t *test
 	require.Equal(t, 1, p.verified)
 	require.Equal(t, 1, s.AstraGatewaySnapshot(t.Context()).ReadyRoutes)
 	p.err = errors.New("target_probe_failed")
-	_, err := s.Do(pinRequest(t), "", 300, 1)
-	require.EqualError(t, err, "target_probe_failed")
+	resp, err := s.Do(pinRequest(t), "", 300, 1)
+	consumeAffinityResponse(t, resp, err)
 	require.Zero(t, p.released)
 }
 

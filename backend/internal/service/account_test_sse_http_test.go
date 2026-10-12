@@ -71,9 +71,13 @@ func TestPelicanKeepaliveHTTP(t *testing.T) {
 					w.(http.Flusher).Flush()
 				}
 				if tc.abort {
-					// Keep the request in flight until cancellation. A short timer
-					// can finish the response before the client gets CPU to close it.
-					<-r.Context().Done()
+					// Disconnect tests must not race a successful 50ms response.
+					// Keep a bounded watchdog so a cancellation regression cannot
+					// leave httptest.Server.Close waiting forever.
+					select {
+					case <-r.Context().Done():
+					case <-time.After(5 * time.Second):
+					}
 					return
 				}
 				timer := time.NewTimer(wait)

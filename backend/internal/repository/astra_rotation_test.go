@@ -107,12 +107,12 @@ func TestAstraGatewayRotationRejectsBadNodeAndPinsSuccessfulNode(t *testing.T) {
 	release()
 	require.Zero(t, *leases)
 	require.Len(t, *calls, 8, "WS reuses node qualification while owning its own dial lease")
-	// Expiration picks the next eligible exit rather than extending old Cookie lifetime.
+	// Explicit diagnostics can acquire another exit after expiration.
 	pool := s.current(t.Context())
 	route := pool.routes[299]
 	route.expires = time.Now().Add(-time.Second)
 	pool.routes[299] = route
-	resp, err = s.Do(rotationBusinessTarget(t), "target-original", 300, 1)
+	resp, err = s.Do(rotationTarget(t), "target-original", 300, 1)
 	consumeAffinityResponse(t, resp, err)
 }
 func TestAstraGatewayRotationBoundedAndFailsClosed(t *testing.T) {

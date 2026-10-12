@@ -12,6 +12,8 @@ vi.mock('@/api/admin/codexHarvest', () => ({
   getCodexHarvestNodes: api.getNodes,
   resetCodexHarvestNodes: api.reset
 }))
+vi.mock('@/components/admin/HarvestGatewayBorrowPanel.vue', () => ({ default: { template: '<section />' } }))
+vi.mock('@/components/admin/HarvestManualConsole.vue', () => ({ default: { template: '<section />' } }))
 vi.mock('@/stores', () => ({ useAppStore: () => toast }))
 // Embedded panels have their own API tests; keep this suite focused on the
 // controls draft and request ordering without loading their real API clients.

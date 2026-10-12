@@ -26,8 +26,11 @@ func (s *channelMonitorV2RepoStub) GetConfig(context.Context) (*ChannelMonitorV2
 	cfg := ChannelMonitorV2Config(s.config)
 	return &cfg, nil
 }
-func (s *channelMonitorV2RepoStub) UpdateConfig(context.Context, ChannelMonitorV2Config, int) (*ChannelMonitorV2Config, error) {
-	return nil, nil
+func (s *channelMonitorV2RepoStub) UpdateConfig(_ context.Context, cfg ChannelMonitorV2Config, version int) (*ChannelMonitorV2Config, error) {
+	saved := cfg
+	saved.Version = version + 1
+	s.config = saved
+	return &saved, nil
 }
 func (s *channelMonitorV2RepoStub) GetDimensions(context.Context, ChannelMonitorV2Filter, ChannelMonitorV2Config) (*ChannelMonitorV2Dimensions, error) {
 	return nil, nil
@@ -170,6 +173,7 @@ func TestChannelMonitorV2ConfigValidation(t *testing.T) {
 	}
 	require.NoError(t, normalizeChannelMonitorV2Config(&cfg))
 	require.Equal(t, 300, cfg.RefreshIntervalSeconds)
+	require.Equal(t, ChannelMonitorV2CandyHistoryDefault, cfg.CandyHistoryLimit)
 	require.Equal(t, "anthropic", cfg.Platforms[0].Platform)
 	require.Equal(t, []int64{1, 3}, cfg.GroupIDs)
 
@@ -179,6 +183,15 @@ func TestChannelMonitorV2ConfigValidation(t *testing.T) {
 	cfg.RefreshIntervalSeconds = 60
 	cfg.GroupIDs = []int64{0}
 	require.ErrorIs(t, normalizeChannelMonitorV2Config(&cfg), ErrChannelMonitorV2InvalidConfig)
+}
+
+func TestChannelMonitorV2UpdateKeepsOmittedCandyHistoryLimit(t *testing.T) {
+	repo := &channelMonitorV2RepoStub{config: ChannelMonitorV2Config{Version: 2, RefreshIntervalSeconds: 60, CandyHistoryLimit: 80}}
+	updated, err := NewChannelMonitorV2Service(repo).UpdateConfig(context.Background(), ChannelMonitorV2Config{Version: 2, RefreshIntervalSeconds: 60}, 2, 9)
+	require.NoError(t, err)
+	require.Equal(t, 80, updated.CandyHistoryLimit)
+	_, err = NewChannelMonitorV2Service(repo).UpdateConfig(context.Background(), ChannelMonitorV2Config{Version: 2, RefreshIntervalSeconds: 60, CandyHistoryLimit: 29}, 2, 9)
+	require.ErrorIs(t, err, ErrChannelMonitorV2InvalidConfig)
 }
 
 func TestChannelMonitorV2ErrorTaxonomyPriority(t *testing.T) {

@@ -94,6 +94,7 @@ func TestUnifiedAstraReusePersistsTargetBundleAndUsesItWithoutReprobing(t *testi
 		}
 		return &http.Response{StatusCode: 200, Header: h, Body: io.NopCloser(strings.NewReader(harvestProbeCompleteFixture("gpt-6-astra")))}, nil
 	}}
+	require.NoError(t, s.VerifyStoredAstraTarget(t.Context(), 2))
 	h := targetTicketHeaders()
 	proxy, release, err := s.ApplyStoredAstraTarget(t.Context(), h, 2, "sse")
 	require.NoError(t, err)
@@ -385,4 +386,24 @@ func TestUnifiedAstraConcurrentVerificationDoesNotDuplicateMint(t *testing.T) {
 	close(proceed)
 	require.NoError(t, <-done)
 	require.Equal(t, 2, calls)
+}
+
+func TestUnifiedAstraForwardingNeverAcquiresMissingTicket(t *testing.T) {
+	s, repo, _ := unifiedAstraFixture(t)
+	s.httpUpstream = &harvestProxyUpstream{do: func(*http.Request, string) (*http.Response, error) {
+		t.Fatal("forwarding must not probe")
+		return nil, nil
+	}}
+	for _, cooling := range []bool{false, true} {
+		if cooling {
+			s.openaiCodexTicketProbeCooldown.Store(openAICodexTicketKey(2, "gpt-6-astra"), time.Now().Add(time.Minute))
+		}
+		h := targetTicketHeaders()
+		before := h.Clone()
+		_, release, err := s.ApplyStoredAstraTarget(t.Context(), h, 2, "sse")
+		require.ErrorIs(t, err, ErrOpenAICodexTicketUnavailable)
+		release()
+		require.Equal(t, before, h)
+		require.Zero(t, repo.writes)
+	}
 }

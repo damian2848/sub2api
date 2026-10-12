@@ -252,8 +252,9 @@ func TestAstraGatewayRuntimeRevisionClearsPool(t *testing.T) {
 	settings.Revision = "two"
 	second := wrapper.current(t.Context())
 	require.NotSame(t, first, second)
-	_, err = wrapper.CodexGatewayPinWSHeader(300)
-	require.Error(t, err)
+	cookie, err = wrapper.CodexGatewayPinWSHeader(300)
+	require.NoError(t, err)
+	require.Empty(t, cookie)
 	settings.CookiePool.Enabled = false
 	require.Nil(t, wrapper.current(t.Context()))
 	cookie, err = wrapper.CodexGatewayPinWSHeader(300)

@@ -49,6 +49,25 @@ function response() {
 }
 
 describe('HarvestFlowView nullable API lists', () => {
+  it('shows beta candy outcomes without marking the account unschedulable', async () => {
+    getFlow.mockResolvedValue({ ...response(),
+      stages: [{ id: 'select', status: 'fail', detail: 'candy_incorrect' }],
+      events: [
+        { id: 'candy-fail', stage: 'select', kind: 'candy_fail', reason: 'candy_incorrect', account_id: 1 },
+        { id: 'candy-pass', stage: 'select', kind: 'candy_pass', reason: 'candy_passed', account_id: 1 }
+      ]
+    })
+    const wrapper = mount(HarvestFlowView, { global: { stubs: { Icon: true, LoadingSpinner: true } } })
+    try {
+      await flushPromises()
+      expect(wrapper.text()).toContain('candy_incorrect')
+      expect(wrapper.text()).toContain('candy_passed')
+      expect(wrapper.text()).toContain('admin.harvestFlow.schedulable')
+      expect(wrapper.text()).not.toContain('admin.harvestFlow.unschedulable')
+      expect(wrapper.findAll('.bg-emerald-500').length).toBeGreaterThan(0)
+    } finally { wrapper.unmount() }
+  })
+
   it('shows Astra pool scheduling changes in the selection flow filter', async () => {
     const data = response()
     getFlow.mockResolvedValue({ ...data,
@@ -242,6 +261,17 @@ describe('HarvestFlowView request ordering', () => {
     await flushPromises()
     await vi.advanceTimersByTimeAsync(5000)
     expect(getFlow).toHaveBeenCalledTimes(2)
+  })
+
+  it('enables an unselected OAuth account without toggling it off', async () => {
+    const data = response()
+    getFlow.mockResolvedValue({ ...data, accounts: [{ ...data.accounts[0], harvest_selected: false, in_scope: false }] })
+    updateSkip.mockResolvedValue({ account_id: 1, skip_harvest: false })
+    wrapper = mountFlow()
+    await flushPromises()
+    await button(wrapper, 'admin.harvestFlow.enableHarvest').trigger('click')
+    await flushPromises()
+    expect(updateSkip).toHaveBeenCalledWith(1, false)
   })
 
   it('isolates reads during a save and preserves the saved toggle when refresh fails', async () => {

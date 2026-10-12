@@ -1,5 +1,15 @@
 export default {
   harvestFlow: {
+    coverageAccountTitle: '账号持票占比',
+    coverageAccountDurations: '有票 / 无票：{ready} / {missing}',
+    coverageAccountSince: '本账号统计始于 {time}',
+    coverageTitle: '账号平均持票占比',
+    coverageDurations: '平均有票 / 无票：{ready} / {missing}',
+    coverageWaiting: '等待有效统计样本',
+    coverageSince: '统计始于 {time} · {n} 个账号',
+    coverageStale: '后台采样已延迟，当前显示上次统计',
+    coverageHint: '每 5 秒采样估算；当前采集范围内可采集账号，任一启用模型有有效票即计有票。逐账号计算有票 ÷（有票 + 无票）后取平均。关闭打票、范围或模型变更及服务重启后重新统计；移出范围的账号不参与，采样中断不计时。',
+
     transportLabel: '采票协议',
     edgeLabel: '边缘 IP（可选）',
     edgeHint: '指定公网 IP 直拨，Host、TLS SNI 和证书校验仍使用 chatgpt.com；留空走 DNS。边缘 IP 仅用于连接，不参与探针通过判定。',
@@ -27,7 +37,8 @@ export default {
     failOpen: '缺票放行',
     strategy: '策略',
     scope: '采集范围',
-    scopeAll: '全部账号',
+    scopeAll: '全部 OAuth 账号',
+    scopeSelectedAccounts: '指定 OAuth 账号',
     scopeSelected: '指定分组 {n}',
     scopeUnavailable: '范围读取失败，采集已暂停',
     policySchedulable: '仅可调度',
@@ -164,6 +175,8 @@ export default {
       idle: '等待'
     },
     kinds: {
+      candy_pass: 'Beta 糖果通过',
+      candy_fail: 'Beta 糖果未通过',
       schedule_join: '加入号池',
       schedule_leave: '移出号池',
       schedule_enable: '恢复调度',
@@ -179,6 +192,18 @@ export default {
       unavailable: '选号失败'
     },
     reasons: {
+      candy_disabled: 'Beta 糖果观测已关闭',
+      candy_passed: 'Beta 糖果观测通过（不影响调度）',
+      candy_incorrect: 'Beta 糖果答案未通过（不影响调度）',
+      candy_error: 'Beta 糖果观测请求失败',
+      candy_timeout: 'Beta 糖果观测超时',
+      candy_stale: 'Beta 糖果观测跳过：票据过期或账号已变化',
+      candy_unavailable: 'Beta 糖果观测出口不可用',
+      candy_route_changed: 'Beta 糖果观测中路由发生变化',
+      candy_ticket_changed: 'Beta 糖果观测中门票重签',
+      candy_model_mismatch: 'Beta 糖果观测响应模型不符',
+
+      ticket_ready: '门票有效',
       ticket_unavailable: '该模型没有探针合格门票',
       harvest_excluded: '不在采集范围内，遗留门票不参与门控选号',
       unavailable: '没有可用账号'

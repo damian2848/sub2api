@@ -37,7 +37,10 @@ type ChannelMonitorV2PlatformConfig struct {
 }
 
 type ChannelMonitorV2Config struct {
-	CandyProbes            []ChannelMonitorV2CandyProbe     `json:"candy_probes,omitempty"`
+	CandyProbes []ChannelMonitorV2CandyProbe `json:"candy_probes,omitempty"`
+	// CandyHistoryLimit is how many recent checks each model shows on a card.
+	// Zero means the default; stored values are 30–100.
+	CandyHistoryLimit      int                              `json:"candy_history_limit"`
 	Version                int                              `json:"version"`
 	Enabled                bool                             `json:"enabled"`
 	RefreshIntervalSeconds int                              `json:"refresh_interval_seconds"`
@@ -246,15 +249,17 @@ type ChannelMonitorV2ModelRow struct {
 }
 
 type ChannelMonitorV2MatrixRow struct {
-	Candy               *ChannelMonitorV2CandyHistory `json:"candy,omitempty"`
-	GroupRateMultiplier *float64                      `json:"group_rate_multiplier,omitempty"`
-	Platform            string                        `json:"platform"`
-	GroupID             *int64                        `json:"group_id,omitempty"`
-	GroupName           string                        `json:"group_name,omitempty"`
-	Model               string                        `json:"model,omitempty"`
-	Metrics             ChannelMonitorV2Metric        `json:"metrics"`
-	Health              ChannelMonitorV2Health        `json:"health"`
-	Buckets             []ChannelMonitorV2TrendPoint  `json:"buckets"`
+	// Candy is the first enabled probe, kept so older clients still render one model.
+	Candy               *ChannelMonitorV2CandyHistory  `json:"candy,omitempty"`
+	CandyChecks         []ChannelMonitorV2CandyHistory `json:"candy_checks,omitempty"`
+	GroupRateMultiplier *float64                       `json:"group_rate_multiplier,omitempty"`
+	Platform            string                         `json:"platform"`
+	GroupID             *int64                         `json:"group_id,omitempty"`
+	GroupName           string                         `json:"group_name,omitempty"`
+	Model               string                         `json:"model,omitempty"`
+	Metrics             ChannelMonitorV2Metric         `json:"metrics"`
+	Health              ChannelMonitorV2Health         `json:"health"`
+	Buckets             []ChannelMonitorV2TrendPoint   `json:"buckets"`
 }
 
 type ChannelMonitorV2Matrix struct {
@@ -438,6 +443,17 @@ func (s *ChannelMonitorV2Service) getEnabledConfig(ctx context.Context) (*Channe
 }
 
 func (s *ChannelMonitorV2Service) UpdateConfig(ctx context.Context, cfg ChannelMonitorV2Config, expectedVersion int, actorID int64) (*ChannelMonitorV2Config, error) {
+	// Older admin bundles omit this field. Keep the stored limit instead of
+	// resetting a custom value back to the default on an unrelated save.
+	if cfg.CandyHistoryLimit == 0 && s.repo != nil {
+		current, err := s.repo.GetConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if current != nil {
+			cfg.CandyHistoryLimit = current.CandyHistoryLimit
+		}
+	}
 	if err := normalizeChannelMonitorV2Config(&cfg); err != nil {
 		return nil, err
 	}
@@ -765,7 +781,11 @@ func channelMonitorV2TopUsersWithSelf(items []ChannelMonitorV2UserRow, selfIndex
 }
 
 func normalizeChannelMonitorV2Config(cfg *ChannelMonitorV2Config) error {
-	if err := normalizeChannelMonitorV2CandyProbes(cfg.CandyProbes); err != nil {
+	var err error
+	if err = normalizeChannelMonitorV2CandyProbes(cfg.CandyProbes); err != nil {
+		return err
+	}
+	if cfg.CandyHistoryLimit, err = normalizeChannelMonitorV2CandyHistoryLimit(cfg.CandyHistoryLimit); err != nil {
 		return err
 	}
 	if cfg.RefreshIntervalSeconds == 0 {
@@ -774,7 +794,6 @@ func normalizeChannelMonitorV2Config(cfg *ChannelMonitorV2Config) error {
 	if cfg.RefreshIntervalSeconds != 60 && cfg.RefreshIntervalSeconds != 300 {
 		return fmt.Errorf("%w: refresh_interval_seconds must be 60 or 300", ErrChannelMonitorV2InvalidConfig)
 	}
-	var err error
 	cfg.GroupIDs, err = normalizeChannelMonitorV2GroupIDs(cfg.GroupIDs)
 	if err != nil {
 		return err

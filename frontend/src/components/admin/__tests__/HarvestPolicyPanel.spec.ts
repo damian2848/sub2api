@@ -4,6 +4,7 @@ import Panel from '../HarvestPolicyPanel.vue'
 const { getSettings, updateSettings, getGroups, showSuccess } = vi.hoisted(() => ({ getSettings: vi.fn(), updateSettings: vi.fn(), getGroups: vi.fn(), showSuccess: vi.fn() }))
 vi.mock('@/api/admin/settings', () => ({ getSettings, updateSettings }))
 vi.mock('@/api/admin/groups', () => ({ getAll: getGroups }))
+vi.mock('../HarvestPoolSchedulingPanel.vue', () => ({ default: { template: '<section data-testid="pool-scheduling-panel" />' } }))
 vi.mock('@/stores', () => ({ useAppStore: () => ({ showSuccess }) }))
 vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (key: string) => key, locale: { value: 'zh-CN' } }) }))
 enableAutoUnmount(afterEach)
@@ -92,56 +93,38 @@ describe('HarvestPolicyPanel', () => {
     wrapper.unmount();
   });
 
-  it("loads and saves selected harvest groups, preserving an explicitly empty selection", async () => {
-    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse,
-      openai_codex_ticket_harvest_scope: { mode: 'selected', group_ids: [2], account_policy: 'schedulable_only' },
-    });
-    getGroups.mockResolvedValueOnce([
-      { id: 2, name: 'PLUS', platform: 'openai', status: 'active' },
-      { id: 24, name: 'PRO', platform: 'openai', status: 'active' },
-      { id: 32, name: 'Grok', platform: 'grok', status: 'active' },
-    ]);
-    const wrapper = mountView(); await flushPromises();
-    expect(wrapper.find('#codex-ticket-group-32').exists()).toBe(false);
-    expect(wrapper.get<HTMLInputElement>('#codex-ticket-group-2').element.checked).toBe(true);
-    await wrapper.get('#codex-ticket-group-24').setValue(true);
-    await wrapper.find('form').trigger('submit.prevent'); await flushPromises();
-    expect(updateSettings.mock.calls[0]?.[0].openai_codex_ticket_harvest_scope).toEqual({mode:'selected',group_ids:[2,24],account_policy:'schedulable_only'});
-    await wrapper.get('#codex-ticket-group-2').setValue(false);
-    await wrapper.get('#codex-ticket-group-24').setValue(false);
-    await wrapper.find('form').trigger('submit.prevent'); await flushPromises();
-    expect(updateSettings.mock.calls[1]?.[0].openai_codex_ticket_harvest_scope).toEqual({mode:'selected',group_ids:[],account_policy:'schedulable_only'});
-    wrapper.unmount();
-  });
-
-  it("preserves selected harvest IDs when group loading fails", async () => {
-    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse,
-      openai_codex_ticket_harvest_scope: { mode: 'selected', group_ids: [24], account_policy: 'schedulable_only' },
-    });
-    getGroups.mockRejectedValueOnce(new Error('offline'));
-    const wrapper = mountView(); await flushPromises();
-    expect(wrapper.get<HTMLInputElement>('#codex-ticket-group-24').element.checked).toBe(true);
-    await wrapper.find('form').trigger('submit.prevent'); await flushPromises();
-    expect(updateSettings.mock.calls[0]?.[0].openai_codex_ticket_harvest_scope).toEqual({mode:'selected',group_ids:[24],account_policy:'schedulable_only'});
-    wrapper.unmount();
-  });
-
-  it("defaults legacy harvest scopes to schedulable only and saves compatibility policy", async () => {
-    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse,
-      openai_codex_ticket_harvest_scope: { mode: 'selected', group_ids: [24] },
-    });
-    const wrapper = mountView();
-    await flushPromises();
-    const policy = wrapper.get<HTMLSelectElement>('#codex-ticket-account-policy');
-    expect(policy.element.value).toBe('schedulable_only');
-    await policy.setValue('prioritize_schedulable');
-    await wrapper.find('form').trigger('submit.prevent');
-    await flushPromises();
+  it('selects OAuth accounts using the existing account controls, without groups', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.get('[data-testid="harvest-policy-panel"] [data-testid="pool-scheduling-panel"]').exists()).toBe(true)
+    expect(getGroups).not.toHaveBeenCalled()
+    expect(wrapper.find('#codex-ticket-account-policy').exists()).toBe(false)
+    await wrapper.get('#codex-ticket-harvest-scope').setValue('selected_accounts')
+    expect(wrapper.text()).toContain('门票账号')
+    await wrapper.find('form').trigger('submit.prevent')
+    await flushPromises()
     expect(updateSettings.mock.calls[0]?.[0].openai_codex_ticket_harvest_scope).toEqual({
-      mode: 'selected', group_ids: [24], account_policy: 'prioritize_schedulable',
-    });
-    wrapper.unmount();
-  });
+      mode: 'selected_accounts', group_ids: [], account_policy: 'prioritize_schedulable',
+    })
+    expect(updateSettings.mock.calls[0]?.[0]).not.toHaveProperty('astra_scheduling')
+  })
+
+  it('preserves the legacy scope until an account scope is explicitly selected', async () => {
+    const legacy = { mode: 'selected', group_ids: [24], account_policy: 'schedulable_only' }
+    getSettings.mockResolvedValueOnce({ ...baseSettingsResponse, openai_codex_ticket_harvest_scope: legacy })
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.text()).toContain('当前仍使用旧分组范围')
+    await wrapper.find('form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateSettings.mock.calls[0]?.[0].openai_codex_ticket_harvest_scope).toEqual(legacy)
+    await wrapper.get('#codex-ticket-harvest-scope').setValue('all')
+    await wrapper.find('form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateSettings.mock.calls[1]?.[0].openai_codex_ticket_harvest_scope).toEqual({
+      mode: 'all', group_ids: [], account_policy: 'prioritize_schedulable',
+    })
+  })
 
   it("keeps strict ticket response rejection opt-in", async () => {
     const wrapper=mountView();await flushPromises();
@@ -160,4 +143,21 @@ describe('HarvestPolicyPanel', () => {
     expect(wrapper.find('[role="alert"]').exists()).toBe(true)
     expect(updateSettings).not.toHaveBeenCalled()
   })
+})
+
+it('defaults beta candy observation off and persists both toggle states', async () => {
+  const wrapper = mountView()
+  await flushPromises()
+  const toggle = wrapper.get<HTMLInputElement>('#codex-ticket-candy-observation')
+  expect(toggle.element.checked).toBe(false)
+  expect(wrapper.text()).toContain('启用糖果测试验证使用后的票据')
+  expect(wrapper.text()).toContain('结果不影响调度、票据或账号状态')
+  await toggle.setValue(true)
+  await wrapper.find('form').trigger('submit.prevent')
+  await flushPromises()
+  expect(updateSettings.mock.calls[0][0].openai_codex_ticket_candy_observation).toBe(true)
+  await toggle.setValue(false)
+  await wrapper.find('form').trigger('submit.prevent')
+  await flushPromises()
+  expect(updateSettings.mock.calls[1][0].openai_codex_ticket_candy_observation).toBe(false)
 })

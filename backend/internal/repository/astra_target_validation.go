@@ -73,6 +73,9 @@ func (s *astraRoutingUpstream) targetRouteOnce(req *http.Request, proxy string, 
 		return nil, zero, proxy, release, nil
 	}
 	cookie, sourceID := pool.currentCookie(req.URL.Path, time.Now())
+	if cookie == nil && !force {
+		return nil, zero, proxy, release, nil
+	}
 	if cookie == nil {
 		if err := s.PrepareAstraGateway(req.Context()); err != nil {
 			return nil, zero, proxy, release, err
@@ -230,8 +233,21 @@ func (s *astraRoutingUpstream) CodexGatewayPinWSRequest(ctx context.Context, hea
 		if !containsTarget(s.cfg.AstraRouting(ctx).CookiePool.TargetAccountIDs, id) {
 			return "", proxy, func() {}, nil
 		}
-		effective, release, err := s.tickets.ApplyStoredAstraTarget(ctx, headers, id, "websocket")
-		return "", effective, release, err
+		borrowed := headers.Clone()
+		effective, release, err := s.tickets.ApplyStoredAstraTarget(ctx, borrowed, id, "websocket")
+		if err != nil {
+			if release != nil {
+				release()
+			}
+			return "", proxy, func() {}, ctx.Err()
+		}
+		for key := range headers {
+			delete(headers, key)
+		}
+		for key, values := range borrowed {
+			headers[key] = values
+		}
+		return "", effective, release, nil
 	}
 	pool := s.current(ctx)
 	if pool == nil || !containsTarget(pool.config.TargetAccountIDs, id) {

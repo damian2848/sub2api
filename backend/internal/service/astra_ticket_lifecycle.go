@@ -259,9 +259,18 @@ func (s *OpenAIGatewayService) VerifyStoredAstraTarget(ctx context.Context, id i
 }
 
 func (s *OpenAIGatewayService) ApplyStoredAstraTarget(ctx context.Context, h http.Header, id int64, protocol string) (string, func(), error) {
-	account, ticket, err := s.acquireStoredAstraTarget(ctx, id, protocol)
-	if err != nil {
-		return "", func() {}, err
+	// Forwarding only consumes an existing bundle. Acquisition and validation
+	// belong to the collector/explicit diagnostics, never the caller's request.
+	if !s.UnifiedAstraTicketsEnabled(ctx) || !slices.Contains(s.cfg.AstraRouting(ctx).CookiePool.TargetAccountIDs, id) {
+		return "", func() {}, errors.New("configuration_changed")
+	}
+	account, err := s.accountRepo.GetByID(ctx, id)
+	if err != nil || !astraTicketAccountEligible(ctx, account) {
+		return "", func() {}, errors.New("account_unavailable")
+	}
+	ticket := s.lookupOpenAICodexTicket(account, OpenAICodexStateProbeDefaultModel)
+	if !ticket.valid(time.Now(), 780) || ticket.Transport != protocol {
+		return "", func() {}, ErrOpenAICodexTicketUnavailable
 	}
 	// Never combine another workspace with the caller's credentials. The
 	// access-token provider may have refreshed a token since this DB snapshot.

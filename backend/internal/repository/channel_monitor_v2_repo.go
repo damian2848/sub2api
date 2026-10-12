@@ -26,11 +26,11 @@ func (r *channelMonitorV2Repository) GetConfig(ctx context.Context) (*service.Ch
 		SELECT version, enabled, refresh_interval_seconds, platforms, group_ids,
 		       COALESCE(ignored_error_categories, '{}'),
 		       COALESCE(health_thresholds, '{}'::jsonb), candy_probes,
-		       updated_at, updated_by
+		       candy_history_limit, updated_at, updated_by
 		FROM channel_monitor_v2_config WHERE id = 1`).Scan(
 		&cfg.Version, &cfg.Enabled, &cfg.RefreshIntervalSeconds, &platforms,
 		pq.Array(&cfg.GroupIDs), pq.Array(&cfg.IgnoredErrorCategories),
-		&thresholds, &probes,
+		&thresholds, &probes, &cfg.CandyHistoryLimit,
 		&cfg.UpdatedAt, &cfg.UpdatedBy,
 	)
 	if err != nil {
@@ -45,6 +45,7 @@ func (r *channelMonitorV2Repository) GetConfig(ctx context.Context) (*service.Ch
 	if err := json.Unmarshal(probes, &cfg.CandyProbes); err != nil {
 		return nil, err
 	}
+	cfg.CandyHistoryLimit = service.EffectiveChannelMonitorV2CandyHistoryLimit(cfg.CandyHistoryLimit)
 	cfg.HealthThresholds = service.DefaultChannelMonitorV2HealthThresholds()
 	if len(thresholds) > 0 {
 		_ = json.Unmarshal(thresholds, &cfg.HealthThresholds)
@@ -70,23 +71,27 @@ func (r *channelMonitorV2Repository) UpdateConfig(ctx context.Context, cfg servi
 	if err != nil {
 		return nil, err
 	}
+	if cfg.CandyHistoryLimit == 0 {
+		cfg.CandyHistoryLimit = service.ChannelMonitorV2CandyHistoryDefault
+	}
 	var updated service.ChannelMonitorV2Config
 	var raw, rawThresholds, rawProbes []byte
 	err = r.db.QueryRowContext(ctx, `
 		UPDATE channel_monitor_v2_config
 		SET version = version + 1, enabled = $1, refresh_interval_seconds = $2,
 		    platforms = $3, group_ids = $4, ignored_error_categories = $5,
-		    health_thresholds = $6, updated_by = $7, updated_at = NOW(), candy_probes = $9
+		    health_thresholds = $6, updated_by = $7, updated_at = NOW(), candy_probes = $9,
+		    candy_history_limit = $10
 		WHERE id = 1 AND version = $8
 		RETURNING version, enabled, refresh_interval_seconds, platforms, group_ids,
 		          COALESCE(ignored_error_categories, '{}'),
 		          COALESCE(health_thresholds, '{}'::jsonb), candy_probes,
-		          updated_at, updated_by`,
+		          candy_history_limit, updated_at, updated_by`,
 		cfg.Enabled, cfg.RefreshIntervalSeconds, platforms, pq.Array(cfg.GroupIDs),
-		pq.Array(cfg.IgnoredErrorCategories), thresholds, cfg.UpdatedBy, expectedVersion, probes,
+		pq.Array(cfg.IgnoredErrorCategories), thresholds, cfg.UpdatedBy, expectedVersion, probes, cfg.CandyHistoryLimit,
 	).Scan(&updated.Version, &updated.Enabled, &updated.RefreshIntervalSeconds, &raw,
 		pq.Array(&updated.GroupIDs), pq.Array(&updated.IgnoredErrorCategories),
-		&rawThresholds, &rawProbes,
+		&rawThresholds, &rawProbes, &updated.CandyHistoryLimit,
 		&updated.UpdatedAt, &updated.UpdatedBy)
 	if err == sql.ErrNoRows {
 		return nil, service.ErrChannelMonitorV2ConfigConflict
@@ -103,6 +108,7 @@ func (r *channelMonitorV2Repository) UpdateConfig(ctx context.Context, cfg servi
 	if err := json.Unmarshal(rawProbes, &updated.CandyProbes); err != nil {
 		return nil, err
 	}
+	updated.CandyHistoryLimit = service.EffectiveChannelMonitorV2CandyHistoryLimit(updated.CandyHistoryLimit)
 	updated.HealthThresholds = service.DefaultChannelMonitorV2HealthThresholds()
 	_ = json.Unmarshal(rawThresholds, &updated.HealthThresholds)
 	updated.HealthThresholds = service.NormalizeChannelMonitorV2HealthThresholds(updated.HealthThresholds)

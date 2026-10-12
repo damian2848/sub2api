@@ -66,17 +66,19 @@ type CodexHarvestFlowStage struct {
 }
 
 type CodexHarvestFlowAccount struct {
-	ID           int64                     `json:"id"`
-	Name         string                    `json:"name"`
-	Status       string                    `json:"status"`
-	Schedulable  bool                      `json:"schedulable"`
-	SkipHarvest  bool                      `json:"skip_harvest"`
-	InScope      bool                      `json:"in_scope"`
-	Availability string                    `json:"availability"`
-	RecoverAt    *time.Time                `json:"recover_at,omitempty"`
-	Tickets      []OpenAICodexTicketStatus `json:"tickets"`
-	ReadyCount   int                       `json:"ready_count"`
-	BlockedCount int                       `json:"blocked_count"`
+	Coverage        *CodexHarvestAccountCoverage `json:"coverage,omitempty"`
+	ID              int64                        `json:"id"`
+	Name            string                       `json:"name"`
+	Status          string                       `json:"status"`
+	Schedulable     bool                         `json:"schedulable"`
+	HarvestSelected bool                         `json:"harvest_selected"`
+	SkipHarvest     bool                         `json:"skip_harvest"`
+	InScope         bool                         `json:"in_scope"`
+	Availability    string                       `json:"availability"`
+	RecoverAt       *time.Time                   `json:"recover_at,omitempty"`
+	Tickets         []OpenAICodexTicketStatus    `json:"tickets"`
+	ReadyCount      int                          `json:"ready_count"`
+	BlockedCount    int                          `json:"blocked_count"`
 }
 
 type CodexHarvestFlowHarvest struct {
@@ -122,6 +124,7 @@ type CodexHarvestFlowCounts struct {
 }
 
 type CodexHarvestFlowSnapshot struct {
+	Coverage    *CodexHarvestCoverage     `json:"coverage,omitempty"`
 	GeneratedAt time.Time                 `json:"generated_at"`
 	Harvest     CodexHarvestFlowHarvest   `json:"harvest"`
 	Sidecar     CodexHarvestFlowSidecar   `json:"sidecar"`
@@ -774,7 +777,7 @@ func BuildCodexHarvestFlow(ctx context.Context, cfg *config.Config, settings *Se
 	rawEvents := listCodexHarvestFlowEvents()
 	events := make([]CodexHarvestFlowEvent, 0, len(rawEvents))
 	for _, event := range rawEvents {
-		if event.Stage == "select" && event.Kind != "schedule_join" && event.Kind != "schedule_leave" {
+		if event.Stage == "select" && event.Kind != "schedule_join" && event.Kind != "schedule_leave" && event.Kind != "candy_pass" && event.Kind != "candy_fail" {
 			continue
 		}
 		events = append(events, event)
@@ -807,6 +810,10 @@ func BuildCodexHarvestFlow(ctx context.Context, cfg *config.Config, settings *Se
 		Events:   events,
 		Accounts: []CodexHarvestFlowAccount{},
 	}
+	if len(controls) > 0 && controls[0] != nil {
+		coverage := controls[0].coverage.snapshot()
+		snapshot.Coverage = &coverage
+	}
 	if snapshot.Harvest.HarvestProxy == "" && harvestProxy == mihomo.Endpoint {
 		snapshot.Harvest.HarvestProxy = mihomo.Endpoint
 	}
@@ -816,15 +823,16 @@ func BuildCodexHarvestFlow(ctx context.Context, cfg *config.Config, settings *Se
 		}
 		availability, recoverAt := ResolveCodexAccountAvailability(&account, now)
 		item := CodexHarvestFlowAccount{
-			ID:           account.ID,
-			Name:         account.Name,
-			Status:       account.Status,
-			Schedulable:  account.Schedulable,
-			SkipHarvest:  openAICodexSkipHarvest(&account),
-			InScope:      !openAICodexSkipHarvest(&account) && scope.includes(&account),
-			Availability: availability,
-			RecoverAt:    recoverAt,
-			Tickets:      OpenAICodexTicketStatuses(&account, ticketCfg, now),
+			ID:              account.ID,
+			Name:            account.Name,
+			Status:          account.Status,
+			Schedulable:     account.Schedulable,
+			SkipHarvest:     openAICodexSkipHarvest(&account),
+			HarvestSelected: !openAICodexSkipHarvest(&account) && (scope.Mode != "selected_accounts" || scope.includes(&account)),
+			InScope:         !openAICodexSkipHarvest(&account) && scope.includes(&account),
+			Availability:    availability,
+			RecoverAt:       recoverAt,
+			Tickets:         OpenAICodexTicketStatuses(&account, ticketCfg, now),
 		}
 		for i := range item.Tickets {
 			ticket := &item.Tickets[i]
@@ -835,7 +843,7 @@ func BuildCodexHarvestFlow(ctx context.Context, cfg *config.Config, settings *Se
 				ticket.StandbyExpiresAt = nil
 				ticket.Blocked = ticketCfg.FailClosed && !item.SkipHarvest
 			}
-			if ticketCfg.FailClosed && !item.SkipHarvest && !item.InScope {
+			if ticketCfg.FailClosed && scope.Mode == "selected" && !item.SkipHarvest && !item.InScope {
 				ticket.Blocked = true
 			}
 			if ticket.Ready && !ticket.Blocked {
@@ -845,6 +853,11 @@ func BuildCodexHarvestFlow(ctx context.Context, cfg *config.Config, settings *Se
 			if ticket.Blocked {
 				item.BlockedCount++
 				snapshot.Counts.TicketsBlocked++
+			}
+		}
+		if snapshot.Coverage != nil {
+			if coverage, ok := snapshot.Coverage.Accounts[account.ID]; ok {
+				item.Coverage = &coverage
 			}
 		}
 		snapshot.Accounts = append(snapshot.Accounts, item)
@@ -977,7 +990,7 @@ func buildCodexHarvestFlowStages(snapshot CodexHarvestFlowSnapshot) []CodexHarve
 	if event, ok := last["select"]; ok {
 		copyFlowMetrics(&selectStage, event)
 		switch event.Kind {
-		case "schedule_join":
+		case "schedule_join", "candy_pass":
 			selectStage.Status = "ok"
 		case "schedule_leave":
 			selectStage.Status = "warn"
