@@ -65,7 +65,9 @@ func (s *GatewayService) FilterSupportedChannelModels(ctx context.Context, group
 		}
 		for i := range accounts {
 			account := &accounts[i]
-			if account.Platform != platform && !(account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled() && (platform == PlatformAnthropic || platform == PlatformGemini)) {
+			mixedAccount := account.Platform == PlatformAntigravity && account.IsMixedSchedulingEnabled() &&
+				(platform == PlatformAnthropic || platform == PlatformGemini)
+			if account.Platform != platform && !mixedAccount {
 				continue
 			}
 			if catalog := oauthCatalogs[i]; catalog != nil {
