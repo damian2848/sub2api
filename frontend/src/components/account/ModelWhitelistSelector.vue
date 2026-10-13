@@ -144,6 +144,16 @@
         {{ isTestingIQModels ? t('admin.accounts.testIQStop', { done: testedIQCount, total: testIQTotal }) : t('admin.accounts.testIQ') }}
       </button>
       <button
+        v-if="accountId && modelValue.length > 0"
+        type="button"
+        data-testid="clear-unavailable-models"
+        :disabled="!canClearUnavailableModels"
+        @click="clearUnavailableModels"
+        class="rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/30"
+      >
+        {{ t('admin.accounts.clearUnavailableModels') }}
+      </button>
+      <button
         type="button"
         @click="clearAll"
         class="rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/30"
@@ -413,6 +423,17 @@ const isTestingIQModels = ref(false)
 const testedIQCount = ref(0)
 const testIQTotal = ref(0)
 let iqTestAbort: AbortController | null = null
+
+const canClearUnavailableModels = computed(() =>
+  !isTestingModels.value &&
+  !isTestingIQModels.value &&
+  props.modelValue.some(model => testStatus.value[model] === 'fail')
+)
+
+const clearUnavailableModels = () => {
+  if (!canClearUnavailableModels.value) return
+  emit('update:modelValue', props.modelValue.filter(model => testStatus.value[model] !== 'fail'))
+}
 
 const stopIQTestModels = () => {
   iqTestAbort?.abort()

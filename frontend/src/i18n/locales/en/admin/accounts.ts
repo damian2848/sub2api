@@ -1014,6 +1014,7 @@ export default {
       testIQPassed: 'Intelligence test passed',
       testIQFailed: 'Intelligence test failed',
       testIQRunning: 'Intelligence test running',
+      clearUnavailableModels: 'Clear unavailable models',
       clearAllModels: 'Clear all models',
       customModelName: 'Custom model name',
       enterCustomModelName: 'Enter custom model name',

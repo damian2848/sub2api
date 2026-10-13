@@ -1119,6 +1119,7 @@ export default {
       testIQPassed: '智商测试通过',
       testIQFailed: '智商测试不通过',
       testIQRunning: '智商测试中',
+      clearUnavailableModels: '清除不可用模型',
       clearAllModels: '清除所有模型',
       customModelName: '自定义模型名称',
       enterCustomModelName: '输入自定义模型名称',
