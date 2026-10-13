@@ -21,11 +21,15 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 	observationHeaders := request.Header.Clone()
 	usageAt := time.Now()
 	var requestWritten atomic.Bool
-	request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
-		if info.Err == nil {
-			requestWritten.Store(true)
-		}
-	}}))
+	// Only bound tickets need write receipts. Preserve ordinary request identity
+	// and replayability semantics in the runtime proxy fallback chain.
+	if boundTicket {
+		request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				requestWritten.Store(true)
+			}
+		}}))
+	}
 	releaseChat := func() {}
 	if boundTicket {
 		releaseChat = s.holdCodexTicketChat(account)
