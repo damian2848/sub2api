@@ -88,6 +88,8 @@ func TestOpenAITurnAdmissionDrainsCurrentRejectsNext(t *testing.T) {
 					require.NoError(t, err)
 					require.Equal(t, want, gjson.GetBytes(payload, "type").String())
 				}
+				resetCodexHarvestFlow()
+				t.Cleanup(resetCodexHarvestFlow)
 				write(firstModel)
 				requirePassthroughUpstreamWrite(t, upstream, time.Second)
 				upstream.Send(`{"type":"response.output_text.delta","delta":"started"}`)
@@ -117,6 +119,15 @@ func TestOpenAITurnAdmissionDrainsCurrentRejectsNext(t *testing.T) {
 				case <-time.After(2 * time.Second):
 					t.Fatal("ineligible next turn did not terminate within the test bound")
 				}
+				events := []CodexHarvestFlowEvent{}
+				for _, event := range listCodexHarvestFlowEvents() {
+					if event.Kind == "ticket_used" {
+						events = append(events, event)
+					}
+				}
+				require.Len(t, events, 1, "only the dispatched turn is a ticket use")
+				require.Equal(t, a.ID, events[0].AccountID)
+				require.Equal(t, "websocket", events[0].TicketUsage.Transport)
 				require.True(t, a.Schedulable, "admission must not write whole-account pause")
 				require.Nil(t, a.TempUnschedulableUntil)
 			})

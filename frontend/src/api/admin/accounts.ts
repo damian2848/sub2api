@@ -1374,6 +1374,14 @@ export interface CodexHarvestFlowStage {
 }
 
 export interface CodexHarvestFlowEvent {
+  ticket_usage?: {
+    source_account_id?: number
+    source_account_name?: string
+    acquisition: 'self' | 'reuse' | 'unknown'
+    gateway?: string
+    transport: string
+    request_kind: 'business' | 'account_test'
+  }
   id: string
   at: string
   stage: string

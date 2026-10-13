@@ -3,6 +3,9 @@ package service
 import (
 	"context"
 	"net/http"
+	"net/http/httptrace"
+	"sync/atomic"
+	"time"
 )
 
 func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
@@ -16,6 +19,13 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 	boundTicket := s.codexTicketRequestBound(request, account)
 	observationTicket := s.boundCodexTicket(request, account)
 	observationHeaders := request.Header.Clone()
+	usageAt := time.Now()
+	var requestWritten atomic.Bool
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{WroteRequest: func(info httptrace.WroteRequestInfo) {
+		if info.Err == nil {
+			requestWritten.Store(true)
+		}
+	}}))
 	releaseChat := func() {}
 	if boundTicket {
 		releaseChat = s.holdCodexTicketChat(account)
@@ -36,6 +46,13 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 		})
 	}()
 	defer func() {
+		usageTicket := observationTicket
+		if result != nil && result.Request != nil {
+			if ticket := s.boundCodexTicket(result.Request, account); ticket != nil {
+				usageTicket = ticket
+			}
+		}
+		recordCodexHTTPTicketUsage(request.Context(), account, usageTicket, usageAt, result, requestWritten.Load())
 		if resultErr == nil {
 			// Fast admission may have installed the ticket inside the upstream
 			// adapter. Capture the binding before observation can revoke it.
@@ -86,6 +103,7 @@ func (s *AccountTestService) doOpenAIAccountTestUpstream(
 		// This restores the complete cookie/egress bundle, holds it until body close,
 		// observes replacements and enforces the configured strict response policy.
 		request = request.WithContext(context.WithValue(request.Context(), astraCandySkipObservationKey{}, true))
+		request = request.WithContext(context.WithValue(request.Context(), codexTicketAccountTestKey{}, true))
 		return gateway.doOpenAIUpstream(request, proxyURL, account)
 	}
 	if s.pluginManager != nil {

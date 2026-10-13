@@ -213,13 +213,16 @@
                       {{ kindLabel(event.kind, event.result) }}
                       <span v-if="event.model" class="ml-1 font-mono text-xs text-gray-500">{{ event.model }}</span>
                     </p>
-                    <span class="text-[11px] text-gray-400">{{ formatClock(event.at) }}</span>
+                    <time :datetime="event.at" :title="formatEventTime(event.at)" class="text-[11px] text-gray-400">{{ event.ticket_usage ? formatEventTime(event.at) : formatClock(event.at) }}</time>
                   </div>
                   <p class="mt-1 break-all font-mono text-xs text-gray-500 dark:text-gray-400">
-                    <span v-if="event.account_name">{{ event.account_name }}</span>
+                    <span v-if="event.account_name || event.account_id">{{ event.account_name || accountNames[event.account_id || 0] }}<template v-if="event.ticket_usage && event.account_id"> (#{{ event.account_id }})</template></span>
                     <span v-if="event.node"> · {{ event.node }}</span>
                     <span v-if="event.http_status"> · HTTP {{ event.http_status }}</span>
                     <span v-if="event.standby"> · {{ t('admin.harvestFlow.standby') }}</span>
+                  </p>
+                  <p v-if="event.ticket_usage" class="mt-1 break-words text-xs text-gray-500 dark:text-gray-400" data-testid="ticket-usage-detail">
+                    {{ ticketUsageDetail(event) }}
                   </p>
                   <p v-if="event.reason || event.detail || event.result" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
                     {{ eventDetail(event) }}
@@ -257,8 +260,8 @@ const refreshing = ref(false)
 const autoRefresh = ref(true)
 const errorMessage = ref('')
 const lastUpdated = ref('')
-const eventFilter = ref<'all' | 'node' | 'probe' | 'shape' | 'ticket' | 'select' | 'nodes'>('all')
-const eventFilters = ['all', 'node', 'probe', 'shape', 'ticket', 'select', 'nodes'] as const
+const eventFilter = ref<'all' | 'node' | 'probe' | 'shape' | 'ticket' | 'usage' | 'select' | 'nodes'>('all')
+const eventFilters = ['all', 'node', 'probe', 'shape', 'ticket', 'usage', 'select', 'nodes'] as const
 const saving = ref(false)
 const harvesting = ref(false)
 const nowMs = ref(Date.now())
@@ -334,6 +337,7 @@ function stageTextClass(status: string) {
 }
 
 function eventDotClass(kind: string) {
+  if (kind === 'ticket_used') return 'bg-sky-500'
   if (kind === 'candy_pass' || kind === 'probe_hit' || kind === 'accept' || kind === 'schedule_join' || kind === 'rotate') {
     return 'bg-emerald-500'
   }
@@ -368,6 +372,28 @@ function reasonLabel(reason?: string) {
 
 function resultLabel(result?: string) {
   return lookupLabel('admin.harvestFlow.results', result)
+}
+
+function ticketUsageDetail(event: CodexHarvestFlowEvent) {
+  const usage = event.ticket_usage
+  if (!usage) return ''
+  const sourceID = usage.source_account_id
+  const sourceName = usage.source_account_name || (sourceID ? accountNames.value[sourceID] : '')
+  const source = sourceID ? `${sourceName || ''} (#${sourceID})`.trim() : t('admin.harvestFlow.usage.unknown')
+  const parts = [
+    t(`admin.harvestFlow.usage.${usage.request_kind}`),
+    t(`admin.harvestFlow.usage.${usage.acquisition}`),
+    t('admin.harvestFlow.usage.source', { source }),
+    usage.transport === 'websocket' ? 'WebSocket' : 'SSE'
+  ]
+  if (usage.gateway) parts.push(t('admin.harvestFlow.usage.gateway', { gateway: usage.gateway }))
+  return parts.join(' · ')
+}
+
+function formatEventTime(value?: string) {
+  if (!value) return ''
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
 }
 
 function eventDetail(event: CodexHarvestFlowEvent) {

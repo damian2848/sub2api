@@ -17,7 +17,7 @@ func TestHarvestFlowAppendInsertsThenCaps(t *testing.T) {
 	at := time.Date(2026, 9, 21, 4, 0, 0, 0, time.UTC)
 	mock.ExpectBegin()
 	mock.ExpectExec("INSERT INTO codex_harvest_flow_events").
-		WithArgs("evt-1", at, "probe", "probe_hit", int64(2), "20x", "gpt-6-astra", "japan-08", 200, 292, 10, 292, 10, true, false, "success", "", "").
+		WithArgs("evt-1", at, "probe", "probe_hit", int64(2), "20x", "gpt-6-astra", "japan-08", 200, 292, 10, 292, 10, true, false, "success", "", "", "null").
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectExec("DELETE FROM codex_harvest_flow_events").
 		WithArgs(harvestFlowPersistCap).
@@ -41,14 +41,18 @@ func TestHarvestFlowListReturnsChronological(t *testing.T) {
 		WithArgs(harvestFlowPersistCap).
 		WillReturnRows(sqlmock.NewRows([]string{
 			"event_id", "at", "stage", "kind", "account_id", "account_name", "model", "node",
-			"http_status", "length", "blocks", "expected_length", "expected_blocks", "accepted", "standby", "result", "reason", "detail",
-		}).AddRow("evt-2", newer, "select", "selected", int64(2), "20x", "gpt-6-astra", "japan-08", 0, 0, 0, 0, 0, false, false, "", "", "").
-			AddRow("evt-1", older, "probe", "probe_hit", int64(2), "20x", "gpt-6-astra", "japan-08", 200, 292, 10, 292, 10, true, false, "success", "", ""))
+			"http_status", "length", "blocks", "expected_length", "expected_blocks", "accepted", "standby", "result", "reason", "detail", "ticket_usage",
+		}).AddRow("evt-2", newer, "select", "selected", int64(2), "20x", "gpt-6-astra", "japan-08", 0, 0, 0, 0, 0, false, false, "", "", "", `{"source_account_id":88,"source_account_name":"donor","acquisition":"reuse","gateway":"unified-42","transport":"sse","request_kind":"business"}`).
+			AddRow("evt-1", older, "probe", "probe_hit", int64(2), "20x", "gpt-6-astra", "japan-08", 200, 292, 10, 292, 10, true, false, "success", "", "", nil))
 	events, err := NewCodexHarvestFlowRepository(db).List(context.Background(), 200)
 	require.NoError(t, err)
 	require.Len(t, events, 2)
 	require.Equal(t, "evt-1", events[0].ID)
 	require.Equal(t, "evt-2", events[1].ID)
+	require.Nil(t, events[0].TicketUsage)
+	require.EqualValues(t, 88, events[1].TicketUsage.SourceAccountID)
+	require.Equal(t, "donor", events[1].TicketUsage.SourceAccountName)
+	require.Equal(t, "unified-42", events[1].TicketUsage.Gateway)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -57,5 +61,19 @@ func TestHarvestFlowAppendRejectsEmptyID(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 	require.Error(t, NewCodexHarvestFlowRepository(db).Append(context.Background(), service.CodexHarvestFlowEvent{}))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestHarvestFlowAppendTicketProvenance(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+	at := time.Now()
+	usage := &service.CodexTicketUsage{SourceAccountID: 88, SourceAccountName: "donor", Acquisition: "reuse", Gateway: "unified-42", Transport: "websocket", RequestKind: "business"}
+	mock.ExpectBegin()
+	mock.ExpectExec("INSERT INTO codex_harvest_flow_events").WithArgs("used-1", at, "usage", "ticket_used", int64(71), "consumer", "gpt-6-astra", "", 0, 0, 0, 0, 0, false, false, "", "", "", `{"source_account_id":88,"source_account_name":"donor","acquisition":"reuse","gateway":"unified-42","transport":"websocket","request_kind":"business"}`).WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectExec("DELETE FROM codex_harvest_flow_events").WithArgs(harvestFlowPersistCap).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectCommit()
+	require.NoError(t, NewCodexHarvestFlowRepository(db).Append(t.Context(), service.CodexHarvestFlowEvent{ID: "used-1", At: at, Stage: "usage", Kind: "ticket_used", AccountID: 71, AccountName: "consumer", Model: "gpt-6-astra", TicketUsage: usage}))
 	require.NoError(t, mock.ExpectationsWereMet())
 }

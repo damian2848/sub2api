@@ -31,24 +31,25 @@ const (
 
 // CodexHarvestFlowEvent is a redacted breadcrumb for the admin harvest pipeline.
 type CodexHarvestFlowEvent struct {
-	ID             string    `json:"id"`
-	At             time.Time `json:"at"`
-	Stage          string    `json:"stage"`
-	Kind           string    `json:"kind"`
-	AccountID      int64     `json:"account_id,omitempty"`
-	AccountName    string    `json:"account_name,omitempty"`
-	Model          string    `json:"model,omitempty"`
-	Node           string    `json:"node,omitempty"`
-	HTTPStatus     int       `json:"http_status,omitempty"`
-	Length         int       `json:"length,omitempty"`
-	Blocks         int       `json:"blocks,omitempty"`
-	ExpectedLength int       `json:"expected_length,omitempty"`
-	ExpectedBlocks int       `json:"expected_blocks,omitempty"`
-	Accepted       bool      `json:"accepted,omitempty"`
-	Standby        bool      `json:"standby,omitempty"`
-	Result         string    `json:"result,omitempty"`
-	Reason         string    `json:"reason,omitempty"`
-	Detail         string    `json:"detail,omitempty"`
+	TicketUsage    *CodexTicketUsage `json:"ticket_usage,omitempty"`
+	ID             string            `json:"id"`
+	At             time.Time         `json:"at"`
+	Stage          string            `json:"stage"`
+	Kind           string            `json:"kind"`
+	AccountID      int64             `json:"account_id,omitempty"`
+	AccountName    string            `json:"account_name,omitempty"`
+	Model          string            `json:"model,omitempty"`
+	Node           string            `json:"node,omitempty"`
+	HTTPStatus     int               `json:"http_status,omitempty"`
+	Length         int               `json:"length,omitempty"`
+	Blocks         int               `json:"blocks,omitempty"`
+	ExpectedLength int               `json:"expected_length,omitempty"`
+	ExpectedBlocks int               `json:"expected_blocks,omitempty"`
+	Accepted       bool              `json:"accepted,omitempty"`
+	Standby        bool              `json:"standby,omitempty"`
+	Result         string            `json:"result,omitempty"`
+	Reason         string            `json:"reason,omitempty"`
+	Detail         string            `json:"detail,omitempty"`
 }
 
 type CodexHarvestFlowStage struct {

@@ -42,6 +42,7 @@ const (
 var ErrOpenAICodexTicketUnavailable = errors.New("codex turn-state ticket unavailable")
 
 type openAICodexTicket struct {
+	SourceAccountName   string             `json:"source_account_name,omitempty"`
 	Acquisition         string             `json:"acquisition,omitempty"`
 	SourceAccountID     int64              `json:"source_account_id,omitempty"`
 	ProbeVerified       bool               `json:"probe_verified,omitempty"`

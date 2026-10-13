@@ -978,6 +978,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	if capture := requestcapture.FromContext(ctx); capture != nil {
 		upstreamFrameConn = &captureUpstreamFrameConn{FrameConn: upstreamFrameConn, capture: capture, account: account.ID}
 	}
+	upstreamFrameConn = &codexTicketUsageFrameConn{FrameConn: upstreamFrameConn, account: account, binding: handshakeBinding}
 	relayUpstreamFrameConn := &openAIWSPassthroughFirstOutputFrameConn{
 		inner:             upstreamFrameConn,
 		activeReadTimeout: s.openAIWSPassthroughIdleTimeout(),

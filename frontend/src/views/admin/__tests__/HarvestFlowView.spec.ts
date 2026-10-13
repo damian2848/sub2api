@@ -49,6 +49,38 @@ function response() {
 }
 
 describe('HarvestFlowView nullable API lists', () => {
+  it('shows ticket consumer, source, gateway and timestamp with a dedicated usage filter', async () => {
+    getFlow.mockResolvedValue({ ...response(), events: [
+      { id: 'used', stage: 'usage', kind: 'ticket_used', at: '2026-10-13T05:37:45Z', account_id: 71, account_name: 'consumer', model: 'gpt-6-astra', http_status: 401,
+        ticket_usage: { source_account_id: 88, source_account_name: 'donor', acquisition: 'reuse', gateway: 'unified-42', transport: 'sse', request_kind: 'business' } },
+      { id: 'self', stage: 'usage', kind: 'ticket_used', at: '2026-10-13T05:37:40Z', account_id: 1, account_name: 'Test account',
+        ticket_usage: { source_account_id: 1, acquisition: 'self', transport: 'websocket', request_kind: 'account_test' } },
+      { id: 'legacy', stage: 'usage', kind: 'ticket_used', ticket_usage: { acquisition: 'unknown', transport: 'sse', request_kind: 'business' } },
+      { id: 'stored', stage: 'ticket', kind: 'accept', at: '2026-10-13T05:36:00Z' }
+    ] })
+    const wrapper = mount(HarvestFlowView, { global: { stubs: { Icon: true, LoadingSpinner: true } } })
+    try {
+      await flushPromises()
+      const details = wrapper.findAll('[data-testid="ticket-usage-detail"]')
+      expect(details[0].text()).toContain('donor (#88)')
+      expect(details[0].text()).toContain('unified-42')
+      expect(details[0].text()).toContain('usage.business')
+      expect(details[1].text()).toContain('Test account (#1)')
+      expect(details[1].text()).toContain('WebSocket')
+      expect(details[1].text()).toContain('usage.account_test')
+      expect(details[2].text()).toContain('usage.unknown')
+      expect(wrapper.findAll('ol li')[0].text()).toContain('consumer (#71)')
+      expect(wrapper.findAll('ol li')[0].text()).toContain('HTTP 401')
+      const timestamp = wrapper.find('time[datetime="2026-10-13T05:37:45Z"]')
+      expect(timestamp.text()).toBe(new Date('2026-10-13T05:37:45Z').toLocaleString())
+      expect(wrapper.findAll('ol li')[0].find('.bg-sky-500').exists()).toBe(true)
+      await wrapper.findAll('button').find(button => button.text() === 'admin.harvestFlow.stages.usage')!.trigger('click')
+      expect(wrapper.findAll('ol li')).toHaveLength(3)
+      await wrapper.findAll('button').find(button => button.text() === 'admin.harvestFlow.stages.ticket')!.trigger('click')
+      expect(wrapper.findAll('ol li')).toHaveLength(1)
+    } finally { wrapper.unmount() }
+  })
+
   it('shows beta candy outcomes without marking the account unschedulable', async () => {
     getFlow.mockResolvedValue({ ...response(),
       stages: [{ id: 'select', status: 'fail', detail: 'candy_incorrect' }],

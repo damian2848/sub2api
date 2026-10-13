@@ -162,6 +162,7 @@ export default {
       authLog: 'Session expired. Refresh and sign in again.'
     },
     stages: {
+      usage: 'Ticket use',
       node: 'Node rotate',
       probe: 'Harvest probe',
       shape: 'Probe validation',
@@ -174,7 +175,17 @@ export default {
       fail: 'Fail',
       idle: 'Idle'
     },
+    usage: {
+      business: 'Business request',
+      account_test: 'Account test',
+      self: 'Self-harvested',
+      reuse: 'Borrowed ticket',
+      unknown: 'Source not recorded',
+      source: 'Source account: {source}',
+      gateway: 'Gateway: {gateway}',
+    },
     kinds: {
+      ticket_used: 'Ticket used',
       candy_pass: 'Beta candy passed',
       candy_fail: 'Beta candy failed',
       schedule_join: 'Added to pool',

@@ -163,6 +163,7 @@ func (s *OpenAIGatewayService) tryBorrowStoredAstraTicket(ctx context.Context, a
 	ticket.HarvestNodeName, ticket.HarvestNodeProvider = seed.HarvestNodeName, seed.HarvestNodeProvider
 	ticket.HarvestSessionID = session
 	ticket.Acquisition, ticket.SourceAccountID = "reuse", donor.ID
+	ticket.SourceAccountName = donor.Name
 	if err = s.storeOpenAICodexTicket(ctx, fresh, ticket); err != nil {
 		// The legacy store retains memory on a database error. Reuse must not
 		// publish a new ready target until the complete bundle is persisted.

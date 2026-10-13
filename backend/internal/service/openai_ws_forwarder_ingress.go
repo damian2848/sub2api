@@ -1689,6 +1689,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				false,
 			)
 		}
+		recordCodexWSTicketUsage(ctx, latest, lease.conn.turnBinding, turnStart)
 		if debugEnabled {
 			logOpenAIWSModeDebug(
 				"ingress_ws_turn_request_sent account_id=%d turn=%d conn_id=%s payload_bytes=%d",

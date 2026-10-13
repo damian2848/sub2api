@@ -162,6 +162,7 @@ export default {
       authLog: '登录状态已失效，请刷新后重新登录。'
     },
     stages: {
+      usage: '门票使用',
       node: '节点轮换',
       probe: '打票探测',
       shape: '探针校验',
@@ -174,7 +175,17 @@ export default {
       fail: '失败',
       idle: '等待'
     },
+    usage: {
+      business: '业务请求',
+      account_test: '管理员测试',
+      self: '自采票',
+      reuse: '借票',
+      unknown: '来源未记录',
+      source: '来源账号：{source}',
+      gateway: '网关：{gateway}',
+    },
     kinds: {
+      ticket_used: '门票使用',
       candy_pass: 'Beta 糖果通过',
       candy_fail: 'Beta 糖果未通过',
       schedule_join: '加入号池',

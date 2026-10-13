@@ -492,6 +492,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		if err := controlledSubmission(ctx, "native_ws"); err != nil {
 			return err
 		}
+		usageAt := time.Now()
 		if err := lease.WriteJSONWithContextTimeout(ctx, value, s.openAIWSWriteTimeout()); err != nil {
 			lease.MarkBroken()
 			logOpenAIWSModeInfo(
@@ -503,6 +504,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 			)
 			return wrapOpenAIWSFallback("write_request", err)
 		}
+		recordCodexWSTicketUsage(ctx, account, lease.conn.turnBinding, usageAt)
 		return nil
 	}
 	if accelerateHTTPSSE && !preflightBeforePrewarm {
