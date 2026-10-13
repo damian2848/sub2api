@@ -294,7 +294,12 @@ func TestSupportedPlatformSections_IndependentGroups(t *testing.T) {
 	ch := service.AvailableChannel{SupportedModels: []service.SupportedModel{
 		{Name: "gpt-5", Platform: "openai"}, {Name: "gpt-4o", Platform: "openai"}, {Name: "pricing-only", Platform: "openai"},
 	}}
-	groups := []userAvailableGroup{{ID: 1, Platform: "openai"}, {ID: 2, Platform: "openai"}, {ID: 3, Platform: "openai"}}
+	groups := []userAvailableGroup{
+		{ID: 1, Name: "标准", Platform: "openai", i18n: service.GroupI18n{"en": {Name: "Standard"}}},
+		{ID: 2, Name: "默认", Platform: "openai"},
+		{ID: 3, Platform: "openai"},
+	}
+	localizeUserAvailableGroups(groups, "en")
 	configs := map[int64]*service.Group{
 		1: {ID: 1, ModelAllowlist: service.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-5"}}},
 		2: {ID: 2, ModelAllowlist: service.GroupModelAllowlist{Enabled: true, Models: []string{"gpt-4o"}}},
@@ -304,6 +309,8 @@ func TestSupportedPlatformSections_IndependentGroups(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, sections, 1)
 	require.Len(t, sections[0].Groups, 2)
+	require.Equal(t, "Standard", sections[0].Groups[0].Name)
+	require.Equal(t, "默认", sections[0].Groups[1].Name)
 	require.Equal(t, "gpt-5", sections[0].Groups[0].SupportedModels[0].Name)
 	require.Equal(t, "gpt-4o", sections[0].Groups[1].SupportedModels[0].Name)
 	require.Len(t, sections[0].SupportedModels, 2)

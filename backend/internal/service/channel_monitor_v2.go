@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 )
 
 const (
@@ -30,16 +32,28 @@ const (
 	ChannelMonitorV2GroupByPlatformGroupModel ChannelMonitorV2GroupBy = "platform_group_model"
 )
 
+// ChannelMonitorV2FactoryPlatforms are the six platforms seeded by migration 194.
+// They stay in every saved config. Operators can disable them, but not remove them.
+var ChannelMonitorV2FactoryPlatforms = []string{
+	"anthropic", "openai", "grok", "kiro", "gemini", "antigravity",
+}
+
+const channelMonitorV2MaxPlatforms = 64
+
 type ChannelMonitorV2PlatformConfig struct {
 	Platform string   `json:"platform"`
 	Enabled  bool     `json:"enabled"`
 	Models   []string `json:"models"`
 }
 
+// ChannelMonitorV2Config is the saved operator document.
+// Platforms keeps submitted array order, which is the display order for filters,
+// cards, and the matrix. Factory platforms are restored if omitted. The model
+// ranking table stays ordered by request volume.
 type ChannelMonitorV2Config struct {
 	CandyProbes []ChannelMonitorV2CandyProbe `json:"candy_probes,omitempty"`
 	// CandyHistoryLimit is how many recent checks each model shows on a card.
-	// Zero means the default; stored values are 30–100.
+	// Zero means the default; stored values are 15–100.
 	CandyHistoryLimit      int                              `json:"candy_history_limit"`
 	Version                int                              `json:"version"`
 	Enabled                bool                             `json:"enabled"`
@@ -804,8 +818,8 @@ func normalizeChannelMonitorV2Config(cfg *ChannelMonitorV2Config) error {
 	for i := range cfg.Platforms {
 		p := &cfg.Platforms[i]
 		p.Platform = strings.ToLower(strings.TrimSpace(p.Platform))
-		if p.Platform == "" {
-			return fmt.Errorf("%w: empty platform", ErrChannelMonitorV2InvalidConfig)
+		if !validChannelMonitorV2Platform(p.Platform) {
+			return fmt.Errorf("%w: invalid platform %q", ErrChannelMonitorV2InvalidConfig, p.Platform)
 		}
 		if _, ok := seen[p.Platform]; ok {
 			return fmt.Errorf("%w: duplicate platform %s", ErrChannelMonitorV2InvalidConfig, p.Platform)
@@ -813,8 +827,73 @@ func normalizeChannelMonitorV2Config(cfg *ChannelMonitorV2Config) error {
 		seen[p.Platform] = struct{}{}
 		p.Models = normalizeStringSet(p.Models)
 	}
-	sort.Slice(cfg.Platforms, func(i, j int) bool { return cfg.Platforms[i].Platform < cfg.Platforms[j].Platform })
+	// Keep the submitted order. It is the public display order.
+	ensureChannelMonitorV2FactoryPlatforms(cfg)
+	if len(cfg.Platforms) > channelMonitorV2MaxPlatforms {
+		return fmt.Errorf("%w: too many platforms", ErrChannelMonitorV2InvalidConfig)
+	}
 	return nil
+}
+
+func validChannelMonitorV2Platform(platform string) bool {
+	if platform == "" || len(platform) > 64 {
+		return false
+	}
+	for i, r := range platform {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case (r == '_' || r == '-') && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func ensureChannelMonitorV2FactoryPlatforms(cfg *ChannelMonitorV2Config) {
+	present := make(map[string]struct{}, len(cfg.Platforms))
+	for _, item := range cfg.Platforms {
+		present[item.Platform] = struct{}{}
+	}
+	for _, id := range ChannelMonitorV2FactoryPlatforms {
+		if _, ok := present[id]; ok {
+			continue
+		}
+		cfg.Platforms = append(cfg.Platforms, ChannelMonitorV2PlatformConfig{
+			Platform: id,
+			Enabled:  true,
+			Models:   []string{},
+		})
+	}
+}
+
+// ChannelMonitorV2PlatformIndex is the configured display position.
+// Platforms missing from config sort after every configured platform.
+func ChannelMonitorV2PlatformIndex(cfg ChannelMonitorV2Config, platform string) int {
+	platform = strings.ToLower(strings.TrimSpace(platform))
+	for i, item := range cfg.Platforms {
+		if item.Platform == platform {
+			return i
+		}
+	}
+	return len(cfg.Platforms)
+}
+
+// ChannelMonitorV2PlatformLabel is the catalog display name, with factory aliases
+// that are not registered as group platforms.
+func ChannelMonitorV2PlatformLabel(platform string) string {
+	platform = strings.ToLower(strings.TrimSpace(platform))
+	if spec, ok := domain.LookupPlatform(platform); ok && spec.DisplayName != "" {
+		return spec.DisplayName
+	}
+	switch platform {
+	case "kiro":
+		return "Kiro"
+	case domain.PlatformComposite:
+		return "Composite"
+	default:
+		return platform
+	}
 }
 
 // DefaultChannelMonitorV2IgnoredErrorCategories are factory defaults for

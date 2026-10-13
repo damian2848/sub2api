@@ -49,7 +49,7 @@ export default {
           storageEntries: '进程暂存图片数',
           ttlMinutes: '链接有效期 (分钟)',
           retentionHint: '支持 PNG、JPEG、GIF 和 WebP，单张仍受 64 百万像素保护。图片数量和总大小统计整份请求中的内嵌图片（含历史消息、工具截图和重复项），大小按解码后计算。保存后新转换立即使用新限制；链接有效期从最后一次提交起算，已有链接在再次提交前保留原到期时间。降低暂存上限不会删除有效图片，占用超限时拒绝新增转换。链接持有者可在有效期内读取。',
-          capacityHint: '请求接入限制覆盖 OpenAI/Composite 的 Responses、Chat 和 Messages HTTP 请求, 包括纯文本. 大请求可用并发更低; 超额返回 503, 不在内存中排队. 提高预算会增加内存压力.',
+          capacityHint: '请求接入限制只作用于转发给已开启 Excel / BPS 协议的 OAuth 账号的 Responses HTTP 请求, 其他账号处理的请求 (包括纯文本) 不受影响. 大请求可用并发更低; 超额时先切换其他账号, 仍无可用账号时返回 503, 不在内存中排队. 提高预算会增加内存压力.',
           invalidBaseUrl: '请填写有效的 HTTPS 访问地址, 不包含路径, 账号密码, 查询参数或片段.',
           invalidCapacity: '请求体上限须为 1–{bodyMiB} MiB，共享预算为 {minBudgetMiB}–{budgetMiB} MiB 且至少为请求体的 8 倍，在途请求数为 1–{requests}。',
         },
@@ -1385,6 +1385,14 @@ export default {
       long_context_badge: {
         label: '展示长上下文计费标识',
         description: '开启后，使用详情中触发长上下文阶梯计费的记录会在费用旁显示 x2 标识；默认开启。',
+      },
+      cache_rate: {
+        label: '显示使用记录缓存率',
+        description: '开启后，使用记录的状态列显示单条请求的缓存率。关闭后管理端和用户端都不显示。默认开启。',
+      },
+      cache_rate_to_users: {
+        label: '向用户展示缓存率',
+        description: '开启后，用户在自己的用量页也能看到单条请求的缓存率。默认关闭，仅管理端可见。',
       },
       saveSettings: '保存设置',
       saving: '保存中...',

@@ -12,6 +12,13 @@ export default {
         "availability": "Availability",
         "ttft": "First token",
         "windows": "Last {count} time windows",
+        "sampledWindows": "Latest {count} samples",
+        "noSamples": "No samples in this range",
+        "timelineMode": {
+            "label": "Card sample display",
+            "windows": "Time windows",
+            "samples": "Latest 18 samples"
+        },
         "refreshIn": "Refresh in {seconds}s",
         "trafficHistory": "Observed request health timeline",
         "health": {
@@ -28,8 +35,8 @@ export default {
         "disabledHint": "Intelligence checks are not enabled for this group. An administrator can configure them in Channel Monitor.",
         "invalid": 'Enter a model and an integer interval from 1 to 1440 minutes.',
         "historyLimit": "Recent checks to show",
-        "historyLimitHint": "How many recent checks each model shows on a card. 30–100, default 100. Missing checks stay gray.",
-        "historyLimitInvalid": "Recent checks must be an integer from 30 to 100.",
+        "historyLimitHint": "How many recent checks each model shows on a card. 15–100, default 100. Missing checks stay gray.",
+        "historyLimitInvalid": "Recent checks must be an integer from 15 to 100.",
         "duplicateModel": "The same group cannot repeat a model and reasoning effort.",
         "title": "Reasoning check",
         "cadence": "Every {minutes} min",
@@ -152,7 +159,22 @@ export default {
       refreshAria: 'Aggregation interval',
       platformsTitle: 'Platforms and models',
       platformsHint:
-        'Leave empty = show all real model names; when filled, only listed models get their own rows and the rest roll into “Other”',
+        'Leave empty = show all real model names; when filled, only listed models get their own rows and the rest roll into “Other”. Add a supported platform, or type the same identifier as a group platform. Composite group usage is recorded on the account’s concrete platform.',
+      platformsOrderHint:
+        'List order is the display order for filters, cards, and the matrix. The model summary stays ranked by request volume. The six factory platforms stay; a newly added platform can be deleted only while it is off.',
+      addPlatform: 'Add platform',
+      selectPlatform: 'Choose a supported or group platform',
+      customPlatform: 'Or type the same identifier as a group platform',
+      platformRequired: 'Choose or type a platform to add',
+      platformInvalid:
+        'Use the same identifier as a group platform: lowercase letters, digits, underscores, or hyphens, up to 64 characters',
+      platformDuplicate: 'That platform is already in the list',
+      platformLimit: 'The platform limit has been reached',
+      factoryBadge: 'Factory',
+      moveUp: 'Move up',
+      moveDown: 'Move down',
+      deletePlatform: 'Remove platform',
+      deleteDisabled: 'Turn this platform off before removing it',
       modelsPlaceholder: 'Empty = all real models; or list popular models (rest → Other)',
       badgeAllModels: 'All models',
       badgeOther: '+ Other',
