@@ -300,6 +300,9 @@ func (s *GeminiMessagesCompatService) isAccountUsableForRequestWithPrecheck(
 	if !s.passesRateLimitPreCheckWithCache(ctx, account, requestedModel, precheckResult) {
 		return false
 	}
+	if account.IsGeminiWeb() && !s.passesGeminiWebQuotaPreCheck(ctx, account) {
+		return false
+	}
 
 	return true
 }
@@ -382,7 +385,7 @@ func (s *GeminiMessagesCompatService) selectBestGeminiAccount(
 }
 
 func (s *GeminiMessagesCompatService) buildPreCheckUsageResultMap(ctx context.Context, accounts []Account, requestedModel string) map[int64]bool {
-	if s.rateLimitService == nil || requestedModel == "" || len(accounts) == 0 {
+	if requestedModel == "" || len(accounts) == 0 {
 		return nil
 	}
 
@@ -391,9 +394,23 @@ func (s *GeminiMessagesCompatService) buildPreCheckUsageResultMap(ctx context.Co
 		candidates = append(candidates, &accounts[i])
 	}
 
-	result, err := s.rateLimitService.PreCheckUsageBatch(ctx, candidates, requestedModel)
-	if err != nil {
-		logger.LegacyPrintf("service.gemini_messages_compat", "[Gemini PreCheckBatch] failed: %v", err)
+	result := make(map[int64]bool, len(candidates))
+	for _, account := range candidates {
+		result[account.ID] = true
+	}
+	if s.rateLimitService != nil {
+		prechecked, err := s.rateLimitService.PreCheckUsageBatch(ctx, candidates, requestedModel)
+		if err != nil {
+			logger.LegacyPrintf("service.gemini_messages_compat", "[Gemini PreCheckBatch] failed: %v", err)
+		}
+		for accountID, ok := range prechecked {
+			result[accountID] = ok
+		}
+	}
+	for _, account := range candidates {
+		if result[account.ID] && account.IsGeminiWeb() {
+			result[account.ID] = s.passesGeminiWebQuotaPreCheck(ctx, account)
+		}
 	}
 	return result
 }

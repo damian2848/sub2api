@@ -635,6 +635,11 @@ func (s *RateLimitService) PreCheckUsage(ctx context.Context, account *Account, 
 	if account == nil || account.Platform != PlatformGemini {
 		return true, nil
 	}
+	// Gemini Web accounts expose different account-wide rolling windows through
+	// the browser usage RPC; do not apply Gemini API Studio RPD/RPM quotas here.
+	if account.IsGeminiWeb() {
+		return true, nil
+	}
 	if s.usageRepo == nil || s.geminiQuotaService == nil {
 		return true, nil
 	}
@@ -771,7 +776,7 @@ func (s *RateLimitService) PreCheckUsageBatch(ctx context.Context, accounts []*A
 	}
 	quotaAccounts := make([]quotaAccount, 0, len(accounts))
 	for _, account := range accounts {
-		if account == nil || account.Platform != PlatformGemini {
+		if account == nil || account.Platform != PlatformGemini || account.IsGeminiWeb() {
 			continue
 		}
 		quota, ok := s.geminiQuotaService.QuotaForAccount(ctx, account)

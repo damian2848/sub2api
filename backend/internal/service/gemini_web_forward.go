@@ -135,9 +135,11 @@ func geminiWebPrompt(body []byte) (string, error) {
 }
 
 func webUsage(prompt, answer string) ClaudeUsage {
-	in := estimateGeminiCountTokens([]byte(prompt))
-	out := estimateGeminiCountTokens([]byte(answer))
-	return ClaudeUsage{InputTokens: in, OutputTokens: out}
+	return webUsageWithThinking(prompt, answer, "")
+}
+
+func webUsageWithThinking(prompt, answer, thinking string) ClaudeUsage {
+	return ClaudeUsage{InputTokens: estimateTokensForText(prompt), OutputTokens: estimateTokensForText(answer) + estimateTokensForText(thinking)}
 }
 
 func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context, c *gin.Context, account *Account, originalModel, action string, stream bool, body []byte) (*ForwardResult, error) {
@@ -147,7 +149,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 		if err != nil {
 			return nil, s.writeGoogleError(c, http.StatusBadRequest, err.Error())
 		}
-		c.JSON(http.StatusOK, gin.H{"totalTokens": estimateGeminiCountTokens([]byte(prompt))})
+		c.JSON(http.StatusOK, gin.H{"totalTokens": estimateTokensForText(prompt)})
 		return &ForwardResult{Model: originalModel, UpstreamModel: account.GetMappedModel(originalModel), Usage: ClaudeUsage{}}, nil
 	}
 	if action != "generateContent" && action != "streamGenerateContent" {
@@ -162,11 +164,11 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 	if err != nil {
 		return nil, geminiWebFailoverError(err)
 	}
-	usage := webUsage(prompt, result.Text)
+	usage := webUsageWithThinking(prompt, result.Text, result.Thinking)
 	if stream || action == "streamGenerateContent" {
-		writeGeminiWebNativeStream(c, result.Text)
+		writeGeminiWebNativeStream(c, originalModel, result.Text, usage)
 	} else {
-		writeGeminiWebNativeJSON(c, originalModel, result.Text)
+		writeGeminiWebNativeJSON(c, originalModel, result.Text, usage)
 	}
 	return &ForwardResult{RequestID: result.RequestID, UpstreamHeaders: make(http.Header), Usage: usage, Model: originalModel, UpstreamModel: mapped, Stream: stream, Duration: time.Since(start)}, nil
 }
@@ -192,17 +194,22 @@ func geminiWebFailoverError(err error) error {
 	return &UpstreamFailoverError{StatusCode: status, Stage: stage, Scope: scope, Reason: reason, ClientStatusCode: status, ClientMessage: message}
 }
 
-func writeGeminiWebNativeJSON(c *gin.Context, model, text string) {
-	c.JSON(http.StatusOK, gin.H{"candidates": []any{gin.H{"content": gin.H{"role": "model", "parts": []any{gin.H{"text": text}}}, "finishReason": "STOP", "index": 0}}, "modelVersion": model})
+func geminiWebUsageMetadata(usage ClaudeUsage) gin.H {
+	return gin.H{"promptTokenCount": usage.InputTokens, "candidatesTokenCount": usage.OutputTokens, "totalTokenCount": usage.InputTokens + usage.OutputTokens}
 }
 
-func writeGeminiWebNativeStream(c *gin.Context, text string) {
+func writeGeminiWebNativeJSON(c *gin.Context, model, text string, usage ClaudeUsage) {
+	c.JSON(http.StatusOK, gin.H{"candidates": []any{gin.H{"content": gin.H{"role": "model", "parts": []any{gin.H{"text": text}}}, "finishReason": "STOP", "index": 0}}, "modelVersion": model, "usageMetadata": geminiWebUsageMetadata(usage)})
+}
+
+func writeGeminiWebNativeStream(c *gin.Context, model, text string, usage ClaudeUsage) {
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.WriteHeader(http.StatusOK)
-	b, _ := json.Marshal(gin.H{"candidates": []any{gin.H{"content": gin.H{"role": "model", "parts": []any{gin.H{"text": text}}}, "index": 0}}})
+	b, _ := json.Marshal(gin.H{"candidates": []any{gin.H{"content": gin.H{"role": "model", "parts": []any{gin.H{"text": text}}}, "index": 0}}, "modelVersion": model, "usageMetadata": geminiWebUsageMetadata(usage)})
 	_, _ = c.Writer.Write([]byte("data: " + string(b) + "\n\n"))
-	_, _ = c.Writer.Write([]byte("data: {\"candidates\":[{\"finishReason\":\"STOP\",\"index\":0}]}\n\n"))
+	finish, _ := json.Marshal(gin.H{"candidates": []any{gin.H{"finishReason": "STOP", "index": 0}}, "usageMetadata": geminiWebUsageMetadata(usage)})
+	_, _ = c.Writer.Write([]byte("data: " + string(finish) + "\n\n"))
 	if f, ok := c.Writer.(http.Flusher); ok {
 		f.Flush()
 	}
@@ -229,9 +236,9 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebClaude(ctx context.Context
 	if err != nil {
 		return nil, geminiWebFailoverError(err)
 	}
-	usage := webUsage(prompt, result.Text)
+	usage := webUsageWithThinking(prompt, result.Text, result.Thinking)
 	if req.Stream {
-		writeGeminiWebClaudeStream(c, req.Model, result.Text)
+		writeGeminiWebClaudeStream(c, req.Model, result.Text, usage)
 	} else {
 		writeGeminiWebClaudeJSON(c, req.Model, result.Text, usage)
 	}
@@ -242,7 +249,7 @@ func writeGeminiWebClaudeJSON(c *gin.Context, model, text string, usage ClaudeUs
 	c.JSON(http.StatusOK, gin.H{"id": "msg_gemini_web", "type": "message", "role": "assistant", "model": model, "content": []any{gin.H{"type": "text", "text": text}}, "stop_reason": "end_turn", "stop_sequence": nil, "usage": usage})
 }
 
-func writeGeminiWebClaudeStream(c *gin.Context, model, text string) {
+func writeGeminiWebClaudeStream(c *gin.Context, model, text string, usage ClaudeUsage) {
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.WriteHeader(http.StatusOK)
@@ -251,7 +258,7 @@ func writeGeminiWebClaudeStream(c *gin.Context, model, text string) {
 		"message": map[string]any{
 			"id": "msg_gemini_web", "type": "message", "role": "assistant", "model": model,
 			"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
-			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
+			"usage": map[string]any{"input_tokens": usage.InputTokens, "output_tokens": 0},
 		},
 	})
 	writeSSE(c.Writer, "content_block_start", map[string]any{
@@ -266,7 +273,7 @@ func writeGeminiWebClaudeStream(c *gin.Context, model, text string) {
 	writeSSE(c.Writer, "message_delta", map[string]any{
 		"type":  "message_delta",
 		"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
-		"usage": map[string]any{"output_tokens": 0},
+		"usage": map[string]any{"output_tokens": usage.OutputTokens},
 	})
 	writeSSE(c.Writer, "message_stop", map[string]any{"type": "message_stop"})
 	if f, ok := c.Writer.(http.Flusher); ok {
@@ -303,10 +310,10 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebChatCompletions(ctx contex
 	if err != nil {
 		return nil, geminiWebFailoverError(err)
 	}
-	usage := webUsage(prompt, webResult.Text)
+	usage := webUsageWithThinking(prompt, webResult.Text, webResult.Thinking)
 	id := "chatcmpl-gemini-web"
 	if req.Stream {
-		writeGeminiWebCCStream(c, id, req.Model, webResult.Text)
+		writeGeminiWebCCStream(c, id, req.Model, webResult.Text, usage, req.StreamOptions != nil && req.StreamOptions.IncludeUsage)
 	} else {
 		writeGeminiWebCCJSON(c, id, req.Model, webResult.Text, usage)
 	}
@@ -317,7 +324,7 @@ func writeGeminiWebCCJSON(c *gin.Context, id, model, text string, usage ClaudeUs
 	c.JSON(http.StatusOK, gin.H{"id": id, "object": "chat.completion", "created": time.Now().Unix(), "model": model, "choices": []any{gin.H{"index": 0, "message": gin.H{"role": "assistant", "content": text}, "finish_reason": "stop"}}, "usage": gin.H{"prompt_tokens": usage.InputTokens, "completion_tokens": usage.OutputTokens, "total_tokens": usage.InputTokens + usage.OutputTokens}})
 }
 
-func writeGeminiWebCCStream(c *gin.Context, id, model, text string) {
+func writeGeminiWebCCStream(c *gin.Context, id, model, text string, usage ClaudeUsage, includeUsage bool) {
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.WriteHeader(http.StatusOK)
 	chunk := func(delta, finish string) {
@@ -334,6 +341,10 @@ func writeGeminiWebCCStream(c *gin.Context, id, model, text string) {
 	chunk("", "")
 	chunk(text, "")
 	chunk("", "stop")
+	if includeUsage {
+		b, _ := json.Marshal(gin.H{"id": id, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": model, "choices": []any{}, "usage": gin.H{"prompt_tokens": usage.InputTokens, "completion_tokens": usage.OutputTokens, "total_tokens": usage.InputTokens + usage.OutputTokens}})
+		_, _ = c.Writer.Write([]byte("data: " + string(b) + "\n\n"))
+	}
 	_, _ = c.Writer.Write([]byte("data: [DONE]\n\n"))
 	if f, ok := c.Writer.(http.Flusher); ok {
 		f.Flush()

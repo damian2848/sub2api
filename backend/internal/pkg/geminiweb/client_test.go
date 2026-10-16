@@ -67,6 +67,41 @@ func TestClientCompleteRefreshesRejectedSession(t *testing.T) {
 	}
 }
 
+func TestClientFetchQuotaParsesUsageWindows(t *testing.T) {
+	calls := 0
+	do := func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.Method == http.MethodGet {
+			return response(http.StatusOK, `"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid"`, nil), nil
+		}
+		if !strings.Contains(req.URL.Query().Get("rpcids"), "jSf9Qc") {
+			t.Fatalf("quota RPC = %q", req.URL.Query().Get("rpcids"))
+		}
+		payload, _ := json.Marshal([]any{2, []any{
+			[]any{"", "0.25", 1, []any{"1730000000", "0"}},
+			[]any{"", "1", 2, []any{"1731000000", "0"}},
+		}})
+		outer, _ := json.Marshal([]any{[]any{"wrb.fr", "jSf9Qc", string(payload)}})
+		return response(http.StatusOK, ")]}'\n"+string(outer), nil), nil
+	}
+	client := NewClient()
+	cred := Credential{Cookie: "__Secure-1PSID=psid", BaseURL: "https://gemini.test"}
+	result, err := client.FetchQuota(context.Background(), cred, do)
+	if err != nil {
+		t.Fatalf("FetchQuota() error = %v", err)
+	}
+	if result.Quota.Plan != "PRO" || len(result.Quota.Windows) != 2 || !result.Quota.Windows[0].HasPercent {
+		t.Fatalf("unexpected quota = %#v", result.Quota)
+	}
+	if result.Quota.Windows[0].RemainingPercent != 75 || !result.Quota.Windows[0].HasReset {
+		t.Fatalf("unexpected five-hour window = %#v", result.Quota.Windows[0])
+	}
+	_, err = client.FetchQuota(context.Background(), cred, do)
+	if err != nil || calls != 2 {
+		t.Fatalf("quota result should be cached for one minute: calls=%d err=%v", calls, err)
+	}
+}
+
 func frameBody(answer string) string {
 	payload, _ := json.Marshal([]any{nil, []any{"cid", "rid"}, nil, nil, []any{[]any{nil, []any{answer}}}})
 	outer, _ := json.Marshal([]any{[]any{"wrb.fr", "req", string(payload)}})

@@ -524,6 +524,11 @@ func (s *BillingService) initFallbackPricing() {
 		CacheReadPricePerToken: 0.075e-6,
 		SupportsCacheBreakdown: false,
 	}
+	// Gemini Web's lightweight Flash mode uses the same public Flash token
+	// price when no channel-specific price is configured. Keeping an explicit
+	// fallback prevents its browser model id from being recorded at $0.
+	s.fallbackPrices["gemini-3.5-flash-lite"] = s.fallbackPrices["gemini-3.8-flash"]
+	s.fallbackPrices["gemini-auto"] = s.fallbackPrices["gemini-3.8-flash"]
 
 	// Gemini 4 Argon (Google AI pricing: $2 input / $10 output / $0.10 cached
 	// input per MTok, promotional through 2026-11-30; official rates double to
@@ -1103,6 +1108,12 @@ func (s *BillingService) getFallbackPricing(model string) *ModelPricing {
 	}
 	if strings.Contains(modelLower, "gemini-3.8-flash") || strings.Contains(modelLower, "gemini-3-8-flash") {
 		return s.fallbackPrices["gemini-3.8-flash"]
+	}
+	if strings.Contains(modelLower, "gemini-3.5-flash-lite") || strings.Contains(modelLower, "gemini-3-5-flash-lite") {
+		return s.fallbackPrices["gemini-3.5-flash-lite"]
+	}
+	if strings.Contains(modelLower, "gemini-auto") {
+		return s.fallbackPrices["gemini-auto"]
 	}
 	// Cyber 变体不享受 Gemini 4 Argon 的优惠价，必须先于 "gemini-4-argon" 判。
 	if strings.Contains(modelLower, "gemini-4-argon-cyber") {

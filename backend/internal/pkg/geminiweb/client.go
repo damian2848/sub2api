@@ -60,14 +60,16 @@ type session struct {
 }
 
 type Client struct {
-	mu       sync.Mutex
-	sessions map[string]session
-	metadata map[string][]any
-	ttl      time.Duration
+	mu         sync.Mutex
+	sessions   map[string]session
+	metadata   map[string][]any
+	quotaCache map[string]quotaCacheEntry
+	ttl        time.Duration
+	quotaTTL   time.Duration
 }
 
 func NewClient() *Client {
-	return &Client{sessions: make(map[string]session), metadata: make(map[string][]any), ttl: 20 * time.Minute}
+	return &Client{sessions: make(map[string]session), metadata: make(map[string][]any), quotaCache: make(map[string]quotaCacheEntry), ttl: 20 * time.Minute, quotaTTL: time.Minute}
 }
 
 func (c *Client) Invalidate(cookie string) {
@@ -76,6 +78,11 @@ func (c *Client) Invalidate(cookie string) {
 	for key := range c.sessions {
 		if key == cookieKey(cookie) || strings.HasPrefix(key, prefix) {
 			delete(c.sessions, key)
+		}
+	}
+	for key := range c.quotaCache {
+		if key == cookieKey(cookie) || strings.HasPrefix(key, prefix) {
+			delete(c.quotaCache, key)
 		}
 	}
 	c.mu.Unlock()
