@@ -1,6 +1,6 @@
 # Fork 源码基线与保留改动
 
-本 fork 自 2026-10-11 起以 `ranxi2001/sub2api` 的完整 `production` 源码为基线。当前固定提交为 `30b8a4b30`（production 最新源码，2026-10-13 同步；包含 v2.10.7 之后的变更）；旧主线基线为 `345458a70`（v0.2.45）。保留双方提交历史，但源码不继续混用旧 fork 的网关、调度、Prism 或监控实现。
+本 fork 自 2026-10-11 起以 `ranxi2001/sub2api` 的完整 `production` 源码为基线。当前固定提交为 `7393d736e`（production 与 v2.12.0 一致，2026-10-16 发布；包含上游 v0.2.17 适配及后续兼容修复）；旧主线基线为 `345458a70`（v0.2.45）。保留双方提交历史，但源码不继续混用旧 fork 的网关、调度、Prism 或监控实现。
 
 ## 保留范围
 
@@ -20,7 +20,7 @@
 
 旧 fork 的托管 Prism 账号、专属监控设置等不能视为与二开实现兼容，生产切换前需在数据库副本上验证，并按二开部署方式检查运行配置。此次源码切换不代表已经执行生产升级。
 
-本地仓库的 `fork` 远端仍指向 `damian2848/sub2api`，`origin` 指向 `ranxi2001/sub2api`。推送、发版和部署应显式指定目标。本 fork 沿用 `0.2.x` 发布序列（当前 v0.2.54，源码基线二开 production `30b8a4b30`），更新器指向 `damian2848/sub2api`，避免自动更新覆盖保留的定制。发布流程沿用二开工作流，并遵守本仓库 `PUBLISH_CONTAINER_IMAGES=false` 设置，只发布程序与重新登录运行包。上述发布身份与工作流适配不改变二开业务功能。
+本地仓库的 `fork` 远端仍指向 `damian2848/sub2api`，`origin` 指向 `ranxi2001/sub2api`。推送、发版和部署应显式指定目标。本 fork 当前源码版本为 `2.12.0`，更新器指向 `damian2848/sub2api`，避免自动更新覆盖保留的定制。发布流程沿用二开工作流，并遵守本仓库 `PUBLISH_CONTAINER_IMAGES=false` 设置，只发布程序与重新登录运行包。上述发布身份与工作流适配不改变二开业务功能。
 
 ## v0.2.49 同步记录
 
@@ -67,3 +67,9 @@
 新增 242_group_i18n、243/244/245 Gemini 缓存迁移及 276_channel_monitor_v2_candy_history_min。迁移按完整文件名识别，已有 276_codex_harvest_ticket_usage 不改名、不改内容，二者独立执行。升级前备份数据库；回退旧版前先处理新建 Gemini 活跃缓存，替换二进制不撤销迁移。在途余额预留沿用上游默认开启及 Redis 故障时的 fail-open 行为。
 
 本次发布程序与重新登录运行包，不部署生产；原有 4 个未提交的调度展示文件单独保存，不包含在发布中。
+
+## v2.12.0 最新源码同步
+
+完整合并 ranxi2001/sub2api production `7393d736e`，包含 Session Cookie 导出、质量检测瞬时错误重试、模型隔离自动恢复、Pelican 测智重试与白名单筛选、Gemini 4 Argon/Antigravity 兼容、Responses `created_at`、Web Search 模拟、请求时区、支付退款和 API 兼容 token 下限等上游修复。
+
+保留本 fork 的模型白名单与账号测试、Gemini Web、Stripe 内嵌充值、门票使用事件、可用渠道分组过滤和完整分组展示。新增迁移包括 `285_openai_session_cookies.sql`、`285_registration_ip_quotas.sql` 和 `286_registration_ip_quota_created_at.sql`；备份或回退时需保留原 `TOTP_ENCRYPTION_KEY`，替换二进制不会撤销已执行的支付退款或余额变化。
