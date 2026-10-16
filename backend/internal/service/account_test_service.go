@@ -29,6 +29,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/geminiweb"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai_compat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
@@ -2656,6 +2657,9 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 	if testModelID == "" {
 		testModelID = geminicli.DefaultTestModel
 	}
+	if account.IsGeminiWeb() {
+		return s.testGeminiWebAccountConnection(c, account, testModelID, prompt)
+	}
 
 	// For static upstream credentials with model mapping, map the model
 	if account.Type == AccountTypeAPIKey || account.Type == AccountTypeServiceAccount {
@@ -2720,6 +2724,55 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 	return s.processGeminiStream(c, resp.Body)
 }
 
+// testGeminiWebAccountConnection probes the browser-facing Gemini session
+// directly.  It deliberately uses the same Cookie transport as normal gateway
+// requests instead of trying to construct an AI Studio API request.
+func (s *AccountTestService) testGeminiWebAccountConnection(c *gin.Context, account *Account, modelID, prompt string) error {
+	if s.httpUpstream == nil {
+		return s.sendErrorAndEnd(c, "Upstream HTTP client is not configured")
+	}
+	if strings.TrimSpace(prompt) == "" {
+		prompt = defaultGeminiTextTestPrompt
+	}
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	c.Writer.Header().Set("Cache-Control", "no-cache")
+	c.Writer.Header().Set("Connection", "keep-alive")
+	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.Flush()
+	s.sendEvent(c, TestEvent{Type: "test_start", Model: modelID})
+
+	cookie := account.GetCredential("gemini_web_cookie")
+	cred := geminiweb.Credential{
+		Cookie:    cookie,
+		AuthUser:  int(account.GetCredentialAsInt64("auth_user")),
+		BaseURL:   "https://gemini.google.com",
+		UserAgent: account.GetCredential("user_agent"),
+	}
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+	result, err := geminiweb.NewClient().Complete(c.Request.Context(), cred, geminiweb.Request{Model: modelID, Prompt: prompt}, func(req *http.Request) (*http.Response, error) {
+		return s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
+	})
+	if result.UpdatedCookie != "" && result.UpdatedCookie != cookie {
+		updated := shallowCopyMap(account.Credentials)
+		updated["gemini_web_cookie"] = result.UpdatedCookie
+		if persistErr := persistAccountCredentials(c.Request.Context(), s.accountRepo, account, updated); persistErr != nil {
+			account.Credentials = updated
+		}
+	}
+	if err != nil {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Gemini Web request failed: %s", err.Error()))
+	}
+	if strings.TrimSpace(result.Text) == "" {
+		return s.sendErrorAndEnd(c, "Gemini Web returned no text")
+	}
+	s.sendEvent(c, TestEvent{Type: "content", Text: result.Text})
+	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+	return nil
+}
+
 // routeAntigravityTest 路由 Antigravity 账号的测试请求。
 // APIKey 类型走原生协议（与 gateway_handler 路由一致），OAuth/Upstream 走 CRS 中转。
 func (s *AccountTestService) routeAntigravityTest(c *gin.Context, account *Account, modelID string, prompt string) error {
@@ -2729,12 +2782,12 @@ func (s *AccountTestService) routeAntigravityTest(c *gin.Context, account *Accou
 		}
 		return s.testClaudeAccountConnection(c, account, modelID)
 	}
-	return s.testAntigravityAccountConnection(c, account, modelID)
+	return s.testAntigravityAccountConnection(c, account, modelID, prompt)
 }
 
 // testAntigravityAccountConnection tests an Antigravity account's connection
 // 支持 Claude 和 Gemini 两种协议，使用非流式请求
-func (s *AccountTestService) testAntigravityAccountConnection(c *gin.Context, account *Account, modelID string) error {
+func (s *AccountTestService) testAntigravityAccountConnection(c *gin.Context, account *Account, modelID string, prompt string) error {
 	ctx := c.Request.Context()
 
 	testModelID := antigravityConnectionTestModel(modelID)
@@ -2753,8 +2806,8 @@ func (s *AccountTestService) testAntigravityAccountConnection(c *gin.Context, ac
 	// Send test_start event
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: testModelID})
 
-	// 调用 AntigravityGatewayService.TestConnection（复用协议转换逻辑）
-	result, err := s.antigravityGatewayService.TestConnection(ctx, account, testModelID)
+	// 调用 AntigravityGatewayService.TestConnectionWithPrompt（复用协议转换逻辑）
+	result, err := s.antigravityGatewayService.TestConnectionWithPrompt(ctx, account, testModelID, prompt)
 	if err != nil {
 		return s.sendErrorAndEnd(c, err.Error())
 	}
@@ -2762,6 +2815,13 @@ func (s *AccountTestService) testAntigravityAccountConnection(c *gin.Context, ac
 	// 发送响应内容
 	if result.Text != "" {
 		s.sendEvent(c, TestEvent{Type: "content", Text: result.Text})
+	}
+	for _, img := range result.Images {
+		s.sendEvent(c, TestEvent{
+			Type:     "image",
+			ImageURL: img.ImageURL,
+			MimeType: img.MimeType,
+		})
 	}
 
 	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})

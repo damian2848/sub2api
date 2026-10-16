@@ -408,7 +408,14 @@ func recordCodexHarvestSelect(account *Account, model, kind, reason, detail stri
 	if account != nil {
 		event.AccountID = account.ID
 		event.AccountName = account.Name
+		if kind == "selected" && strings.TrimSpace(detail) == "" {
+			detail = strings.TrimSpace(account.Name)
+			if detail == "" {
+				detail = fmt.Sprintf("account #%d", account.ID)
+			}
+		}
 	}
+	event.Detail = detail
 	recordCodexHarvestFlow(event)
 }
 
@@ -776,13 +783,7 @@ func BuildCodexHarvestFlow(ctx context.Context, cfg *config.Config, settings *Se
 	ticketCfg.Enabled = enabled
 	ticketCfg.FailClosed = failClosed
 	rawEvents := listCodexHarvestFlowEvents()
-	events := make([]CodexHarvestFlowEvent, 0, len(rawEvents))
-	for _, event := range rawEvents {
-		if event.Stage == "select" && event.Kind != "schedule_join" && event.Kind != "schedule_leave" && event.Kind != "candy_pass" && event.Kind != "candy_fail" {
-			continue
-		}
-		events = append(events, event)
-	}
+	events := rawEvents
 	for i := range events {
 		if strings.TrimSpace(events[i].Node) != "" {
 			events[i].Node = mihomo.NodeDisplayName(events[i].Node)
@@ -873,9 +874,9 @@ func BuildCodexHarvestFlow(ctx context.Context, cfg *config.Config, settings *Se
 			snapshot.Counts.TicketAccept++
 		case "reject":
 			snapshot.Counts.TicketReject++
-		case "schedule_join":
+		case "schedule_join", "selected":
 			snapshot.Counts.SelectOK++
-		case "schedule_leave":
+		case "schedule_leave", "skipped":
 			snapshot.Counts.SelectSkip++
 		case "failed", "unavailable":
 			snapshot.Counts.SelectFail++
@@ -991,9 +992,9 @@ func buildCodexHarvestFlowStages(snapshot CodexHarvestFlowSnapshot) []CodexHarve
 	if event, ok := last["select"]; ok {
 		copyFlowMetrics(&selectStage, event)
 		switch event.Kind {
-		case "schedule_join", "candy_pass":
+		case "schedule_join", "candy_pass", "selected":
 			selectStage.Status = "ok"
-		case "schedule_leave":
+		case "schedule_leave", "skipped":
 			selectStage.Status = "warn"
 		default:
 			selectStage.Status = "fail"

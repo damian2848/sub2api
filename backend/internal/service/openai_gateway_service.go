@@ -236,8 +236,10 @@ type OpenAIUsage struct {
 
 // OpenAIForwardResult represents the result of forwarding
 type OpenAIForwardResult struct {
-	RequestID  string
-	ResponseID string
+	// RegionalMetered prevents the legacy asynchronous path from double charging.
+	RegionalMetered bool
+	RequestID       string
+	ResponseID      string
 	// UpstreamHeaders 是直接上游的响应头，用于按账户配置解析上游请求标识。
 	UpstreamHeaders http.Header
 	Usage           OpenAIUsage
@@ -454,6 +456,8 @@ var ErrNoAvailableCompactAccounts = errors.New("no available accounts support /r
 
 // OpenAIGatewayService handles OpenAI API gateway operations
 type OpenAIGatewayService struct {
+	requestTimezoneEgress   openAIRequestTimezoneEgress
+	requestTimezoneProber   ProxyExitInfoProber
 	stopAstraSetup          func()
 	codexWSAnchors          codexWSAnchorStore
 	priorityScheduling      prioritySchedulingState
@@ -566,6 +570,7 @@ type OpenAIGatewayService struct {
 	openaiCodexTicketStopped       bool
 
 	requireLatestTurnAdmission bool
+	regionalMetering           *RegionalMetering
 	codexHarvest               *CodexHarvestService
 	codexHarvestRoundActive    atomic.Bool
 }
@@ -783,6 +788,9 @@ func (s *OpenAIGatewayService) billingDeps() *billingDeps {
 // CloseOpenAIWSPool 关闭 OpenAI WebSocket 连接池的后台 worker 和空闲连接。
 // 应在应用优雅关闭时调用。
 func (s *OpenAIGatewayService) CloseOpenAIWSPool() {
+	if s != nil && s.regionalMetering != nil && s.regionalMetering.Stop != nil {
+		s.regionalMetering.Stop()
+	}
 	if s != nil && s.stopAstraSetup != nil {
 		s.stopAstraSetup()
 	}

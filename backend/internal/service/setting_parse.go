@@ -274,6 +274,8 @@ func (s *SettingService) InitializeDefaultSettings(ctx context.Context) error {
 		SettingKeyOpenAICodexClientVersion:                           "",
 		SettingKeyOpenAICodexClientVersionSynced:                     "",
 		SettingKeyOpenAICodexVersionAutoSyncEnabled:                  "true",
+		SettingKeyOpenAIRequestTimezoneEnabled:                       "true",
+		SettingKeyOpenAIRequestTimezoneAuto:                          "true",
 		SettingKeyOpenAICodexTicketHarvestProxyURL:                   "",
 		SettingKeyClaudeCodeClientVersion:                            "",
 		SettingKeyClaudeCodeClientVersionSynced:                      "",
@@ -969,7 +971,8 @@ func (s *SettingService) parseSettings(settings map[string]string) *SystemSettin
 	} else {
 		result.OpenAICodexVersionAutoSyncEnabled = true
 	}
-	result.OpenAIRequestTimezoneEnabled = settings[SettingKeyOpenAIRequestTimezoneEnabled] == "true"
+	result.OpenAIRequestTimezoneEnabled = strings.TrimSpace(settings[SettingKeyOpenAIRequestTimezoneEnabled]) == "" || settings[SettingKeyOpenAIRequestTimezoneEnabled] == "true"
+	result.OpenAIRequestTimezoneAuto = strings.TrimSpace(settings[SettingKeyOpenAIRequestTimezoneAuto]) == "" || settings[SettingKeyOpenAIRequestTimezoneAuto] == "true"
 	if v, ok := settings[SettingKeyOpenAICodexTicketEnabled]; ok && v != "" {
 		result.OpenAICodexTicketEnabled = v == "true"
 	} else if s != nil && s.cfg != nil {

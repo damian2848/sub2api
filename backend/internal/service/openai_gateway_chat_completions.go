@@ -61,7 +61,15 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
-	return s.forwardAsChatCompletions(ctx, c, account, body, promptCacheKey, defaultMappedModel, false)
+	meterCtx, finish, err := s.beginRegionalMeter(ctx, c, account, body)
+	if err != nil {
+		return nil, err
+	}
+	if regionalMeterAttemptFrom(meterCtx) != nil && c.Request != nil {
+		c.Request = c.Request.WithContext(meterCtx)
+	}
+	result, err := s.forwardAsChatCompletions(meterCtx, c, account, body, promptCacheKey, defaultMappedModel, false)
+	return result, regionalMeterFinishForward(meterCtx, result, err, finish)
 }
 
 func (s *OpenAIGatewayService) forwardAsChatCompletions(
@@ -244,7 +252,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletions(
 		// Normal path: convert Chat Completions → Responses.
 		// ChatCompletionsToResponses always sets Stream=true (upstream always streams).
 		chatReq.Model = upstreamModel
-		responsesReq, err = apicompat.ChatCompletionsToResponses(&chatReq)
+		responsesReq, err = chatCompletionsToResponses(s.cfg, &chatReq)
 		if err != nil {
 			return nil, fmt.Errorf("convert chat completions to responses: %w", err)
 		}
@@ -707,6 +715,10 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 		observer = beginUpstreamResponseModelObservation(c)
 	}
 	observer.Observe(finalResponse.Model, true)
+	if finalResponse.Usage != nil && c.Request != nil {
+		raw, _ := json.Marshal(finalResponse)
+		regionalMeterObserveUsage(c.Request.Context(), raw, "json")
+	}
 	observer.ObserveServiceTier(finalResponse.ServiceTier, true)
 	if strings.TrimSpace(finalResponse.Status) == "failed" {
 		payload, _ := json.Marshal(gin.H{"type": "response.failed", "response": finalResponse})
@@ -935,6 +947,9 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 			return false
 		}
 		observer.ObserveOpenAI([]byte(payload), event.Type)
+		if c.Request != nil {
+			regionalMeterObserveUsage(c.Request.Context(), []byte(payload), event.Type)
+		}
 		refusalDetector.ObservePayload([]byte(payload))
 		s.parseSSEUsageBytesWithType([]byte(payload), event.Type, &usage)
 

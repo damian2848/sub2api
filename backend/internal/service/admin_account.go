@@ -115,6 +115,7 @@ var duplicateAccountDiscardedExtraKeys = map[string]struct{}{
 	"quota_weekly_reset_at": {},
 	// Provider observations, capability probes, and transient scheduling state.
 	"model_rate_limits":                      {},
+	QualityModelIsolationKey:                 {},
 	"session_window_utilization":             {},
 	"passive_usage_7d_utilization":           {},
 	"passive_usage_7d_reset":                 {},
@@ -362,7 +363,8 @@ func (s *adminServiceImpl) DuplicateAccount(ctx context.Context, id int64, actor
 }
 
 func normalizeAccountConcurrency(platform, accountType string, concurrency int) int {
-	if platform == PlatformGrok && accountType == AccountTypeOAuth {
+	if (platform == PlatformGrok && accountType == AccountTypeOAuth) ||
+		(platform == PlatformGemini && accountType == AccountTypeGeminiWeb) {
 		if concurrency <= 0 {
 			return 1
 		}
@@ -565,7 +567,10 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 		return nil, err
 	}
 	// Never persist ephemeral SSO/password secrets after OAuth conversion.
-	input.Credentials = SanitizeStoredCredentials(input.Platform, input.Credentials)
+	input.Credentials = SanitizeStoredCredentialsForAccount(input.Platform, input.Type, input.Credentials)
+	if err := ValidateGeminiWebCredentials(input.Platform, input.Type, input.Credentials); err != nil {
+		return nil, err
+	}
 
 	account, err := buildAccountForCreate(input, accountExtra)
 	if err != nil {
@@ -715,7 +720,15 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			return nil, err
 		}
 		// Strip SSO/password residue that must never sit next to OAuth tokens.
-		account.Credentials = SanitizeStoredCredentials(account.Platform, account.Credentials)
+		account.Credentials = SanitizeStoredCredentialsForAccount(account.Platform, account.Type, account.Credentials)
+		if err := ValidateGeminiWebCredentials(account.Platform, account.Type, account.Credentials); err != nil {
+			return nil, err
+		}
+	}
+	// A full-object edit may omit the redacted Cookie field. Validate the
+	// effective credentials even when no credential keys were submitted.
+	if err := ValidateGeminiWebCredentials(account.Platform, account.Type, account.Credentials); err != nil {
+		return nil, err
 	}
 	// Extra 使用 map：需要区分“未提供(nil)”与“显式清空({})”。
 	// 关闭配额限制时前端会删除 quota_* 键并提交 extra:{}，此时也必须落库。

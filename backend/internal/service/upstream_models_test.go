@@ -417,6 +417,30 @@ func TestFetchUpstreamSupportedModelsParsesOpenAIResponse(t *testing.T) {
 	require.Equal(t, "Bearer openai-key", upstream.lastReq.Header.Get("Authorization"))
 }
 
+func TestSyncUpstreamModelCatalogGeminiWebUsesCuratedCatalog(t *testing.T) {
+	t.Parallel()
+
+	svc := &AccountTestService{}
+	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), &Account{
+		ID:       101,
+		Platform: PlatformGemini,
+		Type:     AccountTypeGeminiWeb,
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"gemini-4-argon",
+		"gemini-3.8-flash",
+		"gemini-3.8-flash-thinking",
+		"gemini-3.1-pro",
+		"gemini-auto",
+		"gemini-3.8-flash-thinking-lite",
+		"gemini-3.5-flash-lite",
+		"gemini-3.6-flash",
+	}, catalog.Models)
+	require.Empty(t, catalog.Metadata)
+	require.Empty(t, catalog.Warnings)
+}
+
 // Scenario: ID-only 模型列表从 Models.dev 补齐能力。
 func TestSyncUpstreamModelCatalogEnrichesOpenCodeIDOnlyListAndPersistsSnapshot(t *testing.T) {
 	upstream := &httpUpstreamRecorder{responses: []*http.Response{

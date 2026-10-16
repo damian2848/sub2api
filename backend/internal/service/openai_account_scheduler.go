@@ -1985,6 +1985,9 @@ func (s *defaultOpenAIAccountScheduler) lookupShadowParentAccount(ctx context.Co
 			return account
 		}
 	}
+	if s.service.schedulerSnapshot != nil && s.service.schedulerSnapshot.localSnapshotReader != nil {
+		return nil
+	}
 	if s.service.accountRepo == nil {
 		return nil
 	}
@@ -2045,8 +2048,11 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	}) {
 		return false, "shadow_parent_unhealthy"
 	}
-	if req.RequestedModel != "" && !account.IsModelSupported(req.RequestedModel) {
+	if req.RequestedModel != "" && !supportsOpenAIRequestModel(account, req.RequestedModel, req.RequireCompact) {
 		return false, "model_not_supported"
+	}
+	if req.RequestedModel != "" && !pelicanGroupTestModelAllowed(ctx, account, req.RequestedModel) {
+		return false, "model_not_selected_for_pelican"
 	}
 	if req.RequestedModel != "" && !account.IsModelAllowedInGroup(req.GroupID, req.RequestedModel) {
 		return false, "model_not_allowed_in_group"
@@ -2343,7 +2349,9 @@ func (s *OpenAIGatewayService) SelectAccountWithScheduler(
 	requiredTransport OpenAIUpstreamTransport,
 	requireCompact bool,
 ) (*AccountSelectionResult, OpenAIAccountScheduleDecision, error) {
-	return s.selectAccountWithScheduler(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, "", "", requireCompact, PlatformOpenAI, false, true)
+	selection, decision, err := s.selectAccountWithScheduler(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, "", "", requireCompact, PlatformOpenAI, false, true)
+	s.recordCodexScheduleSelection(requestedModel, selection, err)
+	return selection, decision, err
 }
 
 // SelectAccountWithSchedulerForCapability 按能力要求调度账号。
@@ -2368,7 +2376,27 @@ func (s *OpenAIGatewayService) SelectAccountWithSchedulerForCapability(
 	if len(platformOverride) > 0 {
 		platform = platformOverride[0]
 	}
-	return s.selectAccountWithScheduler(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, "", requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+	selection, decision, err := s.selectAccountWithScheduler(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, "", requireCompact, platform, previousResponseCanMove, useUpstreamTokenCost)
+	s.recordCodexScheduleSelection(requestedModel, selection, err)
+	return selection, decision, err
+}
+
+// recordCodexScheduleSelection feeds the admin harvest flow with the actual
+// account chosen for a Codex ticket-gated request. The harvest page is a
+// ticket pipeline view, so ordinary OpenAI model scheduling stays invisible.
+func (s *OpenAIGatewayService) recordCodexScheduleSelection(requestedModel string, selection *AccountSelectionResult, err error) {
+	if s == nil || !s.openAICodexTicketGatedModel(requestedModel) {
+		return
+	}
+	if err != nil {
+		recordCodexHarvestSelect(nil, requestedModel, "failed", "unavailable", err.Error())
+		return
+	}
+	if selection == nil || selection.Account == nil {
+		recordCodexHarvestSelect(nil, requestedModel, "failed", "unavailable", "no account selected")
+		return
+	}
+	recordCodexHarvestSelect(selection.Account, requestedModel, "selected", "", "")
 }
 
 func (s *OpenAIGatewayService) SelectAccountWithSchedulerForImages(

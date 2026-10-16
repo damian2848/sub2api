@@ -244,6 +244,9 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 	if err := ValidateModelMappingMode(req.Credentials); err != nil {
 		return nil, err
 	}
+	if err := ValidateGeminiWebCredentials(req.Platform, req.Type, req.Credentials); err != nil {
+		return nil, err
+	}
 	if req.Platform == PlatformTypeSafe && req.Type != AccountTypeAPIKey {
 		return nil, errors.New("typesafe accounts only support apikey credentials")
 	}
@@ -260,10 +263,10 @@ func (s *AccountService) Create(ctx context.Context, req CreateAccountRequest) (
 		Notes:       normalizeAccountNotes(req.Notes),
 		Platform:    req.Platform,
 		Type:        req.Type,
-		Credentials: SanitizeStoredCredentials(req.Platform, req.Credentials),
+		Credentials: SanitizeStoredCredentialsForAccount(req.Platform, req.Type, req.Credentials),
 		Extra:       prepareCodexFingerprintExtraForCreate(req.Platform, req.Type, req.Extra),
 		ProxyID:     req.ProxyID,
-		Concurrency: req.Concurrency,
+		Concurrency: normalizeAccountConcurrency(req.Platform, req.Type, req.Concurrency),
 		Priority:    req.Priority,
 		Status:      StatusActive,
 		ExpiresAt:   req.ExpiresAt,
@@ -353,10 +356,14 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 	}
 
 	if req.Credentials != nil {
-		if err := ValidateModelMappingMode(*req.Credentials); err != nil {
+		credentials := MergePreservingSensitiveCreds(account.Credentials, *req.Credentials)
+		if err := ValidateModelMappingMode(credentials); err != nil {
 			return nil, err
 		}
-		account.Credentials = SanitizeStoredCredentials(account.Platform, *req.Credentials)
+		if err := ValidateGeminiWebCredentials(account.Platform, account.Type, credentials); err != nil {
+			return nil, err
+		}
+		account.Credentials = SanitizeStoredCredentialsForAccount(account.Platform, account.Type, credentials)
 	}
 
 	if req.Extra != nil {
@@ -377,7 +384,7 @@ func (s *AccountService) Update(ctx context.Context, id int64, req UpdateAccount
 	}
 
 	if req.Concurrency != nil {
-		account.Concurrency = *req.Concurrency
+		account.Concurrency = normalizeAccountConcurrency(account.Platform, account.Type, *req.Concurrency)
 	}
 
 	if req.Priority != nil {

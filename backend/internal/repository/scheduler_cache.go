@@ -1135,6 +1135,7 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		service.OpenAIAutoResetCredit7dThresholdExtraKey,
 		service.OpenAIAutoResetCreditStateExtraKey,
 		"model_rate_limits",
+		service.QualityModelIsolationKey,
 		service.UpstreamBillingProbeExtraKey,
 		service.GrokMediaEligibleExtraKey,
 		"grok_billing_snapshot",

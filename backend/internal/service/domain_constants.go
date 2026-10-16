@@ -165,6 +165,7 @@ const (
 	AccountTypeUpstream       = domain.AccountTypeUpstream       // 上游透传类型账号（通过 Base URL + API Key 连接上游）
 	AccountTypeBedrock        = domain.AccountTypeBedrock        // AWS Bedrock 类型账号（通过 SigV4 签名或 API Key 连接 Bedrock，由 credentials.auth_mode 区分）
 	AccountTypeServiceAccount = domain.AccountTypeServiceAccount // Google Service Account 类型账号（用于 Vertex AI）
+	AccountTypeGeminiWeb      = domain.AccountTypeGeminiWeb      // Gemini 网页 Cookie 类型账号
 )
 
 // Redeem type constants
@@ -736,6 +737,7 @@ const (
 	// SettingKeyOpenAICodexVersionAutoSyncEnabled 是否启用 Codex 客户端版本号自动同步（默认 true）。
 	SettingKeyOpenAICodexVersionAutoSyncEnabled = "openai_codex_version_auto_sync_enabled"
 	SettingKeyOpenAIRequestTimezoneEnabled      = "openai_request_timezone_enabled"
+	SettingKeyOpenAIRequestTimezoneAuto         = "openai_request_timezone_auto"
 	// SettingKeyOpenAICodexTicketEnabled Codex 292 打票总开关（后台可改、热更新）。
 	// 关闭：不打票、不注入 x-codex-turn-state，按原链路转发。
 	// 开启：后台打票并在业务请求中覆盖该头。

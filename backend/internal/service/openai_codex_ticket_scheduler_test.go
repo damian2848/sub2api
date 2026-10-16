@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -95,6 +96,49 @@ func TestCodexTicketSchedulerProjectedCandidate(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestCodexTicketSchedulerRecordsHarvestSelection(t *testing.T) {
+	for _, advanced := range []bool{false, true} {
+		name := "legacy"
+		if advanced {
+			name = "advanced"
+		}
+		t.Run(name, func(t *testing.T) {
+			resetCodexHarvestFlow()
+			t.Cleanup(resetCodexHarvestFlow)
+			svc, _, account, groupID := ticketSchedulerFixture(t, advanced, true)
+			selection, _, err := svc.SelectAccountWithSchedulerForCapability(context.Background(), &groupID, "", "",
+				"gpt-6-astra", nil, OpenAIUpstreamTransportAny, "", false, false, true)
+			require.NoError(t, err)
+			require.Equal(t, account.ID, selection.Account.ID)
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+
+			snapshot := BuildCodexHarvestFlow(context.Background(), svc.cfg, nil, []Account{*account})
+			require.Equal(t, 1, snapshot.Counts.SelectOK)
+			require.Equal(t, "ok", snapshot.Stages[4].Status)
+			require.Equal(t, fmt.Sprintf("account #%d", account.ID), snapshot.Stages[4].Detail)
+			require.Equal(t, account.ID, snapshot.Events[0].AccountID)
+		})
+	}
+}
+
+func TestCodexTicketSchedulerRecordsFailureButNotUngatedModel(t *testing.T) {
+	resetCodexHarvestFlow()
+	t.Cleanup(resetCodexHarvestFlow)
+	svc, _, _, groupID := ticketSchedulerFixture(t, false, true)
+	_, _, err := svc.SelectAccountWithScheduler(context.Background(), &groupID, "", "",
+		"gpt-6-astra", map[int64]struct{}{400: {}}, OpenAIUpstreamTransportAny, false)
+	require.Error(t, err)
+	snapshot := BuildCodexHarvestFlow(context.Background(), svc.cfg, nil, nil)
+	require.Equal(t, 1, snapshot.Counts.SelectFail)
+	require.Equal(t, "fail", snapshot.Stages[4].Status)
+
+	_, _, _ = svc.SelectAccountWithScheduler(context.Background(), &groupID, "", "",
+		"gpt-5.1", nil, OpenAIUpstreamTransportAny, false)
+	require.Len(t, listCodexHarvestFlowEvents(), 1)
 }
 
 func TestCodexTicketSchedulerAdmissionSafety(t *testing.T) {
@@ -216,12 +260,12 @@ func TestCodexTicketCandidateHydrationScope(t *testing.T) {
 			case "disabled":
 				svc.cfg.Gateway.OpenAICodexTicket.Enabled = false
 			case "ungated":
-				model = "gpt-5.5"
+				model = "gpt-6.1-sol"
 			case "excluded":
 				excluded = map[int64]struct{}{account.ID: {}}
 			case "compact_ungated":
 				compact = true
-				svc.cfg.Gateway.OpenAICompactModel = "gpt-5.5"
+				svc.cfg.Gateway.OpenAICompactModel = "gpt-6.1-sol"
 			}
 			_, err := svc.listSchedulableAccountsForRequest(context.Background(), &groupID,
 				PlatformOpenAI, model, compact, excluded)
@@ -247,7 +291,7 @@ func TestCodexTicketSchedulerCompactUsesOutboundModel(t *testing.T) {
 		for _, scenario := range []string{"ungated_outbound", "gated_valid_ticket", "gated_missing_ticket"} {
 			t.Run(path.name+"/"+scenario, func(t *testing.T) {
 				svc, _, account, groupID := ticketSchedulerFixture(t, path.advanced, path.loadBatch)
-				requested, outbound := "gpt-5.5", "gpt-6-astra"
+				requested, outbound := "gpt-6.1-sol", "gpt-6-astra"
 				if scenario == "ungated_outbound" {
 					requested, outbound = outbound, requested
 				}

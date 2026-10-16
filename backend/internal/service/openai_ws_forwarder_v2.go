@@ -486,6 +486,18 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		return nil, err
 	}
 	sendRequest := func(value any) error {
+		if regionalMeterAttemptFrom(ctx) != nil {
+			raw, err := json.Marshal(value)
+			if err != nil {
+				return err
+			}
+			if err = regionalMeterValidatePayload(ctx, raw); err != nil {
+				return err
+			}
+		}
+		if err := regionalMeterBeforeSend(ctx); err != nil {
+			return err
+		}
 		if err := s.acquireOpenAIRPMForSend(ctx, account); err != nil {
 			return err
 		}
@@ -833,6 +845,7 @@ readLoop:
 			message = restoreCodexToolNamesFromContext(c, message)
 		}
 		if openAIWSMessageShouldParseUsage(eventType, message) {
+			regionalMeterObserveUsage(ctx, message, eventType)
 			parseOpenAIWSResponseUsageFromCompletedEvent(message, usage)
 		}
 		imageCounter.AddSSEData(message)

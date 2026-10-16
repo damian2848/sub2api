@@ -761,7 +761,7 @@
             {{ t('admin.accounts.gemini.helpButton') }}
           </button>
         </div>
-        <div class="mt-2 grid grid-cols-3 gap-3" data-tour="account-form-type">
+        <div class="mt-2 grid grid-cols-2 gap-3 lg:grid-cols-4" data-tour="account-form-type">
           <button
             type="button"
             @click="accountCategory = 'oauth-based'"
@@ -863,6 +863,98 @@
               </span>
             </div>
           </button>
+
+          <button
+            type="button"
+            @click="accountCategory = 'gemini-web'"
+            :class="[
+              'flex items-center gap-3 rounded-lg border-2 p-3 text-left transition-all',
+              accountCategory === 'gemini-web'
+                ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20'
+                : 'border-gray-200 hover:border-emerald-300 dark:border-dark-600 dark:hover:border-emerald-700'
+            ]"
+          >
+            <div :class="['flex h-8 w-8 shrink-0 items-center justify-center rounded-lg', accountCategory === 'gemini-web' ? 'bg-emerald-500 text-white' : 'bg-gray-100 text-gray-500 dark:bg-dark-600 dark:text-gray-400']">
+              <Icon name="globe" size="sm" />
+            </div>
+            <div>
+              <span class="block text-sm font-medium text-gray-900 dark:text-white">Gemini Web Cookie</span>
+              <span class="text-xs text-gray-500 dark:text-gray-400">Use a browser session Cookie</span>
+            </div>
+          </button>
+        </div>
+
+        <div v-if="accountCategory === 'gemini-web'" class="mt-4 space-y-3 rounded-lg border border-emerald-200 bg-emerald-50/50 p-4 dark:border-emerald-800/50 dark:bg-emerald-900/10">
+          <div>
+            <label class="input-label">Browser Cookie header</label>
+            <textarea v-model="geminiWebCookie" rows="4" class="input font-mono text-xs" placeholder="__Secure-1PSID=...; __Secure-1PSIDTS=..." />
+            <p class="input-hint">Paste the complete Cookie header copied from gemini.google.com. It is redacted after saving and never shown again.</p>
+          </div>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label class="input-label">Google account index (optional)</label>
+              <input v-model.number="geminiWebAuthUser" type="number" min="0" class="input" placeholder="0" />
+            </div>
+            <div>
+              <label class="input-label">Browser User-Agent (optional)</label>
+              <input v-model="geminiWebUserAgent" type="text" class="input" placeholder="Chrome User-Agent" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Gemini Web model restriction (the web account is not an API-key form) -->
+        <div v-if="accountCategory === 'gemini-web'" class="mt-4 border-t border-gray-200 pt-4 dark:border-dark-600">
+          <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
+          <div class="mb-4 flex gap-2">
+            <button
+              type="button"
+              @click="modelRestrictionMode = 'whitelist'"
+              :class="[
+                'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all',
+                modelRestrictionMode === 'whitelist'
+                  ? 'bg-primary-100 text-primary-700 dark:bg-primary-900/30 dark:text-primary-400'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500'
+              ]"
+            >
+              {{ t('admin.accounts.modelWhitelist') }}
+            </button>
+            <button
+              type="button"
+              @click="modelRestrictionMode = 'mapping'"
+              :class="[
+                'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all',
+                modelRestrictionMode === 'mapping'
+                  ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500'
+              ]"
+            >
+              {{ t('admin.accounts.modelMapping') }}
+            </button>
+          </div>
+          <div v-if="modelRestrictionMode === 'whitelist'">
+            <ModelWhitelistSelector
+              v-model="allowedModels"
+              :model-mappings="modelMappings"
+              platform="gemini_web"
+            />
+            <p class="text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
+              <span v-if="allowedModels.length === 0">{{ t('admin.accounts.supportsAllModels') }}</span>
+            </p>
+          </div>
+          <div v-else class="space-y-2">
+            <div v-for="(mapping, index) in modelMappings" :key="getModelMappingKey(mapping)" class="flex items-center gap-2">
+              <input v-model="mapping.from" type="text" class="input flex-1" :placeholder="t('admin.accounts.requestModel')" />
+              <span class="text-gray-400">→</span>
+              <input v-model="mapping.to" type="text" class="input flex-1" :placeholder="t('admin.accounts.actualModel')" />
+              <button type="button" @click="removeModelMapping(index)" class="text-red-500 hover:text-red-700">
+                <Icon name="trash" size="sm" />
+              </button>
+            </div>
+            <button type="button" @click="addModelMapping" class="btn btn-secondary text-sm">
+              + {{ t('admin.accounts.addMapping') }}
+            </button>
+          </div>
         </div>
 
         <div
@@ -4420,10 +4512,13 @@ const autoBPS = useAccountAutoBPS()
 const globalBpsEnabled = computed(() => appStore.cachedPublicSettings?.excel_bps_enabled !== false)
 const autoBPSAvailable = computed(() => globalBpsEnabled.value && form.platform === 'openai' && accountCategory.value === 'oauth-based' && !isOpenAIBPSOAuth.value)
 const submitting = ref(false)
-const accountCategory = ref<'oauth-based' | 'apikey' | 'bedrock' | 'service_account'>('oauth-based') // UI selection for account category
+const accountCategory = ref<'oauth-based' | 'apikey' | 'bedrock' | 'service_account' | 'gemini-web'>('oauth-based') // UI selection for account category
 const addMethod = ref<AddMethod>('oauth') // For oauth-based: 'oauth' or 'setup-token'
 const apiKeyBaseUrl = ref('https://api.anthropic.com')
 const apiKeyValue = ref('')
+const geminiWebCookie = ref('')
+const geminiWebAuthUser = ref(0)
+const geminiWebUserAgent = ref('')
 const upstreamBillingAutoProbeEnabled = ref(true)
 
 // ── 国产供应商（Kimi / Zhipu / DeepSeek）账号类型、API 协议与端点 ──
@@ -5153,7 +5248,9 @@ watch(
       form.type = 'bedrock' as AccountType
       return
     }
-    if ((form.platform === 'gemini' || form.platform === 'anthropic') && category === 'service_account') {
+    if (form.platform === 'gemini' && category === 'gemini-web') {
+      form.type = 'gemini_web' as AccountType
+    } else if ((form.platform === 'gemini' || form.platform === 'anthropic') && category === 'service_account') {
       form.type = 'service_account' as AccountType
     } else if (category === 'oauth-based') {
       form.type = form.platform === 'anthropic' ? method as AccountType : 'oauth'
@@ -5312,15 +5409,20 @@ const handleSelectGeminiOAuthType = (oauthType: 'code_assist' | 'google_one' | '
     appStore.showError(t('admin.accounts.oauth.gemini.aiStudioNotConfigured'))
     return
   }
+
   geminiOAuthType.value = oauthType
 }
 
 // Auto-fill related models when switching to whitelist mode or changing platform
 watch(
-  [modelRestrictionMode, () => form.platform],
+  [modelRestrictionMode, () => form.platform, accountCategory],
   ([newMode]) => {
     if (newMode === 'whitelist') {
-      allowedModels.value = [...getModelsByPlatform(form.platform)]
+      const catalogPlatform =
+        form.platform === 'gemini' && accountCategory.value === 'gemini-web'
+          ? 'gemini_web'
+          : form.platform
+      allowedModels.value = [...getModelsByPlatform(catalogPlatform)]
     }
   }
 )
@@ -5674,6 +5776,9 @@ const resetForm = () => {
   adaptiveBaseUrls.value = { chat_completions: '', anthropic: '', responses: '' }
   apiKeyBaseUrl.value = 'https://api.anthropic.com'
   apiKeyValue.value = ''
+  geminiWebCookie.value = ''
+  geminiWebAuthUser.value = 0
+  geminiWebUserAgent.value = ''
   upstreamRequestIdHeader.value = ''
   upstreamBillingAutoProbeEnabled.value = true
   editQuotaLimit.value = null
@@ -6027,6 +6132,24 @@ const handleSubmit = async () => {
       return
     }
     step.value = 2
+    return
+  }
+
+  if (form.platform === 'gemini' && accountCategory.value === 'gemini-web') {
+    if (!form.name.trim()) {
+      appStore.showError(t('admin.accounts.pleaseEnterAccountName'))
+      return
+    }
+    if (!geminiWebCookie.value.includes('__Secure-1PSID=')) {
+      appStore.showError('Gemini Web Cookie must include __Secure-1PSID')
+      return
+    }
+    const credentials: Record<string, unknown> = { gemini_web_cookie: geminiWebCookie.value.trim() }
+    if (geminiWebAuthUser.value > 0) credentials.auth_user = geminiWebAuthUser.value
+    if (geminiWebUserAgent.value.trim()) credentials.user_agent = geminiWebUserAgent.value.trim()
+    const modelMapping = buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value)
+    if (modelMapping) credentials.model_mapping = modelMapping
+    await createAccountAndFinish('gemini', 'gemini_web' as AccountType, credentials)
     return
   }
 

@@ -69,6 +69,7 @@ const (
 	AccountTypeUpstream       = "upstream"        // 上游透传类型账号（通过 Base URL + API Key 连接上游）
 	AccountTypeBedrock        = "bedrock"         // AWS Bedrock 类型账号（通过 SigV4 签名或 API Key 连接 Bedrock，由 credentials.auth_mode 区分）
 	AccountTypeServiceAccount = "service_account" // Google Service Account 类型账号（用于 Vertex AI）
+	AccountTypeGeminiWeb      = "gemini_web"      // Gemini 网页 Cookie 类型账号
 )
 
 // Redeem type constants
@@ -114,6 +115,14 @@ var DefaultAntigravityModelMapping = map[string]string{
 	// Claude 白名单
 	"claude-fable-5-1":           "claude-fable-5-1",         // 官方模型
 	"claude-fable-5":             "claude-fable-5",           // 官方模型
+	"claude-opus-5-5":            "claude-opus-5-5-high",     // 简称映射
+	"claude-opus-5-5-high":       "claude-opus-5-5-high",     // 官方模型
+	"claude-opus-5-5-medium":     "claude-opus-5-5-medium",   // 官方模型
+	"claude-opus-5-5-low":        "claude-opus-5-5-low",      // 官方模型
+	"claude-sonnet-5-5":          "claude-sonnet-5-5-high",   // 简称映射
+	"claude-sonnet-5-5-high":     "claude-sonnet-5-5-high",   // 官方模型
+	"claude-sonnet-5-5-medium":   "claude-sonnet-5-5-medium", // 官方模型
+	"claude-sonnet-5-5-low":      "claude-sonnet-5-5-low",    // 官方模型
 	"claude-opus-4-8":            "claude-opus-4-8",          // 官方模型
 	"claude-opus-4-7":            "claude-opus-4-7",          // 官方模型
 	"claude-opus-4-6-thinking":   "claude-opus-4-6-thinking", // 官方模型
@@ -171,6 +180,11 @@ var DefaultAntigravityModelMapping = map[string]string{
 	"gemini-3.8-flash-low":    "gemini-3.8-flash-low",
 	"gemini-3.8-flash-medium": "gemini-3.8-flash-medium",
 	"gemini-3.8-flash-tiered": "gemini-3.8-flash-tiered",
+	// Gemini 4 Argon tiered models
+	"gemini-4-argon":        "gemini-4-argon-high",
+	"gemini-4-argon-high":   "gemini-4-argon-high",
+	"gemini-4-argon-low":    "gemini-4-argon-low",
+	"gemini-4-argon-medium": "gemini-4-argon-medium",
 	// Gemini 3 image 兼容映射（向 3.1 image 迁移）
 	"gemini-3-pro-image":         "gemini-3.1-flash-image",
 	"gemini-3-pro-image-preview": "gemini-3.1-flash-image",

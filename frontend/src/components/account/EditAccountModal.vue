@@ -979,6 +979,80 @@
         </template>
       </div>
 
+      <div v-if="account.type === 'gemini_web'" class="space-y-3 rounded-lg border border-emerald-200 bg-emerald-50/50 p-4 dark:border-emerald-800/50 dark:bg-emerald-900/10">
+        <div>
+          <label class="input-label">Browser Cookie header</label>
+          <textarea v-model="editGeminiWebCookie" rows="4" class="input font-mono text-xs" placeholder="__Secure-1PSID=...; __Secure-1PSIDTS=..." />
+          <p class="input-hint">Leave empty to keep the existing Cookie. Paste a new complete Cookie header to rotate it.</p>
+        </div>
+        <div class="grid gap-3 sm:grid-cols-2">
+          <div>
+            <label class="input-label">Google account index</label>
+            <input v-model.number="editGeminiWebAuthUser" type="number" min="0" class="input" />
+          </div>
+          <div>
+            <label class="input-label">Browser User-Agent</label>
+            <input v-model="editGeminiWebUserAgent" type="text" class="input" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Gemini Web model restriction (the web account is not an API-key form) -->
+      <div v-if="account.type === 'gemini_web'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
+        <div class="mb-4 flex gap-2">
+          <button
+            type="button"
+            @click="modelRestrictionMode = 'whitelist'"
+            :class="[
+              'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all',
+              modelRestrictionMode === 'whitelist'
+                ? 'bg-primary-100 text-primary-700 dark:bg-primary-900/30 dark:text-primary-400'
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500'
+            ]"
+          >
+            {{ t('admin.accounts.modelWhitelist') }}
+          </button>
+          <button
+            type="button"
+            @click="modelRestrictionMode = 'mapping'"
+            :class="[
+              'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all',
+              modelRestrictionMode === 'mapping'
+                ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500'
+            ]"
+          >
+            {{ t('admin.accounts.modelMapping') }}
+          </button>
+        </div>
+        <div v-if="modelRestrictionMode === 'whitelist'">
+          <ModelWhitelistSelector
+            v-model="allowedModels"
+            :model-mappings="modelMappings"
+            platform="gemini_web"
+            :account-id="account.id"
+          />
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
+            <span v-if="allowedModels.length === 0">{{ t('admin.accounts.supportsAllModels') }}</span>
+          </p>
+        </div>
+        <div v-else class="space-y-2">
+          <div v-for="(mapping, index) in modelMappings" :key="getModelMappingKey(mapping)" class="flex items-center gap-2">
+            <input v-model="mapping.from" type="text" class="input flex-1" :placeholder="t('admin.accounts.requestModel')" />
+            <span class="text-gray-400">→</span>
+            <input v-model="mapping.to" type="text" class="input flex-1" :placeholder="t('admin.accounts.actualModel')" />
+            <button type="button" @click="removeModelMapping(index)" class="text-red-500 hover:text-red-700">
+              <Icon name="trash" size="sm" />
+            </button>
+          </div>
+          <button type="button" @click="addModelMapping" class="btn btn-secondary text-sm">
+            + {{ t('admin.accounts.addMapping') }}
+          </button>
+        </div>
+      </div>
+
       <!-- Upstream fields (only for upstream type) -->
       <div v-if="account.type === 'upstream'" class="space-y-4">
         <div>
@@ -2498,9 +2572,9 @@
         </div>
       </div>
 
-      <!-- Anthropic API Key: Web Search Emulation (hidden when global disabled) -->
+      <!-- Anthropic / OpenAI API Key: Web Search Emulation (hidden when global disabled) -->
       <div
-        v-if="account?.platform === 'anthropic' && account?.type === 'apikey' && webSearchGlobalEnabled"
+        v-if="(account?.platform === 'anthropic' || account?.platform === 'openai') && account?.type === 'apikey' && webSearchGlobalEnabled"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -3748,6 +3822,9 @@ interface TempUnschedRuleForm {
 const submitting = ref(false)
 const editBaseUrl = ref('https://api.anthropic.com')
 const editApiKey = ref('')
+const editGeminiWebCookie = ref('')
+const editGeminiWebAuthUser = ref(0)
+const editGeminiWebUserAgent = ref('')
 const prismBrowserEnabled = ref(false)
 const prismSupportedModels = ['gpt-6.1-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-6-luna']
 const prismBrowserModels = ref<string[]>([...prismSupportedModels])
@@ -4627,6 +4704,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 
   // Load intercept warmup requests setting (applies to all account types)
   const credentials = newAccount.credentials as Record<string, unknown> | undefined
+  editGeminiWebCookie.value = ''
+  editGeminiWebAuthUser.value = typeof credentials?.auth_user === 'number' ? credentials.auth_user : 0
+  editGeminiWebUserAgent.value = typeof credentials?.user_agent === 'string' ? credentials.user_agent : ''
   interceptWarmupRequests.value = credentials?.intercept_warmup_requests === true
   autoPauseOnExpired.value = newAccount.auto_pause_on_expired === true
   editVertexProjectId.value = ''
@@ -4791,6 +4871,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     anthropicAPIKeyAuthScheme.value = extra?.anthropic_apikey_auth_scheme === 'authorization_bearer'
       ? 'authorization_bearer'
       : 'x_api_key'
+  }
+  if ((newAccount.platform === 'anthropic' || newAccount.platform === 'openai') && newAccount.type === 'apikey') {
     // 三态：string "default"/"enabled"/"disabled"，向后兼容旧 bool
     const wsVal = extra?.web_search_emulation
     if (wsVal === 'enabled' || wsVal === 'disabled') {
@@ -4911,8 +4993,10 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     }
   }
 
-  // Initialize API Key fields for apikey type
-  if (newAccount.type === 'apikey' && newAccount.credentials) {
+  // Initialize model mappings for Gemini Web, then API Key fields for apikey type.
+  if (newAccount.type === 'gemini_web' && newAccount.credentials) {
+    loadModelRestrictionFromMapping(credentials?.model_mapping as Record<string, unknown> | undefined)
+  } else if (newAccount.type === 'apikey' && newAccount.credentials) {
     const credentials = newAccount.credentials as Record<string, unknown>
     // 国产供应商：读取 account_mode 与 api_protocol 作为可编辑初始值
     // （编辑弹窗允许修正两者，用于修复早期存错默认值的账号）。
@@ -5770,6 +5854,31 @@ const handleSubmit = async () => {
       }
     }
 
+    if (props.account.type === 'gemini_web') {
+      const currentCredentials = (props.account.credentials as Record<string, unknown>) || {}
+      const newCredentials: Record<string, unknown> = { ...currentCredentials }
+      const hasExistingCookie = props.account.credentials_status?.has_gemini_web_cookie ?? Boolean(currentCredentials.gemini_web_cookie)
+      if (editGeminiWebCookie.value.trim()) {
+        if (!editGeminiWebCookie.value.includes('__Secure-1PSID=')) {
+          appStore.showError('Gemini Web Cookie must include __Secure-1PSID')
+          return
+        }
+        newCredentials.gemini_web_cookie = editGeminiWebCookie.value.trim()
+      } else if (!hasExistingCookie) {
+        appStore.showError('Gemini Web Cookie is required')
+        return
+      }
+      if (editGeminiWebAuthUser.value > 0) newCredentials.auth_user = editGeminiWebAuthUser.value
+      else delete newCredentials.auth_user
+      if (editGeminiWebUserAgent.value.trim()) newCredentials.user_agent = editGeminiWebUserAgent.value.trim()
+      else delete newCredentials.user_agent
+      const modelMapping = buildModelRestrictionMapping()
+      if (modelMapping) newCredentials.model_mapping = modelMapping
+      else delete newCredentials.model_mapping
+      if (!applyTempUnschedConfig(newCredentials)) return
+      updatePayload.credentials = newCredentials
+    }
+
     // For apikey type, handle credentials update
     if (props.account.type === 'apikey') {
       const currentCredentials = (props.account.credentials as Record<string, unknown>) || {}
@@ -6053,7 +6162,7 @@ const handleSubmit = async () => {
       }
 
       updatePayload.credentials = newCredentials
-    } else {
+    } else if (props.account.type !== 'gemini_web') {
       // For oauth/setup-token types, only update intercept_warmup_requests if changed
       const currentCredentials = (props.account.credentials as Record<string, unknown>) || {}
       const newCredentials: Record<string, unknown> = { ...currentCredentials }
@@ -6435,6 +6544,11 @@ const handleSubmit = async () => {
           newExtra.images_url_to_b64_json = true
         } else {
           delete newExtra.images_url_to_b64_json
+        }
+        if (webSearchEmulationMode.value === 'default') {
+          delete newExtra.web_search_emulation
+        } else {
+          newExtra.web_search_emulation = webSearchEmulationMode.value
         }
 		}
 		if (autoPause5hThreshold.value != null && autoPause5hThreshold.value > 0) {

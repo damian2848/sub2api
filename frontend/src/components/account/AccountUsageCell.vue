@@ -768,6 +768,7 @@ const isGeminiVertex = computed(() => {
 
 // Show usage windows for OAuth and Setup Token accounts
 const showUsageWindows = computed(() => {
+	if (props.account.platform === 'gemini' && props.account.type === 'gemini_web') return false
   // Gemini: we can always compute local usage windows from DB logs (simulated quotas).
   // 第三方上游 API Key 没有模拟配额，按普通 Key 账号展示今日统计与额度进度条。
   if (props.account.platform === 'gemini') return !isGeminiThirdPartyApiKey.value
@@ -784,7 +785,7 @@ const shouldFetchUsage = computed(() => {
     return props.account.type === 'oauth' || props.account.type === 'setup-token'
   }
   if (props.account.platform === 'gemini') {
-    return !isGeminiThirdPartyApiKey.value && !isGeminiVertex.value
+    return props.account.type !== 'gemini_web' && !isGeminiThirdPartyApiKey.value && !isGeminiVertex.value
   }
   if (props.account.platform === 'antigravity') {
     return props.account.type === 'oauth'

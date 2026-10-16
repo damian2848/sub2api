@@ -14,10 +14,13 @@ import (
 
 // OpenAIOAuthService handles OpenAI OAuth authentication flows
 type OpenAIOAuthService struct {
-	sessionStore         *openai.SessionStore
-	proxyRepo            ProxyRepository
-	oauthClient          OpenAIOAuthClient
-	privacyClientFactory PrivacyClientFactory // 用于调用 chatgpt.com/backend-api（ImpersonateChrome）
+	sessionCookieRepo           OpenAISessionCookieRepository
+	sessionCookieEncryptor      SecretEncryptor
+	sessionCookieStorageEnabled bool
+	sessionStore                *openai.SessionStore
+	proxyRepo                   ProxyRepository
+	oauthClient                 OpenAIOAuthClient
+	privacyClientFactory        PrivacyClientFactory // 用于调用 chatgpt.com/backend-api（ImpersonateChrome）
 }
 
 // NewOpenAIOAuthService creates a new OpenAI OAuth service

@@ -1160,6 +1160,9 @@ type GatewayConfig struct {
 	// CodexGatewayPin shares qualified source routing cookies with selected targets.
 	// Disabled by default; applies only to ChatGPT HTTP Responses requests.
 	CodexGatewayPin CodexGatewayPinConfig `mapstructure:"codex_gateway_pin"`
+	// MinOutputTokens is the minimum max_output_tokens used when
+	// converting Chat Completions or Anthropic requests to Responses.
+	MinOutputTokens int `mapstructure:"min_output_tokens"`
 	// 等待上游响应头的超时时间（秒），0表示无超时
 	// 注意：这不影响流式数据传输，只控制等待响应头的时间
 	ResponseHeaderTimeout int `mapstructure:"response_header_timeout"`
@@ -2263,6 +2266,10 @@ func configureConfigSource(setConfigFile, addConfigPath func(string)) {
 func setDefaults() {
 	viper.SetDefault("gateway.upstream_routing.enabled", false)
 	viper.SetDefault("runtime.role", RuntimeRoleFull)
+	viper.SetDefault("runtime.regional_scheduler_file", "")
+	viper.SetDefault("runtime.regional_auth_file", "")
+	viper.SetDefault("runtime.regional_concurrency_file", "")
+	viper.SetDefault("runtime.regional_funds_file", "")
 	viper.SetDefault("runtime.serverless_id", "")
 	viper.SetDefault("runtime.serverless_endpoint", "")
 	viper.SetDefault("runtime.serverless_region", "")
@@ -2270,6 +2277,7 @@ func setDefaults() {
 	viper.SetDefault("server.graceful_shutdown_timeout", 5)
 	viper.SetDefault("server.shutdown_drain_delay", 0)
 	viper.SetDefault("run_mode", RunModeStandard)
+	viper.SetDefault("gateway.min_output_tokens", 128)
 	viper.SetDefault("simple_mode.auto_create_default_groups", true)
 	viper.SetDefault("simple_mode_key_rate_limit_enabled", false)
 
@@ -2985,6 +2993,9 @@ func (c *Config) Validate() error {
 	}
 	if err := c.Gateway.CodexGatewayPin.Validate(); err != nil {
 		return err
+	}
+	if c.Gateway.MinOutputTokens < 16 {
+		return fmt.Errorf("gateway.min_output_tokens must be at least 16")
 	}
 	forwardedClientIPHeaders, err := NormalizeForwardedClientIPHeaders(c.Security.ForwardedClientIPHeaders)
 	if err != nil {

@@ -26,6 +26,7 @@
         <Icon v-else-if="type === 'setup-token'" name="shield" size="xs" />
         <!-- API Key icon -->
         <Icon v-else-if="type === 'service_account'" name="cloud" size="xs" />
+        <Icon v-else-if="type === 'gemini_web'" name="globe" size="xs" />
         <Icon v-else name="key" size="xs" />
         <span>{{ typeLabel }}</span>
       </span>
@@ -109,6 +110,8 @@ const typeLabel = computed(() => {
       return 'AWS'
     case 'service_account':
       return 'Agent Platform (Vertex)'
+    case 'gemini_web':
+      return 'Gemini Web'
     default:
       return props.type
   }

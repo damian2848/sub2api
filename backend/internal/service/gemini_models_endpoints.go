@@ -12,6 +12,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gemini"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/geminiweb"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/googleapi"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 )
@@ -112,6 +113,8 @@ func modelsEndpointAccountRank(a *Account) int {
 			return 12
 		}
 		return 11
+	case AccountTypeGeminiWeb:
+		return 4
 	default:
 		return 10
 	}
@@ -123,6 +126,13 @@ func modelsEndpointAccountRank(a *Account) int {
 func (s *GeminiMessagesCompatService) ForwardListModels(ctx context.Context, account *Account) (*UpstreamHTTPResult, error) {
 	if account == nil {
 		return nil, errors.New("account is nil")
+	}
+	if account.IsGeminiWeb() {
+		models := make([]gemini.Model, 0, len(geminiweb.Models()))
+		for _, item := range geminiweb.Models() {
+			models = append(models, gemini.FallbackModel(item.ID))
+		}
+		return geminiModelsJSONResult(http.StatusOK, gemini.ModelsListResponse{Models: models})
 	}
 	if !account.IsVertexServiceAccount() {
 		return s.forwardGeminiModelsGET(ctx, account, "/v1beta/models")
@@ -150,6 +160,17 @@ func (s *GeminiMessagesCompatService) ForwardListModels(ctx context.Context, acc
 func (s *GeminiMessagesCompatService) ForwardGetModel(ctx context.Context, account *Account, model string) (*UpstreamHTTPResult, error) {
 	if account == nil {
 		return nil, errors.New("account is nil")
+	}
+	if account.IsGeminiWeb() {
+		if _, known := geminiweb.LookupModel(model); known {
+			resolved := geminiweb.ResolveModel(model)
+			for _, item := range geminiweb.Models() {
+				if item.ID == resolved.ID {
+					return geminiModelsJSONResult(http.StatusOK, gemini.FallbackModel(item.ID))
+				}
+			}
+		}
+		return geminiModelsJSONResult(http.StatusNotFound, map[string]any{"error": map[string]any{"code": http.StatusNotFound, "message": fmt.Sprintf("models/%s is not found", model)}})
 	}
 	if !account.IsVertexServiceAccount() {
 		return s.forwardGeminiModelsGET(ctx, account, "/v1beta/models/"+model)
@@ -213,6 +234,8 @@ func (s *GeminiMessagesCompatService) forwardGeminiModelsGET(ctx context.Context
 			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
+	case AccountTypeGeminiWeb:
+		return nil, errors.New("Gemini Web uses browser sessions and has no AI Studio models endpoint")
 	default:
 		return nil, fmt.Errorf("unsupported account type: %s", account.Type)
 	}

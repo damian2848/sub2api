@@ -24,6 +24,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/geminiweb"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
@@ -135,7 +136,7 @@ type CreateAccountRequest struct {
 	Name                    string         `json:"name" binding:"required"`
 	Notes                   *string        `json:"notes"`
 	Platform                string         `json:"platform" binding:"required"`
-	Type                    string         `json:"type" binding:"required,oneof=oauth setup-token apikey upstream bedrock service_account"`
+	Type                    string         `json:"type" binding:"required,oneof=oauth setup-token apikey upstream bedrock service_account gemini_web"`
 	Credentials             map[string]any `json:"credentials" binding:"required"`
 	Extra                   map[string]any `json:"extra"`
 	ProxyID                 *int64         `json:"proxy_id"`
@@ -156,7 +157,7 @@ type CreateAccountRequest struct {
 type UpdateAccountRequest struct {
 	Name                string         `json:"name"`
 	Notes               *string        `json:"notes"`
-	Type                string         `json:"type" binding:"omitempty,oneof=oauth setup-token apikey upstream bedrock service_account"`
+	Type                string         `json:"type" binding:"omitempty,oneof=oauth setup-token apikey upstream bedrock service_account gemini_web"`
 	Credentials         map[string]any `json:"credentials"`
 	Extra               map[string]any `json:"extra"`
 	ProxyID             *int64         `json:"proxy_id"`
@@ -1762,7 +1763,7 @@ func (h *AccountHandler) ApplyOAuthCredentials(c *gin.Context) {
 	// OAuth values to replace their existing counterparts.
 	req.Credentials = service.MergeCredentials(existing.Credentials, req.Credentials)
 	// Drop SSO/password residue; re-auth must leave only OAuth tokens on disk.
-	req.Credentials = service.SanitizeStoredCredentials(existing.Platform, req.Credentials)
+	req.Credentials = service.SanitizeStoredCredentialsForAccount(existing.Platform, existing.Type, req.Credentials)
 
 	updatedAccount, err := h.adminService.UpdateAccount(ctx, accountID, &service.UpdateAccountInput{
 		Type:        req.Type,
@@ -3018,6 +3019,24 @@ func (h *AccountHandler) GetAvailableModels(c *gin.Context) {
 
 	// Handle Gemini accounts
 	if account.IsGemini() {
+		if account.IsGeminiWeb() {
+			mapping := account.GetModelMapping()
+			catalog := geminiweb.Models()
+			if len(mapping) == 0 {
+				models := make([]geminicli.Model, 0, len(catalog))
+				for _, item := range catalog {
+					models = append(models, geminicli.Model{ID: item.ID, Type: "model", DisplayName: item.ID, CreatedAt: ""})
+				}
+				response.Success(c, models)
+				return
+			}
+			models := make([]geminicli.Model, 0, len(mapping))
+			for requested := range mapping {
+				models = append(models, geminicli.Model{ID: requested, Type: "model", DisplayName: requested, CreatedAt: ""})
+			}
+			response.Success(c, models)
+			return
+		}
 		// Consumer Google One OAuth still uses the legacy Gemini CLI / Code
 		// Assist channel. Do not advertise newer 3.x or image models that the
 		// channel cannot serve.
@@ -3170,13 +3189,13 @@ func antigravityAccountTestModels(rawMapping any) []antigravity.ClaudeModel {
 	switch mapping := rawMapping.(type) {
 	case map[string]any:
 		for id := range mapping {
-			if strings.TrimSpace(id) != "" {
+			if strings.TrimSpace(id) != "" && !strings.Contains(id, "*") {
 				mappedIDs = append(mappedIDs, id)
 			}
 		}
 	case map[string]string:
 		for id := range mapping {
-			if strings.TrimSpace(id) != "" {
+			if strings.TrimSpace(id) != "" && !strings.Contains(id, "*") {
 				mappedIDs = append(mappedIDs, id)
 			}
 		}
