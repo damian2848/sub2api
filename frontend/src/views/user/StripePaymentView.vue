@@ -86,13 +86,17 @@ const initError = ref('')
 const order = ref<PaymentOrder | null>(null)
 const currency = ref('CNY')
 const showPaymentElement = ref(false)
+// The PaymentIntent secret is accepted only from the local recovery snapshot
+// for the matching order. Keep it reactive because the checkout composable is
+// created before the async order initialization completes.
+const resolvedClientSecret = ref('')
 
 const {
   error: stripeError, submitting: stripeSubmitting, succeeded: stripeSuccess, ready: stripeReady,
   pending, selectedType, walletAction, remainingMs, expired, terminalStatus, locked, showStatus, initialize, pay,
 } = useStripeCheckout({
   orderId: () => Number(route.query.order_id),
-  clientSecret: () => String(route.query.client_secret || ''),
+  clientSecret: () => resolvedClientSecret.value,
   order,
   onSuccess: scheduleClose,
 })
@@ -109,6 +113,7 @@ onMounted(async () => {
     ? readPaymentRecoverySnapshot(window.localStorage.getItem(PAYMENT_RECOVERY_STORAGE_KEY), { resumeToken })
     : null
   const clientSecret = orderId && restored?.orderId === orderId ? restored.clientSecret : ''
+  resolvedClientSecret.value = clientSecret
 
   if (!orderId || !clientSecret) {
     loading.value = false

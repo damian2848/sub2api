@@ -76,6 +76,7 @@ export function useStripeCheckout(options: {
   function finish() {
     if (disposed || succeeded.value) return
     stopPolling()
+    clearInterval(clockTimer)
     pending.value = false
     walletAction.value = null
     succeeded.value = true

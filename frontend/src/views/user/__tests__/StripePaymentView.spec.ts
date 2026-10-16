@@ -21,6 +21,7 @@ const stripeElements = vi.hoisted(() => ({
 const stripePaymentElement = vi.hoisted(() => ({
   mount: vi.fn(),
   on: vi.fn(),
+  destroy: vi.fn(),
 }))
 const stripeInstance = vi.hoisted(() => ({
   elements: vi.fn(),
@@ -83,8 +84,8 @@ function orderFactory(overrides: Partial<PaymentOrder> = {}): PaymentOrder {
     out_trade_no: 'sub2_stripe_42',
     status: 'PENDING',
     order_type: 'balance',
-    created_at: '2026-04-20T12:00:00Z',
-    expires_at: '2026-04-20T12:30:00Z',
+    created_at: '2099-01-01T00:00:00Z',
+    expires_at: '2099-01-01T00:30:00Z',
     refund_amount: 0,
     ...overrides,
   }
@@ -123,6 +124,10 @@ function mountView() {
       stubs: {
         AppLayout: { template: '<div><slot /></div>' },
         Icon: true,
+        StripeCheckoutForm: {
+          props: { formattedAmount: { type: String, default: '' } },
+          template: '<div><span>{{ formattedAmount }}</span><slot /></div>',
+        },
       },
     },
   })
@@ -130,6 +135,10 @@ function mountView() {
 
 describe('StripePaymentView', () => {
   beforeEach(() => {
+    // Keep the fixture order inside its payment window regardless of the
+    // calendar date on which the suite runs.
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-04-20T12:00:00Z'))
     routeState.query = {
       order_id: '42',
     }
@@ -141,6 +150,7 @@ describe('StripePaymentView', () => {
     loadStripe.mockReset().mockResolvedValue(stripeInstance)
     stripeElements.create.mockReset().mockReturnValue(stripePaymentElement)
     stripePaymentElement.mount.mockReset()
+    stripePaymentElement.destroy.mockReset()
     stripePaymentElement.on.mockReset().mockImplementation((event: string, callback: () => void) => {
       if (event === 'ready') callback()
     })
@@ -159,7 +169,7 @@ describe('StripePaymentView', () => {
     await flushPromises()
 
     expect(getOrder).toHaveBeenCalledWith(42)
-    expect(stripeInstance.confirmAlipayPayment).toHaveBeenCalledWith('pi_secret_42', expect.any(Object))
+    expect(stripeInstance.confirmAlipayPayment).toHaveBeenCalledWith('pi_secret_42', expect.any(Object), expect.any(Object))
   })
 
   it('ignores a client secret supplied in the URL query', async () => {
