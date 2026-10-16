@@ -69,6 +69,7 @@ func TestProvideCleanup_WithMinimalDependencies_NoPanic(t *testing.T) {
 		nil, // authCacheInvalidationWorker
 		schedulerSnapshotSvc,
 		tokenRefreshSvc,
+		nil, // geminiWebKeepalive
 		accountExpirySvc,
 		nil, // cnProviderBalanceCheck
 		codexVersionSyncSvc,

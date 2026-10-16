@@ -11,6 +11,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/payment"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/geminiweb"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/qualityqueue"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
@@ -175,6 +176,19 @@ func ProvideTokenRefreshService(
 	// 调用侧显式注入后台刷新策略，避免策略漂移
 	svc.SetRefreshPolicy(DefaultBackgroundRefreshPolicy())
 	svc.SetAccountRuntimeBlocker(runtimeBlocker)
+	startBackgroundService(cfg, svc)
+	return svc
+}
+
+// ProvideGeminiWebCookieKeepaliveService creates the browser-cookie renewal
+// worker. It is a process-wide background job, so gateway-only replicas do
+// not independently rotate the same account credentials.
+func ProvideGeminiWebCookieKeepaliveService(accountRepo AccountRepository, httpUpstream HTTPUpstream, cfg *config.Config, geminiCompat *GeminiMessagesCompatService) *GeminiWebCookieKeepaliveService {
+	var client *geminiweb.Client
+	if geminiCompat != nil {
+		client = geminiCompat.geminiWebClient()
+	}
+	svc := NewGeminiWebCookieKeepaliveService(accountRepo, httpUpstream, client)
 	startBackgroundService(cfg, svc)
 	return svc
 }
@@ -1077,6 +1091,7 @@ var ProviderSet = wire.NewSet(
 	ProvideCRSSyncService,
 	ProvideUpdateService,
 	ProvideTokenRefreshService,
+	ProvideGeminiWebCookieKeepaliveService,
 	wire.Bind(new(GrokOAuthReconciler), new(*TokenRefreshService)),
 	ProvideAccountExpiryService,
 	ProvideOpenAICodexVersionSyncService,

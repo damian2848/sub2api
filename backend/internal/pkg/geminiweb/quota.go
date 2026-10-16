@@ -54,7 +54,7 @@ func (c *Client) FetchQuota(ctx context.Context, cred Credential, do Doer) (Quot
 	if base == "" {
 		base = "https://gemini.google.com"
 	}
-	key := cookieKey(cred.Cookie) + "\x00" + strconv.Itoa(cred.AuthUser)
+	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet)
 	c.mu.Lock()
 	if c.quotaCache == nil {
 		c.quotaCache = make(map[string]quotaCacheEntry)
@@ -73,7 +73,7 @@ func (c *Client) FetchQuota(ctx context.Context, cred Credential, do Doer) (Quot
 		postCred.Cookie = sessionCookie
 	}
 	accountPath := ""
-	if cred.AuthUser > 0 {
+	if cred.hasAuthUser() {
 		accountPath = "/u/" + strconv.Itoa(cred.AuthUser)
 	}
 	query := url.Values{"rpcids": {geminiWebQuotaRPC}, "source-path": {accountPath + "/usage"}, "hl": {defaultString(sess.Language, "en")}, "_reqid": {strconv.FormatInt(time.Now().UnixNano()%1000000, 10)}, "rt": {"c"}, "bl": {sess.Build}, "f.sid": {sess.Fsid}}
@@ -88,8 +88,15 @@ func (c *Client) FetchQuota(ctx context.Context, cred Credential, do Doer) (Quot
 	if err != nil {
 		return QuotaResult{UpdatedCookie: sessionCookie}, err
 	}
+	if resp == nil || resp.Body == nil {
+		return QuotaResult{UpdatedCookie: sessionCookie}, errors.New("gemini web quota returned no response body")
+	}
 	defer resp.Body.Close()
 	updatedCookie := mergeSetCookie(postCred.Cookie, resp.Header.Values("Set-Cookie"))
+	c.updateSessionCookie(postCred, updatedCookie)
+	if live := c.currentSessionCookie(postCred); live != "" {
+		updatedCookie = live
+	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return QuotaResult{UpdatedCookie: updatedCookie}, ErrInvalidCredential
 	}

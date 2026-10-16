@@ -101,6 +101,7 @@ func provideCleanup(
 	authCacheInvalidationWorker *service.AuthCacheInvalidationWorker,
 	schedulerSnapshot *service.SchedulerSnapshotService,
 	tokenRefresh *service.TokenRefreshService,
+	geminiWebKeepalive *service.GeminiWebCookieKeepaliveService,
 	accountExpiry *service.AccountExpiryService,
 	cnProviderBalanceCheck *service.CNProviderBalanceCheckService,
 	codexVersionSync *service.OpenAICodexVersionSyncService,
@@ -311,6 +312,12 @@ func provideCleanup(
 			}},
 			{"TokenRefreshService", func() error {
 				tokenRefresh.Stop()
+				return nil
+			}},
+			{"GeminiWebCookieKeepaliveService", func() error {
+				if geminiWebKeepalive != nil {
+					geminiWebKeepalive.Stop()
+				}
 				return nil
 			}},
 			{"AccountExpiryService", func() error {

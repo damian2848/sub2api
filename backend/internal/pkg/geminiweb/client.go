@@ -26,13 +26,18 @@ var (
 	ErrInvalidCredential = errors.New("gemini web credential is invalid")
 	ErrRateLimited       = errors.New("gemini web is rate limited")
 	ErrEmptyResponse     = errors.New("gemini web returned no answer")
+	// ErrCookieRotationUnavailable means Google accepted the rotation request,
+	// but did not issue a new timestamp cookie.  This is a transient condition;
+	// callers may continue using a still-valid session and retry later.
+	ErrCookieRotationUnavailable = errors.New("gemini web cookie rotation returned no new timestamp cookie")
 )
 
 type Credential struct {
-	Cookie    string
-	AuthUser  int
-	BaseURL   string
-	UserAgent string
+	Cookie      string
+	AuthUser    int
+	AuthUserSet bool
+	BaseURL     string
+	UserAgent   string
 }
 
 type Request struct {
@@ -56,20 +61,53 @@ type Doer func(*http.Request) (*http.Response, error)
 
 type session struct {
 	At, Build, Fsid, Language string
-	Fetched                   time.Time
+	// Cookie is the latest merged cookie header observed by this session. It
+	// prevents an older cached Cookie from being sent after Google rotates the
+	// timestamp cookie in a response.
+	Cookie string
+	// CookieRefreshed records the last successful RotateCookies call (or the
+	// bootstrap that created the session). Gemini Web cookies are kept alive at
+	// most once per ten minutes, matching cliproxyapi's browser-cookie worker.
+	CookieRefreshed time.Time
+	Fetched         time.Time
 }
 
 type Client struct {
-	mu         sync.Mutex
-	sessions   map[string]session
-	metadata   map[string][]any
-	quotaCache map[string]quotaCacheEntry
-	ttl        time.Duration
-	quotaTTL   time.Duration
+	mu          sync.Mutex
+	sessions    map[string]session
+	liveCookies map[string]string
+	metadata    map[string][]any
+	quotaCache  map[string]quotaCacheEntry
+	ttl         time.Duration
+	quotaTTL    time.Duration
+}
+
+const geminiWebCookieRefreshInterval = 10 * time.Minute
+
+// cookieRefreshLocks is shared by all clients in this process. The keepalive
+// worker and a request-triggered lazy refresh can otherwise race the same
+// account and persist an older Set-Cookie value after the newer rotation.
+var cookieRefreshLocks sync.Map // map[string]*sync.Mutex
+
+func cookieRefreshLock(key string) *sync.Mutex {
+	if lock, ok := cookieRefreshLocks.Load(key); ok {
+		return lock.(*sync.Mutex)
+	}
+	lock := &sync.Mutex{}
+	actual, _ := cookieRefreshLocks.LoadOrStore(key, lock)
+	return actual.(*sync.Mutex)
+}
+
+func (cred Credential) hasAuthUser() bool {
+	return cred.AuthUserSet || cred.AuthUser > 0
+}
+
+func credentialKey(cookie string, authUser int, authUserSet bool) string {
+	return cookieKey(cookie) + "\x00" + strconv.Itoa(authUser) + "\x00" + strconv.FormatBool(authUserSet)
 }
 
 func NewClient() *Client {
-	return &Client{sessions: make(map[string]session), metadata: make(map[string][]any), quotaCache: make(map[string]quotaCacheEntry), ttl: 20 * time.Minute, quotaTTL: time.Minute}
+	return &Client{sessions: make(map[string]session), liveCookies: make(map[string]string), metadata: make(map[string][]any), quotaCache: make(map[string]quotaCacheEntry), ttl: 20 * time.Minute, quotaTTL: time.Minute}
 }
 
 func (c *Client) Invalidate(cookie string) {
@@ -83,6 +121,11 @@ func (c *Client) Invalidate(cookie string) {
 	for key := range c.quotaCache {
 		if key == cookieKey(cookie) || strings.HasPrefix(key, prefix) {
 			delete(c.quotaCache, key)
+		}
+	}
+	for key := range c.liveCookies {
+		if strings.HasPrefix(key, prefix) {
+			delete(c.liveCookies, key)
 		}
 	}
 	c.mu.Unlock()
@@ -114,6 +157,127 @@ func normalizeCookieHeader(cookie string) string {
 
 func (c *Client) Complete(ctx context.Context, cred Credential, req Request, do Doer) (Result, error) {
 	return c.complete(ctx, cred, req, do, false)
+}
+
+// RefreshCookies asks Google's browser session endpoint to rotate the
+// timestamp cookie (__Secure-1PSIDTS).  Gemini Web cookies are bearer-like
+// browser credentials: unlike OAuth tokens they do not have an expiry field,
+// and Google periodically invalidates an old timestamp cookie.  cliproxyapi
+// keeps these sessions alive by calling RotateCookies every ten minutes; the
+// Sub2API client does the same lazily before reusing an idle session.
+//
+// The returned header is the merged Cookie value and should be persisted by
+// the account service.  No secret is included in returned errors.
+func (c *Client) RefreshCookies(ctx context.Context, cred Credential, do Doer) (string, error) {
+	cred.Cookie = normalizeCookieHeader(cred.Cookie)
+	if strings.TrimSpace(cred.Cookie) == "" || cookieKey(cred.Cookie) == "" || cookieValue(cred.Cookie, "__Secure-1PSID") == "" {
+		return cred.Cookie, ErrInvalidCredential
+	}
+	if do == nil {
+		return cred.Cookie, errors.New("gemini web transport is nil")
+	}
+	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet)
+	c.mu.Lock()
+	if live := c.liveCookies[key]; live != "" {
+		cred.Cookie = live
+	}
+	c.mu.Unlock()
+	// Rotation changes account state globally. Serialize calls across all
+	// Client instances so the request path and background keepalive worker
+	// cannot overwrite a fresh timestamp with an older Set-Cookie response.
+	lock := cookieRefreshLock(credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet))
+	lock.Lock()
+	defer lock.Unlock()
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"https://accounts.google.com/RotateCookies", strings.NewReader(`[000,"-0000000000000000000"]`))
+	if err != nil {
+		return cred.Cookie, err
+	}
+	ua := cred.UserAgent
+	if ua == "" {
+		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "https://accounts.google.com")
+	referer := "https://gemini.google.com/app"
+	if cred.hasAuthUser() {
+		referer = "https://gemini.google.com/u/" + strconv.Itoa(cred.AuthUser) + "/app"
+	}
+	request.Header.Set("Referer", referer)
+	request.Header.Set("X-Same-Domain", "1")
+	request.Header.Set("User-Agent", ua)
+	request.Header.Set("Accept", "*/*")
+	request.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	request.Header.Set("Cookie", cred.Cookie)
+	if cred.hasAuthUser() {
+		request.Header.Set("X-Goog-AuthUser", strconv.Itoa(cred.AuthUser))
+	}
+	resp, err := do(request)
+	if err != nil {
+		return cred.Cookie, err
+	}
+	if resp == nil {
+		return cred.Cookie, errors.New("gemini web cookie rotation returned no response")
+	}
+	if resp.Body != nil {
+		defer resp.Body.Close()
+	}
+	updated := mergeSetCookie(cred.Cookie, googleSharedCookieValues(resp.Header.Values("Set-Cookie")))
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return updated, ErrInvalidCredential
+	case http.StatusTooManyRequests:
+		return updated, ErrRateLimited
+	}
+	if resp.StatusCode >= 400 {
+		return updated, fmt.Errorf("gemini web cookie rotation upstream: %s", resp.Status)
+	}
+	if !hasChangedCookie(cred.Cookie, updated, "__Secure-1PSIDTS") {
+		return updated, ErrCookieRotationUnavailable
+	}
+	c.updateSessionCookie(cred, updated)
+	return updated, nil
+}
+
+// googleSharedCookieValues keeps the rotation response limited to cookies
+// whose declared scope can be sent to Gemini. A host-only cookie from
+// accounts.google.com must stay on that host; the account credential stores a
+// flat Cookie header and cannot represent host-only scope, so it is discarded.
+func googleSharedCookieValues(values []string) []string {
+	filtered := make([]string, 0, len(values))
+	for _, raw := range values {
+		domain := ""
+		for _, attr := range strings.Split(raw, ";")[1:] {
+			parts := strings.SplitN(strings.TrimSpace(attr), "=", 2)
+			if strings.EqualFold(strings.TrimSpace(parts[0]), "domain") && len(parts) == 2 {
+				domain = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(parts[1]), "."))
+				break
+			}
+		}
+		// Only the parent Google domain is shared with gemini.google.com.
+		// A cookie scoped to accounts.google.com (or another Google subdomain)
+		// must remain host-specific; the flat account Cookie field cannot model
+		// that scope safely.
+		if domain == "google.com" {
+			filtered = append(filtered, raw)
+		}
+	}
+	return filtered
+}
+
+func hasChangedCookie(before, after, name string) bool {
+	lookup := func(header string) string {
+		for _, piece := range strings.Split(normalizeCookieHeader(header), ";") {
+			kv := strings.SplitN(strings.TrimSpace(piece), "=", 2)
+			if len(kv) == 2 && strings.EqualFold(strings.TrimSpace(kv[0]), name) {
+				return strings.TrimSpace(kv[1])
+			}
+		}
+		return ""
+	}
+	oldValue, newValue := lookup(before), lookup(after)
+	return newValue != "" && newValue != oldValue
 }
 
 func (c *Client) complete(ctx context.Context, cred Credential, req Request, do Doer, retried bool) (Result, error) {
@@ -153,7 +317,7 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 	encodedInner, _ := json.Marshal(inner)
 	outer, _ := json.Marshal([]any{nil, string(encodedInner)})
 	path := "/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
-	if cred.AuthUser > 0 {
+	if cred.hasAuthUser() {
 		path = "/u/" + strconv.Itoa(cred.AuthUser) + path
 	}
 	endpoint := base + path + "?bl=" + url.QueryEscape(sess.Build) + "&hl=" + url.QueryEscape(defaultString(sess.Language, "en")) + "&_reqid=" + strconv.FormatInt(time.Now().UnixNano()%1000000, 10) + "&rt=c&f.sid=" + url.QueryEscape(sess.Fsid)
@@ -171,8 +335,15 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 	if err != nil {
 		return Result{}, err
 	}
+	if resp == nil || resp.Body == nil {
+		return Result{}, errors.New("gemini web generation returned no response body")
+	}
 	defer resp.Body.Close()
 	updatedCookie := mergeSetCookie(sessionCookie, resp.Header.Values("Set-Cookie"))
+	c.updateSessionCookie(postCred, updatedCookie)
+	if live := c.currentSessionCookie(postCred); live != "" {
+		updatedCookie = live
+	}
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return Result{UpdatedCookie: updatedCookie}, ErrInvalidCredential
 	}
@@ -252,7 +423,7 @@ func applyHeaders(r *http.Request, cred Credential, base string, sess session, m
 	r.Header.Set("Accept", "*/*")
 	r.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	r.Header.Set("Cookie", cred.Cookie)
-	if cred.AuthUser > 0 {
+	if cred.hasAuthUser() {
 		r.Header.Set("X-Goog-AuthUser", strconv.Itoa(cred.AuthUser))
 	}
 	r.Header.Set("x-goog-ext-73010989-jspb", "[0]")
@@ -266,15 +437,62 @@ func applyHeaders(r *http.Request, cred Credential, base string, sess session, m
 }
 
 func (c *Client) getSession(ctx context.Context, cred Credential, base string, do Doer) (session, string, error) {
-	key := cookieKey(cred.Cookie) + "\x00" + strconv.Itoa(cred.AuthUser)
+	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet)
 	c.mu.Lock()
 	cached, ok := c.sessions[key]
+	liveCookie := c.liveCookies[key]
 	c.mu.Unlock()
+	if liveCookie != "" {
+		// The background worker may have rotated an account before this client
+		// bootstrapped a browser session. Prefer that live generation over the
+		// older cookie row returned by the account repository.
+		cred.Cookie = liveCookie
+	}
 	if ok && time.Since(cached.Fetched) < c.ttl {
-		return cached, cred.Cookie, nil
+		cookie := defaultString(liveCookie, defaultString(cached.Cookie, cred.Cookie))
+		if cached.CookieRefreshed.IsZero() || time.Since(cached.CookieRefreshed) >= geminiWebCookieRefreshInterval {
+			rotated, rotateErr := c.RefreshCookies(ctx, Credential{
+				Cookie: cookie, AuthUser: cred.AuthUser, AuthUserSet: cred.AuthUserSet, BaseURL: base, UserAgent: cred.UserAgent,
+			}, do)
+			if rotateErr == nil && rotated != "" {
+				// RefreshCookies already merged the response into the cache. Read
+				// the entry again so a concurrent model/quota response cannot be
+				// overwritten by this older local snapshot.
+				c.mu.Lock()
+				live := c.sessions[key]
+				c.mu.Unlock()
+				if live.Cookie == "" {
+					live = cached
+					live.Cookie = rotated
+					live.CookieRefreshed = time.Now()
+					c.mu.Lock()
+					c.sessions[key] = live
+					c.mu.Unlock()
+				}
+				return live, defaultString(live.Cookie, rotated), nil
+			}
+			if errors.Is(rotateErr, ErrInvalidCredential) || errors.Is(rotateErr, ErrRateLimited) {
+				return cached, rotated, rotateErr
+			}
+			// A transport failure or a response without a new timestamp cookie
+			// should not take down a still-valid generation. Mark the attempt so
+			// repeated requests do not hammer accounts.google.com; retry after
+			// the normal ten-minute interval.
+			c.mu.Lock()
+			live := c.sessions[key]
+			if live.Cookie == "" {
+				live = cached
+			}
+			live.CookieRefreshed = time.Now()
+			c.sessions[key] = live
+			c.mu.Unlock()
+			cached = live
+			cookie = defaultString(live.Cookie, cookie)
+		}
+		return cached, cookie, nil
 	}
 	path := "/app"
-	if cred.AuthUser > 0 {
+	if cred.hasAuthUser() {
 		path = "/u/" + strconv.Itoa(cred.AuthUser) + "/app"
 	}
 	r, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
@@ -289,12 +507,15 @@ func (c *Client) getSession(ctx context.Context, cred Credential, base string, d
 	r.Header.Set("Accept", "text/html,application/xhtml+xml")
 	r.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	r.Header.Set("Cookie", cred.Cookie)
-	if cred.AuthUser > 0 {
+	if cred.hasAuthUser() {
 		r.Header.Set("X-Goog-AuthUser", strconv.Itoa(cred.AuthUser))
 	}
 	resp, err := do(r)
 	if err != nil {
 		return session{}, cred.Cookie, err
+	}
+	if resp == nil || resp.Body == nil {
+		return session{}, cred.Cookie, errors.New("gemini web session returned no response body")
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
@@ -311,7 +532,8 @@ func (c *Client) getSession(ctx context.Context, cred Credential, base string, d
 	if resp.StatusCode >= 400 {
 		return session{}, updated, fmt.Errorf("gemini web session upstream: %s", resp.Status)
 	}
-	s := session{At: findValue(string(b), `"SNlM0e"\s*:\s*"([^"]+)"`), Build: findValue(string(b), `"cfb2h"\s*:\s*"([^"]+)"`), Fsid: findValue(string(b), `"FdrFJe"\s*:\s*"([^"]+)"`), Language: findValue(string(b), `"TuX5cc"\s*:\s*"([^"]+)"`), Fetched: time.Now()}
+	now := time.Now()
+	s := session{At: findValue(string(b), `"SNlM0e"\s*:\s*"([^"]+)"`), Build: findValue(string(b), `"cfb2h"\s*:\s*"([^"]+)"`), Fsid: findValue(string(b), `"FdrFJe"\s*:\s*"([^"]+)"`), Language: findValue(string(b), `"TuX5cc"\s*:\s*"([^"]+)"`), Cookie: updated, CookieRefreshed: now, Fetched: now}
 	if s.Language == "" {
 		s.Language = "en"
 	}
@@ -319,9 +541,92 @@ func (c *Client) getSession(ctx context.Context, cred Credential, base string, d
 		return session{}, updated, ErrInvalidCredential
 	}
 	c.mu.Lock()
+	if live := c.liveCookies[key]; live != "" {
+		// Keep any live cookie that arrived while bootstrap was in flight,
+		// including companion cookies with the same timestamp.
+		s.Cookie = live
+	}
 	c.sessions[key] = s
+	if c.liveCookies == nil {
+		c.liveCookies = make(map[string]string)
+	}
+	if c.liveCookies[key] == "" {
+		c.liveCookies[key] = updated
+	}
 	c.mu.Unlock()
-	return s, updated, nil
+	return s, s.Cookie, nil
+}
+
+// updateSessionCookie keeps a live session aligned with cookies returned by a
+// generation or usage response. The stable __Secure-1PSID key remains the
+// session identity, so the next request can use the rotated timestamp without
+// doing an unnecessary bootstrap.
+func (c *Client) updateSessionCookie(cred Credential, cookie string) {
+	if strings.TrimSpace(cookie) == "" {
+		return
+	}
+	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	previousCookie := c.liveCookies[key]
+	if previousCookie == "" {
+		if cached, ok := c.sessions[key]; ok {
+			previousCookie = cached.Cookie
+		}
+	}
+	previousTimestamp := cookieValue(previousCookie, "__Secure-1PSIDTS")
+	updatedTimestamp := cookieValue(cookie, "__Secure-1PSIDTS")
+	credentialTimestamp := cookieValue(cred.Cookie, "__Secure-1PSIDTS")
+	// An in-flight request may still carry the old credential after another
+	// request rotated the shared live session. Never let that old response
+	// roll the cached timestamp back.
+	if previousTimestamp != "" && credentialTimestamp != "" && previousTimestamp != credentialTimestamp {
+		return
+	}
+	if previousTimestamp != "" && updatedTimestamp == "" {
+		return
+	}
+	if c.liveCookies == nil {
+		c.liveCookies = make(map[string]string)
+	}
+	c.liveCookies[key] = cookie
+	if cached, ok := c.sessions[key]; ok {
+		cached.Cookie = cookie
+		if updatedTimestamp != "" && updatedTimestamp != previousTimestamp {
+			cached.CookieRefreshed = time.Now()
+		}
+		c.sessions[key] = cached
+	}
+}
+
+func (c *Client) currentSessionCookie(cred Credential) string {
+	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if live := c.liveCookies[key]; live != "" {
+		return live
+	}
+	if cached, ok := c.sessions[key]; ok {
+		return cached.Cookie
+	}
+	return ""
+}
+
+// CurrentCookie returns the newest cookie header held by the live session.
+// Callers that persist rotated credentials should read it after a network
+// operation so an overlapping request cannot write an older generation.
+func (c *Client) CurrentCookie(cred Credential) string {
+	return c.currentSessionCookie(cred)
+}
+
+func cookieValue(header, name string) string {
+	for _, piece := range strings.Split(normalizeCookieHeader(header), ";") {
+		kv := strings.SplitN(strings.TrimSpace(piece), "=", 2)
+		if len(kv) == 2 && strings.EqualFold(strings.TrimSpace(kv[0]), name) {
+			return strings.TrimSpace(kv[1])
+		}
+	}
+	return ""
 }
 
 func findValue(body, expression string) string {
@@ -371,19 +676,46 @@ func mergeSetCookie(current string, values []string) string {
 		}
 	}
 	for _, raw := range values {
-		first := strings.Split(raw, ";")[0]
+		parts := strings.Split(raw, ";")
+		first := parts[0]
 		kv := strings.SplitN(strings.TrimSpace(first), "=", 2)
-		if len(kv) == 2 {
-			k := strings.TrimSpace(kv[0])
-			if _, ok := jar[k]; !ok {
-				order = append(order, k)
-			}
-			jar[k] = strings.TrimSpace(kv[1])
+		if len(kv) != 2 {
+			continue
 		}
+		k, v := strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])
+		deleteCookie := v == ""
+		for _, attr := range parts[1:] {
+			nameValue := strings.SplitN(strings.TrimSpace(attr), "=", 2)
+			name := strings.ToLower(strings.TrimSpace(nameValue[0]))
+			switch name {
+			case "max-age":
+				if len(nameValue) == 2 {
+					if maxAge, err := strconv.Atoi(strings.TrimSpace(nameValue[1])); err == nil && maxAge <= 0 {
+						deleteCookie = true
+					}
+				}
+			case "expires":
+				if len(nameValue) == 2 {
+					if expires, err := http.ParseTime(strings.TrimSpace(nameValue[1])); err == nil && !expires.After(time.Now()) {
+						deleteCookie = true
+					}
+				}
+			}
+		}
+		if deleteCookie {
+			delete(jar, k)
+			continue
+		}
+		if _, ok := jar[k]; !ok {
+			order = append(order, k)
+		}
+		jar[k] = v
 	}
 	parts := make([]string, 0, len(order))
 	for _, k := range order {
-		parts = append(parts, k+"="+jar[k])
+		if value, ok := jar[k]; ok {
+			parts = append(parts, k+"="+value)
+		}
 	}
 	return strings.Join(parts, "; ")
 }

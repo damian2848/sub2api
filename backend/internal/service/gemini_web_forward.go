@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,25 @@ const (
 	GeminiWebCredentialRejectedReason        GatewayFailureReason = "gemini_web_credential_rejected"
 	GeminiWebCredentialRejectedClientMessage                      = "Gemini Web Cookie is invalid or expired; update the account Cookie and retry"
 )
+
+func geminiWebAuthUser(account *Account) (int, bool) {
+	if account == nil || account.Credentials == nil {
+		return 0, false
+	}
+	_, present := account.Credentials["auth_user"]
+	if !present {
+		return 0, false
+	}
+	raw := strings.TrimSpace(account.GetCredential("auth_user"))
+	if raw == "" {
+		return 0, false
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return 0, false
+	}
+	return value, true
+}
 
 func (s *GeminiMessagesCompatService) geminiWebClient() *geminiweb.Client {
 	if s.geminiWeb == nil {
@@ -39,9 +59,9 @@ func (s *GeminiMessagesCompatService) callGeminiWeb(ctx context.Context, account
 	if s.httpUpstream == nil {
 		return geminiweb.Result{}, errors.New("upstream HTTP client is not configured")
 	}
-	authUser := int(account.GetCredentialAsInt64("auth_user"))
+	authUser, authUserSet := geminiWebAuthUser(account)
 	cred := geminiweb.Credential{
-		Cookie: cookie, AuthUser: authUser,
+		Cookie: cookie, AuthUser: authUser, AuthUserSet: authUserSet,
 		BaseURL: "https://gemini.google.com", UserAgent: account.GetCredential("user_agent"),
 	}
 	proxyURL := ""
@@ -52,10 +72,21 @@ func (s *GeminiMessagesCompatService) callGeminiWeb(ctx context.Context, account
 		return s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 	}
 	result, err := s.geminiWebClient().Complete(requestCtx, cred, geminiweb.Request{Model: model, Prompt: prompt, Thinking: thinking}, do)
-	if result.UpdatedCookie != "" && result.UpdatedCookie != cookie {
+	if err == nil || (!errors.Is(err, geminiweb.ErrInvalidCredential) && !errors.Is(err, geminiweb.ErrRateLimited)) {
+		if live := s.geminiWebClient().CurrentCookie(cred); live != "" {
+			result.UpdatedCookie = live
+		}
+	}
+	if !errors.Is(err, geminiweb.ErrInvalidCredential) && !errors.Is(err, geminiweb.ErrRateLimited) && result.UpdatedCookie != "" && result.UpdatedCookie != cookie {
+		persistLock := geminiWebCredentialPersistLock(account.ID)
+		persistLock.Lock()
+		defer persistLock.Unlock()
 		updated := shallowCopyMap(account.Credentials)
 		updated["gemini_web_cookie"] = result.UpdatedCookie
-		if persistErr := persistAccountCredentials(ctx, s.accountRepo, account, updated); persistErr != nil {
+		updated[geminiWebCookieLastRefresh] = time.Now().UTC().Format(time.RFC3339Nano)
+		persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+		defer persistCancel()
+		if persistErr := persistAccountCredentials(persistCtx, s.accountRepo, account, updated); persistErr != nil {
 			// A rotated cookie is useful but a persistence failure must not turn a
 			// successful model response into a failed request.
 			account.Credentials = updated

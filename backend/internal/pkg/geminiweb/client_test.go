@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestClientCompleteDiscoversSessionAndParsesAnswer(t *testing.T) {
@@ -67,6 +68,27 @@ func TestClientCompleteRefreshesRejectedSession(t *testing.T) {
 	}
 }
 
+func TestClientExplicitAuthUserZeroUsesScopedGeminiPath(t *testing.T) {
+	var bootstrapPath, bootstrapAuthUser string
+	do := func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet {
+			bootstrapPath = req.URL.Path
+			bootstrapAuthUser = req.Header.Get("X-Goog-AuthUser")
+			return response(http.StatusOK, `"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid"`, nil), nil
+		}
+		return response(http.StatusOK, frameBody("ok"), nil), nil
+	}
+	_, err := NewClient().Complete(context.Background(), Credential{
+		Cookie: "__Secure-1PSID=psid", AuthUser: 0, AuthUserSet: true, BaseURL: "https://gemini.test",
+	}, Request{Model: "gemini-pro", Prompt: "hello"}, do)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bootstrapPath != "/u/0/app" || bootstrapAuthUser != "0" {
+		t.Fatalf("explicit auth_user=0 bootstrap = path %q, header %q", bootstrapPath, bootstrapAuthUser)
+	}
+}
+
 func TestClientFetchQuotaParsesUsageWindows(t *testing.T) {
 	calls := 0
 	do := func(req *http.Request) (*http.Response, error) {
@@ -99,6 +121,110 @@ func TestClientFetchQuotaParsesUsageWindows(t *testing.T) {
 	_, err = client.FetchQuota(context.Background(), cred, do)
 	if err != nil || calls != 2 {
 		t.Fatalf("quota result should be cached for one minute: calls=%d err=%v", calls, err)
+	}
+}
+
+func TestClientRefreshCookiesUsesGoogleRotationEndpoint(t *testing.T) {
+	client := NewClient()
+	var got *http.Request
+	do := func(req *http.Request) (*http.Response, error) {
+		got = req
+		if req.URL.Host != "accounts.google.com" || req.URL.Path != "/RotateCookies" {
+			t.Fatalf("rotation target = %s, want accounts.google.com/RotateCookies", req.URL)
+		}
+		if req.Header.Get("Origin") != "https://accounts.google.com" || req.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("rotation headers missing: origin=%q content-type=%q", req.Header.Get("Origin"), req.Header.Get("Content-Type"))
+		}
+		return response(http.StatusOK, "[]", http.Header{"Set-Cookie": {
+			"__Secure-1PSIDTS=renewed; Domain=.google.com; Path=/; Secure",
+			"accounts_only=1; Domain=accounts.google.com; Path=/; Secure",
+		}}), nil
+	}
+	updated, err := client.RefreshCookies(context.Background(), Credential{Cookie: "__Secure-1PSID=psid; __Secure-1PSIDTS=old"}, do)
+	if err != nil {
+		t.Fatalf("RefreshCookies() error = %v", err)
+	}
+	if got == nil || !strings.Contains(got.Header.Get("Cookie"), "__Secure-1PSIDTS=old") {
+		t.Fatal("rotation did not send the existing timestamp cookie")
+	}
+	if !strings.Contains(updated, "__Secure-1PSIDTS=renewed") {
+		t.Fatalf("rotated cookie = %q", updated)
+	}
+	if strings.Contains(updated, "accounts_only=") {
+		t.Fatalf("host-only account cookie leaked into Gemini cookie header: %q", updated)
+	}
+}
+
+func TestMergeSetCookieHonorsDeletionAttributes(t *testing.T) {
+	current := "__Secure-1PSID=psid; __Secure-1PSIDTS=old; stale=value"
+	updated := mergeSetCookie(current, []string{
+		"__Secure-1PSIDTS=renewed; Domain=.google.com; Path=/; Secure",
+		"stale=; Domain=.google.com; Path=/; Max-Age=0",
+	})
+	if strings.Contains(updated, "stale=") || !strings.Contains(updated, "__Secure-1PSIDTS=renewed") {
+		t.Fatalf("merged cookie = %q", updated)
+	}
+}
+
+func TestGoogleSharedCookieValuesRejectsSubdomainCookies(t *testing.T) {
+	values := googleSharedCookieValues([]string{
+		"shared=1; Domain=.google.com; Path=/",
+		"accounts_only=1; Domain=accounts.google.com; Path=/",
+		"gemini_only=1; Domain=gemini.google.com; Path=/",
+		"host_only=1; Path=/",
+	})
+	joined := strings.Join(values, "\n")
+	if !strings.Contains(joined, "shared=1") || strings.Contains(joined, "accounts_only=") || strings.Contains(joined, "gemini_only=") || strings.Contains(joined, "host_only=") {
+		t.Fatalf("filtered cookies = %q", joined)
+	}
+}
+
+func TestClientLazyCookieKeepaliveRotatesCachedSession(t *testing.T) {
+	client := NewClient()
+	cred := Credential{Cookie: "__Secure-1PSID=psid; __Secure-1PSIDTS=old", BaseURL: "https://gemini.test"}
+	var appCalls, rotateCalls, generateCalls int
+	do := func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.URL.Path == "/app":
+			appCalls++
+			return response(http.StatusOK, `"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid"`, nil), nil
+		case req.URL.Host == "accounts.google.com" && req.URL.Path == "/RotateCookies":
+			rotateCalls++
+			return response(http.StatusOK, "[]", http.Header{"Set-Cookie": {"__Secure-1PSIDTS=renewed; Domain=.google.com; Path=/; Secure"}}), nil
+		default:
+			generateCalls++
+			if generateCalls == 2 && !strings.Contains(req.Header.Get("Cookie"), "__Secure-1PSIDTS=renewed") {
+				t.Fatalf("generation did not use rotated Cookie: %q", req.Header.Get("Cookie"))
+			}
+			return response(http.StatusOK, frameBody("hello"), nil), nil
+		}
+	}
+	if _, err := client.Complete(context.Background(), cred, Request{Model: "gemini-pro", Prompt: "first"}, do); err != nil {
+		t.Fatal(err)
+	}
+	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet)
+	client.mu.Lock()
+	s := client.sessions[key]
+	s.CookieRefreshed = time.Now().Add(-geminiWebCookieRefreshInterval - time.Second)
+	client.sessions[key] = s
+	client.mu.Unlock()
+	result, err := client.Complete(context.Background(), cred, Request{Model: "gemini-pro", Prompt: "second"}, do)
+	if err != nil || result.Text != "hello" {
+		t.Fatalf("second Complete() result=%#v err=%v", result, err)
+	}
+	if appCalls != 1 || rotateCalls != 1 || generateCalls != 2 {
+		t.Fatalf("app=%d rotate=%d generate=%d, want 1/1/2", appCalls, rotateCalls, generateCalls)
+	}
+}
+
+func TestClientStaleCookieResponseCannotRollBackLiveSession(t *testing.T) {
+	client := NewClient()
+	key := credentialKey("__Secure-1PSID=psid; __Secure-1PSIDTS=old", 0, false)
+	client.sessions[key] = session{Cookie: "__Secure-1PSID=psid; __Secure-1PSIDTS=old"}
+	client.updateSessionCookie(Credential{Cookie: "__Secure-1PSID=psid; __Secure-1PSIDTS=old"}, "__Secure-1PSID=psid; __Secure-1PSIDTS=new")
+	client.updateSessionCookie(Credential{Cookie: "__Secure-1PSID=psid; __Secure-1PSIDTS=old"}, "__Secure-1PSID=psid; __Secure-1PSIDTS=old")
+	if got := client.sessions[key].Cookie; !strings.Contains(got, "__Secure-1PSIDTS=new") {
+		t.Fatalf("stale response rolled back live Cookie: %q", got)
 	}
 }
 

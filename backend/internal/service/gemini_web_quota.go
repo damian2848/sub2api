@@ -23,7 +23,8 @@ func (s *GeminiMessagesCompatService) passesGeminiWebQuotaPreCheck(ctx context.C
 	if strings.TrimSpace(cookie) == "" {
 		return false
 	}
-	cred := geminiweb.Credential{Cookie: cookie, AuthUser: int(account.GetCredentialAsInt64("auth_user")), BaseURL: "https://gemini.google.com", UserAgent: account.GetCredential("user_agent")}
+	authUser, authUserSet := geminiWebAuthUser(account)
+	cred := geminiweb.Credential{Cookie: cookie, AuthUser: authUser, AuthUserSet: authUserSet, BaseURL: "https://gemini.google.com", UserAgent: account.GetCredential("user_agent")}
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
@@ -34,7 +35,12 @@ func (s *GeminiMessagesCompatService) passesGeminiWebQuotaPreCheck(ctx context.C
 	quotaCtx, cancel := context.WithTimeout(ctx, geminiWebQuotaPrecheckTimeout)
 	defer cancel()
 	result, err := s.geminiWebClient().FetchQuota(quotaCtx, cred, do)
-	s.persistGeminiWebQuotaCookie(ctx, account, cookie, result.UpdatedCookie)
+	if live := s.geminiWebClient().CurrentCookie(cred); live != "" {
+		result.UpdatedCookie = live
+	}
+	if !errors.Is(err, geminiweb.ErrInvalidCredential) && !errors.Is(err, geminiweb.ErrRateLimited) {
+		s.persistGeminiWebQuotaCookie(ctx, account, cookie, result.UpdatedCookie)
+	}
 	if err != nil {
 		s.handleGeminiWebQuotaError(ctx, account, cookie, err)
 		return !errors.Is(err, geminiweb.ErrInvalidCredential) && !errors.Is(err, geminiweb.ErrRateLimited)
@@ -59,7 +65,13 @@ func (s *GeminiMessagesCompatService) persistGeminiWebQuotaCookie(ctx context.Co
 	}
 	updated := shallowCopyMap(account.Credentials)
 	updated["gemini_web_cookie"] = updatedCookie
-	if err := persistAccountCredentials(ctx, s.accountRepo, account, updated); err != nil {
+	updated[geminiWebCookieLastRefresh] = time.Now().UTC().Format(time.RFC3339Nano)
+	persistLock := geminiWebCredentialPersistLock(account.ID)
+	persistLock.Lock()
+	defer persistLock.Unlock()
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	if err := persistAccountCredentials(persistCtx, s.accountRepo, account, updated); err != nil {
 		account.Credentials = updated
 	}
 }
