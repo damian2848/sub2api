@@ -35,6 +35,7 @@ export default {
     updating: 'Updating...',
     updateComplete: 'Update Complete',
     updateFailed: 'Update Failed',
+    dirNotWritable: 'The program directory is not writable, so online update is unavailable. For Docker deployments, upgrade by updating the image',
     restartRequired: 'Please restart the service to apply the update',
     restartNow: 'Restart Now',
     restarting: 'Restarting...',

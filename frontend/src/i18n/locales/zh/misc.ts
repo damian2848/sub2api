@@ -35,6 +35,7 @@ export default {
     updating: '正在更新...',
     updateComplete: '更新完成',
     updateFailed: '更新失败',
+    dirNotWritable: '程序目录不可写，无法在线更新。Docker 部署请通过更新镜像升级',
     restartRequired: '请重启服务以应用更新',
     restartNow: '立即重启',
     restarting: '正在重启...',

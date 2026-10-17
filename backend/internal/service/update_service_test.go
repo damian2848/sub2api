@@ -5,9 +5,12 @@ package service
 import (
 	"context"
 	"errors"
+	"net/http"
+	"os"
 	"testing"
 	"time"
 
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/stretchr/testify/require"
 )
 
@@ -188,4 +191,23 @@ func TestUpdateServiceRollbackToVersionAcceptsVPrefix(t *testing.T) {
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrRollbackVersionNotAllowed)
 	require.Contains(t, err.Error(), "no compatible release found")
+}
+
+func TestCreateUpdateTempDirReportsReadOnlyProgramDir(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	_, err := createUpdateTempDir(dir)
+	require.ErrorIs(t, err, ErrUpdateDirNotWritable)
+	require.Equal(t, http.StatusConflict, infraerrors.Code(err))
+	require.Equal(t, "UPDATE_DIR_NOT_WRITABLE", infraerrors.Reason(err))
+
+	require.NoError(t, os.Chmod(dir, 0o755))
+	tempDir, err := createUpdateTempDir(dir)
+	require.NoError(t, err)
+	require.DirExists(t, tempDir)
 }

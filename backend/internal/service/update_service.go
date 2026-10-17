@@ -8,8 +8,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -25,6 +27,10 @@ import (
 var (
 	ErrNoUpdateAvailable         = infraerrors.Conflict("ALREADY_UP_TO_DATE", "no update available; current version is latest")
 	ErrRollbackVersionNotAllowed = infraerrors.BadRequest("ROLLBACK_VERSION_NOT_ALLOWED", "version is not in the allowed rollback list")
+	// ErrUpdateDirNotWritable means the service user cannot replace its own
+	// binary, typically a Docker image whose /app is owned by root. Such
+	// deployments are upgraded by updating the image.
+	ErrUpdateDirNotWritable = infraerrors.Conflict("UPDATE_DIR_NOT_WRITABLE", "the program directory is not writable by the service; for Docker deployments, upgrade by updating the image")
 )
 
 const (
@@ -222,11 +228,9 @@ func (s *UpdateService) applyReleaseAssets(ctx context.Context, releaseAssets []
 
 	exeDir := filepath.Dir(exePath)
 
-	// Create temp directory in the SAME directory as executable
-	// This ensures os.Rename is atomic (same filesystem)
-	tempDir, err := os.MkdirTemp(exeDir, ".sub2api-update-*")
+	tempDir, err := createUpdateTempDir(exeDir)
 	if err != nil {
-		return fmt.Errorf("failed to create temp dir: %w", err)
+		return err
 	}
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
@@ -265,6 +269,9 @@ func (s *UpdateService) applyReleaseAssets(ctx context.Context, releaseAssets []
 
 	// Step 1: Move current binary to backup
 	if err := os.Rename(exePath, backupPath); err != nil {
+		if errors.Is(err, fs.ErrPermission) {
+			return ErrUpdateDirNotWritable
+		}
 		return fmt.Errorf("backup failed: %w", err)
 	}
 
@@ -280,6 +287,19 @@ func (s *UpdateService) applyReleaseAssets(ctx context.Context, releaseAssets []
 	// Success - backup file is kept for rollback capability
 	// It will be cleaned up on next successful update
 	return nil
+}
+
+// createUpdateTempDir creates the staging directory in the SAME directory as
+// the executable, so the final os.Rename is atomic (same filesystem).
+func createUpdateTempDir(exeDir string) (string, error) {
+	tempDir, err := os.MkdirTemp(exeDir, ".sub2api-update-*")
+	if err != nil {
+		if errors.Is(err, fs.ErrPermission) {
+			return "", ErrUpdateDirNotWritable
+		}
+		return "", fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	return tempDir, nil
 }
 
 // Rollback restores the previous version
