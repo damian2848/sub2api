@@ -11,11 +11,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminiweb"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/googleapi"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 const (
@@ -79,6 +82,7 @@ func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Cont
 		return s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 	}
 	result, err := s.geminiWebClient().Complete(requestCtx, cred, geminiweb.Request{Model: model, Prompt: prompt, Thinking: thinking, OnResult: onResult}, do)
+	logGeminiWebTiming(ctx, account, model, result, err)
 	if err == nil || (!errors.Is(err, geminiweb.ErrInvalidCredential) && !errors.Is(err, geminiweb.ErrRateLimited)) {
 		if live := s.geminiWebClient().CurrentCookie(cred); live != "" {
 			result.UpdatedCookie = live
@@ -117,6 +121,42 @@ func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Cont
 		return result, err
 	}
 	return result, nil
+}
+
+// logGeminiWebTiming writes one line per Gemini Web completion with the time
+// each stage took. Gemini Web returns no usage or latency data of its own, so
+// this line is the only way to see whether a slow request was waiting on
+// Google's headers, on the first frame, or on the answer after thinking.
+func logGeminiWebTiming(ctx context.Context, account *Account, model string, result geminiweb.Result, err error) {
+	t := result.Timing
+	fields := []zap.Field{
+		zap.Int64("account_id", account.ID),
+		zap.String("model", model),
+		zap.Int("prompt_chars", t.PromptChars),
+		zap.Int("upstream_status", t.Status),
+		zap.Int64("session_ms", geminiWebStageMs(t.Session)),
+		zap.Int64("headers_ms", geminiWebStageMs(t.Headers)),
+		zap.Int64("first_frame_ms", geminiWebStageMs(t.FirstFrame)),
+		zap.Int64("first_thinking_ms", geminiWebStageMs(t.FirstThinking)),
+		zap.Int64("first_text_ms", geminiWebStageMs(t.FirstText)),
+		zap.Int64("total_ms", geminiWebStageMs(t.Total)),
+		zap.Int("thinking_chars", utf8.RuneCountInString(result.Thinking)),
+		zap.Int("text_chars", utf8.RuneCountInString(result.Text)),
+	}
+	if err != nil {
+		logger.FromContext(ctx).Warn("gemini_web.completion_timing", append(fields, zap.Error(err))...)
+		return
+	}
+	logger.FromContext(ctx).Info("gemini_web.completion_timing", fields...)
+}
+
+// geminiWebStageMs reports a stage that was never reached as -1, so it cannot
+// be mistaken for an instant one.
+func geminiWebStageMs(d time.Duration) int64 {
+	if d <= 0 {
+		return -1
+	}
+	return d.Milliseconds()
 }
 
 func webUsageWithThinking(prompt, answer, thinking string) ClaudeUsage {

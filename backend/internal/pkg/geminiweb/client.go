@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 var (
@@ -63,6 +64,48 @@ type Result struct {
 	RID                   string
 	RequestID             string
 	UpdatedCookie         string
+	// Timing is filled in by Complete, on success and on error, so callers can
+	// tell where a slow or failed request spent its time.
+	Timing Timing
+}
+
+// Timing records the stages of one Complete call. Each duration is measured
+// from the start of Complete; zero means the stage was never reached.
+type Timing struct {
+	PromptChars int
+	// Status is the HTTP status of the StreamGenerate response, 0 if none.
+	Status        int
+	Session       time.Duration
+	Headers       time.Duration
+	FirstFrame    time.Duration
+	FirstThinking time.Duration
+	FirstText     time.Duration
+	Total         time.Duration
+}
+
+type stageClock struct {
+	start  time.Time
+	timing *Timing
+}
+
+// mark sets *stage to the time elapsed so far. Unless overwrite is set it keeps
+// an earlier mark, so first-arrival stages survive later frames.
+func (c *stageClock) mark(stage *time.Duration, overwrite bool) {
+	if *stage != 0 && !overwrite {
+		return
+	}
+	// Never record zero: zero means "not reached".
+	*stage = max(time.Since(c.start), time.Nanosecond)
+}
+
+func (c *stageClock) observe(r Result) {
+	c.mark(&c.timing.FirstFrame, false)
+	if r.Thinking != "" {
+		c.mark(&c.timing.FirstThinking, false)
+	}
+	if r.Text != "" {
+		c.mark(&c.timing.FirstText, false)
+	}
 }
 
 type Doer func(*http.Request) (*http.Response, error)
@@ -245,7 +288,11 @@ func browserCookieJSONHeader(raw string) string {
 }
 
 func (c *Client) Complete(ctx context.Context, cred Credential, req Request, do Doer) (Result, error) {
-	return c.complete(ctx, cred, req, do, false)
+	clock := &stageClock{start: time.Now(), timing: &Timing{PromptChars: utf8.RuneCountInString(req.Prompt)}}
+	result, err := c.complete(ctx, cred, req, do, false, clock)
+	clock.mark(&clock.timing.Total, true)
+	result.Timing = *clock.timing
+	return result, err
 }
 
 // RefreshCookies asks Google's browser session endpoint to rotate the
@@ -369,7 +416,7 @@ func hasChangedCookie(before, after, name string) bool {
 	return newValue != "" && newValue != oldValue
 }
 
-func (c *Client) complete(ctx context.Context, cred Credential, req Request, do Doer, retried bool) (Result, error) {
+func (c *Client) complete(ctx context.Context, cred Credential, req Request, do Doer, retried bool, clock *stageClock) (Result, error) {
 	cred.Cookie = normalizeCookieHeader(cred.Cookie)
 	if strings.TrimSpace(cred.Cookie) == "" || cookieKey(cred.Cookie) == "" {
 		return Result{}, ErrInvalidCredential
@@ -385,6 +432,7 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 	if err != nil {
 		return Result{UpdatedCookie: sessionCookie}, err
 	}
+	clock.mark(&clock.timing.Session, true)
 	model := ResolveModel(req.Model)
 	meta := req.Metadata
 	inner := make([]any, 81)
@@ -427,6 +475,9 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 	if resp == nil || resp.Body == nil {
 		return Result{}, errors.New("gemini web generation returned no response body")
 	}
+	// A stale-session retry overwrites these with the retried request's values.
+	clock.mark(&clock.timing.Headers, true)
+	clock.timing.Status = resp.StatusCode
 	defer func() { _ = resp.Body.Close() }()
 	updatedCookie := mergeSetCookie(sessionCookie, resp.Header.Values("Set-Cookie"))
 	c.updateSessionCookie(postCred, updatedCookie)
@@ -444,7 +495,7 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 		stale := resp.StatusCode == http.StatusMethodNotAllowed || len(bytes.TrimSpace(body)) == 0
 		if stale && !retried {
 			c.Invalidate(cred.Cookie)
-			return c.complete(ctx, postCred, req, do, true)
+			return c.complete(ctx, postCred, req, do, true, clock)
 		}
 		if stale {
 			c.Invalidate(cred.Cookie)
@@ -468,6 +519,7 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 			_, _ = raw.Write(chunk)
 			for _, frame := range parser.feed(string(chunk)) {
 				result = applyFrame(result, frame)
+				clock.observe(result)
 				if req.OnResult != nil {
 					if callbackErr := req.OnResult(result); callbackErr != nil {
 						return result, callbackErr
@@ -484,6 +536,7 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 	}
 	for _, frame := range parser.flush() {
 		result = applyFrame(result, frame)
+		clock.observe(result)
 		if req.OnResult != nil {
 			if callbackErr := req.OnResult(result); callbackErr != nil {
 				return result, callbackErr
