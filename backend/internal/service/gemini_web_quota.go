@@ -10,7 +10,10 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminiweb"
 )
 
-const geminiWebQuotaPrecheckTimeout = 15 * time.Second
+// Quota is a scheduling hint and must not consume the user's first-token
+// budget. A slow usage RPC fails open; the generation request still validates
+// the cookie and records the final usage normally.
+const geminiWebQuotaPrecheckTimeout = 3 * time.Second
 
 // passesGeminiWebQuotaPreCheck reads Gemini Web's account-wide usage windows
 // before candidate selection. Transport/decoding failures fail open, while an

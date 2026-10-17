@@ -6,6 +6,28 @@ import {
   type ProviderProtocolRule
 } from '@/constants/platformCatalog'
 
+/** Accept either a Cookie header or a browser-exported cookie JSON array. */
+export function isGeminiWebCookieInput(value: string): boolean {
+  const trimmed = value.trim()
+  if (trimmed.includes('__Secure-1PSID=')) return true
+  if (!trimmed.startsWith('[') && !trimmed.startsWith('{')) return false
+  try {
+    const parsed = JSON.parse(trimmed) as unknown
+    const cookies = Array.isArray(parsed)
+      ? parsed
+      : parsed && typeof parsed === 'object' && Array.isArray((parsed as { cookies?: unknown }).cookies)
+        ? (parsed as { cookies: unknown[] }).cookies
+        : []
+    return cookies.some((item) => {
+      if (!item || typeof item !== 'object') return false
+      const cookie = item as { name?: unknown; value?: unknown }
+      return cookie.name === '__Secure-1PSID' && typeof cookie.value === 'string' && cookie.value.length > 0
+    })
+  } catch {
+    return false
+  }
+}
+
 export function applyInterceptWarmup(
   credentials: Record<string, unknown>,
   enabled: boolean,

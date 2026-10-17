@@ -20,7 +20,7 @@
 
 旧 fork 的托管 Prism 账号、专属监控设置等不能视为与二开实现兼容，生产切换前需在数据库副本上验证，并按二开部署方式检查运行配置。此次源码切换不代表已经执行生产升级。
 
-本地仓库的 `fork` 远端仍指向 `damian2848/sub2api`，`origin` 指向 `ranxi2001/sub2api`。推送、发版和部署应显式指定目标。本 fork 当前源码版本为 `2.12.0`，更新器指向 `damian2848/sub2api`，避免自动更新覆盖保留的定制。发布流程沿用二开工作流，并遵守本仓库 `PUBLISH_CONTAINER_IMAGES=false` 设置，只发布程序与重新登录运行包。上述发布身份与工作流适配不改变二开业务功能。
+本地仓库的 `fork` 远端仍指向 `damian2848/sub2api`，`origin` 指向 `ranxi2001/sub2api`。推送、发版和部署应显式指定目标。本 fork 当前发布版本为 `0.2.56`，源码基线为二开的 `2.12.0`；更新器指向 `damian2848/sub2api`，避免自动更新覆盖保留的定制。发布流程沿用二开工作流，并遵守本仓库 `PUBLISH_CONTAINER_IMAGES=false` 设置，只发布程序与重新登录运行包。上述发布身份与工作流适配不改变二开业务功能。
 
 ## v0.2.49 同步记录
 
@@ -73,3 +73,11 @@
 完整合并 ranxi2001/sub2api production `7393d736e`，包含 Session Cookie 导出、质量检测瞬时错误重试、模型隔离自动恢复、Pelican 测智重试与白名单筛选、Gemini 4 Argon/Antigravity 兼容、Responses `created_at`、Web Search 模拟、请求时区、支付退款和 API 兼容 token 下限等上游修复。
 
 保留本 fork 的模型白名单与账号测试、Gemini Web、Stripe 内嵌充值、门票使用事件、可用渠道分组过滤和完整分组展示。新增迁移包括 `285_openai_session_cookies.sql`、`285_registration_ip_quotas.sql` 和 `286_registration_ip_quota_created_at.sql`；备份或回退时需保留原 `TOTP_ENCRYPTION_KEY`，替换二进制不会撤销已执行的支付退款或余额变化。
+
+## v0.2.56 Gemini Web 账号与用量
+
+将 Gemini Web 作为 Gemini 平台下的 Cookie 账号接入账号管理、模型限制和调度。读取网页端的五小时与七天额度窗口，额度耗尽时参与账号避让；账号用量栏新增“检查用量”，主动绕过额度缓存刷新，保留浏览器会话和已轮换 Cookie。手动查询使用 20 秒预算，调度预检维持 3 秒及失败放行。
+
+支持 Cookie 请求头和浏览器导出的 Cookie JSON，定期保活并保存轮换后的 Cookie。原生 Gemini 流式响应输出文本增量和空白心跳，结束时返回用量；Gemini、OpenAI 与 Claude 兼容接口的 token 用量用于现有计费流程。Gemini Web 未提供官方 token 统计，这些数值为本地估算；当前支持文本对话，未实现 Gemini CLI 的完整 function calling 和文件/终端工具协议。
+
+本次同时发布此前合并的二开 v2.12.0 基线及 Stripe 恢复密钥兼容修复。从 v0.2.55 升级还会应用区域调度、会话 Cookie 和注册 IP 配额等新增迁移，升级前应备份数据库与原加密密钥。发布程序与重新登录运行包，不自动升级生产服务。

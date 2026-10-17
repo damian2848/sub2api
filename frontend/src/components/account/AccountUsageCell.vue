@@ -563,6 +563,9 @@
         <div v-else-if="error" class="text-xs text-red-500">
           {{ error }}
         </div>
+        <div v-else-if="usageInfo?.error" class="text-xs text-amber-600 dark:text-amber-400" :title="usageInfo.error">
+          {{ usageErrorLabel }}
+        </div>
         <!-- Gemini: show daily usage bars when available -->
         <div v-else-if="geminiUsageAvailable" class="space-y-1">
           <UsageProgressBar
@@ -574,13 +577,37 @@
             :window-stats="bar.windowStats"
             :color="bar.color"
           />
-          <p class="mt-1 text-[9px] leading-tight text-gray-400 dark:text-gray-500 italic">
+          <p v-if="account.type !== 'gemini_web'" class="mt-1 text-[9px] leading-tight text-gray-400 dark:text-gray-500 italic">
             * {{ t('admin.accounts.gemini.quotaPolicy.simulatedNote') || 'Simulated quota' }}
           </p>
         </div>
         <!-- AI Studio Client OAuth: show unlimited flow (no usage tracking) -->
         <div v-else-if="!showGeminiTodayStats" class="text-xs text-gray-400">
           {{ t('admin.accounts.gemini.rateLimit.unlimited') }}
+        </div>
+        <div v-if="account.type === 'gemini_web'" class="flex items-center gap-1.5 mt-0.5">
+          <button
+            type="button"
+            class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-900/30 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="activeQueryLoading || loading"
+            @click="loadActiveUsage"
+          >
+            <svg
+              class="h-2.5 w-2.5"
+              :class="{ 'animate-spin': activeQueryLoading }"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+              />
+            </svg>
+            {{ t('admin.accounts.usageWindow.checkUsage') }}
+          </button>
         </div>
       </div>
     </template>
@@ -768,7 +795,6 @@ const isGeminiVertex = computed(() => {
 
 // Show usage windows for OAuth and Setup Token accounts
 const showUsageWindows = computed(() => {
-	if (props.account.platform === 'gemini' && props.account.type === 'gemini_web') return false
   // Gemini: we can always compute local usage windows from DB logs (simulated quotas).
   // 第三方上游 API Key 没有模拟配额，按普通 Key 账号展示今日统计与额度进度条。
   if (props.account.platform === 'gemini') return !isGeminiThirdPartyApiKey.value
@@ -785,7 +811,7 @@ const shouldFetchUsage = computed(() => {
     return props.account.type === 'oauth' || props.account.type === 'setup-token'
   }
   if (props.account.platform === 'gemini') {
-    return props.account.type !== 'gemini_web' && !isGeminiThirdPartyApiKey.value && !isGeminiVertex.value
+    return !isGeminiThirdPartyApiKey.value && !isGeminiVertex.value
   }
   if (props.account.platform === 'antigravity') {
     return props.account.type === 'oauth'
@@ -812,6 +838,9 @@ const showGeminiTodayStats = computed(() => {
 })
 
 const geminiUsageAvailable = computed(() => {
+  if (props.account.platform === 'gemini' && props.account.type === 'gemini_web') {
+    return !!usageInfo.value?.five_hour || !!usageInfo.value?.seven_day
+  }
   return (
     !!usageInfo.value?.gemini_shared_daily ||
     !!usageInfo.value?.gemini_pro_daily ||
@@ -988,7 +1017,7 @@ const geminiOAuthType = computed(() => {
 })
 
 const showGeminiQuotaPolicy = computed(() => {
-  return !isGeminiVertex.value
+  return !isGeminiVertex.value && props.account.type !== 'gemini_web'
 })
 
 // Gemini 是否为 Code Assist OAuth
@@ -998,10 +1027,11 @@ const isGeminiCodeAssist = computed(() => {
   return creds?.oauth_type === 'code_assist' || (!creds?.oauth_type && !!creds?.project_id)
 })
 
-const geminiChannelShort = computed((): 'ai studio' | 'vertex' | 'gcp' | 'google one' | 'client' | null => {
+const geminiChannelShort = computed((): 'ai studio' | 'vertex' | 'gcp' | 'google one' | 'client' | 'gemini web' | null => {
   if (props.account.platform !== 'gemini') return null
 
   if (isGeminiVertex.value) return 'vertex'
+  if (props.account.type === 'gemini_web') return 'gemini web'
   // API Key accounts are AI Studio.
   if (props.account.type === 'apikey') return 'ai studio'
 
@@ -1073,7 +1103,7 @@ const geminiTierClass = computed(() => {
   const channel = geminiChannelShort.value
   const level = geminiUserLevel.value
 
-  if (channel === 'client' || channel === 'ai studio' || channel === 'vertex') {
+  if (channel === 'client' || channel === 'ai studio' || channel === 'vertex' || channel === 'gemini web') {
     return 'bg-blue-100 text-blue-600 dark:bg-blue-900/40 dark:text-blue-300'
   }
 
@@ -1159,6 +1189,30 @@ const geminiUsageBars = computed(() => {
     windowStats?: WindowStats | null
     color: 'indigo' | 'emerald'
   }> = []
+
+  if (props.account.type === 'gemini_web') {
+    if (usageInfo.value.five_hour) {
+      bars.push({
+        key: 'web_five_hour',
+        label: '5h',
+        utilization: usageInfo.value.five_hour.utilization,
+        resetsAt: usageInfo.value.five_hour.resets_at,
+        windowStats: usageInfo.value.five_hour.window_stats,
+        color: 'indigo'
+      })
+    }
+    if (usageInfo.value.seven_day) {
+      bars.push({
+        key: 'web_weekly',
+        label: '7d',
+        utilization: usageInfo.value.seven_day.utilization,
+        resetsAt: usageInfo.value.seven_day.resets_at,
+        windowStats: usageInfo.value.seven_day.window_stats,
+        color: 'emerald'
+      })
+    }
+    return bars
+  }
 
   if (geminiUsesSharedDaily.value) {
     const sharedDaily = usageInfo.value.gemini_shared_daily
@@ -1533,13 +1587,21 @@ const attachVisibilityObserver = () => {
 }
 
 const loadActiveUsage = async () => {
+  if (activeQueryLoading.value) return
+  const accountID = props.account.id
   activeQueryLoading.value = true
+  error.value = null
   try {
-    usageInfo.value = await adminAPI.accounts.getUsage(props.account.id, 'active', true)
+    const result = await adminAPI.accounts.getUsage(accountID, 'active', true)
+    if (unmounted.value || props.account.id !== accountID) return
+    usageInfo.value = result
+    _usageCache.set(accountID, { data: result, ts: Date.now() })
   } catch (e: any) {
+    if (unmounted.value || props.account.id !== accountID) return
+    if (props.account.type === 'gemini_web') error.value = t('common.error')
     console.error('Failed to load active usage:', e)
   } finally {
-    activeQueryLoading.value = false
+    if (!unmounted.value) activeQueryLoading.value = false
   }
 }
 

@@ -802,6 +802,14 @@ const setUsageBatchState = (accountID: number, usage: AccountUsageInfo | null, e
 
 const handleAccountUsageLoaded = (accountID: number, usage: AccountUsageInfo) => {
   if (usageBatchByAccountId.value[String(accountID)] === usage) return
+  // A cell's active query supersedes cached and in-flight batch results.
+  usageBatchCache.set(accountID, { data: usage, ts: Date.now() })
+  usageBatchRequestTokenByAccountId.value = {
+    ...usageBatchRequestTokenByAccountId.value,
+    [String(accountID)]: ++usageBatchRequestToken
+  }
+  pendingUsageBatchIds.delete(accountID)
+  setUsageBatchLoading(accountID, false)
   setUsageBatchState(accountID, usage, null)
 }
 

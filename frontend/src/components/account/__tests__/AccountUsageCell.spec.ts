@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import AccountUsageCell from '../AccountUsageCell.vue'
-import type { Account } from '@/types'
+import type { Account, AccountUsageInfo } from '@/types'
 
 const { getUsage } = vi.hoisted(() => ({
   getUsage: vi.fn()
@@ -1839,6 +1839,161 @@ describe('AccountUsageCell', () => {
     expect(wrapper.findComponent({ name: 'HelpTooltip' }).exists()).toBe(true)
     expect(text).toContain('admin.accounts.gemini.quotaPolicy.simulatedNote')
     expect(getUsage).toHaveBeenCalledWith(4003)
+  })
+
+  it('Gemini Web 显示真实 5h/7d 窗口，不显示 AI Studio 模拟提示', async () => {
+    getUsage.mockResolvedValue({
+      five_hour: {
+        utilization: 28,
+        resets_at: '2026-10-17T12:00:00Z',
+        remaining_seconds: 3600
+      },
+      seven_day: {
+        utilization: 44,
+        resets_at: '2026-10-20T00:00:00Z',
+        remaining_seconds: 200000
+      }
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({
+          id: 4004,
+          platform: 'gemini',
+          type: 'gemini_web',
+          credentials: { gemini_web_cookie: '__Secure-1PSID=test' },
+          extra: {}
+        })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'utilization'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('gemini web')
+    expect(text).toContain('5h|28')
+    expect(text).toContain('7d|44')
+    expect(text).not.toContain('admin.accounts.gemini.quotaPolicy.simulatedNote')
+    expect(text).not.toContain('admin.accounts.gemini.rateLimit.unlimited')
+    expect(getUsage).toHaveBeenCalledWith(4004)
+  })
+
+  describe('Gemini Web 检查用量', () => {
+    const makeUsage = (utilization = 18): AccountUsageInfo => ({
+      updated_at: '2026-10-17T00:00:00Z',
+      five_hour: { utilization, resets_at: null, remaining_seconds: 0 },
+      seven_day: { utilization: utilization + 10, resets_at: null, remaining_seconds: 0 },
+      seven_day_sonnet: null
+    })
+
+    const mountGeminiWeb = (batchProps = {}) => mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 4010, platform: 'gemini', type: 'gemini_web' }),
+        ...batchProps
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'utilization'],
+            template: '<div class="usage-bar">{{ label }}|{{ utilization }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    it('强制查询新窗口，等待时禁用按钮并将结果通知父缓存', async () => {
+      let resolveActive!: (usage: AccountUsageInfo) => void
+      getUsage.mockResolvedValueOnce(makeUsage()).mockImplementationOnce(() => new Promise(resolve => {
+        resolveActive = resolve
+      }))
+      const wrapper = mountGeminiWeb()
+      await flushPromises()
+
+      const button = wrapper.get('button')
+      expect(button.text()).toBe('admin.accounts.usageWindow.checkUsage')
+      expect(wrapper.text()).toContain('5h|18')
+      await button.trigger('click')
+
+      expect(getUsage).toHaveBeenLastCalledWith(4010, 'active', true)
+      expect(button.attributes('disabled')).toBeDefined()
+      expect(button.find('svg').classes()).toContain('animate-spin')
+      await button.trigger('click')
+      expect(getUsage).toHaveBeenCalledTimes(2)
+
+      const refreshed = makeUsage(42)
+      resolveActive(refreshed)
+      await flushPromises()
+
+      expect(button.attributes('disabled')).toBeUndefined()
+      expect(wrapper.text()).toContain('5h|42')
+      expect(wrapper.text()).toContain('7d|52')
+      expect(wrapper.emitted('usage-loaded')?.at(-1)).toEqual([refreshed])
+      wrapper.unmount()
+    })
+
+    it.each(['empty', 'response-error', 'request-error'] as const)('初始 %s 时仍能检查用量并恢复窗口', async (state) => {
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+      if (state === 'request-error') {
+        getUsage.mockRejectedValueOnce(new Error('unavailable'))
+      } else {
+        getUsage.mockResolvedValueOnce({
+          updated_at: null,
+          five_hour: null,
+          seven_day: null,
+          seven_day_sonnet: null,
+          ...(state === 'response-error' ? { error: 'Quota temporarily unavailable' } : {})
+        })
+      }
+      getUsage.mockResolvedValueOnce(makeUsage(35))
+      const wrapper = mountGeminiWeb()
+      await flushPromises()
+
+      expect(wrapper.get('button').attributes('disabled')).toBeUndefined()
+      await wrapper.get('button').trigger('click')
+      await flushPromises()
+
+      expect(getUsage).toHaveBeenLastCalledWith(4010, 'active', true)
+      expect(wrapper.text()).toContain('5h|35')
+      expect(wrapper.text()).not.toContain('common.error')
+      expect(wrapper.text()).not.toContain('Quota temporarily unavailable')
+      wrapper.unmount()
+      log.mockRestore()
+    })
+
+    it('批量管理账号主动查询失败后可重试，成功结果通过 usage-loaded 同步', async () => {
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const requestBatchedUsage = vi.fn()
+      const refreshed = makeUsage(63)
+      getUsage.mockRejectedValueOnce(new Error('unavailable')).mockResolvedValueOnce(refreshed)
+      const wrapper = mountGeminiWeb({ batchedUsage: makeUsage(), requestBatchedUsage })
+      await flushPromises()
+      expect(requestBatchedUsage).toHaveBeenCalledTimes(1)
+      expect(getUsage).not.toHaveBeenCalled()
+
+      await wrapper.get('button').trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('common.error')
+      expect(wrapper.get('button').attributes('disabled')).toBeUndefined()
+
+      await wrapper.get('button').trigger('click')
+      await flushPromises()
+      expect(getUsage).toHaveBeenLastCalledWith(4010, 'active', true)
+      expect(wrapper.text()).toContain('5h|63')
+      expect(wrapper.text()).not.toContain('common.error')
+      expect(wrapper.emitted('usage-loaded')?.at(-1)).toEqual([refreshed])
+      wrapper.unmount()
+      log.mockRestore()
+    })
   })
 
   it('Anthropic OAuth 会渲染 7d F (Fable) 进度条，且 7d S 逻辑保留', async () => {

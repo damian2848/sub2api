@@ -3,6 +3,8 @@ package geminiweb
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -33,7 +35,17 @@ func TestClientCompleteDiscoversSessionAndParsesAnswer(t *testing.T) {
 		return response(http.StatusOK, frameBody("hello from web"), nil), nil
 	}
 
-	result, err := NewClient().Complete(context.Background(), Credential{Cookie: cookie, BaseURL: "https://gemini.test"}, Request{Model: "gemini-3.8-flash", Prompt: "hello"}, do)
+	snapshots := 0
+	result, err := NewClient().Complete(context.Background(), Credential{Cookie: cookie, BaseURL: "https://gemini.test"}, Request{
+		Model: "gemini-3.8-flash", Prompt: "hello",
+		OnResult: func(snapshot Result) error {
+			snapshots++
+			if snapshot.Text != "hello from web" {
+				t.Fatalf("stream snapshot text = %q", snapshot.Text)
+			}
+			return nil
+		},
+	}, do)
 	if err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}
@@ -42,6 +54,123 @@ func TestClientCompleteDiscoversSessionAndParsesAnswer(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("request count = %d, want session + completion", calls)
+	}
+	if snapshots != 1 {
+		t.Fatalf("stream snapshots = %d, want 1", snapshots)
+	}
+}
+
+func TestClientCompleteEmitsSnapshotsBeforeUpstreamEOF(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	releaseFinal := make(chan struct{})
+	go func() {
+		first := frameBody("hello")
+		// Deliberately split a frame across reads, as real HTTP streams do.
+		_, _ = io.WriteString(writer, first[:len(first)/2])
+		_, _ = io.WriteString(writer, first[len(first)/2:])
+		select {
+		case <-releaseFinal:
+			_, _ = io.WriteString(writer, "\n"+frameBody("hello world"))
+		case <-ctx.Done():
+		}
+		_ = writer.Close()
+	}()
+	do := func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodGet {
+			return response(http.StatusOK, `"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid"`, nil), nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: reader}, nil
+	}
+	snapshots := make(chan Result, 2)
+	finished := make(chan error, 1)
+	go func() {
+		_, err := NewClient().Complete(ctx, Credential{Cookie: "__Secure-1PSID=psid", BaseURL: "https://gemini.test"}, Request{
+			Model: "gemini-pro", Prompt: "hello",
+			OnResult: func(result Result) error {
+				snapshots <- result
+				return nil
+			},
+		}, do)
+		finished <- err
+	}()
+	select {
+	case snapshot := <-snapshots:
+		if snapshot.Text != "hello" {
+			t.Fatalf("first snapshot = %q, want hello", snapshot.Text)
+		}
+	case <-ctx.Done():
+		t.Fatal("first snapshot was not delivered before upstream EOF")
+	}
+	close(releaseFinal)
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("Complete() = %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Complete() did not finish after upstream EOF")
+	}
+	select {
+	case snapshot := <-snapshots:
+		if snapshot.Text != "hello world" {
+			t.Fatalf("last snapshot = %q, want hello world", snapshot.Text)
+		}
+	case <-ctx.Done():
+		t.Fatal("missing final snapshot")
+	}
+}
+
+type geminiWebEOFBody struct {
+	data   string
+	closed bool
+}
+
+func (b *geminiWebEOFBody) Read(p []byte) (int, error) {
+	n := copy(p, b.data)
+	b.data = b.data[n:]
+	if b.data == "" {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func (b *geminiWebEOFBody) Close() error { b.closed = true; return nil }
+
+func TestClientCompleteHandlesDataWithEOFAndCallbackFailure(t *testing.T) {
+	callbackErr := errors.New("downstream write failed")
+	for _, wantErr := range []error{nil, callbackErr} {
+		t.Run(fmt.Sprint(wantErr), func(t *testing.T) {
+			body := &geminiWebEOFBody{data: frameBody("final frame")}
+			do := func(req *http.Request) (*http.Response, error) {
+				if req.Method == http.MethodGet {
+					return response(http.StatusOK, `"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid"`, nil), nil
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}, nil
+			}
+			calls := 0
+			result, err := NewClient().Complete(context.Background(), Credential{Cookie: "__Secure-1PSID=psid", BaseURL: "https://gemini.test"}, Request{
+				Model: "gemini-pro", Prompt: "hello",
+				OnResult: func(Result) error { calls++; return wantErr },
+			}, do)
+			if !errors.Is(err, wantErr) || result.Text != "final frame" || calls != 1 || !body.closed {
+				t.Fatalf("result=%#v err=%v callbacks=%d closed=%v", result, err, calls, body.closed)
+			}
+		})
+	}
+}
+
+func TestNormalizeCookieHeaderAcceptsBrowserJSONExport(t *testing.T) {
+	input := `[{"name":"__Secure-1PSID","value":"psid","domain":".google.com","expirationDate":4102444800,"hostOnly":false},{"name":"__Secure-1PSIDTS","value":"ts","domain":".google.com","expirationDate":4102444800,"hostOnly":false},{"name":"COMPASS","value":"gemini-only","domain":".gemini.google.com","expirationDate":4102444800,"hostOnly":false},{"name":"expired","value":"old","domain":".google.com","expirationDate":1},{"name":"wrong_host","value":"secret","domain":"accounts.google.com","expirationDate":4102444800}]`
+	got := NormalizeCookieHeader(input)
+	if !strings.Contains(got, "__Secure-1PSID=psid") || !strings.Contains(got, "__Secure-1PSIDTS=ts") {
+		t.Fatalf("normalized browser export = %q", got)
+	}
+	if strings.Contains(got, "COMPASS=") || strings.Contains(got, "expired=") || strings.Contains(got, "wrong_host=") {
+		t.Fatalf("normalized browser export leaked expired or out-of-scope cookies: %q", got)
 	}
 }
 

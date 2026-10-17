@@ -4,7 +4,6 @@
 package geminiweb
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -45,6 +44,11 @@ type Request struct {
 	Prompt   string
 	Metadata []any
 	Thinking bool
+	// OnResult receives cumulative snapshots while the browser response is
+	// being decoded. It is used by the native streaming adapter to forward
+	// Gemini Web frames as soon as they arrive. A nil callback preserves the
+	// original buffered behavior.
+	OnResult func(Result) error
 }
 
 type Result struct {
@@ -142,17 +146,96 @@ func cookieKey(cookie string) string {
 	return strings.TrimSpace(cookie)
 }
 
+// NormalizeCookieHeader converts a raw Cookie header or a browser-exported
+// cookie JSON array to the header representation used by Gemini Web.
+// Browser exports include expiry and domain metadata, but HTTP requests only
+// send name/value pairs; the metadata is used here to avoid sending expired or
+// out-of-scope cookies.
+func NormalizeCookieHeader(cookie string) string {
+	return normalizeCookieHeader(cookie)
+}
+
 // normalizeCookieHeader accepts both the browser's raw Cookie value and a
-// copied header line ("Cookie: ...").  The admin UI intentionally stores the
-// complete cookie header so users can paste it directly from DevTools.
+// copied header line ("Cookie: ..."). The admin UI stores the complete value
+// so users can paste it directly from DevTools or a browser cookie exporter.
 func normalizeCookieHeader(cookie string) string {
 	cookie = strings.TrimSpace(cookie)
+	if converted := browserCookieJSONHeader(cookie); converted != "" {
+		cookie = converted
+	}
 	if strings.HasPrefix(strings.ToLower(cookie), "cookie:") {
 		cookie = strings.TrimSpace(cookie[len("cookie:"):])
 	}
 	cookie = strings.ReplaceAll(cookie, "\r\n", "; ")
 	cookie = strings.ReplaceAll(cookie, "\n", "; ")
 	return cookie
+}
+
+type browserCookieExport struct {
+	Name           string  `json:"name"`
+	Value          string  `json:"value"`
+	Domain         string  `json:"domain"`
+	HostOnly       bool    `json:"hostOnly"`
+	ExpirationDate float64 `json:"expirationDate"`
+	Session        bool    `json:"session"`
+}
+
+func browserCookieJSONHeader(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || (trimmed[0] != '[' && trimmed[0] != '{') {
+		return ""
+	}
+	var cookies []browserCookieExport
+	if trimmed[0] == '[' {
+		if err := json.Unmarshal([]byte(trimmed), &cookies); err != nil {
+			return ""
+		}
+	} else {
+		var wrapper struct {
+			Cookies []browserCookieExport `json:"cookies"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &wrapper); err != nil {
+			return ""
+		}
+		cookies = wrapper.Cookies
+	}
+	if len(cookies) == 0 {
+		return ""
+	}
+
+	now := float64(time.Now().Unix())
+	values := make(map[string]string, len(cookies))
+	order := make([]string, 0, len(cookies))
+	for _, cookie := range cookies {
+		name := strings.TrimSpace(cookie.Name)
+		if name == "" || cookie.Value == "" {
+			continue
+		}
+		if cookie.ExpirationDate > 0 && !cookie.Session && cookie.ExpirationDate <= now {
+			continue
+		}
+		domain := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(cookie.Domain), "."))
+		if domain != "" {
+			// Keep the shared Google-domain authentication cookies. A flat
+			// header cannot preserve host/path scope, and sending a Gemini-only
+			// cookie to accounts.google.com during RotateCookies is incorrect.
+			if cookie.HostOnly || domain != "google.com" {
+				continue
+			}
+		}
+		if _, exists := values[name]; !exists {
+			order = append(order, name)
+		}
+		values[name] = cookie.Value
+	}
+	if len(order) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(order))
+	for _, name := range order {
+		parts = append(parts, name+"="+values[name])
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (c *Client) Complete(ctx context.Context, cred Credential, req Request, do Doer) (Result, error) {
@@ -371,13 +454,19 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 	result := Result{UpdatedCookie: updatedCookie}
 	var raw bytes.Buffer
 	parser := newFrameParser()
-	reader := bufio.NewReaderSize(resp.Body, 32*1024)
+	buffer := make([]byte, 32*1024)
 	for {
-		chunk, readErr := reader.ReadBytes(0)
-		if len(chunk) > 0 {
+		n, readErr := resp.Body.Read(buffer)
+		if n > 0 {
+			chunk := buffer[:n]
 			raw.Write(chunk)
 			for _, frame := range parser.feed(string(chunk)) {
 				result = applyFrame(result, frame)
+				if req.OnResult != nil {
+					if callbackErr := req.OnResult(result); callbackErr != nil {
+						return result, callbackErr
+					}
+				}
 			}
 		}
 		if readErr != nil {
@@ -389,6 +478,11 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 	}
 	for _, frame := range parser.flush() {
 		result = applyFrame(result, frame)
+		if req.OnResult != nil {
+			if callbackErr := req.OnResult(result); callbackErr != nil {
+				return result, callbackErr
+			}
+		}
 	}
 	for _, code := range []string{"1016", "1037", "1050", "1052", "1060", "1013"} {
 		if strings.Contains(raw.String(), "BardErrorInfo") && strings.Contains(raw.String(), code) {

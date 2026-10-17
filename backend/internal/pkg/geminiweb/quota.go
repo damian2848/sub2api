@@ -43,6 +43,16 @@ type quotaCacheEntry struct {
 
 // FetchQuota reads the account-wide usage windows exposed by Gemini Web's read-only usage RPC.
 func (c *Client) FetchQuota(ctx context.Context, cred Credential, do Doer) (QuotaResult, error) {
+	return c.fetchQuota(ctx, cred, do, false)
+}
+
+// RefreshQuota bypasses the usage cache while preserving the browser session
+// and its latest rotated cookies.
+func (c *Client) RefreshQuota(ctx context.Context, cred Credential, do Doer) (QuotaResult, error) {
+	return c.fetchQuota(ctx, cred, do, true)
+}
+
+func (c *Client) fetchQuota(ctx context.Context, cred Credential, do Doer, force bool) (QuotaResult, error) {
 	cred.Cookie = normalizeCookieHeader(cred.Cookie)
 	if strings.TrimSpace(cred.Cookie) == "" || cookieKey(cred.Cookie) == "" {
 		return QuotaResult{}, ErrInvalidCredential
@@ -59,7 +69,7 @@ func (c *Client) FetchQuota(ctx context.Context, cred Credential, do Doer) (Quot
 	if c.quotaCache == nil {
 		c.quotaCache = make(map[string]quotaCacheEntry)
 	}
-	if cached, ok := c.quotaCache[key]; ok && time.Since(cached.observed) < c.quotaTTL {
+	if cached, ok := c.quotaCache[key]; !force && ok && time.Since(cached.observed) < c.quotaTTL {
 		c.mu.Unlock()
 		return cached.result, nil
 	}

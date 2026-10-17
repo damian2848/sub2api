@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/geminiweb"
 	httppool "github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	openaipkg "github.com/Wei-Shaw/sub2api/internal/pkg/openai"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -105,14 +107,15 @@ type antigravityUsageCache struct {
 }
 
 const (
-	apiCacheTTL         = 3 * time.Minute
-	apiErrorCacheTTL    = 1 * time.Minute        // 负缓存 TTL：429 等错误缓存 1 分钟
-	antigravityErrorTTL = 1 * time.Minute        // Antigravity 错误缓存 TTL（可恢复错误）
-	apiQueryMaxJitter   = 800 * time.Millisecond // 用量查询最大随机延迟
-	windowStatsCacheTTL = 1 * time.Minute
-	openAIProbeCacheTTL = 10 * time.Minute
-	grokProbeRetryTTL   = 1 * time.Minute
-	grokFreeQuotaWindow = 24 * time.Hour
+	apiCacheTTL           = 3 * time.Minute
+	apiErrorCacheTTL      = 1 * time.Minute        // 负缓存 TTL：429 等错误缓存 1 分钟
+	antigravityErrorTTL   = 1 * time.Minute        // Antigravity 错误缓存 TTL（可恢复错误）
+	apiQueryMaxJitter     = 800 * time.Millisecond // 用量查询最大随机延迟
+	windowStatsCacheTTL   = 1 * time.Minute
+	openAIProbeCacheTTL   = 10 * time.Minute
+	grokProbeRetryTTL     = 1 * time.Minute
+	grokFreeQuotaWindow   = 24 * time.Hour
+	geminiWebUsageTimeout = 20 * time.Second
 )
 
 // UsageCache 封装账户使用量相关的缓存
@@ -301,6 +304,8 @@ type AccountUsageService struct {
 	grokQuotaFetcher        *GrokQuotaFetcher
 	grokQuotaService        *GrokQuotaService
 	openAIQuotaService      *OpenAIQuotaService
+	httpUpstream            HTTPUpstream
+	geminiWeb               *geminiweb.Client
 	cache                   *UsageCache
 	identityCache           IdentityCache
 	tlsFPProfileService     *TLSFingerprintProfileService
@@ -321,7 +326,12 @@ func NewAccountUsageService(
 	cache *UsageCache,
 	identityCache IdentityCache,
 	tlsFPProfileService *TLSFingerprintProfileService,
+	httpUpstream ...HTTPUpstream,
 ) *AccountUsageService {
+	var upstream HTTPUpstream
+	if len(httpUpstream) > 0 {
+		upstream = httpUpstream[0]
+	}
 	return &AccountUsageService{
 		accountRepo:             accountRepo,
 		usageLogRepo:            usageLogRepo,
@@ -334,6 +344,8 @@ func NewAccountUsageService(
 		cache:                   cache,
 		identityCache:           identityCache,
 		tlsFPProfileService:     tlsFPProfileService,
+		httpUpstream:            upstream,
+		geminiWeb:               geminiweb.NewClient(),
 	}
 }
 
@@ -368,6 +380,13 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 	}
 
 	if account.Platform == PlatformGemini {
+		if account.IsGeminiWeb() {
+			usage, err := s.getGeminiWebUsage(ctx, account, forceProbe)
+			if err == nil && usage != nil && usage.Error == "" {
+				s.tryClearRecoverableAccountError(ctx, account)
+			}
+			return usage, err
+		}
 		usage, err := s.getGeminiUsage(ctx, account)
 		if err == nil {
 			s.tryClearRecoverableAccountError(ctx, account)
@@ -1037,6 +1056,113 @@ func (s *AccountUsageService) getGeminiUsage(ctx context.Context, account *Accou
 	}
 
 	return usage, nil
+}
+
+// getGeminiWebUsage reads the account-wide windows exposed by Gemini's browser
+// usage page. Gemini Web has no Gemini API RPD/RPM policy, so it must not go
+// through getGeminiUsage (which is a local/static quota approximation).
+func (s *AccountUsageService) getGeminiWebUsage(ctx context.Context, account *Account, forceProbe bool) (*UsageInfo, error) {
+	now := time.Now()
+	usage := &UsageInfo{UpdatedAt: &now}
+	if s.httpUpstream == nil || s.geminiWeb == nil {
+		usage.Error = "Gemini Web quota transport is not configured"
+		usage.ErrorCode = "network_error"
+		return usage, nil
+	}
+	cookie := strings.TrimSpace(account.GetCredential("gemini_web_cookie"))
+	if cookie == "" {
+		usage.Error = "Gemini Web Cookie is missing"
+		usage.ErrorCode = "unauthenticated"
+		return usage, nil
+	}
+	authUser, authUserSet := geminiWebAuthUser(account)
+	cred := geminiweb.Credential{
+		Cookie: cookie, AuthUser: authUser, AuthUserSet: authUserSet,
+		BaseURL: "https://gemini.google.com", UserAgent: account.GetCredential("user_agent"),
+	}
+	proxyURL := ""
+	if account.ProxyID != nil && account.Proxy != nil {
+		proxyURL = account.Proxy.URL()
+	}
+	do := func(req *http.Request) (*http.Response, error) {
+		return s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	}
+	// Administrative queries can wait for browser bootstrap and the usage RPC;
+	// the scheduler keeps its separate, short fail-open precheck budget.
+	quotaCtx, cancel := context.WithTimeout(ctx, geminiWebUsageTimeout)
+	defer cancel()
+	var result geminiweb.QuotaResult
+	var err error
+	if forceProbe {
+		result, err = s.geminiWeb.RefreshQuota(quotaCtx, cred, do)
+	} else {
+		result, err = s.geminiWeb.FetchQuota(quotaCtx, cred, do)
+	}
+	if live := s.geminiWeb.CurrentCookie(cred); live != "" {
+		result.UpdatedCookie = live
+	}
+	if !errors.Is(err, geminiweb.ErrInvalidCredential) && !errors.Is(err, geminiweb.ErrRateLimited) {
+		s.persistGeminiWebUsageCookie(ctx, account, cookie, result.UpdatedCookie)
+	}
+	if err != nil {
+		usage.Error = err.Error()
+		switch {
+		case errors.Is(err, geminiweb.ErrInvalidCredential):
+			usage.ErrorCode = "unauthenticated"
+			s.geminiWeb.Invalidate(cookie)
+		case errors.Is(err, geminiweb.ErrRateLimited):
+			usage.ErrorCode = "rate_limited"
+		default:
+			usage.ErrorCode = "network_error"
+		}
+		return usage, nil
+	}
+
+	for _, window := range result.Quota.Windows {
+		if !window.HasPercent {
+			continue
+		}
+		resetAt := (*time.Time)(nil)
+		remaining := 0
+		if window.HasReset {
+			reset := window.ResetAt
+			resetAt = &reset
+			remaining = max(0, int(time.Until(reset).Seconds()))
+		}
+		progress := &UsageProgress{
+			Utilization:      window.UsedPercent,
+			ResetsAt:         resetAt,
+			RemainingSeconds: remaining,
+		}
+		switch window.ID {
+		case "five_hour":
+			usage.FiveHour = progress
+		case "weekly":
+			usage.SevenDay = progress
+		}
+	}
+	if usage.FiveHour == nil && usage.SevenDay == nil {
+		usage.Error = "Gemini Web returned no usage windows"
+		usage.ErrorCode = "network_error"
+	}
+	return usage, nil
+}
+
+func (s *AccountUsageService) persistGeminiWebUsageCookie(ctx context.Context, account *Account, oldCookie, updatedCookie string) {
+	if account == nil || strings.TrimSpace(updatedCookie) == "" || updatedCookie == oldCookie || s.accountRepo == nil {
+		return
+	}
+	updated := shallowCopyMap(account.Credentials)
+	updated["gemini_web_cookie"] = updatedCookie
+	updated[geminiWebCookieLastRefresh] = time.Now().UTC().Format(time.RFC3339Nano)
+	persistLock := geminiWebCredentialPersistLock(account.ID)
+	persistLock.Lock()
+	defer persistLock.Unlock()
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	if err := persistAccountCredentials(persistCtx, s.accountRepo, account, updated); err != nil {
+		account.Credentials = updated
+	}
 }
 
 // getAntigravityUsage 获取 Antigravity 账户额度

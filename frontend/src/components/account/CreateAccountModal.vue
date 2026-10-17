@@ -886,9 +886,9 @@
 
         <div v-if="accountCategory === 'gemini-web'" class="mt-4 space-y-3 rounded-lg border border-emerald-200 bg-emerald-50/50 p-4 dark:border-emerald-800/50 dark:bg-emerald-900/10">
           <div>
-            <label class="input-label">Browser Cookie header</label>
+            <label class="input-label">Browser Cookie header or JSON export</label>
             <textarea v-model="geminiWebCookie" rows="4" class="input font-mono text-xs" placeholder="__Secure-1PSID=...; __Secure-1PSIDTS=..." />
-            <p class="input-hint">Paste the complete Cookie header copied from gemini.google.com. It is redacted after saving and never shown again.</p>
+            <p class="input-hint">Paste the complete Cookie header or a browser cookie JSON export. It is redacted after saving and never shown again.</p>
           </div>
           <div class="grid gap-3 sm:grid-cols-2">
             <div>
@@ -4287,6 +4287,7 @@ import {
   defaultProviderProtocolRules,
   isCNProviderPlatform,
   isHeaderOverrideCapable,
+  isGeminiWebCookieInput,
   isMultiProtocolApiKeyPlatform,
   providerAccountModes,
   providerModeLabel,
@@ -6140,7 +6141,7 @@ const handleSubmit = async () => {
       appStore.showError(t('admin.accounts.pleaseEnterAccountName'))
       return
     }
-    if (!geminiWebCookie.value.includes('__Secure-1PSID=')) {
+    if (!isGeminiWebCookieInput(geminiWebCookie.value)) {
       appStore.showError('Gemini Web Cookie must include __Secure-1PSID')
       return
     }

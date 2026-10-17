@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminiweb"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/googleapi"
 	"github.com/gin-gonic/gin"
 )
 
@@ -47,6 +50,10 @@ func (s *GeminiMessagesCompatService) geminiWebClient() *geminiweb.Client {
 }
 
 func (s *GeminiMessagesCompatService) callGeminiWeb(ctx context.Context, account *Account, model, prompt string, thinking bool) (geminiweb.Result, error) {
+	return s.callGeminiWebWithCallback(ctx, account, model, prompt, thinking, nil)
+}
+
+func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Context, account *Account, model, prompt string, thinking bool, onResult func(geminiweb.Result) error) (geminiweb.Result, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	if _, ok := geminiweb.LookupModel(model); !ok {
@@ -71,7 +78,7 @@ func (s *GeminiMessagesCompatService) callGeminiWeb(ctx context.Context, account
 	do := func(req *http.Request) (*http.Response, error) {
 		return s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 	}
-	result, err := s.geminiWebClient().Complete(requestCtx, cred, geminiweb.Request{Model: model, Prompt: prompt, Thinking: thinking}, do)
+	result, err := s.geminiWebClient().Complete(requestCtx, cred, geminiweb.Request{Model: model, Prompt: prompt, Thinking: thinking, OnResult: onResult}, do)
 	if err == nil || (!errors.Is(err, geminiweb.ErrInvalidCredential) && !errors.Is(err, geminiweb.ErrRateLimited)) {
 		if live := s.geminiWebClient().CurrentCookie(cred); live != "" {
 			result.UpdatedCookie = live
@@ -191,13 +198,27 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 		return nil, s.writeGoogleError(c, http.StatusBadRequest, err.Error())
 	}
 	mapped := account.GetMappedModel(originalModel)
-	result, err := s.callGeminiWeb(ctx, account, mapped, prompt, strings.Contains(strings.ToLower(originalModel), "thinking"))
+	var streamWriter *geminiWebNativeStreamWriter
+	var onResult func(geminiweb.Result) error
+	if stream || action == "streamGenerateContent" {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		streamWriter = newGeminiWebNativeStreamWriter(c, originalModel, cancel)
+		onResult = streamWriter.WriteResult
+	}
+	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, prompt, strings.Contains(strings.ToLower(originalModel), "thinking"), onResult)
 	if err != nil {
+		if streamWriter != nil {
+			return nil, streamWriter.Abort(err)
+		}
 		return nil, geminiWebFailoverError(err)
 	}
 	usage := webUsageWithThinking(prompt, result.Text, result.Thinking)
 	if stream || action == "streamGenerateContent" {
-		writeGeminiWebNativeStream(c, originalModel, result.Text, usage)
+		if err := streamWriter.Finish(result, usage); err != nil {
+			return nil, err
+		}
 	} else {
 		writeGeminiWebNativeJSON(c, originalModel, result.Text, usage)
 	}
@@ -233,17 +254,219 @@ func writeGeminiWebNativeJSON(c *gin.Context, model, text string, usage ClaudeUs
 	c.JSON(http.StatusOK, gin.H{"candidates": []any{gin.H{"content": gin.H{"role": "model", "parts": []any{gin.H{"text": text}}}, "finishReason": "STOP", "index": 0}}, "modelVersion": model, "usageMetadata": geminiWebUsageMetadata(usage)})
 }
 
-func writeGeminiWebNativeStream(c *gin.Context, model, text string, usage ClaudeUsage) {
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.WriteHeader(http.StatusOK)
-	b, _ := json.Marshal(gin.H{"candidates": []any{gin.H{"content": gin.H{"role": "model", "parts": []any{gin.H{"text": text}}}, "index": 0}}, "modelVersion": model, "usageMetadata": geminiWebUsageMetadata(usage)})
-	_, _ = c.Writer.Write([]byte("data: " + string(b) + "\n\n"))
-	finish, _ := json.Marshal(gin.H{"candidates": []any{gin.H{"finishReason": "STOP", "index": 0}}, "usageMetadata": geminiWebUsageMetadata(usage)})
-	_, _ = c.Writer.Write([]byte("data: " + string(finish) + "\n\n"))
-	if f, ok := c.Writer.(http.Flusher); ok {
+// geminiWebNativeStreamWriter forwards cumulative browser snapshots as native
+// Gemini SSE deltas. Gemini Web can spend a long time between answer frames,
+// so the writer sends blank SSE heartbeats every five seconds until the
+// request finishes, keeping idle connections alive without triggering the
+// older Gemini CLI parsers that reject comment heartbeats.
+type geminiWebNativeStreamWriter struct {
+	c             *gin.Context
+	model         string
+	mu            sync.Mutex
+	text          string
+	thinking      string
+	committed     bool
+	stopped       bool
+	writeErr      error
+	cancel        context.CancelFunc
+	stopKeepAlive chan struct{}
+	keepAliveDone chan struct{}
+	stopOnce      sync.Once
+}
+
+func newGeminiWebNativeStreamWriter(c *gin.Context, model string, cancel context.CancelFunc) *geminiWebNativeStreamWriter {
+	w := &geminiWebNativeStreamWriter{
+		c:             c,
+		model:         model,
+		cancel:        cancel,
+		stopKeepAlive: make(chan struct{}),
+		keepAliveDone: make(chan struct{}),
+	}
+	go w.keepAlive()
+	return w
+}
+
+func (w *geminiWebNativeStreamWriter) keepAlive() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	defer close(w.keepAliveDone)
+	for {
+		select {
+		case <-ticker.C:
+			w.mu.Lock()
+			if w.stopped {
+				w.mu.Unlock()
+				return
+			}
+			err := w.writeHeartbeatLocked()
+			w.mu.Unlock()
+			if err != nil {
+				return
+			}
+		case <-w.stopKeepAlive:
+			return
+		case <-w.c.Request.Context().Done():
+			return
+		}
+	}
+}
+
+func (w *geminiWebNativeStreamWriter) stop() {
+	w.mu.Lock()
+	w.stopped = true
+	w.stopOnce.Do(func() { close(w.stopKeepAlive) })
+	w.mu.Unlock()
+	<-w.keepAliveDone
+}
+
+func (w *geminiWebNativeStreamWriter) commitLocked() {
+	if w.committed {
+		return
+	}
+	w.c.Writer.Header().Set("Content-Type", "text/event-stream")
+	w.c.Writer.Header().Set("Cache-Control", "no-cache")
+	w.c.Writer.Header().Set("Connection", "keep-alive")
+	w.c.Writer.WriteHeader(http.StatusOK)
+	w.committed = true
+	MarkResponseCommitted(w.c)
+}
+
+func (w *geminiWebNativeStreamWriter) flushLocked() {
+	if f, ok := w.c.Writer.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+func (w *geminiWebNativeStreamWriter) writeLocked(data []byte) error {
+	if w.writeErr != nil {
+		return w.writeErr
+	}
+	if w.c.Request != nil && w.c.Request.Context().Err() != nil {
+		return w.c.Request.Context().Err()
+	}
+	w.commitLocked()
+	n, err := w.c.Writer.Write(data)
+	if err == nil && n != len(data) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		w.writeErr = err
+		if w.cancel != nil {
+			w.cancel()
+		}
+		return err
+	}
+	w.flushLocked()
+	return nil
+}
+
+func (w *geminiWebNativeStreamWriter) writeHeartbeatLocked() error {
+	// Keep the heartbeat as an empty SSE event. Gemini CLI's bundled parser
+	// accepts the blank-line form across its supported SDK versions, while
+	// comment heartbeats are rejected by some older versions.
+	return w.writeLocked([]byte("\n\n"))
+}
+
+func geminiWebCumulativeDelta(previous, current string) (delta, next string) {
+	if current == "" {
+		return "", previous
+	}
+	if previous == "" || strings.HasPrefix(current, previous) {
+		return current[len(previous):], current
+	}
+	if strings.HasPrefix(previous, current) {
+		return "", previous
+	}
+	// Gemini Web occasionally replaces a provisional thought/answer snapshot.
+	// Preserve the already emitted prefix and append the replacement as a new
+	// delta instead of duplicating the whole response.
+	return current, current
+}
+
+func (w *geminiWebNativeStreamWriter) writeResultLocked(result geminiweb.Result) error {
+	textDelta, nextText := geminiWebCumulativeDelta(w.text, result.Text)
+	thinkingDelta, nextThinking := geminiWebCumulativeDelta(w.thinking, result.Thinking)
+	w.text, w.thinking = nextText, nextThinking
+	if textDelta == "" && thinkingDelta == "" {
+		return nil
+	}
+	parts := make([]any, 0, 2)
+	if thinkingDelta != "" {
+		parts = append(parts, gin.H{"text": thinkingDelta, "thought": true})
+	}
+	if textDelta != "" {
+		parts = append(parts, gin.H{"text": textDelta})
+	}
+	payload, _ := json.Marshal(gin.H{
+		"candidates":   []any{gin.H{"content": gin.H{"role": "model", "parts": parts}, "index": 0}},
+		"modelVersion": w.model,
+	})
+	return w.writeLocked([]byte("data: " + string(payload) + "\n\n"))
+}
+
+func (w *geminiWebNativeStreamWriter) WriteResult(result geminiweb.Result) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.writeErr != nil {
+		return w.writeErr
+	}
+	if w.stopped {
+		return context.Canceled
+	}
+	if err := w.c.Request.Context().Err(); err != nil {
+		return err
+	}
+	return w.writeResultLocked(result)
+}
+
+func (w *geminiWebNativeStreamWriter) Finish(result geminiweb.Result, usage ClaudeUsage) error {
+	w.stop()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.writeResultLocked(result); err != nil {
+		return err
+	}
+	finish, _ := json.Marshal(gin.H{
+		"candidates":    []any{gin.H{"finishReason": "STOP", "index": 0}},
+		"modelVersion":  w.model,
+		"usageMetadata": geminiWebUsageMetadata(usage),
+	})
+	return w.writeLocked([]byte("data: " + string(finish) + "\n\n"))
+}
+
+func (w *geminiWebNativeStreamWriter) Abort(cause error) error {
+	w.stop()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.writeErr != nil {
+		return w.writeErr
+	}
+	if err := w.c.Request.Context().Err(); err != nil {
+		return err
+	}
+	// Account switching is only safe before any response has been sent. The
+	// concurrency-wait path may have committed a heartbeat before this writer
+	// was created, so inspect the Gin writer as well as our own state.
+	if !w.committed && !w.c.Writer.Written() {
+		return geminiWebFailoverError(cause)
+	}
+	status, message := http.StatusBadGateway, "Gemini Web upstream request failed"
+	if errors.Is(cause, geminiweb.ErrInvalidCredential) {
+		status, message = http.StatusUnauthorized, GeminiWebCredentialRejectedClientMessage
+	} else if errors.Is(cause, geminiweb.ErrRateLimited) {
+		status, message = http.StatusTooManyRequests, "Gemini Web account is rate limited; retry later"
+	}
+	SetOpsUpstreamError(w.c, status, message, "")
+	MarkOpsStreamFailure(w.c, "upstream_error", "gemini_web", message, status)
+	payload, _ := json.Marshal(gin.H{"error": gin.H{
+		"code": status, "message": message, "status": googleapi.HTTPStatusToGoogleStatus(status),
+	}})
+	if err := w.writeLocked([]byte("data: " + string(payload) + "\n\n")); err != nil {
+		return err
+	}
+	// Do not wrap the upstream error: it must never be interpreted as another
+	// failover attempt after the SSE response is committed.
+	return errors.New(message)
 }
 
 func (s *GeminiMessagesCompatService) forwardGeminiWebClaude(ctx context.Context, c *gin.Context, account *Account, body []byte) (*ForwardResult, error) {

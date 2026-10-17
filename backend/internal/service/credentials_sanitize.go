@@ -3,6 +3,8 @@ package service
 import (
 	"errors"
 	"strings"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/geminiweb"
 )
 
 // SanitizeStoredCredentials strips secrets that must never be persisted on the
@@ -50,7 +52,8 @@ func ValidateGeminiWebCredentials(platform, accountType string, creds map[string
 		return nil
 	}
 	value, _ := creds["gemini_web_cookie"].(string)
-	if len(value) < 20 || !strings.Contains(value, "__Secure-1PSID=") {
+	normalized := geminiweb.NormalizeCookieHeader(value)
+	if len(normalized) < 20 || !strings.Contains(normalized, "__Secure-1PSID=") {
 		return errors.New("gemini_web accounts require a browser Cookie header containing __Secure-1PSID")
 	}
 	return nil

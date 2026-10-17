@@ -981,9 +981,9 @@
 
       <div v-if="account.type === 'gemini_web'" class="space-y-3 rounded-lg border border-emerald-200 bg-emerald-50/50 p-4 dark:border-emerald-800/50 dark:bg-emerald-900/10">
         <div>
-          <label class="input-label">Browser Cookie header</label>
+          <label class="input-label">Browser Cookie header or JSON export</label>
           <textarea v-model="editGeminiWebCookie" rows="4" class="input font-mono text-xs" placeholder="__Secure-1PSID=...; __Secure-1PSIDTS=..." />
-          <p class="input-hint">Leave empty to keep the existing Cookie. Paste a new complete Cookie header to rotate it.</p>
+          <p class="input-hint">Leave empty to keep the existing Cookie. Paste a new complete Cookie header or browser cookie JSON export to rotate it.</p>
         </div>
         <div class="grid gap-3 sm:grid-cols-2">
           <div>
@@ -3587,6 +3587,7 @@ import {
   readPlanType,
   resolveOpenCodeAccountMode,
   isCustomGrokBaseUrl,
+  isGeminiWebCookieInput,
   isHeaderOverrideCapable,
   splitHeaderOverridesObject,
   validateHeaderOverrideRows,
@@ -5859,7 +5860,7 @@ const handleSubmit = async () => {
       const newCredentials: Record<string, unknown> = { ...currentCredentials }
       const hasExistingCookie = props.account.credentials_status?.has_gemini_web_cookie ?? Boolean(currentCredentials.gemini_web_cookie)
       if (editGeminiWebCookie.value.trim()) {
-        if (!editGeminiWebCookie.value.includes('__Secure-1PSID=')) {
+        if (!isGeminiWebCookieInput(editGeminiWebCookie.value)) {
           appStore.showError('Gemini Web Cookie must include __Secure-1PSID')
           return
         }
