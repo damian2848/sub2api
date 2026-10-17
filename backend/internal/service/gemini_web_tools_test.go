@@ -366,7 +366,7 @@ func TestGeminiWebNativeToolCalls(t *testing.T) {
 			if stream {
 				action = "streamGenerateContent"
 			}
-			_, err := svc.ForwardNative(context.Background(), c, geminiWebTestAccount(), "gemini-3.5-flash-lite", action, stream,
+			result, err := svc.ForwardNative(context.Background(), c, geminiWebTestAccount(), "gemini-3.5-flash-lite", action, stream,
 				[]byte(`{`+tools+`,"contents":[{"role":"user","parts":[{"text":"Weather?"}]}]}`))
 			require.NoError(t, err)
 			out := recorder.Body.String()
@@ -374,6 +374,7 @@ func TestGeminiWebNativeToolCalls(t *testing.T) {
 			require.Equal(t, 2, strings.Count(out, `"functionCall":`))
 			require.Contains(t, out, `"functionCall":{"args":{"city":"Paris"},"name":"get_weather"}`)
 			require.Contains(t, out, `"functionCall":{"args":{"city":"Tokyo"},"name":"get_weather"}`)
+			require.Equal(t, stream, result.FirstTokenMs != nil, "native streams record first_token_ms")
 			if stream {
 				require.Contains(t, out, `"text":"Let me check"`)
 				require.Contains(t, out, `"text":" both cities."`)
@@ -423,6 +424,77 @@ func TestGeminiWebPipeStreamKeepAliveBecomesClientPing(t *testing.T) {
 	blocks, stop := collectClaudeSSEBlocks(t, out)
 	require.Equal(t, "tool_use", stop)
 	require.Equal(t, map[string]any{"path": "a"}, blocks[1]["input"])
+}
+
+// slowGeminiWebStub delays the StreamGenerate response, like a Pro model that
+// thinks before Google sends the first answer frame.
+func slowGeminiWebStub(delay time.Duration, next func(*http.Request) (*http.Response, error)) *geminiWebUsageHTTPStub {
+	return &geminiWebUsageHTTPStub{do: func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodPost {
+			time.Sleep(delay)
+		}
+		return next(req)
+	}}
+}
+
+func shortenGeminiWebFirstTokenPing(t *testing.T) {
+	t.Helper()
+	previousDelay, previousInterval := geminiWebFirstTokenPingDelay, geminiWebKeepAliveInterval
+	geminiWebFirstTokenPingDelay, geminiWebKeepAliveInterval = 20*time.Millisecond, 20*time.Millisecond
+	t.Cleanup(func() { geminiWebFirstTokenPingDelay, geminiWebKeepAliveInterval = previousDelay, previousInterval })
+}
+
+func TestGeminiWebCompatStreamPingsBeforeFirstToken(t *testing.T) {
+	shortenGeminiWebFirstTokenPing(t)
+	for _, endpoint := range []string{"messages", "chat"} {
+		t.Run(endpoint, func(t *testing.T) {
+			frames, _ := geminiWebFramesStub(t, "Hello", "Hello world")
+			svc := &GeminiMessagesCompatService{httpUpstream: slowGeminiWebStub(150*time.Millisecond, frames.do)}
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+			var err error
+			if endpoint == "messages" {
+				_, err = svc.Forward(context.Background(), c, geminiWebTestAccount(), []byte(`{"model":"gemini-3.5-flash-lite","stream":true,"max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
+			} else {
+				_, err = svc.ForwardAsChatCompletions(context.Background(), c, geminiWebTestAccount(), []byte(`{"model":"gemini-3.5-flash-lite","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+			}
+			require.NoError(t, err)
+			out := recorder.Body.String()
+			require.True(t, strings.HasPrefix(out, ": ping\n\n"), "stream starts with a comment ping: %q", out)
+			require.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
+			require.True(t, IsResponseCommitted(c))
+			require.Contains(t, out, "Hello")
+			require.Contains(t, out, " world")
+			if endpoint == "messages" {
+				require.Contains(t, out, "event: message_start")
+				require.Contains(t, out, "event: message_stop")
+			} else {
+				require.Contains(t, out, "data: [DONE]")
+			}
+		})
+	}
+}
+
+func TestGeminiWebCompatStreamErrorAfterPingDoesNotFailOver(t *testing.T) {
+	shortenGeminiWebFirstTokenPing(t)
+	svc := &GeminiMessagesCompatService{httpUpstream: slowGeminiWebStub(150*time.Millisecond, func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodPost {
+			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid"`))}, nil
+	})}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+	_, err := svc.Forward(context.Background(), c, geminiWebTestAccount(), []byte(`{"model":"gemini-3.5-flash-lite","stream":true,"max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
+	require.Error(t, err)
+	var failover *UpstreamFailoverError
+	require.False(t, errors.As(err, &failover), "a committed stream must not switch accounts")
+	out := recorder.Body.String()
+	require.True(t, strings.HasPrefix(out, ": ping\n\n"), "out = %q", out)
+	require.Contains(t, out, "event: error")
+	require.Contains(t, out, "rate limited")
 }
 
 func TestGeminiWebClaudeToolChoice(t *testing.T) {

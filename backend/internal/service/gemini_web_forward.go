@@ -150,6 +150,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 		defer cancel()
 		streamWriter = newGeminiWebNativeStreamWriter(c, originalModel, cancel)
 		streamWriter.plan = plan
+		streamWriter.start = start
 		onResult = streamWriter.WriteResult
 	}
 	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, prompt, strings.Contains(strings.ToLower(originalModel), "thinking"), onResult)
@@ -168,11 +169,15 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 		text, calls := geminiWebExtractToolCalls(result.Text, plan)
 		writeGeminiWebNativeJSON(c, originalModel, text, calls, usage)
 	}
-	return &ForwardResult{
+	forwardResult := &ForwardResult{
 		RequestID: result.RequestID, UpstreamHeaders: make(http.Header), Usage: usage,
 		Model: originalModel, UpstreamModel: mapped, Stream: stream, Duration: time.Since(start),
 		UpstreamResponseModel: result.ResponseModel, UpstreamResponseModelConflict: result.ResponseModelConflict,
-	}, nil
+	}
+	if streamWriter != nil {
+		forwardResult.FirstTokenMs = streamWriter.firstTokenMs
+	}
+	return forwardResult, nil
 }
 
 func geminiWebFailoverError(err error) error {
@@ -219,6 +224,8 @@ type geminiWebNativeStreamWriter struct {
 	c             *gin.Context
 	model         string
 	plan          geminiWebPromptPlan
+	start         time.Time
+	firstTokenMs  *int
 	mu            sync.Mutex
 	text          string
 	thinking      string
@@ -350,6 +357,10 @@ func (w *geminiWebNativeStreamWriter) writeSnapshotLocked(text, thinking string,
 	w.text, w.thinking = nextText, nextThinking
 	if textDelta == "" && thinkingDelta == "" && len(calls) == 0 && extra == nil {
 		return nil
+	}
+	if w.firstTokenMs == nil && (textDelta != "" || thinkingDelta != "" || len(calls) > 0) && !w.start.IsZero() {
+		ms := int(time.Since(w.start).Milliseconds())
+		w.firstTokenMs = &ms
 	}
 	parts := make([]any, 0, 2+len(calls))
 	if thinkingDelta != "" {
@@ -548,6 +559,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	pipe := newGeminiWebPipeStream(req.plan, req.includeThought, cancel, req.handleStream)
+	pipe.pingUntilFirstToken(c)
 	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, req.plan.Prompt, thinking, pipe.OnResult)
 	if err != nil {
 		if !pipe.Abort(err) && !c.Writer.Written() {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminiweb"
+	"github.com/gin-gonic/gin"
 )
 
 // Gemini Web has no function-calling API. Tools are described in the prompt,
@@ -27,6 +28,13 @@ const (
 )
 
 var geminiWebKeepAliveInterval = 5 * time.Second
+
+// geminiWebFirstTokenPingDelay is how long a compat stream stays silent while
+// Gemini Web has produced no answer yet. Until then the request can still
+// switch accounts; after it, the response is committed and the client gets
+// SSE comment pings so its first-byte timeout does not fire while a Pro model
+// is thinking.
+var geminiWebFirstTokenPingDelay = 5 * time.Second
 
 type geminiWebTool struct {
 	Name        string
@@ -500,7 +508,9 @@ var (
 // geminiWebPipeStream feeds Gemini Web snapshots to the shared native Gemini
 // stream converters (Claude Messages, Chat Completions) through an in-memory
 // SSE pipe. The converter only starts on the first frame with content, so a
-// request that fails before any output can still switch accounts.
+// request that fails before any output can still switch accounts. If no
+// content arrives within geminiWebFirstTokenPingDelay, pingUntilFirstToken
+// commits the response and sends SSE comment pings instead.
 type geminiWebPipeStream struct {
 	plan           geminiWebPromptPlan
 	includeThought bool
@@ -512,6 +522,7 @@ type geminiWebPipeStream struct {
 	pw           *io.PipeWriter
 	started      bool
 	finished     bool
+	committed    bool
 	writeErr     error
 	lastWrite    time.Time
 	sentText     string
@@ -540,17 +551,17 @@ func (p *geminiWebPipeStream) startLocked() {
 		// A converter that stops early (client gone) must unblock the producer.
 		_ = p.pr.CloseWithError(errGeminiWebConverterStopped)
 	}()
-	go p.keepAlive()
+	go p.keepAlive(geminiWebKeepAliveInterval)
 }
 
-func (p *geminiWebPipeStream) keepAlive() {
-	ticker := time.NewTicker(geminiWebKeepAliveInterval)
+func (p *geminiWebPipeStream) keepAlive(interval time.Duration) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
 			p.mu.Lock()
-			if !p.finished && p.writeErr == nil && time.Since(p.lastWrite) >= geminiWebKeepAliveInterval {
+			if !p.finished && p.writeErr == nil && time.Since(p.lastWrite) >= interval {
 				_ = p.writeLocked([]byte(geminiWebKeepAliveLine + "\n\n"))
 			}
 			p.mu.Unlock()
@@ -560,6 +571,68 @@ func (p *geminiWebPipeStream) keepAlive() {
 			return
 		}
 	}
+}
+
+// pingUntilFirstToken waits geminiWebFirstTokenPingDelay for the first
+// content frame. If none has arrived by then, it commits the client response
+// and writes an SSE comment ping every geminiWebKeepAliveInterval until the
+// converter starts or the stream ends. Comments are ignored by Anthropic and
+// OpenAI SSE clients, so they are safe before message_start / the first chunk.
+func (p *geminiWebPipeStream) pingUntilFirstToken(c *gin.Context) {
+	delay, interval := geminiWebFirstTokenPingDelay, geminiWebKeepAliveInterval
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-p.stopKeep:
+			return
+		case <-c.Request.Context().Done():
+			return
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for p.pingBeforeFirstToken(c) {
+			select {
+			case <-ticker.C:
+			case <-p.stopKeep:
+				return
+			case <-c.Request.Context().Done():
+				return
+			}
+		}
+	}()
+}
+
+// pingBeforeFirstToken writes one comment ping straight to the client. It
+// holds p.mu, and the converter only starts under p.mu, so the two never write
+// to the client at the same time. It reports whether pinging should go on.
+func (p *geminiWebPipeStream) pingBeforeFirstToken(c *gin.Context) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.started || p.finished || p.writeErr != nil {
+		return false
+	}
+	if !p.committed {
+		c.Writer.Header().Set("Content-Type", "text/event-stream")
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+		c.Writer.Header().Set("Connection", "keep-alive")
+		c.Writer.Header().Set("X-Accel-Buffering", "no")
+		c.Writer.WriteHeader(http.StatusOK)
+		p.committed = true
+		MarkResponseCommitted(c)
+	}
+	if _, err := c.Writer.Write([]byte(": ping\n\n")); err != nil {
+		p.writeErr = err
+		if p.cancel != nil {
+			p.cancel()
+		}
+		return false
+	}
+	if f, ok := c.Writer.(http.Flusher); ok {
+		f.Flush()
+	}
+	return true
 }
 
 func (p *geminiWebPipeStream) writeLocked(data []byte) error {
@@ -643,16 +716,18 @@ func (p *geminiWebPipeStream) Finish(result geminiweb.Result, usage ClaudeUsage)
 }
 
 // Abort ends the stream after an upstream error. It reports whether the
-// client response had already started; if not, the caller may fail over.
+// client response had already started (output or first-token pings); if not,
+// the caller may fail over.
 func (p *geminiWebPipeStream) Abort(cause error) bool {
 	p.stopOnce.Do(func() { close(p.stopKeep) })
 	p.mu.Lock()
 	p.finished = true
 	started := p.started
+	committed := p.committed
 	_ = p.pw.CloseWithError(cause)
 	p.mu.Unlock()
 	if started {
 		<-p.done
 	}
-	return started
+	return started || committed
 }

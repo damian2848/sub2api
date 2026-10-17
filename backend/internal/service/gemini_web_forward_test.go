@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminiweb"
 	"github.com/gin-gonic/gin"
@@ -190,6 +191,33 @@ func TestGeminiWebNativeStreamWriterFinishEmitsDeltasAndUsage(t *testing.T) {
 	}
 	if err := w.WriteResult(geminiweb.Result{Text: "late callback"}); err == nil || recorder.Body.String() != body {
 		t.Fatal("callback after terminal frame appended content")
+	}
+}
+
+func TestGeminiWebNativeStreamWriterRecordsFirstTokenMs(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+	w := newGeminiWebNativeStreamWriter(c, "gemini-pro", nil)
+	w.start = time.Now().Add(-50 * time.Millisecond)
+	w.mu.Lock()
+	_ = w.writeHeartbeatLocked()
+	w.mu.Unlock()
+	if w.firstTokenMs != nil {
+		t.Fatal("a heartbeat is not a first token")
+	}
+	if err := w.WriteResult(geminiweb.Result{Thinking: "planning"}); err != nil {
+		t.Fatal(err)
+	}
+	if w.firstTokenMs == nil || *w.firstTokenMs < 50 {
+		t.Fatalf("firstTokenMs = %v, want >= 50", w.firstTokenMs)
+	}
+	first := *w.firstTokenMs
+	if err := w.Finish(geminiweb.Result{Thinking: "planning", Text: "answer"}, ClaudeUsage{}); err != nil {
+		t.Fatal(err)
+	}
+	if *w.firstTokenMs != first {
+		t.Fatal("later frames overwrote the first-token time")
 	}
 }
 
