@@ -2192,6 +2192,10 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 		}
 
 		if !strings.HasPrefix(line, "data:") {
+			if strings.TrimRight(line, "\r\n") == geminiWebKeepAliveLine {
+				writeSSE(c.Writer, "ping", map[string]any{"type": "ping"})
+				flusher.Flush()
+			}
 			if errors.Is(err, io.EOF) {
 				break
 			}
@@ -2353,8 +2357,24 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 					openBlockType = ""
 				}
 
+				argsJSONText := "{}"
+				switch v := args.(type) {
+				case nil:
+					// keep default "{}"
+				case string:
+					if strings.TrimSpace(v) != "" {
+						argsJSONText = v
+					}
+				default:
+					if b, err := json.Marshal(args); err == nil && len(b) > 0 {
+						argsJSONText = string(b)
+					}
+				}
+
 				// If we receive streamed tool args in pieces, keep a single tool block open and emit deltas.
-				if openToolIndex >= 0 && openToolName != name {
+				// Arguments that do not extend the open block are a separate call,
+				// such as two parallel calls of the same tool.
+				if openToolIndex >= 0 && (openToolName != name || !strings.HasPrefix(argsJSONText, seenToolJSON)) {
 					writeSSE(c.Writer, "content_block_stop", map[string]any{
 						"type":  "content_block_stop",
 						"index": openToolIndex,
@@ -2381,20 +2401,6 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 							"input": map[string]any{},
 						},
 					})
-				}
-
-				argsJSONText := "{}"
-				switch v := args.(type) {
-				case nil:
-					// keep default "{}"
-				case string:
-					if strings.TrimSpace(v) != "" {
-						argsJSONText = v
-					}
-				default:
-					if b, err := json.Marshal(args); err == nil && len(b) > 0 {
-						argsJSONText = string(b)
-					}
 				}
 
 				delta, newSeen := computeGeminiTextDelta(seenToolJSON, argsJSONText)

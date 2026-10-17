@@ -614,6 +614,12 @@ func (s *GeminiMessagesCompatService) handleChatCompletionsStreamingResponseFrom
 		line, err := reader.ReadString('\n')
 		if len(line) > 0 {
 			trimmed := strings.TrimRight(line, "\r\n")
+			if trimmed == geminiWebKeepAliveLine {
+				if _, werr := io.WriteString(c.Writer, ": keepalive\n\n"); werr != nil {
+					return &geminiStreamResult{usage: &usage, firstTokenMs: firstTokenMs}, nil
+				}
+				flusher.Flush()
+			}
 			if strings.HasPrefix(trimmed, "data:") {
 				payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
 				if payload != "" && payload != "[DONE]" {
@@ -724,7 +730,21 @@ func (s *GeminiMessagesCompatService) handleChatCompletionsStreamingResponseFrom
 								if closeOpenBlock() {
 									return &geminiStreamResult{usage: &usage, firstTokenMs: firstTokenMs}, nil
 								}
-								if openToolIndex >= 0 && openToolName != name {
+								argsJSONText := "{}"
+								switch v := fc["args"].(type) {
+								case nil:
+								case string:
+									if strings.TrimSpace(v) != "" {
+										argsJSONText = v
+									}
+								default:
+									if b, err := json.Marshal(v); err == nil && len(b) > 0 {
+										argsJSONText = string(b)
+									}
+								}
+								// Arguments that do not extend the open block are a separate
+								// call, such as two parallel calls of the same tool.
+								if openToolIndex >= 0 && (openToolName != name || !strings.HasPrefix(argsJSONText, seenToolJSON)) {
 									if closeOpenTool() {
 										return &geminiStreamResult{usage: &usage, firstTokenMs: firstTokenMs}, nil
 									}
@@ -749,18 +769,6 @@ func (s *GeminiMessagesCompatService) handleChatCompletionsStreamingResponseFrom
 									}
 								}
 
-								argsJSONText := "{}"
-								switch v := fc["args"].(type) {
-								case nil:
-								case string:
-									if strings.TrimSpace(v) != "" {
-										argsJSONText = v
-									}
-								default:
-									if b, err := json.Marshal(v); err == nil && len(b) > 0 {
-										argsJSONText = string(b)
-									}
-								}
 								delta, newSeen := computeGeminiTextDelta(seenToolJSON, argsJSONText)
 								seenToolJSON = newSeen
 								if delta != "" {

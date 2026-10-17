@@ -119,59 +119,6 @@ func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Cont
 	return result, nil
 }
 
-func geminiWebPrompt(body []byte) (string, error) {
-	var root map[string]any
-	if err := json.Unmarshal(body, &root); err != nil {
-		return "", err
-	}
-	var parts []string
-	appendParts := func(raw any) {
-		items, _ := raw.([]any)
-		for _, item := range items {
-			m, _ := item.(map[string]any)
-			if _, ok := m["inlineData"]; ok {
-				parts = append(parts, "__gemini_web_unsupported_media__")
-				continue
-			}
-			if _, ok := m["fileData"]; ok {
-				parts = append(parts, "__gemini_web_unsupported_media__")
-				continue
-			}
-			if text, ok := m["text"].(string); ok && strings.TrimSpace(text) != "" {
-				parts = append(parts, text)
-				continue
-			}
-			if call, ok := m["functionCall"]; ok {
-				b, _ := json.Marshal(call)
-				parts = append(parts, string(b))
-			}
-		}
-	}
-	if system, ok := root["systemInstruction"].(map[string]any); ok {
-		appendParts(system["parts"])
-	}
-	if contents, ok := root["contents"].([]any); ok {
-		for _, raw := range contents {
-			m, _ := raw.(map[string]any)
-			role, _ := m["role"].(string)
-			before := len(parts)
-			appendParts(m["parts"])
-			if len(parts) > before && role != "" {
-				parts[before] = role + ": " + parts[before]
-			}
-		}
-	}
-	if len(parts) == 0 {
-		return "", errors.New("request contains no text parts")
-	}
-	for _, part := range parts {
-		if part == "__gemini_web_unsupported_media__" {
-			return "", errors.New("gemini web provider currently supports text input only")
-		}
-	}
-	return strings.Join(parts, "\n"), nil
-}
-
 func webUsageWithThinking(prompt, answer, thinking string) ClaudeUsage {
 	return ClaudeUsage{InputTokens: estimateTokensForText(prompt), OutputTokens: estimateTokensForText(answer) + estimateTokensForText(thinking)}
 }
@@ -189,10 +136,11 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 	if action != "generateContent" && action != "streamGenerateContent" {
 		return nil, s.writeGoogleError(c, http.StatusNotFound, "Unsupported action: "+action)
 	}
-	prompt, err := geminiWebPrompt(body)
+	plan, err := geminiWebBuildPrompt(body)
 	if err != nil {
 		return nil, s.writeGoogleError(c, http.StatusBadRequest, err.Error())
 	}
+	prompt := plan.Prompt
 	mapped := account.GetMappedModel(originalModel)
 	var streamWriter *geminiWebNativeStreamWriter
 	var onResult func(geminiweb.Result) error
@@ -201,6 +149,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 		ctx, cancel = context.WithCancel(ctx)
 		defer cancel()
 		streamWriter = newGeminiWebNativeStreamWriter(c, originalModel, cancel)
+		streamWriter.plan = plan
 		onResult = streamWriter.WriteResult
 	}
 	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, prompt, strings.Contains(strings.ToLower(originalModel), "thinking"), onResult)
@@ -216,7 +165,8 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 			return nil, err
 		}
 	} else {
-		writeGeminiWebNativeJSON(c, originalModel, result.Text, usage)
+		text, calls := geminiWebExtractToolCalls(result.Text, plan)
+		writeGeminiWebNativeJSON(c, originalModel, text, calls, usage)
 	}
 	return &ForwardResult{
 		RequestID: result.RequestID, UpstreamHeaders: make(http.Header), Usage: usage,
@@ -250,18 +200,25 @@ func geminiWebUsageMetadata(usage ClaudeUsage) gin.H {
 	return gin.H{"promptTokenCount": usage.InputTokens, "candidatesTokenCount": usage.OutputTokens, "totalTokenCount": usage.InputTokens + usage.OutputTokens}
 }
 
-func writeGeminiWebNativeJSON(c *gin.Context, model, text string, usage ClaudeUsage) {
-	c.JSON(http.StatusOK, gin.H{"candidates": []any{gin.H{"content": gin.H{"role": "model", "parts": []any{gin.H{"text": text}}}, "finishReason": "STOP", "index": 0}}, "modelVersion": model, "usageMetadata": geminiWebUsageMetadata(usage)})
+func writeGeminiWebNativeJSON(c *gin.Context, model, text string, calls []geminiWebToolCall, usage ClaudeUsage) {
+	parts := []any{}
+	if text != "" || len(calls) == 0 {
+		parts = append(parts, gin.H{"text": text})
+	}
+	parts = append(parts, geminiWebFunctionCallParts(calls)...)
+	c.JSON(http.StatusOK, gin.H{"candidates": []any{gin.H{"content": gin.H{"role": "model", "parts": parts}, "finishReason": "STOP", "index": 0}}, "modelVersion": model, "usageMetadata": geminiWebUsageMetadata(usage)})
 }
 
 // geminiWebNativeStreamWriter forwards cumulative browser snapshots as native
-// Gemini SSE deltas. Gemini Web can spend a long time between answer frames,
+// Gemini SSE deltas. Text from the first <tool_call> on is held back and sent
+// as functionCall parts once the answer is complete. Gemini Web can spend a long time between answer frames,
 // so the writer sends blank SSE heartbeats every five seconds until the
 // request finishes, keeping idle connections alive without triggering the
 // older Gemini CLI parsers that reject comment heartbeats.
 type geminiWebNativeStreamWriter struct {
 	c             *gin.Context
 	model         string
+	plan          geminiWebPromptPlan
 	mu            sync.Mutex
 	text          string
 	thinking      string
@@ -384,24 +341,38 @@ func geminiWebCumulativeDelta(previous, current string) (delta, next string) {
 }
 
 func (w *geminiWebNativeStreamWriter) writeResultLocked(result geminiweb.Result) error {
-	textDelta, nextText := geminiWebCumulativeDelta(w.text, result.Text)
-	thinkingDelta, nextThinking := geminiWebCumulativeDelta(w.thinking, result.Thinking)
+	return w.writeSnapshotLocked(geminiWebStreamableText(result.Text, w.plan.toolsEnabled()), result.Thinking, nil, nil)
+}
+
+func (w *geminiWebNativeStreamWriter) writeSnapshotLocked(text, thinking string, calls []geminiWebToolCall, extra gin.H) error {
+	textDelta, nextText := geminiWebCumulativeDelta(w.text, text)
+	thinkingDelta, nextThinking := geminiWebCumulativeDelta(w.thinking, thinking)
 	w.text, w.thinking = nextText, nextThinking
-	if textDelta == "" && thinkingDelta == "" {
+	if textDelta == "" && thinkingDelta == "" && len(calls) == 0 && extra == nil {
 		return nil
 	}
-	parts := make([]any, 0, 2)
+	parts := make([]any, 0, 2+len(calls))
 	if thinkingDelta != "" {
 		parts = append(parts, gin.H{"text": thinkingDelta, "thought": true})
 	}
 	if textDelta != "" {
 		parts = append(parts, gin.H{"text": textDelta})
 	}
-	payload, _ := json.Marshal(gin.H{
-		"candidates":   []any{gin.H{"content": gin.H{"role": "model", "parts": parts}, "index": 0}},
-		"modelVersion": w.model,
-	})
-	return w.writeLocked([]byte("data: " + string(payload) + "\n\n"))
+	parts = append(parts, geminiWebFunctionCallParts(calls)...)
+	candidate := gin.H{"index": 0}
+	if len(parts) > 0 {
+		candidate["content"] = gin.H{"role": "model", "parts": parts}
+	}
+	payload := gin.H{"candidates": []any{candidate}, "modelVersion": w.model}
+	for key, value := range extra {
+		if key == "finishReason" {
+			candidate[key] = value
+			continue
+		}
+		payload[key] = value
+	}
+	encoded, _ := json.Marshal(payload)
+	return w.writeLocked([]byte("data: " + string(encoded) + "\n\n"))
 }
 
 func (w *geminiWebNativeStreamWriter) WriteResult(result geminiweb.Result) error {
@@ -423,15 +394,11 @@ func (w *geminiWebNativeStreamWriter) Finish(result geminiweb.Result, usage Clau
 	w.stop()
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := w.writeResultLocked(result); err != nil {
+	text, calls := geminiWebExtractToolCalls(result.Text, w.plan)
+	if err := w.writeSnapshotLocked(text, result.Thinking, calls, nil); err != nil {
 		return err
 	}
-	finish, _ := json.Marshal(gin.H{
-		"candidates":    []any{gin.H{"finishReason": "STOP", "index": 0}},
-		"modelVersion":  w.model,
-		"usageMetadata": geminiWebUsageMetadata(usage),
-	})
-	return w.writeLocked([]byte("data: " + string(finish) + "\n\n"))
+	return w.writeSnapshotLocked(w.text, w.thinking, nil, gin.H{"finishReason": "STOP", "usageMetadata": geminiWebUsageMetadata(usage)})
 }
 
 func (w *geminiWebNativeStreamWriter) Abort(cause error) error {
@@ -470,6 +437,7 @@ func (w *geminiWebNativeStreamWriter) Abort(cause error) error {
 }
 
 func (s *GeminiMessagesCompatService) forwardGeminiWebClaude(ctx context.Context, c *gin.Context, account *Account, body []byte) (*ForwardResult, error) {
+	start := time.Now()
 	var req struct {
 		Model  string `json:"model"`
 		Stream bool   `json:"stream"`
@@ -481,61 +449,24 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebClaude(ctx context.Context
 	if err != nil {
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
-	prompt, err := geminiWebPrompt(geminiBody)
+	plan, err := geminiWebBuildPrompt(geminiWebClaudeToolChoice(geminiBody, body))
 	if err != nil {
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
-	mapped := account.GetMappedModel(req.Model)
-	result, err := s.callGeminiWeb(ctx, account, mapped, prompt, strings.Contains(strings.ToLower(req.Model), "thinking"))
-	if err != nil {
-		return nil, geminiWebFailoverError(err)
-	}
-	usage := webUsageWithThinking(prompt, result.Text, result.Thinking)
-	if req.Stream {
-		writeGeminiWebClaudeStream(c, req.Model, result.Text, usage)
-	} else {
-		writeGeminiWebClaudeJSON(c, req.Model, result.Text, usage)
-	}
-	return &ForwardResult{
-		Usage: usage, Model: req.Model, UpstreamModel: mapped, Stream: req.Stream,
-		UpstreamResponseModel: result.ResponseModel, UpstreamResponseModelConflict: result.ResponseModelConflict,
-	}, nil
-}
-
-func writeGeminiWebClaudeJSON(c *gin.Context, model, text string, usage ClaudeUsage) {
-	c.JSON(http.StatusOK, gin.H{"id": "msg_gemini_web", "type": "message", "role": "assistant", "model": model, "content": []any{gin.H{"type": "text", "text": text}}, "stop_reason": "end_turn", "stop_sequence": nil, "usage": usage})
-}
-
-func writeGeminiWebClaudeStream(c *gin.Context, model, text string, usage ClaudeUsage) {
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.Header().Set("Cache-Control", "no-cache")
-	c.Writer.WriteHeader(http.StatusOK)
-	writeSSE(c.Writer, "message_start", map[string]any{
-		"type": "message_start",
-		"message": map[string]any{
-			"id": "msg_gemini_web", "type": "message", "role": "assistant", "model": model,
-			"content": []any{}, "stop_reason": nil, "stop_sequence": nil,
-			"usage": map[string]any{"input_tokens": usage.InputTokens, "output_tokens": 0},
+	return s.forwardGeminiWebCompat(ctx, c, account, geminiWebCompatRequest{
+		model: req.Model, stream: req.Stream, plan: plan, start: start,
+		includeThought: geminiWebClaudeThinkingEnabled(body),
+		handleStream: func(resp *http.Response) (*geminiStreamResult, error) {
+			return s.handleStreamingResponse(c, resp, start, req.Model)
+		},
+		writeJSON: func(raw []byte, geminiResp map[string]any, _ ClaudeUsage) {
+			claudeResp, _ := convertGeminiToClaudeMessage(geminiResp, req.Model, raw, false)
+			c.JSON(http.StatusOK, claudeResp)
+		},
+		writeStreamError: func(message string) {
+			writeSSE(c.Writer, "error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": message}})
 		},
 	})
-	writeSSE(c.Writer, "content_block_start", map[string]any{
-		"type": "content_block_start", "index": 0,
-		"content_block": map[string]any{"type": "text", "text": ""},
-	})
-	writeSSE(c.Writer, "content_block_delta", map[string]any{
-		"type": "content_block_delta", "index": 0,
-		"delta": map[string]any{"type": "text_delta", "text": text},
-	})
-	writeSSE(c.Writer, "content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
-	writeSSE(c.Writer, "message_delta", map[string]any{
-		"type":  "message_delta",
-		"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
-		"usage": map[string]any{"output_tokens": usage.OutputTokens},
-	})
-	writeSSE(c.Writer, "message_stop", map[string]any{"type": "message_stop"})
-	if f, ok := c.Writer.(http.Flusher); ok {
-		f.Flush()
-	}
 }
 
 func (s *GeminiMessagesCompatService) forwardGeminiWebChatCompletions(ctx context.Context, c *gin.Context, account *Account, body []byte) (*ForwardResult, error) {
@@ -558,55 +489,113 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebChatCompletions(ctx contex
 	if err != nil {
 		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
-	prompt, err := geminiWebPrompt(geminiBody)
+	plan, err := geminiWebBuildPrompt(geminiWebClaudeToolChoice(geminiBody, claudeBody))
 	if err != nil {
 		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
-	mapped := account.GetMappedModel(req.Model)
-	webResult, err := s.callGeminiWeb(ctx, account, mapped, prompt, strings.Contains(strings.ToLower(req.Model), "thinking"))
+	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
+	return s.forwardGeminiWebCompat(ctx, c, account, geminiWebCompatRequest{
+		model: req.Model, stream: req.Stream, plan: plan, start: start,
+		includeThought: geminiWebClaudeThinkingEnabled(claudeBody),
+		handleStream: func(resp *http.Response) (*geminiStreamResult, error) {
+			return s.handleChatCompletionsStreamingResponseFromGemini(c, resp, start, req.Model, false, includeUsage)
+		},
+		writeJSON: func(raw []byte, geminiResp map[string]any, usage ClaudeUsage) {
+			chatResp, _, err := geminiResponseToChatCompletions(geminiResp, req.Model, raw, &usage)
+			if err != nil {
+				_ = s.writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", "Failed to convert Gemini Web response")
+				return
+			}
+			c.JSON(http.StatusOK, chatResp)
+		},
+		writeStreamError: func(message string) {
+			payload, _ := json.Marshal(gin.H{"error": gin.H{"message": message, "type": "upstream_error"}})
+			_, _ = c.Writer.Write([]byte("data: " + string(payload) + "\n\n"))
+		},
+	})
+}
+
+// geminiWebCompatRequest describes a Claude Messages or Chat Completions
+// request after it has been reduced to a Gemini Web prompt. Responses reuse
+// the converters of regular Gemini accounts, so tool_use / tool_calls,
+// stop reasons and stream framing match the other Gemini account types.
+type geminiWebCompatRequest struct {
+	model            string
+	stream           bool
+	includeThought   bool
+	plan             geminiWebPromptPlan
+	start            time.Time
+	handleStream     func(*http.Response) (*geminiStreamResult, error)
+	writeJSON        func(raw []byte, geminiResp map[string]any, usage ClaudeUsage)
+	writeStreamError func(message string)
+}
+
+func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context, c *gin.Context, account *Account, req geminiWebCompatRequest) (*ForwardResult, error) {
+	mapped := account.GetMappedModel(req.model)
+	thinking := strings.Contains(strings.ToLower(req.model), "thinking")
+	if !req.stream {
+		result, err := s.callGeminiWeb(ctx, account, mapped, req.plan.Prompt, thinking)
+		if err != nil {
+			return nil, geminiWebFailoverError(err)
+		}
+		usage := webUsageWithThinking(req.plan.Prompt, result.Text, result.Thinking)
+		text, calls := geminiWebExtractToolCalls(result.Text, req.plan)
+		raw, geminiResp := geminiWebGeminiResponse(text, calls, usage, result.ResponseModel)
+		req.writeJSON(raw, geminiResp, usage)
+		return geminiWebCompatForwardResult(req, mapped, result, usage, nil), nil
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	pipe := newGeminiWebPipeStream(req.plan, req.includeThought, cancel, req.handleStream)
+	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, req.plan.Prompt, thinking, pipe.OnResult)
 	if err != nil {
-		return nil, geminiWebFailoverError(err)
+		if !pipe.Abort(err) && !c.Writer.Written() {
+			if ctxErr := c.Request.Context().Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, geminiWebFailoverError(err)
+		}
+		if ctxErr := c.Request.Context().Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, geminiWebCommittedStreamError(c, err, req.writeStreamError)
 	}
-	usage := webUsageWithThinking(prompt, webResult.Text, webResult.Thinking)
-	id := "chatcmpl-gemini-web"
-	if req.Stream {
-		writeGeminiWebCCStream(c, id, req.Model, webResult.Text, usage, req.StreamOptions != nil && req.StreamOptions.IncludeUsage)
-	} else {
-		writeGeminiWebCCJSON(c, id, req.Model, webResult.Text, usage)
+	usage := webUsageWithThinking(req.plan.Prompt, result.Text, result.Thinking)
+	streamResult, err := pipe.Finish(result, usage)
+	if err != nil {
+		return nil, err
 	}
-	return &ForwardResult{
-		RequestID: id, Usage: usage, Model: req.Model, UpstreamModel: mapped, Stream: req.Stream, Duration: time.Since(start),
-		UpstreamResponseModel: webResult.ResponseModel, UpstreamResponseModelConflict: webResult.ResponseModelConflict,
-	}, nil
+	return geminiWebCompatForwardResult(req, mapped, result, usage, streamResult), nil
 }
 
-func writeGeminiWebCCJSON(c *gin.Context, id, model, text string, usage ClaudeUsage) {
-	c.JSON(http.StatusOK, gin.H{"id": id, "object": "chat.completion", "created": time.Now().Unix(), "model": model, "choices": []any{gin.H{"index": 0, "message": gin.H{"role": "assistant", "content": text}, "finish_reason": "stop"}}, "usage": gin.H{"prompt_tokens": usage.InputTokens, "completion_tokens": usage.OutputTokens, "total_tokens": usage.InputTokens + usage.OutputTokens}})
+func geminiWebCompatForwardResult(req geminiWebCompatRequest, mapped string, result geminiweb.Result, usage ClaudeUsage, stream *geminiStreamResult) *ForwardResult {
+	out := &ForwardResult{
+		RequestID: result.RequestID, UpstreamHeaders: make(http.Header), Usage: usage,
+		Model: req.model, UpstreamModel: mapped, Stream: req.stream, Duration: time.Since(req.start),
+		UpstreamResponseModel: result.ResponseModel, UpstreamResponseModelConflict: result.ResponseModelConflict,
+	}
+	if stream != nil {
+		out.FirstTokenMs = stream.firstTokenMs
+	}
+	return out
 }
 
-func writeGeminiWebCCStream(c *gin.Context, id, model, text string, usage ClaudeUsage, includeUsage bool) {
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	c.Writer.WriteHeader(http.StatusOK)
-	chunk := func(delta, finish string) {
-		choice := gin.H{"index": 0, "delta": gin.H{}, "finish_reason": nil}
-		if delta != "" {
-			choice["delta"] = gin.H{"content": delta}
-		}
-		if finish != "" {
-			choice["finish_reason"] = finish
-		}
-		b, _ := json.Marshal(gin.H{"id": id, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": model, "choices": []any{choice}})
-		_, _ = c.Writer.Write([]byte("data: " + string(b) + "\n\n"))
+// geminiWebCommittedStreamError reports an upstream failure on a stream that
+// has already sent output. Like the native writer, it must not be wrapped as a
+// failover error once the client has received bytes.
+func geminiWebCommittedStreamError(c *gin.Context, cause error, write func(string)) error {
+	status, message := http.StatusBadGateway, "Gemini Web upstream request failed"
+	if errors.Is(cause, geminiweb.ErrInvalidCredential) {
+		status, message = http.StatusUnauthorized, GeminiWebCredentialRejectedClientMessage
+	} else if errors.Is(cause, geminiweb.ErrRateLimited) {
+		status, message = http.StatusTooManyRequests, "Gemini Web account is rate limited; retry later"
 	}
-	chunk("", "")
-	chunk(text, "")
-	chunk("", "stop")
-	if includeUsage {
-		b, _ := json.Marshal(gin.H{"id": id, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": model, "choices": []any{}, "usage": gin.H{"prompt_tokens": usage.InputTokens, "completion_tokens": usage.OutputTokens, "total_tokens": usage.InputTokens + usage.OutputTokens}})
-		_, _ = c.Writer.Write([]byte("data: " + string(b) + "\n\n"))
-	}
-	_, _ = c.Writer.Write([]byte("data: [DONE]\n\n"))
+	SetOpsUpstreamError(c, status, message, "")
+	MarkOpsStreamFailure(c, "upstream_error", "gemini_web", message, status)
+	write(message)
 	if f, ok := c.Writer.(http.Flusher); ok {
 		f.Flush()
 	}
+	return errors.New(message)
 }

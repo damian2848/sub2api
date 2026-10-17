@@ -81,12 +81,27 @@ contracts for:
 - OpenAI-compatible `/v1/chat/completions`;
 - Anthropic-compatible `/v1/messages`.
 
-The current implementation buffers the browser response before emitting a
-single provider response chunk. Text prompts are supported. Image/file parts,
-browser tools, OpenAI Responses `/v1/responses`, and a full incremental
-upstream stream still require a later protocol extension. The request path
-persists cookies rotated by the upstream response; a periodic background
-Cookie refresh probe is not included yet.
+Streaming requests forward browser frames as they arrive on all three
+protocols. Claude Messages and Chat Completions reuse the native Gemini stream
+converters of regular Gemini accounts, so content blocks, `tool_use` /
+`tool_calls` and stop reasons match them. The client response starts with the
+first frame that carries content; a request that fails earlier can still fail
+over to another account. Gemini Web often spends several seconds before its
+first frame, which no gateway setting can shorten.
+
+Function calling is emulated, because the browser endpoint has no tool API.
+Declared tools (`functionDeclarations`, Claude `tools`, OpenAI `tools`) and
+`toolConfig` / `tool_choice` are described in the prompt, earlier calls and
+results are replayed as a tagged transcript, and the model answers with
+`<tool_call>` JSON blocks. The gateway converts blocks that name a declared
+tool into native function calls and leaves anything else as text. While a call
+is being generated its markup is held back; Claude streams receive `ping`
+events and Chat Completions streams receive SSE comments in the meantime.
+Plain conversations without tools keep the original prompt format.
+
+Text prompts are supported. Image/file parts (including images inside tool
+results) and OpenAI Responses `/v1/responses` still require a later protocol
+extension.
 
 The browser protocol details follow the public behavior documented by the
 [geminiweb2api README](https://github.com/juangchuank-ops/geminiweb2api): the
