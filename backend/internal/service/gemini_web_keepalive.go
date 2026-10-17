@@ -37,12 +37,12 @@ const (
 var geminiWebCredentialPersistLocks sync.Map // map[int64]*sync.Mutex
 
 func geminiWebCredentialPersistLock(accountID int64) *sync.Mutex {
-	if lock, ok := geminiWebCredentialPersistLocks.Load(accountID); ok {
-		return lock.(*sync.Mutex)
+	actual, _ := geminiWebCredentialPersistLocks.LoadOrStore(accountID, &sync.Mutex{})
+	lock, ok := actual.(*sync.Mutex)
+	if !ok {
+		panic("gemini web credential persist lock has unexpected type")
 	}
-	lock := &sync.Mutex{}
-	actual, _ := geminiWebCredentialPersistLocks.LoadOrStore(accountID, lock)
-	return actual.(*sync.Mutex)
+	return lock
 }
 
 func NewGeminiWebCookieKeepaliveService(accountRepo AccountRepository, httpUpstream HTTPUpstream, clients ...*geminiweb.Client) *GeminiWebCookieKeepaliveService {

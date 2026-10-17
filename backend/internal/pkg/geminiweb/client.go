@@ -94,12 +94,12 @@ const geminiWebCookieRefreshInterval = 10 * time.Minute
 var cookieRefreshLocks sync.Map // map[string]*sync.Mutex
 
 func cookieRefreshLock(key string) *sync.Mutex {
-	if lock, ok := cookieRefreshLocks.Load(key); ok {
-		return lock.(*sync.Mutex)
+	actual, _ := cookieRefreshLocks.LoadOrStore(key, &sync.Mutex{})
+	lock, ok := actual.(*sync.Mutex)
+	if !ok {
+		panic("gemini web cookie refresh lock has unexpected type")
 	}
-	lock := &sync.Mutex{}
-	actual, _ := cookieRefreshLocks.LoadOrStore(key, lock)
-	return actual.(*sync.Mutex)
+	return lock
 }
 
 func (cred Credential) hasAuthUser() bool {
@@ -304,7 +304,7 @@ func (c *Client) RefreshCookies(ctx context.Context, cred Credential, do Doer) (
 		return cred.Cookie, errors.New("gemini web cookie rotation returned no response")
 	}
 	if resp.Body != nil {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 	}
 	updated := mergeSetCookie(cred.Cookie, googleSharedCookieValues(resp.Header.Values("Set-Cookie")))
 	switch resp.StatusCode {
@@ -421,7 +421,7 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 	if resp == nil || resp.Body == nil {
 		return Result{}, errors.New("gemini web generation returned no response body")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	updatedCookie := mergeSetCookie(sessionCookie, resp.Header.Values("Set-Cookie"))
 	c.updateSessionCookie(postCred, updatedCookie)
 	if live := c.currentSessionCookie(postCred); live != "" {
@@ -459,7 +459,7 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 		n, readErr := resp.Body.Read(buffer)
 		if n > 0 {
 			chunk := buffer[:n]
-			raw.Write(chunk)
+			_, _ = raw.Write(chunk)
 			for _, frame := range parser.feed(string(chunk)) {
 				result = applyFrame(result, frame)
 				if req.OnResult != nil {
@@ -611,7 +611,7 @@ func (c *Client) getSession(ctx context.Context, cred Credential, base string, d
 	if resp == nil || resp.Body == nil {
 		return session{}, cred.Cookie, errors.New("gemini web session returned no response body")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
 		return session{}, cred.Cookie, err
@@ -746,15 +746,6 @@ func uuid() string {
 	b[8] = (b[8] & 0x3f) | 0x80
 	return strings.ToUpper(fmt.Sprintf("%s-%s-%s-%s-%s", hex.EncodeToString(b[0:4]), hex.EncodeToString(b[4:6]), hex.EncodeToString(b[6:8]), hex.EncodeToString(b[8:10]), hex.EncodeToString(b[10:16])))
 }
-func cloneAny(v []any) []any {
-	if v == nil {
-		return nil
-	}
-	b, _ := json.Marshal(v)
-	var out []any
-	_ = json.Unmarshal(b, &out)
-	return out
-}
 
 func mergeSetCookie(current string, values []string) string {
 	jar := map[string]string{}
@@ -813,8 +804,6 @@ func mergeSetCookie(current string, values []string) string {
 	}
 	return strings.Join(parts, "; ")
 }
-
-func outerURLDecode(s string) string { v, _ := url.QueryUnescape(s); return v }
 
 // frame and payload parsing intentionally accepts both Google's length-prefixed
 // stream and a plain JSON array.  The length has changed units over time, while

@@ -235,7 +235,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiModelsGET(ctx context.Context
 		}
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 	case AccountTypeGeminiWeb:
-		return nil, errors.New("Gemini Web uses browser sessions and has no AI Studio models endpoint")
+		return nil, errors.New("gemini web uses browser sessions and has no AI Studio models endpoint")
 	default:
 		return nil, fmt.Errorf("unsupported account type: %s", account.Type)
 	}

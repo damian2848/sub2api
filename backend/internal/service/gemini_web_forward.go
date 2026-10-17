@@ -20,7 +20,7 @@ import (
 
 const (
 	GeminiWebCredentialRejectedReason        GatewayFailureReason = "gemini_web_credential_rejected"
-	GeminiWebCredentialRejectedClientMessage                      = "Gemini Web Cookie is invalid or expired; update the account Cookie and retry"
+	GeminiWebCredentialRejectedClientMessage string               = "Gemini Web Cookie is invalid or expired; update the account Cookie and retry"
 )
 
 func geminiWebAuthUser(account *Account) (int, bool) {
@@ -166,14 +166,10 @@ func geminiWebPrompt(body []byte) (string, error) {
 	}
 	for _, part := range parts {
 		if part == "__gemini_web_unsupported_media__" {
-			return "", errors.New("Gemini Web provider currently supports text input only")
+			return "", errors.New("gemini web provider currently supports text input only")
 		}
 	}
 	return strings.Join(parts, "\n"), nil
-}
-
-func webUsage(prompt, answer string) ClaudeUsage {
-	return webUsageWithThinking(prompt, answer, "")
 }
 
 func webUsageWithThinking(prompt, answer, thinking string) ClaudeUsage {

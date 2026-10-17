@@ -62,8 +62,8 @@ func TestClientCompleteDiscoversSessionAndParsesAnswer(t *testing.T) {
 
 func TestClientCompleteEmitsSnapshotsBeforeUpstreamEOF(t *testing.T) {
 	reader, writer := io.Pipe()
-	defer reader.Close()
-	defer writer.Close()
+	defer func() { _ = reader.Close() }()
+	defer func() { _ = writer.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	releaseFinal := make(chan struct{})

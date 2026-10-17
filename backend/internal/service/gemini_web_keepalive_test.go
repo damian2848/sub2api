@@ -70,7 +70,8 @@ func TestGeminiWebCookieKeepalivePersistsRotatedCookie(t *testing.T) {
 	if upstream.requests != 1 {
 		t.Fatalf("rotation requests = %d, want 1", upstream.requests)
 	}
-	if repo.updateCalls != 1 || !strings.Contains(repo.updated["gemini_web_cookie"].(string), "__Secure-1PSIDTS=renewed") || repo.updated[geminiWebCookieLastRefresh] == nil {
+	updatedCookie, ok := repo.updated["gemini_web_cookie"].(string)
+	if repo.updateCalls != 1 || !ok || !strings.Contains(updatedCookie, "__Secure-1PSIDTS=renewed") || repo.updated[geminiWebCookieLastRefresh] == nil {
 		t.Fatalf("rotated credentials were not persisted: calls=%d credentials=%#v", repo.updateCalls, repo.updated)
 	}
 	service.runOnce(context.Background())

@@ -200,8 +200,11 @@ func TestGeminiWebNativeStreamWriterUsesBlankSSEHeartbeat(t *testing.T) {
 	writer := &geminiWebNativeStreamWriter{c: ctx}
 
 	writer.mu.Lock()
-	writer.writeHeartbeatLocked()
+	err := writer.writeHeartbeatLocked()
 	writer.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if got := recorder.Body.String(); got != "\n\n" {
 		t.Fatalf("heartbeat = %q, want %q", got, "\n\n")

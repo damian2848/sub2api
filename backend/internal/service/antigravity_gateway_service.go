@@ -637,6 +637,11 @@ func extractContentFromSSEResponse(respBody []byte) (string, []TestConnectionIma
 
 		for _, part := range parts {
 			if partMap, ok := part.(map[string]any); ok {
+				// Connection-test content is also scored by Pelican. Keep
+				// thinking parts out of the answer, including thought images.
+				if isGeminiThoughtPart(partMap) {
+					continue
+				}
 				if text, ok := partMap["text"].(string); ok && text != "" {
 					texts = append(texts, text)
 				}

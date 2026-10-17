@@ -101,7 +101,7 @@ func (c *Client) fetchQuota(ctx context.Context, cred Credential, do Doer, force
 	if resp == nil || resp.Body == nil {
 		return QuotaResult{UpdatedCookie: sessionCookie}, errors.New("gemini web quota returned no response body")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	updatedCookie := mergeSetCookie(postCred.Cookie, resp.Header.Values("Set-Cookie"))
 	c.updateSessionCookie(postCred, updatedCookie)
 	if live := c.currentSessionCookie(postCred); live != "" {

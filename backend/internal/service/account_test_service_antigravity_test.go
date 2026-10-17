@@ -72,6 +72,26 @@ func TestExtractContentFromSSEResponse_ExtractsTextAndInlineImages(t *testing.T)
 	require.Equal(t, "data:image/png;base64,iVBORw0KGgo=", images[0].ImageURL)
 }
 
+func TestExtractContentFromSSEResponse_ExcludesThinkingFromAnswer(t *testing.T) {
+	t.Parallel()
+
+	for _, wrapped := range []bool{false, true} {
+		for _, answer := range []string{"", `,{"text":"21","thought":false,"thoughtSignature":"answer-signature"}`} {
+			response := `{"candidates":[{"content":{"parts":[{"text":"reasoning","thought":true},{"thought":true,"inlineData":{"mimeType":"image/png","data":"thinking-image"}}` + answer + `]}}]}`
+			if wrapped {
+				response = `{"response":` + response + `}`
+			}
+			text, images := extractContentFromSSEResponse([]byte("data: " + response + "\n\n"))
+			if answer == "" {
+				require.Empty(t, text, "thinking-only responses must not become a scored answer")
+			} else {
+				require.Equal(t, "21", text, "ordinary answer text may carry a thought signature")
+			}
+			require.Empty(t, images, "thought images must not become answer images")
+		}
+	}
+}
+
 func TestAntigravityShouldUseGeminiTestBuilder_UsesMappedModel(t *testing.T) {
 	t.Parallel()
 
