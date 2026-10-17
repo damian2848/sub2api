@@ -1,6 +1,9 @@
 package geminiweb
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // Model describes the small model selector used by Gemini's web client.  The
 // web endpoint receives a mode number and, for some modes, an opaque model id;
@@ -60,8 +63,11 @@ func LookupModel(id string) (Model, bool) {
 func Models() []Model { return append([]Model(nil), models...) }
 
 // responseModel translates known Web protocol IDs into public catalog names.
-// Preserve unknown IDs for auditing rather than guessing a requested model.
-func responseModel(id string) string {
+// Google rotates these IDs, so an unknown ID is named from the display label
+// sent beside it (payload[42], e.g. "3.5 Flash-Lite"). The label never
+// replaces a missing ID, and an unparseable label keeps the raw ID for audit
+// rather than guessing a requested model.
+func responseModel(id, label string) string {
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return ""
@@ -71,10 +77,28 @@ func responseModel(id string) string {
 			return model.ID
 		}
 	}
+	if name := modelNameFromLabel(label); name != "" {
+		return name
+	}
 	// Match the shared response observer's bound on untrusted declarations.
 	runes := []rune(id)
 	if len(runes) > 200 {
 		return string(runes[:200])
 	}
 	return id
+}
+
+var labelModelPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?(-[a-z0-9]+)+$`)
+
+// modelNameFromLabel maps a versioned label such as "3.5 Flash-Lite" or
+// "Gemini 4 Argon" to its catalog-style name. Mode labels without a version
+// ("Fast", "Thinking") are not model identities and return "".
+func modelNameFromLabel(label string) string {
+	name := strings.ToLower(strings.TrimSpace(label))
+	name = strings.TrimSpace(strings.TrimPrefix(name, "gemini"))
+	name = strings.Join(strings.Fields(name), "-")
+	if len(name) > 64 || !labelModelPattern.MatchString(name) {
+		return ""
+	}
+	return "gemini-" + name
 }

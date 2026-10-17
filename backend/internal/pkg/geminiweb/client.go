@@ -78,6 +78,8 @@ type session struct {
 	// most once per ten minutes, matching cliproxyapi's browser-cookie worker.
 	CookieRefreshed time.Time
 	Fetched         time.Time
+	// ModelIDs are the Web model IDs the startup page's model picker lists.
+	ModelIDs []string
 }
 
 type Client struct {
@@ -632,6 +634,7 @@ func (c *Client) getSession(ctx context.Context, cred Credential, base string, d
 	}
 	now := time.Now()
 	s := session{At: findValue(string(b), `"SNlM0e"\s*:\s*"([^"]+)"`), Build: findValue(string(b), `"cfb2h"\s*:\s*"([^"]+)"`), Fsid: findValue(string(b), `"FdrFJe"\s*:\s*"([^"]+)"`), Language: findValue(string(b), `"TuX5cc"\s*:\s*"([^"]+)"`), Cookie: updated, CookieRefreshed: now, Fetched: now}
+	s.ModelIDs = parseModelPicker(string(b))
 	if s.Language == "" {
 		s.Language = "en"
 	}
@@ -900,7 +903,8 @@ func applyFrame(r Result, f frame) Result {
 	// requested model. Like native Gemini modelVersion, the latest declaration
 	// wins, with conflicts retained for the shared response-model billing gate.
 	if id, ok := topAt(top, 39).(string); ok {
-		if model := responseModel(id); model != "" {
+		label, _ := topAt(top, 42).(string)
+		if model := responseModel(id, label); model != "" {
 			if r.ResponseModel != "" && !strings.EqualFold(r.ResponseModel, model) {
 				r.ResponseModelConflict = true
 			}

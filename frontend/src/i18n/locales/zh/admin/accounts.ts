@@ -1137,6 +1137,7 @@ export default {
       syncUpstreamModelsLoading: '同步上游中...',
       syncUpstreamModelsSuccess: '已从上游同步 {count} 个新模型（上游共 {total} 个）',
       syncUpstreamModelsNoChanges: '上游 {count} 个模型均已在白名单中',
+      syncUpstreamModelsReplaced: "已按账号实时模型列表更新：共 {total} 个，新增 {added} 个，移除 {removed} 个",
       syncUpstreamModelsEmpty: '上游没有返回可同步的模型',
       syncUpstreamModelsFailed: '同步上游模型失败',
       syncUpstreamModelsError: '同步上游模型失败：{message}',

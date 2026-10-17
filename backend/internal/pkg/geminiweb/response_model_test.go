@@ -12,24 +12,30 @@ func TestClientCompleteObservesResponseModel(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		ids      []any
+		label    any
 		want     string
 		conflict bool
 	}{
-		{"downgraded", []any{nil, "cf41b0e0dd7d53e5", nil}, "gemini-3.5-flash-lite", false},
-		{"matching", []any{"95a4c0abcba24364", "95a4c0abcba24364"}, "gemini-4-argon", false},
-		{"missing", []any{nil, " ", 42}, "", false},
-		{"unknown", []any{"unknown-runtime-id"}, "unknown-runtime-id", false},
-		{"conflicting", []any{"95a4c0abcba24364", "cf41b0e0dd7d53e5", nil}, "gemini-3.5-flash-lite", true},
-		{"bounded", []any{strings.Repeat("x", 300)}, strings.Repeat("x", 200), false},
+		// A known ID wins over a contradicting label.
+		{"downgraded", []any{nil, "cf41b0e0dd7d53e5", nil}, "Gemini 4 Argon", "gemini-3.5-flash-lite", false},
+		{"matching", []any{"95a4c0abcba24364", "95a4c0abcba24364"}, "Gemini 4 Argon", "gemini-4-argon", false},
+		// A label alone is not a declaration.
+		{"missing", []any{nil, " ", 42}, "Gemini 4 Argon", "", false},
+		{"unknown labelled", []any{"797f3d0293f288ad"}, "3.5 Flash-Lite", "gemini-3.5-flash-lite", false},
+		{"unknown branded label", []any{"797f3d0293f288ad"}, "Gemini 3.1 Pro", "gemini-3.1-pro", false},
+		{"unknown mode label", []any{"797f3d0293f288ad"}, "Fast", "797f3d0293f288ad", false},
+		{"unknown unlabelled", []any{"unknown-runtime-id"}, nil, "unknown-runtime-id", false},
+		{"conflicting", []any{"95a4c0abcba24364", "cf41b0e0dd7d53e5", nil}, "Gemini 4 Argon", "gemini-3.5-flash-lite", true},
+		{"bounded", []any{strings.Repeat("x", 300)}, nil, strings.Repeat("x", 200), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var frames strings.Builder
 			for _, id := range tc.ids {
 				payload := make([]any, 43)
-				// Model IDs in generated text or a display label alone are not
-				// declarations of the model that served the response.
+				// Model IDs in generated text are not declarations of the model
+				// that served the response.
 				payload[4] = []any{[]any{"candidate", []any{"95a4c0abcba24364 cf41b0e0dd7d53e5"}}}
-				payload[39], payload[42] = id, "Gemini 4 Argon"
+				payload[39], payload[42] = id, tc.label
 				b, _ := json.Marshal(payload)
 				outer, _ := json.Marshal([]any{[]any{"wrb.fr", nil, string(b)}})
 				_, _ = frames.Write(outer)

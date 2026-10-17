@@ -24,6 +24,17 @@ func (s *AccountTestService) finishAccountModelTest(c *gin.Context, sent, actual
 }
 
 func accountTestModelVerification(sent, actual string, conflict, web bool) (string, string) {
+	status, detail := accountTestModelVerdict(sent, actual, conflict, web)
+	// Gemini Web always declares the serving model, so anything short of a
+	// confirmed match means the selected model was not served: a failure, not
+	// an inconclusive warning.
+	if web && status == "unverified" {
+		status = "mismatch"
+	}
+	return status, detail
+}
+
+func accountTestModelVerdict(sent, actual string, conflict, web bool) (string, string) {
 	sent, actual = strings.TrimSpace(sent), strings.TrimSpace(actual)
 	if conflict {
 		return "unverified", "Model identity is unverified: upstream returned conflicting model declarations"

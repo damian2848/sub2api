@@ -89,6 +89,9 @@ const messages: Record<string, string> = {
 	'usage.upstreamResponseModel': 'Upstream response',
 	'usage.modelVariant': 'Possible version variant',
 	'usage.modelMismatch': 'Different model',
+	'usage.unrecognizedGeminiWebModel': 'Unrecognised Gemini Web model',
+	'usage.geminiWebModelID': 'Web model ID',
+	'usage.unrecognizedGeminiWebModelHint': 'Unknown Web model ID',
 }
 
 vi.mock('vue-i18n', async () => {
@@ -571,6 +574,36 @@ describe('admin UsageTable tooltip', () => {
 		expect(text).toContain('gpt-5.5')
 		expect(text).toContain(responseModel)
 		expect(text).toContain(expectedBadge)
+	})
+
+	it('labels unrecognised Gemini Web model IDs and shows sent Web ID in the tooltip', () => {
+		const wrapper = mount(UsageTable, {
+			props: {
+				data: [{
+					request_id: 'req-gemini-web',
+					model: 'gemini-2.5-pro',
+					upstream_response_model: '797f3d0293f288ad',
+					upstream_model_mismatch: true,
+				}],
+				loading: false,
+				columns: [],
+			},
+			global: {
+				stubs: {
+					DataTable: DataTableStub,
+					EmptyState: true,
+					Icon: true,
+					Teleport: true,
+				},
+			},
+		})
+
+		expect(wrapper.text()).toContain('Unrecognised Gemini Web model')
+		expect(wrapper.text()).toContain('797f3d0293f288ad')
+		const title = wrapper.find('[title*="Web model ID"]').attributes('title')
+		expect(title).toContain('Requested: gemini-2.5-pro')
+		expect(title).toContain('Sent upstream: gemini-2.5-pro → gemini-3.1-pro (Web model ID: e6fa609c3fa255c0)')
+		expect(title).toContain('Upstream response: Unrecognised Gemini Web model (Web model ID: 797f3d0293f288ad)')
 	})
 
   it.each([

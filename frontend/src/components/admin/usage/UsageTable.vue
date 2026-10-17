@@ -78,7 +78,11 @@
               :class="isLikelyModelVariant(row) ? 'text-amber-600 dark:text-amber-400' : 'text-orange-600 dark:text-orange-400'"
               :title="modelAuditTitle(row)"
             >
-              <span class="mr-1">↳ {{ t('usage.upstreamResponseModel') }}:</span>{{ row.upstream_response_model }}
+              <span class="mr-1">↳ {{ t('usage.upstreamResponseModel') }}:</span>
+              <template v-if="isUnrecognizedGeminiWebModelID(row.upstream_response_model)">
+                <span class="mr-1">{{ t('usage.unrecognizedGeminiWebModel') }}</span><span class="font-mono">{{ row.upstream_response_model }}</span>
+              </template>
+              <template v-else>{{ row.upstream_response_model }}</template>
               <span
                 class="ml-1 inline-flex rounded px-1 py-px text-[10px] font-medium ring-1 ring-inset"
                 :class="isLikelyModelVariant(row)
@@ -613,6 +617,7 @@ import EmptyState from '@/components/common/EmptyState.vue'
 import IpGeoCell from '@/components/common/IpGeoCell.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { fetchBatch, getEntry } from '@/utils/ipGeoLookup'
+import { isUnrecognizedGeminiWebModelID, lookupGeminiWebModel } from '@/utils/geminiWebModels'
 import type { AdminUsageLog } from '@/types'
 import type { Column } from '@/components/common/types'
 
@@ -686,11 +691,29 @@ const isLikelyModelVariant = (row: AdminUsageLog): boolean => {
   return sent !== '' && response !== '' && normalizeModelVariant(sent) === normalizeModelVariant(response)
 }
 
-const modelAuditTitle = (row: AdminUsageLog): string => [
-  `${t('usage.requestedModel')}: ${row.model || '-'}`,
-  `${t('usage.sentUpstreamModel')}: ${sentUpstreamModel(row) || '-'}`,
-  `${t('usage.upstreamResponseModel')}: ${row.upstream_response_model || '-'}`,
-].join('\n')
+const modelAuditTitle = (row: AdminUsageLog): string => {
+  const sent = sentUpstreamModel(row)
+  const response = row.upstream_response_model?.trim() || ''
+  if (!isUnrecognizedGeminiWebModelID(response)) {
+    return [
+      `${t('usage.requestedModel')}: ${row.model || '-'}`,
+      `${t('usage.sentUpstreamModel')}: ${sent || '-'}`,
+      `${t('usage.upstreamResponseModel')}: ${response || '-'}`,
+    ].join('\n')
+  }
+  // Gemini Web only exchanges opaque model IDs, so show the ID actually sent
+  // next to the one that came back.
+  const web = lookupGeminiWebModel(sent)
+  let sentLine = sent || '-'
+  if (web && web.id !== sent) sentLine += ` → ${web.id}`
+  if (web?.headerID) sentLine += ` (${t('usage.geminiWebModelID')}: ${web.headerID})`
+  return [
+    `${t('usage.requestedModel')}: ${row.model || '-'}`,
+    `${t('usage.sentUpstreamModel')}: ${sentLine}`,
+    `${t('usage.upstreamResponseModel')}: ${t('usage.unrecognizedGeminiWebModel')} (${t('usage.geminiWebModelID')}: ${response})`,
+    t('usage.unrecognizedGeminiWebModelHint'),
+  ].join('\n')
+}
 
 const currentPageIps = computed(() =>
   Array.from(new Set(props.data.map((row) => row.ip_address).filter((ip): ip is string => Boolean(ip))))

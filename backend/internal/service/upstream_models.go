@@ -17,7 +17,6 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
-	"github.com/Wei-Shaw/sub2api/internal/pkg/geminiweb"
 )
 
 const (
@@ -764,12 +763,7 @@ func (s *AccountTestService) fetchUpstreamModelList(ctx context.Context, account
 		return models, response.Body, nil
 	}
 	if account.IsGeminiWeb() {
-		catalog := geminiweb.Models()
-		ids := make([]string, 0, len(catalog))
-		for _, model := range catalog {
-			ids = append(ids, model.ID)
-		}
-		return ids, nil, nil
+		return s.fetchGeminiWebUpstreamModels(ctx, account)
 	}
 
 	if s.httpUpstream == nil {

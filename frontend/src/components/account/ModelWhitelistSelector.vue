@@ -356,6 +356,18 @@ const syncUpstreamModels = async () => {
       emit('upstream-synced')
     }
 
+    // Gemini Web reports the account's live model picker, so the list replaces
+    // the whitelist: models the account does not offer are silently downgraded.
+    if (props.platform === 'gemini_web') {
+      const removed = props.modelValue.filter(model => !upstreamModels.includes(model))
+      const added = upstreamModels.filter(model => !props.modelValue.includes(model))
+      emit('update:modelValue', upstreamModels)
+      appStore.showSuccess(t('admin.accounts.syncUpstreamModelsReplaced', {
+        total: upstreamModels.length, added: added.length, removed: removed.length,
+      }))
+      return
+    }
+
     const newModels = [...props.modelValue]
     let addedCount = 0
     for (const model of upstreamModels) {

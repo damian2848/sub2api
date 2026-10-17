@@ -257,6 +257,28 @@ describe('ModelWhitelistSelector', () => {
     expect(showSuccess).not.toHaveBeenCalled()
   })
 
+  it('replaces the Gemini Web whitelist with the live model list', async () => {
+    syncUpstreamModels.mockResolvedValue({ models: ['gemini-3.1-pro', 'gemini-3.8-flash', 'gemini-3.6-flash'], warnings: [] })
+    const wrapper = mount(ModelWhitelistSelector, {
+      props: {
+        modelValue: ['gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.5-flash-lite'],
+        platform: 'gemini_web',
+        accountId: 232
+      },
+      global: { stubs: { ModelIcon: true } }
+    })
+
+    const syncButton = wrapper
+      .findAll('button')
+      .find(button => button.text() === 'admin.accounts.syncUpstreamModels')
+    expect(syncButton).toBeDefined()
+    await syncButton!.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['gemini-3.1-pro', 'gemini-3.8-flash', 'gemini-3.6-flash']]])
+    expect(showSuccess).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsReplaced')
+  })
+
   it('shows the backend message when upstream sync is rejected', async () => {
     syncUpstreamModels.mockRejectedValue({
       status: 400,

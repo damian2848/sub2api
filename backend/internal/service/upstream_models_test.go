@@ -417,28 +417,48 @@ func TestFetchUpstreamSupportedModelsParsesOpenAIResponse(t *testing.T) {
 	require.Equal(t, "Bearer openai-key", upstream.lastReq.Header.Get("Authorization"))
 }
 
-func TestSyncUpstreamModelCatalogGeminiWebUsesCuratedCatalog(t *testing.T) {
+func TestSyncUpstreamModelCatalogGeminiWebUsesLivePicker(t *testing.T) {
 	t.Parallel()
 
-	svc := &AccountTestService{}
+	page := `"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid" ` +
+		`\"45734007\":\"[[\\\"thinking\\\\u003de6fa609c3fa255c0,9d8ca3786ebdfbea\\\",\\\"fast\\\\u003d56fdd199312815e2\\\"]]\"`
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(page)),
+	}}
+	svc := &AccountTestService{httpUpstream: upstream}
 	catalog, err := svc.SyncUpstreamModelCatalog(context.Background(), &Account{
-		ID:       101,
-		Platform: PlatformGemini,
-		Type:     AccountTypeGeminiWeb,
+		ID:          101,
+		Platform:    PlatformGemini,
+		Type:        AccountTypeGeminiWeb,
+		Credentials: map[string]any{"gemini_web_cookie": "__Secure-1PSID=psid"},
 	})
 	require.NoError(t, err)
-	require.Equal(t, []string{
-		"gemini-4-argon",
-		"gemini-3.8-flash",
-		"gemini-3.8-flash-thinking",
-		"gemini-3.1-pro",
-		"gemini-auto",
-		"gemini-3.8-flash-thinking-lite",
-		"gemini-3.5-flash-lite",
-		"gemini-3.6-flash",
-	}, catalog.Models)
-	require.Empty(t, catalog.Metadata)
-	require.Empty(t, catalog.Warnings)
+	// Only models the picker lists; unknown IDs and modes without a Web ID
+	// (auto, thinking) are not offered.
+	require.Equal(t, []string{"gemini-3.1-pro", "gemini-3.8-flash"}, catalog.Models)
+	require.Equal(t, "https://gemini.google.com/app", upstream.lastReq.URL.String())
+}
+
+func TestSyncUpstreamModelCatalogGeminiWebFailsWithoutPicker(t *testing.T) {
+	t.Parallel()
+
+	upstream := &httpUpstreamRecorder{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(`"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid"`)),
+	}}
+	svc := &AccountTestService{httpUpstream: upstream}
+	_, err := svc.SyncUpstreamModelCatalog(context.Background(), &Account{
+		ID:          101,
+		Platform:    PlatformGemini,
+		Type:        AccountTypeGeminiWeb,
+		Credentials: map[string]any{"gemini_web_cookie": "__Secure-1PSID=psid"},
+	})
+	var syncErr *UpstreamModelSyncError
+	require.True(t, errors.As(err, &syncErr))
+	require.Equal(t, UpstreamModelSyncErrorUpstream, syncErr.Kind)
 }
 
 // Scenario: ID-only 模型列表从 Models.dev 补齐能力。

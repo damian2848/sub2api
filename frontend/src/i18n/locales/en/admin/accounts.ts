@@ -1029,6 +1029,7 @@ export default {
       syncUpstreamModelsLoading: 'Syncing upstream...',
       syncUpstreamModelsSuccess: 'Synced {count} new model(s) from upstream ({total} upstream total)',
       syncUpstreamModelsNoChanges: 'All {count} upstream model(s) are already in the whitelist',
+      syncUpstreamModelsReplaced: "Updated from the account's live model list: {total} model(s), {added} added, {removed} removed",
       syncUpstreamModelsEmpty: 'Upstream returned no models to sync',
       syncUpstreamModelsFailed: 'Failed to sync upstream models',
       syncUpstreamModelsError: 'Failed to sync upstream models: {message}',
