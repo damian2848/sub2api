@@ -152,12 +152,13 @@ type WindowStats struct {
 
 // UsageProgress 使用量进度
 type UsageProgress struct {
-	Utilization      float64      `json:"utilization"`            // 使用率百分比 (0-100+，100表示100%)
-	ResetsAt         *time.Time   `json:"resets_at"`              // 重置时间
-	RemainingSeconds int          `json:"remaining_seconds"`      // 距重置剩余秒数
-	WindowStats      *WindowStats `json:"window_stats,omitempty"` // 窗口期统计（从窗口开始到当前的使用量）
-	UsedRequests     int64        `json:"used_requests,omitempty"`
-	LimitRequests    int64        `json:"limit_requests,omitempty"`
+	Utilization       float64      `json:"utilization"`                   // 使用率百分比 (0-100+，100表示100%)
+	ResetsAt          *time.Time   `json:"resets_at"`                     // 重置时间
+	RemainingSeconds  int          `json:"remaining_seconds"`             // 距重置剩余秒数
+	ResetsAtEstimated bool         `json:"resets_at_estimated,omitempty"` // 上游未给出重置时间，由本地用量记录推算
+	WindowStats       *WindowStats `json:"window_stats,omitempty"`        // 窗口期统计（从窗口开始到当前的使用量）
+	UsedRequests      int64        `json:"used_requests,omitempty"`
+	LimitRequests     int64        `json:"limit_requests,omitempty"`
 }
 
 // AntigravityModelQuota Antigravity 单个模型的配额信息
@@ -222,7 +223,7 @@ type UsageInfo struct {
 	GrokBilling *xai.BillingSummary `json:"grok_billing,omitempty"`
 
 	// Antigravity 账号级信息
-	SubscriptionTier    string `json:"subscription_tier,omitempty"`     // 归一化订阅等级: FREE/PRO/ULTRA/UNKNOWN
+	SubscriptionTier    string `json:"subscription_tier,omitempty"`     // 归一化订阅等级: FREE/PLUS/PRO/ULTRA/UNKNOWN（Gemini Web 有 PLUS）
 	SubscriptionTierRaw string `json:"subscription_tier_raw,omitempty"` // 上游原始订阅等级名称
 
 	// Antigravity 模型详细能力信息（与 antigravity_quota 同 key）
@@ -1118,6 +1119,8 @@ func (s *AccountUsageService) getGeminiWebUsage(ctx context.Context, account *Ac
 		return usage, nil
 	}
 
+	usage.SubscriptionTier = result.Quota.Plan
+	usage.SubscriptionTierRaw = result.Quota.PlanCode
 	for _, window := range result.Quota.Windows {
 		if !window.HasPercent {
 			continue
@@ -1144,8 +1147,41 @@ func (s *AccountUsageService) getGeminiWebUsage(ctx context.Context, account *Ac
 	if usage.FiveHour == nil && usage.SevenDay == nil {
 		usage.Error = "Gemini Web returned no usage windows"
 		usage.ErrorCode = "network_error"
+		return usage, nil
 	}
+	s.estimateGeminiWebReset(ctx, account.ID, usage.FiveHour, 5*time.Hour, now)
+	s.estimateGeminiWebReset(ctx, account.ID, usage.SevenDay, 7*24*time.Hour, now)
 	return usage, nil
+}
+
+// accountFirstUsageReader is implemented by the SQL usage log repository. It is
+// asserted rather than added to UsageLogRepository so test fakes stay unchanged.
+type accountFirstUsageReader interface {
+	GetAccountFirstUsageSince(ctx context.Context, accountID int64, startTime time.Time) (*time.Time, error)
+}
+
+// estimateGeminiWebReset fills a missing upstream reset time for a used window,
+// assuming it opened with this account's first local request inside the window.
+// Requests made outside Sub2API are invisible here, so the result is flagged.
+func (s *AccountUsageService) estimateGeminiWebReset(ctx context.Context, accountID int64, progress *UsageProgress, window time.Duration, now time.Time) {
+	if progress == nil || progress.ResetsAt != nil || progress.Utilization <= 0 {
+		return
+	}
+	reader, ok := s.usageLogRepo.(accountFirstUsageReader)
+	if !ok {
+		return
+	}
+	first, err := reader.GetAccountFirstUsageSince(ctx, accountID, now.Add(-window))
+	if err != nil || first == nil {
+		return
+	}
+	reset := first.Add(window)
+	if !reset.After(now) {
+		return
+	}
+	progress.ResetsAt = &reset
+	progress.RemainingSeconds = int(reset.Sub(now).Seconds())
+	progress.ResetsAtEstimated = true
 }
 
 func (s *AccountUsageService) persistGeminiWebUsageCookie(ctx context.Context, account *Account, oldCookie, updatedCookie string) {

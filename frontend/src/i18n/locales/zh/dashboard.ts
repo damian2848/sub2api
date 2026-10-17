@@ -397,6 +397,7 @@ export default {
     accountBilled: '账号计费',
     resetNow: '现在',
     resetPending: '待刷新',
+    resetEstimated: '估算值：上游未返回重置时间，按本窗口内首个本地请求推算',
     accountMultiplier: '账号倍率',
     avgDuration: '平均耗时',
     inSelectedRange: '所选范围内',

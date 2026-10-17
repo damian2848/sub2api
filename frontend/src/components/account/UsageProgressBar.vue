@@ -54,8 +54,12 @@
       </span>
 
       <!-- Reset time -->
-      <span v-if="shouldShowResetTime" class="shrink-0 text-[10px] text-gray-400">
-        {{ formatResetTime }}
+      <span
+        v-if="shouldShowResetTime"
+        class="shrink-0 text-[10px] text-gray-400"
+        :title="resetEstimated && resetsAt ? t('usage.resetEstimated') : undefined"
+      >
+        {{ resetEstimated && resetsAt ? `≈${formatResetTime}` : formatResetTime }}
       </span>
     </div>
   </div>
@@ -73,6 +77,8 @@ const props = withDefaults(
     label: string
     utilization: number // Percentage (0-100+)
     resetsAt?: string | null
+    /** 上游未给出重置时间、resetsAt 为本地推算值时为 true，倒计时前加「≈」 */
+    resetEstimated?: boolean
     color: 'indigo' | 'emerald' | 'purple' | 'amber'
     windowStats?: WindowStats | null
     estimatedTotalCost?: number | null

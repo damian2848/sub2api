@@ -574,6 +574,7 @@
             :label="bar.label"
             :utilization="bar.utilization"
             :resets-at="bar.resetsAt"
+            :reset-estimated="bar.resetEstimated"
             :window-stats="bar.windowStats"
             :color="bar.color"
           />
@@ -1051,6 +1052,12 @@ const geminiUserLevel = computed((): string | null => {
   const tierLower = tier.toLowerCase()
   const tierUpper = tier.toUpperCase()
 
+  // Gemini Web: free / plus / pro / ultra，来自用量接口返回的订阅等级
+  if (props.account.type === 'gemini_web') {
+    const plan = (usageInfo.value?.subscription_tier || '').trim().toLowerCase()
+    return ['free', 'plus', 'pro', 'ultra'].includes(plan) ? plan : null
+  }
+
   // Google One: free / pro / ultra
   if (geminiOAuthType.value === 'google_one') {
     if (tierLower === 'google_one_free') return 'free'
@@ -1103,7 +1110,14 @@ const geminiTierClass = computed(() => {
   const channel = geminiChannelShort.value
   const level = geminiUserLevel.value
 
-  if (channel === 'client' || channel === 'ai studio' || channel === 'vertex' || channel === 'gemini web') {
+  if (channel === 'client' || channel === 'ai studio' || channel === 'vertex') {
+    return 'bg-blue-100 text-blue-600 dark:bg-blue-900/40 dark:text-blue-300'
+  }
+
+  if (channel === 'gemini web') {
+    if (level === 'ultra') return 'bg-purple-100 text-purple-600 dark:bg-purple-900/40 dark:text-purple-300'
+    if (level === 'plus') return 'bg-emerald-100 text-emerald-600 dark:bg-emerald-900/40 dark:text-emerald-300'
+    if (level === 'free') return 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300'
     return 'bg-blue-100 text-blue-600 dark:bg-blue-900/40 dark:text-blue-300'
   }
 
@@ -1186,6 +1200,7 @@ const geminiUsageBars = computed(() => {
     label: string
     utilization: number
     resetsAt: string | null
+    resetEstimated?: boolean
     windowStats?: WindowStats | null
     color: 'indigo' | 'emerald'
   }> = []
@@ -1197,6 +1212,7 @@ const geminiUsageBars = computed(() => {
         label: '5h',
         utilization: usageInfo.value.five_hour.utilization,
         resetsAt: usageInfo.value.five_hour.resets_at,
+        resetEstimated: usageInfo.value.five_hour.resets_at_estimated,
         windowStats: usageInfo.value.five_hour.window_stats,
         color: 'indigo'
       })
@@ -1207,6 +1223,7 @@ const geminiUsageBars = computed(() => {
         label: '7d',
         utilization: usageInfo.value.seven_day.utilization,
         resetsAt: usageInfo.value.seven_day.resets_at,
+        resetEstimated: usageInfo.value.seven_day.resets_at_estimated,
         windowStats: usageInfo.value.seven_day.window_stats,
         color: 'emerald'
       })

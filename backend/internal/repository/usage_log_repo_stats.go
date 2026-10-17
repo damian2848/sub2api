@@ -304,6 +304,19 @@ func (r *usageLogRepository) GetAccountTodayStats(ctx context.Context, accountID
 	return stats, nil
 }
 
+// GetAccountFirstUsageSince 返回账号在 startTime 之后最早一条用量记录的时间，没有记录时返回 nil。
+func (r *usageLogRepository) GetAccountFirstUsageSince(ctx context.Context, accountID int64, startTime time.Time) (*time.Time, error) {
+	query := `SELECT MIN(created_at) FROM usage_logs WHERE account_id = $1 AND created_at >= $2`
+	var first sql.NullTime
+	if err := scanSingleRow(ctx, r.sql, query, []any{accountID, startTime}, &first); err != nil {
+		return nil, err
+	}
+	if !first.Valid {
+		return nil, nil
+	}
+	return &first.Time, nil
+}
+
 // GetAccountWindowStats 获取账号时间窗口内的统计
 func (r *usageLogRepository) GetAccountWindowStats(ctx context.Context, accountID int64, startTime time.Time) (*usagestats.AccountStats, error) {
 	query := `

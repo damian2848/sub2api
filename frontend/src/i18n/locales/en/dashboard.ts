@@ -392,6 +392,7 @@ export default {
     accountBilled: 'Account billed',
     resetNow: 'Now',
     resetPending: 'Pending refresh',
+    resetEstimated: 'Estimated: the upstream did not report a reset time, so it is counted from the first local request in this window',
     accountMultiplier: 'Account rate',
     avgDuration: 'Avg Duration',
     inSelectedRange: 'in selected range',

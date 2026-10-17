@@ -1887,6 +1887,70 @@ describe('AccountUsageCell', () => {
     expect(getUsage).toHaveBeenCalledWith(4004)
   })
 
+  it.each([
+    ['FREE', 'gemini web free', 'bg-gray-100'],
+    ['PLUS', 'gemini web plus', 'bg-emerald-100'],
+    ['PRO', 'gemini web pro', 'bg-blue-100'],
+    ['ULTRA', 'gemini web ultra', 'bg-purple-100'],
+    [undefined, 'gemini web', 'bg-blue-100']
+  ])('Gemini Web 徽章显示订阅等级 %s', async (tier, label, colorClass) => {
+    getUsage.mockResolvedValue({
+      subscription_tier: tier,
+      five_hour: { utilization: 1, resets_at: null, remaining_seconds: 0 },
+      seven_day: null
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 4006, platform: 'gemini', type: 'gemini_web', extra: {} })
+      },
+      global: { stubs: { UsageProgressBar: true, AccountQuotaInfo: true } }
+    })
+
+    await flushPromises()
+
+    const badge = wrapper.findAll('span').find(span => span.text().startsWith('gemini web'))
+    expect(badge?.text()).toBe(label)
+    expect(badge?.classes()).toContain(colorClass)
+  })
+
+  it('Gemini Web 5h/7d 用量条传入重置时间，并标记推算值', async () => {
+    getUsage.mockResolvedValue({
+      five_hour: {
+        utilization: 12,
+        resets_at: '2026-10-17T12:00:00Z',
+        remaining_seconds: 3600,
+        resets_at_estimated: true
+      },
+      seven_day: {
+        utilization: 20,
+        resets_at: '2026-10-20T00:00:00Z',
+        remaining_seconds: 200000
+      }
+    })
+
+    const wrapper = mount(AccountUsageCell, {
+      props: {
+        account: makeAccount({ id: 4005, platform: 'gemini', type: 'gemini_web', extra: {} })
+      },
+      global: {
+        stubs: {
+          UsageProgressBar: {
+            props: ['label', 'resetsAt', 'resetEstimated'],
+            template: '<div class="usage-bar">{{ label }}|{{ resetsAt }}|{{ resetEstimated ? "est" : "exact" }}</div>'
+          },
+          AccountQuotaInfo: true
+        }
+      }
+    })
+
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('5h|2026-10-17T12:00:00Z|est')
+    expect(text).toContain('7d|2026-10-20T00:00:00Z|exact')
+  })
+
   describe('Gemini Web 检查用量', () => {
     const makeUsage = (utilization = 18): AccountUsageInfo => ({
       updated_at: '2026-10-17T00:00:00Z',

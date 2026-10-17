@@ -223,4 +223,40 @@ describe('UsageProgressBar', () => {
     expect(percent.classes()).toContain('w-[32px]')
     expect(percent.classes()).toContain('text-right')
   })
+
+  it('resetEstimated=true 时倒计时加「≈」并提示为推算值', async () => {
+    const wrapper = mount(UsageProgressBar, {
+      props: {
+        label: '5h',
+        utilization: 12,
+        resetsAt: '2026-03-17T02:13:00Z',
+        resetEstimated: true,
+        color: 'indigo'
+      }
+    })
+
+    const reset = wrapper.get('[title="usage.resetEstimated"]')
+    expect(reset.text()).toBe('≈2h 13m')
+
+    await wrapper.setProps({ resetEstimated: false })
+    expect(wrapper.find('[title]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('2h 13m')
+    expect(wrapper.text()).not.toContain('≈')
+  })
+
+  it('倒计时每分钟随时钟走动', async () => {
+    const wrapper = mount(UsageProgressBar, {
+      props: {
+        label: '7d',
+        utilization: 20,
+        resetsAt: '2026-03-20T00:00:30Z',
+        color: 'emerald'
+      }
+    })
+
+    expect(wrapper.text()).toContain('3d 0h')
+    vi.setSystemTime(new Date('2026-03-17T00:01:00Z'))
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(wrapper.text()).toContain('2d 23h')
+  })
 })

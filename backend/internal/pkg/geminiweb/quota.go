@@ -19,6 +19,7 @@ const geminiWebQuotaRPC = "jSf9Qc"
 
 type Quota struct {
 	Plan       string
+	PlanCode   string // raw upstream plan enum, kept so unmapped tiers can be identified
 	AICredits  *float64
 	Windows    []QuotaWindow
 	ObservedAt time.Time
@@ -158,7 +159,11 @@ func parseQuotaPayload(fields []any, observed time.Time) (Quota, bool) {
 	q := Quota{ObservedAt: observed, Windows: make([]QuotaWindow, 0, 2)}
 	if v, ok := arrayValue(fields, 0); ok {
 		if plan, valid := integerValue(v); valid {
+			q.PlanCode = strconv.Itoa(plan)
 			switch plan {
+			case 1:
+				// Inferred: the free tier is the only consumer plan below Pro (2).
+				q.Plan = "FREE"
 			case 2:
 				q.Plan = "PRO"
 			case 3, 6:
@@ -194,11 +199,8 @@ func parseQuotaPayload(fields []any, observed time.Time) (Quota, bool) {
 				w.RemainingPercent = math.Max(0, 100-w.UsedPercent)
 				w.HasPercent = true
 			}
-			rv, _ := arrayValue(bucket, 3)
-			if reset, valid := rv.([]any); valid {
-				if ts, valid := timestampValue(reset); valid {
-					w.ResetAt, w.HasReset = ts, true
-				}
+			if ts, valid := bucketResetValue(bucket, observed); valid {
+				w.ResetAt, w.HasReset = ts, true
 			}
 			q.Windows = append(q.Windows, w)
 		case 3:
@@ -209,6 +211,40 @@ func parseQuotaPayload(fields []any, observed time.Time) (Quota, bool) {
 		}
 	}
 	return q, true
+}
+
+// bucketResetValue reads a window's reset, normally a [seconds, nanos]
+// timestamp at index 3. Later fields are also checked, accepting only a time
+// inside the next week, so a shifted field does not hide the countdown.
+func bucketResetValue(bucket []any, observed time.Time) (time.Time, bool) {
+	for i := 3; i < len(bucket); i++ {
+		ts, ok := resetValue(bucket[i])
+		if !ok {
+			continue
+		}
+		if i == 3 || (ts.After(observed.Add(-time.Hour)) && ts.Before(observed.Add(8*24*time.Hour))) {
+			return ts, true
+		}
+	}
+	return time.Time{}, false
+}
+func resetValue(value any) (time.Time, bool) {
+	switch v := value.(type) {
+	case []any:
+		if ts, ok := timestampValue(v); ok {
+			return ts, true
+		}
+		if len(v) == 1 {
+			if inner, ok := v[0].([]any); ok {
+				return timestampValue(inner)
+			}
+		}
+	case string:
+		if ts, err := time.Parse(time.RFC3339Nano, v); err == nil {
+			return ts.UTC(), true
+		}
+	}
+	return time.Time{}, false
 }
 func arrayValue(values []any, index int) (any, bool) {
 	if index < 0 || index >= len(values) {
