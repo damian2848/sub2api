@@ -411,6 +411,24 @@ describe('ModelWhitelistSelector', () => {
     expect(wrapper.find('[data-testid="test-iq-models"]').exists()).toBe(false)
   })
 
+  it('marks unverified models separately and keeps them when clearing unavailable models', async () => {
+    testAccountModel.mockImplementation(async (_id: number, model: string) =>
+      model === 'unknown' ? { success: false, unverified: true, error: 'No model declaration' }
+        : model === 'downgraded' ? { success: false, error: 'Requested Argon, received Flash-Lite' }
+          : { success: true }
+    )
+    const wrapper = mountSelector({ accountId: 7, modelValue: ['good', 'downgraded', 'unknown'] })
+    await wrapper.get('[data-testid="test-models"]').trigger('click')
+    await flushPromises()
+    const marks = wrapper.findAll('[data-testid="model-test-status"]')
+    expect(marks.map(m => m.text())).toEqual(['✅', '❌', '⚠️'])
+    expect(marks[2].attributes('title')).toBe('No model declaration')
+    expect(showWarning).toHaveBeenCalledWith(expect.stringContaining('admin.accounts.testModelsUnverified'))
+    expect(showSuccess).not.toHaveBeenCalled()
+    await wrapper.get('[data-testid="clear-unavailable-models"]').trigger('click')
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['good', 'unknown']]])
+  })
+
   it('drops a model\'s test marker when the model leaves the whitelist', async () => {
     testAccountModel.mockResolvedValue({ success: true })
     const wrapper = mountSelector({ accountId: 7, modelValue: ['a', 'b'] })

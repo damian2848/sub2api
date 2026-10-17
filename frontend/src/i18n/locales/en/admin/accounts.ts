@@ -1039,6 +1039,7 @@ export default {
       testModels: 'Test models',
       testModelsStop: 'Stop ({done}/{total})',
       testModelsDone: 'Test finished: {ok} usable, {failed} unusable',
+      testModelsUnverified: '{count} model identities unverified',
       testIQ: 'Test intelligence',
       testIQStop: 'Stop intelligence test ({done}/{total})',
       testIQDone: 'Intelligence test finished: {ok} passed, {failed} failed',

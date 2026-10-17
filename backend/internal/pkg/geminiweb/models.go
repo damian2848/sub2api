@@ -58,3 +58,23 @@ func LookupModel(id string) (Model, bool) {
 }
 
 func Models() []Model { return append([]Model(nil), models...) }
+
+// responseModel translates known Web protocol IDs into public catalog names.
+// Preserve unknown IDs for auditing rather than guessing a requested model.
+func responseModel(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	for _, model := range models {
+		if model.HeaderID != "" && strings.EqualFold(model.HeaderID, id) {
+			return model.ID
+		}
+	}
+	// Match the shared response observer's bound on untrusted declarations.
+	runes := []rune(id)
+	if len(runes) > 200 {
+		return string(runes[:200])
+	}
+	return id
+}

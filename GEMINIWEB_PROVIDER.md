@@ -55,6 +55,23 @@ time; an explicit whitelist or mapping limits scheduling before the browser
 session is called. Unknown Web model IDs are rejected by the provider instead
 of being silently sent to an unrelated Gemini API endpoint.
 
+Google may serve a different model even when generation succeeds. The provider
+reads the model ID declared in `StreamGenerate` payload index 39, maps known
+IDs to catalog names, and passes it to the normal upstream-response model audit.
+The request and client-facing model alias remain separate from this observation.
+Missing declarations stay unknown; conflicting declarations retain the latest
+model and set the existing conflict flag. A mismatch alone does not trigger
+failover. Billing follows the channel's existing model-source setting, including
+the normal safeguards when `billing_model_source = response_model` is enabled.
+
+The account whitelist's **Test models** action requests strict model validation
+(`verify_model: true`). A declared downgrade fails the selected model; missing
+or conflicting declarations are shown as unverified and are retained by
+**Clear unavailable models**. Unsupported Web names are rejected before sending
+a generation request. This stricter test verdict does not change normal gateway
+forwarding or background connectivity checks. Antigravity model tests use the
+same verdict, comparing the mapped request with the returned `modelVersion`.
+
 ## Supported gateway routes
 
 The provider translates the browser response into the existing gateway

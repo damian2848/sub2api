@@ -324,7 +324,7 @@ export async function testAccountModel(
   id: number,
   modelId: string,
   signal?: AbortSignal
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; unverified?: boolean }> {
   try {
     const response = await fetch(buildApiUrl(`/admin/accounts/${id}/test`), {
       method: 'POST',
@@ -332,7 +332,7 @@ export async function testAccountModel(
         Authorization: `Bearer ${localStorage.getItem('auth_token')}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ model_id: modelId, prompt: '', mode: 'default', skip_recovery: true }),
+      body: JSON.stringify({ model_id: modelId, prompt: '', mode: 'default', skip_recovery: true, verify_model: true }),
       signal
     })
     if (!response.ok) {
@@ -344,18 +344,26 @@ export async function testAccountModel(
     const decoder = new TextDecoder()
     let buffer = ''
     let result: { success: boolean; error?: string } | null = null
+    let failure: { success: boolean; error?: string; unverified?: boolean } | null = null
     const handleLine = (line: string) => {
       if (!line.startsWith('data: ')) return
       const jsonStr = line.slice(6).trim()
       if (!jsonStr) return
       try {
         const event = JSON.parse(jsonStr)
-        if (event.type === 'test_complete') {
+        if (event.type === 'model_check' && event.status !== 'verified') {
+          failure = {
+            success: false,
+            error: event.error || 'Model identity could not be verified',
+            ...(event.status === 'unverified' ? { unverified: true } : {})
+          }
+        } else if (event.type === 'test_complete') {
           result = event.success
             ? { success: true }
             : { success: false, error: event.error || 'Test failed' }
+          if (!event.success) failure ??= result
         } else if (event.type === 'error') {
-          result = { success: false, error: event.error || 'Unknown error' }
+          failure ??= { success: false, error: event.error || 'Unknown error' }
         }
       } catch {
         // ignore malformed events
@@ -370,7 +378,7 @@ export async function testAccountModel(
       lines.forEach(handleLine)
     }
     handleLine(buffer)
-    return result ?? { success: false, error: 'No test result received' }
+    return failure ?? result ?? { success: false, error: 'No test result received' }
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error
     return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
@@ -417,7 +425,8 @@ export async function testAccountModelIntelligence(
       const json = line.replace(/^data:\s*/, '').trim()
       if (!json) return
       try {
-        const event = JSON.parse(json) as { type?: string; text?: string; success?: boolean; error?: string }
+        const event = JSON.parse(json) as { type?: string; text?: string; success?: boolean; error?: string; status?: string }
+        if (event.type === 'model_check' && event.status !== 'verified') streamError = event.error || 'Model identity could not be verified'
         if (event.type === 'content' && event.text) answer += event.text
         if (event.type === 'test_complete') {
           completed = true

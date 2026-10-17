@@ -218,7 +218,11 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 	} else {
 		writeGeminiWebNativeJSON(c, originalModel, result.Text, usage)
 	}
-	return &ForwardResult{RequestID: result.RequestID, UpstreamHeaders: make(http.Header), Usage: usage, Model: originalModel, UpstreamModel: mapped, Stream: stream, Duration: time.Since(start)}, nil
+	return &ForwardResult{
+		RequestID: result.RequestID, UpstreamHeaders: make(http.Header), Usage: usage,
+		Model: originalModel, UpstreamModel: mapped, Stream: stream, Duration: time.Since(start),
+		UpstreamResponseModel: result.ResponseModel, UpstreamResponseModelConflict: result.ResponseModelConflict,
+	}, nil
 }
 
 func geminiWebFailoverError(err error) error {
@@ -492,7 +496,10 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebClaude(ctx context.Context
 	} else {
 		writeGeminiWebClaudeJSON(c, req.Model, result.Text, usage)
 	}
-	return &ForwardResult{Usage: usage, Model: req.Model, UpstreamModel: mapped, Stream: req.Stream}, nil
+	return &ForwardResult{
+		Usage: usage, Model: req.Model, UpstreamModel: mapped, Stream: req.Stream,
+		UpstreamResponseModel: result.ResponseModel, UpstreamResponseModelConflict: result.ResponseModelConflict,
+	}, nil
 }
 
 func writeGeminiWebClaudeJSON(c *gin.Context, model, text string, usage ClaudeUsage) {
@@ -567,7 +574,10 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebChatCompletions(ctx contex
 	} else {
 		writeGeminiWebCCJSON(c, id, req.Model, webResult.Text, usage)
 	}
-	return &ForwardResult{RequestID: id, Usage: usage, Model: req.Model, UpstreamModel: mapped, Stream: req.Stream, Duration: time.Since(start)}, nil
+	return &ForwardResult{
+		RequestID: id, Usage: usage, Model: req.Model, UpstreamModel: mapped, Stream: req.Stream, Duration: time.Since(start),
+		UpstreamResponseModel: webResult.ResponseModel, UpstreamResponseModelConflict: webResult.ResponseModelConflict,
+	}, nil
 }
 
 func writeGeminiWebCCJSON(c *gin.Context, id, model, text string, usage ClaudeUsage) {

@@ -352,9 +352,11 @@ type TestConnectionImage struct {
 
 // TestConnectionResult 测试连接结果
 type TestConnectionResult struct {
-	Text        string                // 响应文本
-	Images      []TestConnectionImage // 响应图片（图片生成模型）
-	MappedModel string                // 实际使用的模型
+	Text                  string                // 响应文本
+	Images                []TestConnectionImage // 响应图片（图片生成模型）
+	MappedModel           string                // 映射后发送给上游的模型
+	ResponseModel         string                // 上游响应声明的模型，与发送模型分开记录
+	ResponseModelConflict bool
 }
 
 func shouldUseAntigravityGeminiTestRequest(_, mappedModel string) bool {
@@ -456,7 +458,11 @@ func (s *AntigravityGatewayService) TestConnectionWithPrompt(ctx context.Context
 	}
 
 	text, images := extractContentFromSSEResponse(respBody)
-	return &TestConnectionResult{Text: text, Images: images, MappedModel: mappedModel}, nil
+	observer := observeGeminiTestResponse(respBody)
+	return &TestConnectionResult{
+		Text: text, Images: images, MappedModel: mappedModel,
+		ResponseModel: observer.Model(), ResponseModelConflict: observer.Conflict(),
+	}, nil
 }
 
 // testConnectionHandleError 是 TestConnection 使用的轻量 handleError 回调。

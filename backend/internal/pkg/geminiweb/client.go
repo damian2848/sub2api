@@ -52,13 +52,17 @@ type Request struct {
 }
 
 type Result struct {
-	Text          string
-	Thinking      string
-	Metadata      []any
-	CID           string
-	RID           string
-	RequestID     string
-	UpdatedCookie string
+	Text     string
+	Thinking string
+	// ResponseModel is declared by the upstream protocol, independently of the
+	// requested model. Empty means Google did not identify the model used.
+	ResponseModel         string
+	ResponseModelConflict bool
+	Metadata              []any
+	CID                   string
+	RID                   string
+	RequestID             string
+	UpdatedCookie         string
 }
 
 type Doer func(*http.Request) (*http.Response, error)
@@ -890,6 +894,18 @@ func applyFrame(r Result, f frame) Result {
 	var top []any
 	if json.Unmarshal([]byte(f.payload), &top) != nil {
 		return r
+	}
+	// StreamGenerate declares the model ID at payload[39]. Do not infer it
+	// from generated text or the request: Google can silently downgrade a
+	// requested model. Like native Gemini modelVersion, the latest declaration
+	// wins, with conflicts retained for the shared response-model billing gate.
+	if id, ok := topAt(top, 39).(string); ok {
+		if model := responseModel(id); model != "" {
+			if r.ResponseModel != "" && !strings.EqualFold(r.ResponseModel, model) {
+				r.ResponseModelConflict = true
+			}
+			r.ResponseModel = model
+		}
 	}
 	if m, ok := topAt(top, 1).([]any); ok {
 		r.Metadata = m

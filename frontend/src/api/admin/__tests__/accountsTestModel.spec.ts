@@ -14,7 +14,7 @@ describe('testAccountModel', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(testAccountModel(7, 'gpt-x')).resolves.toEqual({ success: true })
-    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ model_id: 'gpt-x', skip_recovery: true })
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({ model_id: 'gpt-x', skip_recovery: true, verify_model: true })
   })
 
   it.each([
@@ -31,10 +31,39 @@ describe('testAccountModel', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(new Response('', { status: 502 })))
     await expect(testAccountModel(7, 'm')).resolves.toEqual({ success: false, error: 'HTTP 502' })
   })
+
+  it.each(['mismatch', 'unverified'])('does not turn a %s model into a green result', async (status) => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sse(
+      { type: 'model_check', status, error: 'Requested Argon, received Flash-Lite' },
+      { type: 'error', error: 'Requested Argon, received Flash-Lite' },
+      { type: 'test_complete', success: true }
+    )))
+    const result = await testAccountModel(7, 'gemini-4-argon')
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('Flash-Lite')
+    expect(result.unverified).toBe(status === 'unverified' ? true : undefined)
+  })
+
+  it('accepts a verified model and preserves unrelated stream errors', async () => {
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(sse({ type: 'model_check', status: 'verified' }, { type: 'test_complete', success: true }))
+      .mockResolvedValueOnce(sse({ type: 'error', error: 'broken' }, { type: 'test_complete', success: true })))
+    await expect(testAccountModel(7, 'gemini-4-argon')).resolves.toEqual({ success: true })
+    await expect(testAccountModel(7, 'gemini-4-argon')).resolves.toEqual({ success: false, error: 'broken' })
+  })
 })
 
 describe('testAccountModelIntelligence', () => {
   afterEach(() => vi.unstubAllGlobals())
+
+  it('does not accept a correct answer from a downgraded model', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sse(
+      { type: 'content', text: '21' },
+      { type: 'model_check', status: 'mismatch', error: 'Model mismatch' },
+      { type: 'test_complete', success: true }
+    )))
+    await expect(testAccountModelIntelligence(7, 'gemini-4-argon')).resolves.toEqual({ success: false, error: 'Model mismatch', answer: '21' })
+  })
 
   it('sends the candy question and passes a correct answer', async () => {
     const fetchMock = vi.fn().mockResolvedValue(sse(

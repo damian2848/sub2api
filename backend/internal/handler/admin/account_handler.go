@@ -1345,6 +1345,9 @@ type TestAccountRequest struct {
 	// error / rate-limit / overload state. Batch model checks set it: one
 	// passing model must not reset an account whose other models fail.
 	SkipRecovery bool `json:"skip_recovery"`
+	// VerifyModel makes whitelist checks require a matching upstream model
+	// declaration; ordinary connectivity probes retain their existing policy.
+	VerifyModel bool `json:"verify_model"`
 }
 
 type PelicanTestRequest struct {
@@ -1381,6 +1384,7 @@ func (h *AccountHandler) Test(c *gin.Context) {
 	_ = c.ShouldBindJSON(&req)
 
 	opts := service.AccountTestOptions{
+		VerifyModel:  req.VerifyModel,
 		ImageDataURL: req.ImageDataURL,
 		AudioDataURL: req.AudioDataURL,
 	}

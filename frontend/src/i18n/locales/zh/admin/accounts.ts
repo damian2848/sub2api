@@ -1145,6 +1145,7 @@ export default {
       testModels: '测试模型',
       testModelsStop: '停止测试（{done}/{total}）',
       testModelsDone: '测试完成：{ok} 个可用，{failed} 个不可用',
+      testModelsUnverified: '{count} 个模型身份未验证',
       testIQ: '测试智商',
       testIQStop: '停止智商测试（{done}/{total}）',
       testIQDone: '智商测试完成：{ok} 个通过，{failed} 个未通过',

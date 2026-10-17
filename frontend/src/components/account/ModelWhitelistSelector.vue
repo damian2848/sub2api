@@ -19,8 +19,8 @@
                 v-if="testStatus[model]"
                 data-testid="model-test-status"
                 class="shrink-0"
-                :title="testStatus[model] === 'fail' ? testErrors[model] : undefined"
-              >{{ testStatus[model] === 'ok' ? '✅' : testStatus[model] === 'fail' ? '❌' : '⏳' }}</span>
+                :title="testErrors[model]"
+              >{{ testStatus[model] === 'ok' ? '✅' : testStatus[model] === 'fail' ? '❌' : testStatus[model] === 'unverified' ? '⚠️' : '⏳' }}</span>
               <span
                 v-if="iqTestStatus[model]"
                 data-testid="model-iq-test-status"
@@ -405,7 +405,7 @@ const clearAll = () => {
 }
 
 const TEST_CONCURRENCY = 3
-const testStatus = ref<Record<string, 'pending' | 'ok' | 'fail'>>({})
+const testStatus = ref<Record<string, 'pending' | 'ok' | 'fail' | 'unverified'>>({})
 const testErrors = ref<Record<string, string>>({})
 const isTestingModels = ref(false)
 const testedCount = ref(0)
@@ -466,7 +466,7 @@ const testModels = async () => {
         const result = await accountsAPI.testAccountModel(accountId, model, abort.signal)
         if (abort.signal.aborted || props.accountId !== accountId) return
         if (testStatus.value[model] !== 'pending') continue
-        testStatus.value = { ...testStatus.value, [model]: result.success ? 'ok' : 'fail' }
+        testStatus.value = { ...testStatus.value, [model]: result.unverified ? 'unverified' : result.success ? 'ok' : 'fail' }
         if (!result.success && result.error) {
           testErrors.value = { ...testErrors.value, [model]: result.error }
         }
@@ -491,11 +491,14 @@ const testModels = async () => {
   }
   if (abort.signal.aborted) return
   const failed = Object.values(testStatus.value).filter(st => st === 'fail').length
-  const ok = models.length - failed
-  if (failed > 0) {
-    appStore.showWarning(t('admin.accounts.testModelsDone', { ok, failed }))
+  const ok = Object.values(testStatus.value).filter(st => st === 'ok').length
+  const unverified = Object.values(testStatus.value).filter(st => st === 'unverified').length
+  const summary = t('admin.accounts.testModelsDone', { ok, failed }) +
+    (unverified ? ` · ${t('admin.accounts.testModelsUnverified', { count: unverified })}` : '')
+  if (failed > 0 || unverified > 0) {
+    appStore.showWarning(summary)
   } else {
-    appStore.showSuccess(t('admin.accounts.testModelsDone', { ok, failed }))
+    appStore.showSuccess(summary)
   }
 }
 

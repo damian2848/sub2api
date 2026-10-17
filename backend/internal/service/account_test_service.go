@@ -75,6 +75,7 @@ type TestEvent struct {
 type AccountTestOptions struct {
 	ImageDataURL string
 	AudioDataURL string
+	VerifyModel  bool
 }
 
 func firstAccountTestOptions(opts []AccountTestOptions) AccountTestOptions {
@@ -387,6 +388,7 @@ func (s *AccountTestService) TestAccountConnection(c *gin.Context, accountID int
 	}()
 	ctx = c.Request.Context()
 	testOpts := firstAccountTestOptions(opts)
+	c.Set(accountTestVerifyModelContextKey, testOpts.VerifyModel)
 
 	// Get account
 	account, err := s.accountRepo.GetByID(ctx, accountID)
@@ -2721,13 +2723,17 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 	}
 
 	// Process SSE stream
-	return s.processGeminiStream(c, resp.Body)
+	return s.processGeminiStreamForModel(c, resp.Body, testModelID)
 }
 
 // testGeminiWebAccountConnection probes the browser-facing Gemini session
 // directly.  It deliberately uses the same Cookie transport as normal gateway
 // requests instead of trying to construct an AI Studio API request.
 func (s *AccountTestService) testGeminiWebAccountConnection(c *gin.Context, account *Account, modelID, prompt string) error {
+	modelID = account.GetMappedModel(modelID)
+	if _, ok := geminiweb.LookupModel(modelID); !ok {
+		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported Gemini Web model: %s", modelID))
+	}
 	if s.httpUpstream == nil {
 		return s.sendErrorAndEnd(c, "Upstream HTTP client is not configured")
 	}
@@ -2769,8 +2775,7 @@ func (s *AccountTestService) testGeminiWebAccountConnection(c *gin.Context, acco
 		return s.sendErrorAndEnd(c, "Gemini Web returned no text")
 	}
 	s.sendEvent(c, TestEvent{Type: "content", Text: result.Text})
-	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-	return nil
+	return s.finishAccountModelTest(c, modelID, result.ResponseModel, result.ResponseModelConflict, true)
 }
 
 // routeAntigravityTest 路由 Antigravity 账号的测试请求。
@@ -2824,8 +2829,7 @@ func (s *AccountTestService) testAntigravityAccountConnection(c *gin.Context, ac
 		})
 	}
 
-	s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-	return nil
+	return s.finishAccountModelTest(c, result.MappedModel, result.ResponseModel, result.ResponseModelConflict, false)
 }
 
 func antigravityConnectionTestModel(modelID string) string {
@@ -3012,17 +3016,28 @@ func createGeminiTestPayload(modelID string, prompt string) []byte {
 
 // processGeminiStream processes SSE stream from Gemini API
 func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader) error {
+	return s.processGeminiStreamForModel(c, body, "")
+}
+
+func (s *AccountTestService) processGeminiStreamForModel(c *gin.Context, body io.Reader, expectedModel string) error {
 	reader := bufio.NewReader(body)
 	usage := startPelicanTestStream(c, "gemini")
+	observer := &upstreamResponseModelObserver{}
+	finish := func() error {
+		if expectedModel != "" {
+			return s.finishAccountModelTest(c, expectedModel, observer.Model(), observer.Conflict(), false)
+		}
+		s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
+		return nil
+	}
 
 	for {
 		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-				return nil
-			}
+		if err != nil && err != io.EOF {
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Stream read error: %s", err.Error()))
+		}
+		if err == io.EOF && len(line) == 0 {
+			return finish()
 		}
 
 		line = strings.TrimSpace(line)
@@ -3033,9 +3048,9 @@ func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader)
 		jsonStr := strings.TrimPrefix(line, "data: ")
 		usage.read(jsonStr)
 		if jsonStr == "[DONE]" {
-			s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-			return nil
+			return finish()
 		}
+		observer.ObserveGemini([]byte(jsonStr))
 
 		var data map[string]any
 		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
@@ -3074,11 +3089,8 @@ func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader)
 					}
 				}
 
-				// Check for completion after extracting content
-				if finishReason, ok := candidate["finishReason"].(string); ok && finishReason != "" {
-					s.sendEvent(c, TestEvent{Type: "test_complete", Success: true})
-					return nil
-				}
+				// Continue through trailing metadata to observe the final model
+				// declaration and any conflicts before reporting success.
 			}
 		}
 
