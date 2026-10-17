@@ -1101,6 +1101,8 @@ const geminiUserLevel = computed((): string | null => {
 const geminiAuthTypeLabel = computed(() => {
   if (props.account.platform !== 'gemini') return null
   if (!geminiChannelShort.value) return null
+  // Gemini Web 有订阅等级时只显示等级（free/plus/pro/ultra）
+  if (props.account.type === 'gemini_web' && geminiUserLevel.value) return geminiUserLevel.value
   return geminiUserLevel.value ? `${geminiChannelShort.value} ${geminiUserLevel.value}` : geminiChannelShort.value
 })
 

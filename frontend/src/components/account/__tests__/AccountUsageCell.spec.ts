@@ -1888,10 +1888,10 @@ describe('AccountUsageCell', () => {
   })
 
   it.each([
-    ['FREE', 'gemini web free', 'bg-gray-100'],
-    ['PLUS', 'gemini web plus', 'bg-emerald-100'],
-    ['PRO', 'gemini web pro', 'bg-blue-100'],
-    ['ULTRA', 'gemini web ultra', 'bg-purple-100'],
+    ['FREE', 'free', 'bg-gray-100'],
+    ['PLUS', 'plus', 'bg-emerald-100'],
+    ['PRO', 'pro', 'bg-blue-100'],
+    ['ULTRA', 'ultra', 'bg-purple-100'],
     [undefined, 'gemini web', 'bg-blue-100']
   ])('Gemini Web 徽章显示订阅等级 %s', async (tier, label, colorClass) => {
     getUsage.mockResolvedValue({
@@ -1909,7 +1909,7 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    const badge = wrapper.findAll('span').find(span => span.text().startsWith('gemini web'))
+    const badge = wrapper.findAll('span.inline-block').at(0)
     expect(badge?.text()).toBe(label)
     expect(badge?.classes()).toContain(colorClass)
   })
