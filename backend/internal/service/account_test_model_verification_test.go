@@ -85,7 +85,7 @@ func TestGeminiWebAccountTestRejectsDowngradeAndUnsupportedModel(t *testing.T) {
 	for _, tc := range []struct{ requested, returned, want string }{
 		{"gemini-4-argon", "cf41b0e0dd7d53e5", "mismatch"},
 		{"gemini-3.5-flash-lite", "cf41b0e0dd7d53e5", "verified"},
-		{"gemini-4-argon", "", "unverified"},
+		{"gemini-4-argon", "", "mismatch"},
 		{"gemini-4-argon-high", "95a4c0abcba24364", "unsupported"},
 		{"custom-alias", "cf41b0e0dd7d53e5", "verified"},
 	} {
