@@ -126,11 +126,17 @@ func geminiWebFramesStub(t *testing.T, snapshots ...string) (*geminiWebUsageHTTP
 			raw, _ := io.ReadAll(req.Body)
 			form, err := url.ParseQuery(string(raw))
 			require.NoError(t, err)
-			var outer []any
+			var outer []json.RawMessage
 			require.NoError(t, json.Unmarshal([]byte(form.Get("f.req")), &outer))
-			var inner []any
-			require.NoError(t, json.Unmarshal([]byte(outer[1].(string)), &inner))
-			prompt = inner[0].([]any)[0].(string)
+			var innerText string
+			require.NoError(t, json.Unmarshal(outer[1], &innerText))
+			var inner []json.RawMessage
+			require.NoError(t, json.Unmarshal([]byte(innerText), &inner))
+			var message []any
+			require.NoError(t, json.Unmarshal(inner[0], &message))
+			var ok bool
+			prompt, ok = message[0].(string)
+			require.True(t, ok)
 			body = ""
 			for _, text := range snapshots {
 				payload := make([]any, 43)
@@ -183,12 +189,12 @@ func TestGeminiWebClaudeToolCalls(t *testing.T) {
 			var blocks []map[string]any
 			stopReason := ""
 			if !stream {
-				var resp map[string]any
-				require.NoError(t, json.Unmarshal([]byte(out), &resp))
-				for _, b := range resp["content"].([]any) {
-					blocks = append(blocks, b.(map[string]any))
+				var resp struct {
+					Content    []map[string]any `json:"content"`
+					StopReason string           `json:"stop_reason"`
 				}
-				stopReason, _ = resp["stop_reason"].(string)
+				require.NoError(t, json.Unmarshal([]byte(out), &resp))
+				blocks, stopReason = resp.Content, resp.StopReason
 			} else {
 				require.NotNil(t, result.FirstTokenMs)
 				blocks, stopReason = collectClaudeSSEBlocks(t, out)
@@ -222,30 +228,36 @@ func collectClaudeSSEBlocks(t *testing.T, body string) ([]map[string]any, string
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
-		var evt map[string]any
+		var evt struct {
+			Type         string         `json:"type"`
+			Index        int            `json:"index"`
+			ContentBlock map[string]any `json:"content_block"`
+			Delta        struct {
+				Text        *string `json:"text"`
+				PartialJSON *string `json:"partial_json"`
+				StopReason  string  `json:"stop_reason"`
+			} `json:"delta"`
+		}
 		require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &evt))
-		switch evt["type"] {
+		switch evt.Type {
 		case "content_block_start":
-			blocks = append(blocks, evt["content_block"].(map[string]any))
+			blocks = append(blocks, evt.ContentBlock)
 			partial = append(partial, "")
 		case "content_block_delta":
-			i := int(evt["index"].(float64))
-			delta := evt["delta"].(map[string]any)
-			if text, ok := delta["text"].(string); ok {
-				blocks[i]["text"] = fmt.Sprint(blocks[i]["text"]) + text
+			if evt.Delta.Text != nil {
+				blocks[evt.Index]["text"] = fmt.Sprint(blocks[evt.Index]["text"]) + *evt.Delta.Text
 			}
-			if js, ok := delta["partial_json"].(string); ok {
-				partial[i] += js
+			if evt.Delta.PartialJSON != nil {
+				partial[evt.Index] += *evt.Delta.PartialJSON
 			}
 		case "content_block_stop":
-			i := int(evt["index"].(float64))
-			if blocks[i]["type"] == "tool_use" {
+			if blocks[evt.Index]["type"] == "tool_use" {
 				var input map[string]any
-				require.NoError(t, json.Unmarshal([]byte(partial[i]), &input), "tool %d partial_json %q", i, partial[i])
-				blocks[i]["input"] = input
+				require.NoError(t, json.Unmarshal([]byte(partial[evt.Index]), &input), "tool %d partial_json %q", evt.Index, partial[evt.Index])
+				blocks[evt.Index]["input"] = input
 			}
 		case "message_delta":
-			stop, _ = evt["delta"].(map[string]any)["stop_reason"].(string)
+			stop = evt.Delta.StopReason
 		}
 	}
 	return blocks, stop

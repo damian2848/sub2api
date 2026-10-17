@@ -53,7 +53,7 @@ func TestPelicanTestUsageStreams(t *testing.T) {
 			want: UsageTokens{InputTokens: 200, OutputTokens: 200, CacheReadTokens: 800},
 		},
 		{
-			name: "gemini CLI includes thinking and subtracts cached input", process: svc.processGeminiStream,
+			name: "gemini CLI includes thinking and subtracts cached input", process: func(c *gin.Context, body io.Reader) error { return svc.processGeminiStreamForModel(c, body, "") },
 			events: []string{`{"response":{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":300,"cachedContentTokenCount":100,"candidatesTokenCount":40,"thoughtsTokenCount":20}}}`},
 			want:   UsageTokens{InputTokens: 200, OutputTokens: 60, CacheReadTokens: 100},
 		},

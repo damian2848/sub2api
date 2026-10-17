@@ -3014,11 +3014,6 @@ func createGeminiTestPayload(modelID string, prompt string) []byte {
 	return bytes
 }
 
-// processGeminiStream processes SSE stream from Gemini API
-func (s *AccountTestService) processGeminiStream(c *gin.Context, body io.Reader) error {
-	return s.processGeminiStreamForModel(c, body, "")
-}
-
 func (s *AccountTestService) processGeminiStreamForModel(c *gin.Context, body io.Reader, expectedModel string) error {
 	reader := bufio.NewReader(body)
 	usage := startPelicanTestStream(c, "gemini")

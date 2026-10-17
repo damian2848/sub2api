@@ -47,7 +47,7 @@ func TestProcessGeminiStream_EmitsImageEvent(t *testing.T) {
 
 	stream := strings.NewReader("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"},{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"QUJD\"}}]}}]}\n\ndata: [DONE]\n\n")
 
-	err := svc.processGeminiStream(ctx, stream)
+	err := svc.processGeminiStreamForModel(ctx, stream, "")
 	require.NoError(t, err)
 
 	body := recorder.Body.String()

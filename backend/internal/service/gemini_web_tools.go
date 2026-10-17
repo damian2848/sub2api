@@ -83,14 +83,14 @@ func geminiWebBuildPrompt(body []byte) (geminiWebPromptPlan, error) {
 
 	var b strings.Builder
 	if system := geminiWebPartsText(root["systemInstruction"]); system != "" {
-		b.WriteString("<system>\n" + system + "\n</system>\n\n")
+		_, _ = b.WriteString("<system>\n" + system + "\n</system>\n\n")
 	}
 	if len(tools) > 0 {
 		writeGeminiWebToolInstructions(&b, tools, requireTool)
 	} else {
-		b.WriteString("Tool calling is not available for this reply. Answer in plain text, using the tool results in the conversation.\n\n")
+		_, _ = b.WriteString("Tool calling is not available for this reply. Answer in plain text, using the tool results in the conversation.\n\n")
 	}
-	b.WriteString("<conversation>\n")
+	_, _ = b.WriteString("<conversation>\n")
 	turns := 0
 	for _, raw := range contents {
 		content, _ := raw.(map[string]any)
@@ -102,13 +102,13 @@ func geminiWebBuildPrompt(body []byte) (geminiWebPromptPlan, error) {
 		if role, _ := content["role"].(string); role == "model" {
 			tag = "assistant"
 		}
-		b.WriteString("<" + tag + ">\n" + text + "\n</" + tag + ">\n")
+		_, _ = b.WriteString("<" + tag + ">\n" + text + "\n</" + tag + ">\n")
 		turns++
 	}
 	if turns == 0 {
 		return geminiWebPromptPlan{}, errors.New("request contains no text parts")
 	}
-	b.WriteString("</conversation>\n\nContinue the conversation as the assistant. Reply with only your next message.")
+	_, _ = b.WriteString("</conversation>\n\nContinue the conversation as the assistant. Reply with only your next message.")
 	return geminiWebPromptPlan{Prompt: b.String(), Tools: tools, RequireTool: requireTool && len(tools) > 0}, nil
 }
 
@@ -223,28 +223,28 @@ func geminiWebDeclaredTools(root map[string]any) ([]geminiWebTool, bool) {
 }
 
 func writeGeminiWebToolInstructions(b *strings.Builder, tools []geminiWebTool, requireTool bool) {
-	b.WriteString("<tools>\nYou can call the tools below. Each tool's parameters are described by a JSON Schema. These tools are the only way to reach the user's environment and live data: use them instead of your own built-in tools, search or cards.\n\n")
+	_, _ = b.WriteString("<tools>\nYou can call the tools below. Each tool's parameters are described by a JSON Schema. These tools are the only way to reach the user's environment and live data: use them instead of your own built-in tools, search or cards.\n\n")
 	for _, tool := range tools {
-		b.WriteString("- name: " + tool.Name + "\n")
+		_, _ = b.WriteString("- name: " + tool.Name + "\n")
 		if tool.Description != "" {
-			b.WriteString("  description: " + strings.ReplaceAll(tool.Description, "\n", "\n    ") + "\n")
+			_, _ = b.WriteString("  description: " + strings.ReplaceAll(tool.Description, "\n", "\n    ") + "\n")
 		}
 		params := tool.Parameters
 		if params == nil {
 			params = map[string]any{"type": "object", "properties": map[string]any{}}
 		}
 		schema, _ := json.Marshal(params)
-		b.WriteString("  parameters: " + string(schema) + "\n")
+		_, _ = b.WriteString("  parameters: " + string(schema) + "\n")
 	}
-	b.WriteString("\nTo call a tool, write a block in exactly this format: the tags on their own lines, the body one JSON object.\n")
-	b.WriteString(geminiWebToolCallOpen + "\n{\"name\": \"<tool name>\", \"arguments\": {<arguments object>}}\n" + geminiWebToolCallClose + "\n")
-	b.WriteString("- Write several blocks to call several tools at once. After the last block stop: the results come back in the next message.\n")
-	b.WriteString("- Results of earlier calls appear as <tool_result> blocks in the conversation. Use them; do not call a tool again for a result you already have, and never invent results.\n")
-	b.WriteString("- Do not wrap the blocks in code fences. If no tool is needed, answer normally.\n")
+	_, _ = b.WriteString("\nTo call a tool, write a block in exactly this format: the tags on their own lines, the body one JSON object.\n")
+	_, _ = b.WriteString(geminiWebToolCallOpen + "\n{\"name\": \"<tool name>\", \"arguments\": {<arguments object>}}\n" + geminiWebToolCallClose + "\n")
+	_, _ = b.WriteString("- Write several blocks to call several tools at once. After the last block stop: the results come back in the next message.\n")
+	_, _ = b.WriteString("- Results of earlier calls appear as <tool_result> blocks in the conversation. Use them; do not call a tool again for a result you already have, and never invent results.\n")
+	_, _ = b.WriteString("- Do not wrap the blocks in code fences. If no tool is needed, answer normally.\n")
 	if requireTool {
-		b.WriteString("- This reply must call at least one tool.\n")
+		_, _ = b.WriteString("- This reply must call at least one tool.\n")
 	}
-	b.WriteString("</tools>\n\n")
+	_, _ = b.WriteString("</tools>\n\n")
 }
 
 func geminiWebPartsText(raw any) string {
@@ -326,10 +326,10 @@ func geminiWebExtractToolCalls(text string, plan geminiWebPromptPlan) (string, [
 	for {
 		start := strings.Index(rest, geminiWebToolCallOpen)
 		if start < 0 {
-			clean.WriteString(rest)
+			_, _ = clean.WriteString(rest)
 			break
 		}
-		clean.WriteString(rest[:start])
+		_, _ = clean.WriteString(rest[:start])
 		after := rest[start+len(geminiWebToolCallOpen):]
 		body, remainder := after, ""
 		if end := strings.Index(after, geminiWebToolCallClose); end >= 0 {
@@ -338,7 +338,7 @@ func geminiWebExtractToolCalls(text string, plan geminiWebPromptPlan) (string, [
 		if call, ok := parseGeminiWebToolCall(body, plan); ok {
 			calls = append(calls, call)
 		} else {
-			clean.WriteString(rest[start : len(rest)-len(remainder)])
+			_, _ = clean.WriteString(rest[start : len(rest)-len(remainder)])
 		}
 		rest = remainder
 		if rest == "" {

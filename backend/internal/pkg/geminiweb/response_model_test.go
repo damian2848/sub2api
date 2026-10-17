@@ -32,8 +32,8 @@ func TestClientCompleteObservesResponseModel(t *testing.T) {
 				payload[39], payload[42] = id, "Gemini 4 Argon"
 				b, _ := json.Marshal(payload)
 				outer, _ := json.Marshal([]any{[]any{"wrb.fr", nil, string(b)}})
-				frames.Write(outer)
-				frames.WriteString("\n")
+				_, _ = frames.Write(outer)
+				_, _ = frames.WriteString("\n")
 			}
 			do := func(req *http.Request) (*http.Response, error) {
 				if req.Method == http.MethodGet {
