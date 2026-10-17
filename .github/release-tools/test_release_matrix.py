@@ -67,6 +67,7 @@ class ReleaseMatrixTest(unittest.TestCase):
         self.assertEqual(leaf['archives'], original['archives'])
         self.assertEqual(leaf['release'], original['release'])
         self.assertFalse(leaf['dockers'])
+        self.assertEqual(leaf['before'], {'hooks': []})
         self.assertIn('{{ .Env.RELEASE_DATE }}', '\n'.join(leaf['builds'][0]['ldflags']))
 
     def test_publication_config_has_no_compilation_or_docker_work(self):

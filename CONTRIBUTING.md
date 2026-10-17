@@ -207,7 +207,7 @@ pnpm --dir frontend run dev
 | 前端完整测试 | 需要全量验证时使用 `pnpm --dir frontend run test:run`；`make test-frontend` 仅包含 lint、类型检查和根 Makefile 中的关键测试集 |
 | Ent schema / Wire | `make -C backend generate`，检查生成文件，按 [迁移说明](backend/migrations/README.md) 验证新旧数据和升级路径 |
 | 部署脚本 / Compose | 对修改的脚本执行 `bash -n` / `sh -n`，运行 CI 中对应的离线部署测试；不要用部署入口做语法测试 |
-| Release 辅助脚本 | 按 CI 安装其 requirements，执行 `python3 -m unittest discover -s .github/release-tools -p 'test_release_matrix.py'` 及对应 shell 语法检查 |
+| Release 辅助脚本 | 按 CI 安装其 requirements，执行 `python3 -m unittest discover -s .github/release-tools -p 'test_*.py'` 及对应 shell 语法检查 |
 
 后端定向测试要使用文件对应的 build tags，例如 `(cd backend && go test -tags=unit ./internal/service -run 'Test具体名称' -count=1)`。更换为实际测试名称，确认输出中不是“no tests to run”。Bug 修复尽量验证同一回归用例在修改前失败、修改后通过；无法验证修复前行为时明确说明。
 
@@ -239,3 +239,5 @@ UI 改动补充可复核的前后截图、交互步骤与相关语言覆盖；�
 使用代码生成或 AI 辅助时，贡献者仍需核对实现、依赖、命令和证据；不要提交虚构的复现、测试结果或不理解的生成代码。对无法验证的部分明确说明。
 
 PR 合并、Release 发布和生产部署是独立步骤。PR 中提供构建或测试结果不代表已经上线；发布与部署由维护者在对应流程中单独执行和验收。
+
+日常发版采用[精简发布流程](.github/release-tools/README.md)：本地做受影响功能的回归，完整检查由分支 CI 执行一次，Release 复用同一提交的成功结果。无需为了发版在本地和标签 CI 重复跑全套测试、重复构建；出现新改动或失败时再补充对应验证。

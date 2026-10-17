@@ -41,6 +41,9 @@ env:
 jobs:
   prepare:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
       sha: ${{ steps.plan.outputs.sha }}
       owner_lower: ${{ steps.plan.outputs.owner_lower }}
@@ -76,6 +79,12 @@ jobs:
           if [[ "$SIMPLE_RELEASE" == true ]]; then args+=(--simple); fi
           if [[ "$DRY_RUN" == true ]]; then args+=(--dry-run); fi
           python "$RUNNER_TEMP/release-tools/release_matrix.py" plan "${args[@]}"
+      - name: Reuse CI for the selected source commit
+        if: ${{ env.DRY_RUN != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.plan.outputs.sha }}
+        run: python "$RUNNER_TEMP/release-tools/wait_for_ci.py" --repo "$GITHUB_REPOSITORY" --sha "$RELEASE_SHA"
       - uses: actions/upload-artifact@v7
         with:
           name: release-tooling
@@ -213,10 +222,17 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.sha }}
       - uses: docker/setup-buildx-action@v3
+      - name: Cache re-login runtime layers
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/reauth-build-cache
+          key: reauth-build-v1-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('tools/reauth-runtime/**', 'tools/openai*', 'tools/test_openai*') }}
+          restore-keys: reauth-build-v1-${{ runner.os }}-${{ matrix.arch }}-
       - name: Build and validate portable re-login runtime
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
           ARCH: ${{ matrix.arch }}
+          REAUTH_CACHE_DIR: ${{ runner.temp }}/reauth-build-cache
         run: bash tools/reauth-runtime/build.sh
       - uses: actions/upload-artifact@v7
         with:
@@ -264,8 +280,10 @@ jobs:
           go-version-file: backend/go.mod
           cache: false
       - name: Set up QEMU
+        if: ${{ env.PUBLISH_IMAGES == 'true' && env.SIMPLE_RELEASE != 'true' }}
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
+        if: ${{ env.PUBLISH_IMAGES == 'true' }}
         uses: docker/setup-buildx-action@v3
       - name: Login to DockerHub
         if: ${{ env.PUBLISH_IMAGES == 'true' && env.DRY_RUN != 'true' && env.SIMPLE_RELEASE != 'true' && env.DOCKERHUB_USERNAME != '' }}

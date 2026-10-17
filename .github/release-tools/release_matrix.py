@@ -82,6 +82,9 @@ def generate_config(args):
     data['snapshot'] = {'version_template': '{{ .Env.RELEASE_VERSION }}'}
     data['dockers'] = []
     data['docker_manifests'] = []
+    # CI validates the committed dependency files. Do not run go mod tidy once
+    # per platform or silently change dependencies while packaging a release.
+    data['before'] = {'hooks': []}
     if args.mode == 'build':
         target = {'goos': args.goos, 'goarch': args.goarch}
         if target not in targets():
@@ -93,7 +96,6 @@ def generate_config(args):
     else:
         # Artifacts are supplied through the OSS extra_files mechanism. No build
         # is repeated on the publishing runner, and release templates stay intact.
-        data['before'] = {'hooks': []}
         data['builds'] = [{'id': 'sub2api', 'skip': True}]
         data['archives'] = []
         extra = [{'glob': 'release-input/sub2api_*.tar.gz'}, {'glob': 'release-input/sub2api_*.zip'}]
