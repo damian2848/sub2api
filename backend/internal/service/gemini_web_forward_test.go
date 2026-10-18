@@ -15,8 +15,8 @@ import (
 )
 
 func TestWebUsageEstimatesPlainTextAndThinking(t *testing.T) {
-	withoutThinking := webUsageWithThinking("hello world", "answer", "")
-	usage := webUsageWithThinking("hello world", "answer", "hidden reasoning")
+	withoutThinking := webUsageWithThinking(geminiWebPromptPlan{Prompt: "hello world"}, "answer", "")
+	usage := webUsageWithThinking(geminiWebPromptPlan{Prompt: "hello world"}, "answer", "hidden reasoning")
 	if usage.InputTokens <= 0 || usage.OutputTokens <= 0 {
 		t.Fatalf("usage = %#v, want positive text estimates", usage)
 	}

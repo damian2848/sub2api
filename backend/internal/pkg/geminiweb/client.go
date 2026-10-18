@@ -45,11 +45,18 @@ type Request struct {
 	Prompt   string
 	Metadata []any
 	Thinking bool
+	// Attachments are uploaded before the prompt is sent and attached to it,
+	// as files picked with the browser's upload button.
+	Attachments []Attachment
 	// OnResult receives cumulative snapshots while the browser response is
 	// being decoded. It is used by the native streaming adapter to forward
 	// Gemini Web frames as soon as they arrive. A nil callback preserves the
 	// original buffered behavior.
 	OnResult func(Result) error
+
+	// files is the uploaded attachment list, filled in once by Complete so a
+	// stale-session retry does not upload again.
+	files []any
 }
 
 type Result struct {
@@ -82,8 +89,11 @@ type Result struct {
 // from the start of Complete; zero means the stage was never reached.
 type Timing struct {
 	PromptChars int
+	Attachments int
 	// Status is the HTTP status of the StreamGenerate response, 0 if none.
-	Status        int
+	Status int
+	// Upload is when the attachments finished uploading.
+	Upload        time.Duration
 	Session       time.Duration
 	Headers       time.Duration
 	FirstFrame    time.Duration
@@ -118,6 +128,8 @@ func (c *stageClock) observe(r Result) {
 }
 
 type Doer func(*http.Request) (*http.Response, error)
+
+const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
 
 type session struct {
 	At, Build, Fsid, Language string
@@ -297,8 +309,19 @@ func browserCookieJSONHeader(raw string) string {
 }
 
 func (c *Client) Complete(ctx context.Context, cred Credential, req Request, do Doer) (Result, error) {
-	clock := &stageClock{start: time.Now(), timing: &Timing{PromptChars: utf8.RuneCountInString(req.Prompt)}}
-	result, err := c.complete(ctx, cred, req, do, false, clock)
+	clock := &stageClock{start: time.Now(), timing: &Timing{PromptChars: utf8.RuneCountInString(req.Prompt), Attachments: len(req.Attachments)}}
+	var result Result
+	var err error
+	if len(req.Attachments) > 0 {
+		if do == nil {
+			err = errors.New("gemini web transport is nil")
+		} else if req.files, err = c.uploadAttachments(ctx, cred, req.Attachments, do); err == nil {
+			clock.mark(&clock.timing.Upload, true)
+		}
+	}
+	if err == nil {
+		result, err = c.complete(ctx, cred, req, do, false, clock)
+	}
 	clock.mark(&clock.timing.Total, true)
 	result.Timing = *clock.timing
 	return result, err
@@ -339,10 +362,7 @@ func (c *Client) RefreshCookies(ctx context.Context, cred Credential, do Doer) (
 	if err != nil {
 		return cred.Cookie, err
 	}
-	ua := cred.UserAgent
-	if ua == "" {
-		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
-	}
+	ua := defaultString(cred.UserAgent, defaultUserAgent)
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Origin", "https://accounts.google.com")
 	referer := "https://gemini.google.com/app"
@@ -445,7 +465,11 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 	model := ResolveModel(req.Model)
 	meta := req.Metadata
 	inner := make([]any, 81)
-	inner[0] = []any{req.Prompt, 0, nil, nil, nil, nil, 0}
+	var files any
+	if len(req.files) > 0 {
+		files = req.files
+	}
+	inner[0] = []any{req.Prompt, 0, nil, files, nil, nil, 0}
 	inner[1] = []any{defaultString(sess.Language, "en")}
 	if meta == nil {
 		meta = []any{"", "", "", nil, nil, nil, nil, nil, nil, ""}
@@ -575,10 +599,7 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 }
 
 func applyHeaders(r *http.Request, cred Credential, base string, sess session, model Model, requestUUID string) {
-	ua := cred.UserAgent
-	if ua == "" {
-		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
-	}
+	ua := defaultString(cred.UserAgent, defaultUserAgent)
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
 	r.Header.Set("Origin", base)
 	r.Header.Set("Referer", base+"/")
@@ -663,10 +684,7 @@ func (c *Client) getSession(ctx context.Context, cred Credential, base string, d
 	if err != nil {
 		return session{}, cred.Cookie, err
 	}
-	ua := cred.UserAgent
-	if ua == "" {
-		ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"
-	}
+	ua := defaultString(cred.UserAgent, defaultUserAgent)
 	r.Header.Set("User-Agent", ua)
 	r.Header.Set("Accept", "text/html,application/xhtml+xml")
 	r.Header.Set("Accept-Language", "en-US,en;q=0.9")

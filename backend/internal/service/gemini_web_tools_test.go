@@ -83,9 +83,42 @@ func TestGeminiWebBuildPromptKeepsPlainConversationsUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "sys\nuser: hi\nmodel: hello\nuser: bye", plan.Prompt)
 	require.False(t, plan.toolsEnabled())
+}
 
-	_, err = geminiWebBuildPrompt([]byte(`{"contents":[{"role":"user","parts":[{"text":"look"},{"inlineData":{"mimeType":"image/png","data":"AA=="}}]}]}`))
-	require.ErrorContains(t, err, "text input only")
+func TestGeminiWebBuildPromptTakesInlineDataAsAttachments(t *testing.T) {
+	plan, err := geminiWebBuildPrompt([]byte(`{"contents":[{"role":"user","parts":[{"text":"look"},{"inlineData":{"mimeType":"image/png","data":"iVBORw=="}}]},{"role":"model","parts":[{"text":"a cat"}]},{"role":"user","parts":[{"inlineData":{"mimeType":"application/pdf","data":"JVBERg"}},{"text":"and this?"}]}]}`))
+	require.NoError(t, err)
+	require.Equal(t, "user: look\n[Attachment 1: attachment-1.png]\nmodel: a cat\nuser: [Attachment 2: attachment-2.pdf]\nand this?", plan.Prompt)
+	require.Equal(t, []geminiweb.Attachment{
+		{Name: "attachment-1.png", MimeType: "image/png", Data: []byte{0x89, 'P', 'N', 'G'}},
+		{Name: "attachment-2.pdf", MimeType: "application/pdf", Data: []byte("%PDF")},
+	}, plan.Attachments)
+
+	tagged, err := geminiWebBuildPrompt([]byte(`{"tools":[{"functionDeclarations":[{"name":"read_file"}]}],"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/jpeg","data":"/9j/"}},{"text":"describe"}]}]}`))
+	require.NoError(t, err)
+	require.Contains(t, tagged.Prompt, "<user>\n[Attachment 1: attachment-1.jpg]\ndescribe\n</user>")
+	require.Len(t, tagged.Attachments, 1)
+	require.Equal(t, 258+estimateTokensForText(tagged.Prompt), geminiWebInputTokens(tagged))
+
+	urlSafe, err := geminiWebBuildPrompt([]byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/jpeg","data":"_9j_"}}]}]}`))
+	require.NoError(t, err)
+	require.Equal(t, []byte{0xff, 0xd8, 0xff}, urlSafe.Attachments[0].Data)
+}
+
+func TestGeminiWebBuildPromptRejectsUnusableMedia(t *testing.T) {
+	_, err := geminiWebBuildPrompt([]byte(`{"contents":[{"role":"user","parts":[{"text":"look"},{"fileData":{"mimeType":"image/png","fileUri":"https://generativelanguage.googleapis.com/v1beta/files/x"}}]}]}`))
+	require.ErrorContains(t, err, "fileData")
+
+	_, err = geminiWebBuildPrompt([]byte(`{"contents":[{"role":"user","parts":[{"inlineData":{"mimeType":"image/png","data":"not base64!"}}]}]}`))
+	require.ErrorContains(t, err, "invalid inlineData")
+
+	parts := make([]any, geminiWebMaxAttachments+1)
+	for i := range parts {
+		parts[i] = map[string]any{"inlineData": map[string]any{"mimeType": "image/png", "data": "AA=="}}
+	}
+	body, _ := json.Marshal(map[string]any{"contents": []any{map[string]any{"role": "user", "parts": parts}}})
+	_, err = geminiWebBuildPrompt(body)
+	require.ErrorContains(t, err, "at most 10 attachments")
 }
 
 func TestGeminiWebExtractToolCalls(t *testing.T) {
@@ -511,4 +544,58 @@ func TestGeminiWebClaudeToolChoice(t *testing.T) {
 		require.JSONEq(t, want, string(out["toolConfig"]))
 	}
 	require.Equal(t, gemini, geminiWebClaudeToolChoice(gemini, []byte(`{"tool_choice":{"type":"auto"}}`)))
+}
+
+// Images sent through the Claude and Chat Completions endpoints are uploaded
+// and attached to the browser prompt, with a marker where each one was.
+func TestGeminiWebForwardUploadsImages(t *testing.T) {
+	const png = "iVBORw0KGgo="
+	for _, endpoint := range []string{"messages", "chat"} {
+		t.Run(endpoint, func(t *testing.T) {
+			frames, prompt := geminiWebFramesStub(t, "a red square")
+			var uploads []string
+			var files string
+			upstream := &geminiWebUsageHTTPStub{do: func(req *http.Request) (*http.Response, error) {
+				if req.URL.Host == "content-push.googleapis.com" {
+					file, header, err := req.FormFile("file")
+					require.NoError(t, err)
+					data, _ := io.ReadAll(file)
+					uploads = append(uploads, header.Filename+"="+string(data))
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("/contrib_service/ttl_1d/" + header.Filename))}, nil
+				}
+				if req.Method == http.MethodPost {
+					raw, _ := io.ReadAll(req.Body)
+					form, _ := url.ParseQuery(string(raw))
+					var outer []json.RawMessage
+					require.NoError(t, json.Unmarshal([]byte(form.Get("f.req")), &outer))
+					var innerText string
+					require.NoError(t, json.Unmarshal(outer[1], &innerText))
+					var inner []json.RawMessage
+					require.NoError(t, json.Unmarshal([]byte(innerText), &inner))
+					var message []json.RawMessage
+					require.NoError(t, json.Unmarshal(inner[0], &message))
+					files = string(message[3])
+					req.Body = io.NopCloser(strings.NewReader(string(raw)))
+				}
+				return frames.do(req)
+			}}
+			svc := &GeminiMessagesCompatService{httpUpstream: upstream}
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+			var err error
+			if endpoint == "chat" {
+				_, err = svc.ForwardAsChatCompletions(context.Background(), c, geminiWebTestAccount(), []byte(`{"model":"gemini-4-argon","messages":[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,`+png+`"}}]}]}`))
+			} else {
+				_, err = svc.Forward(context.Background(), c, geminiWebTestAccount(), []byte(`{"model":"gemini-4-argon","max_tokens":64,"messages":[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"`+png+`"}}]}]}`))
+			}
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+			require.Contains(t, recorder.Body.String(), "a red square")
+			require.Equal(t, []string{"attachment-1.png=\x89PNG\r\n\x1a\n"}, uploads)
+			require.Equal(t, `[[["/contrib_service/ttl_1d/attachment-1.png"],"attachment-1.png"]]`, files)
+			require.Contains(t, *prompt, "what is this?")
+			require.Contains(t, *prompt, "[Attachment 1: attachment-1.png]")
+		})
+	}
 }

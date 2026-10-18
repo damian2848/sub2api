@@ -1291,3 +1291,24 @@ func parseAnthropicContentBlockEvents(t *testing.T, raw string) []anthropicConte
 	}
 	return events
 }
+
+func TestConvertClaudeMessagesToGeminiGenerateContent_ConvertsDocuments(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":[
+		{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERg=="}},
+		{"type":"document","source":{"type":"text","media_type":"text/plain","data":"plain notes"}},
+		{"type":"text","text":"summarize"}]}]}`)
+	out, err := convertClaudeMessagesToGeminiGenerateContent(body)
+	require.NoError(t, err)
+	var req struct {
+		Contents []struct {
+			Parts []map[string]any `json:"parts"`
+		} `json:"contents"`
+	}
+	require.NoError(t, json.Unmarshal(out, &req))
+	require.Len(t, req.Contents, 1)
+	require.Equal(t, []map[string]any{
+		{"inlineData": map[string]any{"mimeType": "application/pdf", "data": "JVBERg=="}},
+		{"text": "plain notes"},
+		{"text": "summarize"},
+	}, req.Contents[0].Parts)
+}

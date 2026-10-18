@@ -3589,7 +3589,7 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 						},
 					})
 					toolImageParts = append(toolImageParts, images...)
-				case "image":
+				case "image", "document":
 					if src, ok := bm["source"].(map[string]any); ok {
 						if srcType, _ := src["type"].(string); srcType == "base64" {
 							mediaType, _ := src["media_type"].(string)
@@ -3601,6 +3601,11 @@ func convertClaudeMessagesToGeminiContents(messages any, toolUseIDToName map[str
 										"data":     data,
 									},
 								})
+							}
+						} else if srcType == "text" {
+							// Plain-text documents stay readable as text.
+							if data, _ := src["data"].(string); strings.TrimSpace(data) != "" {
+								parts = append(parts, map[string]any{"text": data})
 							}
 						}
 					}

@@ -158,8 +158,17 @@ is being generated its markup is held back; Claude streams receive `ping`
 events and Chat Completions streams receive SSE comments in the meantime.
 Plain conversations without tools keep the original prompt format.
 
-Text prompts are supported. Image/file parts (including images inside tool
-results) and OpenAI Responses `/v1/responses` still require a later protocol
+Images and files are sent the way the browser's upload button sends them.
+Each `inlineData` part (Claude `image` / base64 `document` blocks and Chat
+Completions `image_url` data URIs arrive as `inlineData`) is uploaded to
+`content-push.googleapis.com` without the account cookie, through the
+account's proxy, and the returned file reference is attached to the
+`StreamGenerate` prompt. The flattened prompt keeps an
+`[Attachment N: name]` marker where each file was, so multi-turn
+conversations still say which turn a file belongs to. A request carries at
+most 10 attachments, and each one is estimated at 258 input tokens.
+`fileData` references (Gemini Files API URIs) and remote image URLs are not
+supported. OpenAI Responses `/v1/responses` still requires a later protocol
 extension.
 
 The browser protocol details follow the public behavior documented by the

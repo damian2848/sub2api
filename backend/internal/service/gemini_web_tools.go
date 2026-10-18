@@ -1,8 +1,10 @@
 package service
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -82,7 +84,10 @@ type geminiWebToolCall struct {
 
 type geminiWebPromptPlan struct {
 	Prompt string
-	Tools  []geminiWebTool
+	// Attachments are the inlineData parts, in request order. The prompt
+	// marks where each one was with "[Attachment N: name]".
+	Attachments []geminiweb.Attachment
+	Tools       []geminiWebTool
 	// RequireTool mirrors functionCallingConfig mode ANY.
 	RequireTool bool
 }
@@ -98,11 +103,6 @@ func (p geminiWebPromptPlan) allows(name string) bool {
 	return false
 }
 
-func geminiWebPrompt(body []byte) (string, error) {
-	plan, err := geminiWebBuildPrompt(body)
-	return plan.Prompt, err
-}
-
 // geminiWebBuildPrompt flattens a generateContent body into one browser
 // prompt. Plain conversations keep the original "role: text" format; requests
 // that declare tools or carry tool history use a tagged transcript, which
@@ -113,13 +113,21 @@ func geminiWebBuildPrompt(body []byte) (geminiWebPromptPlan, error) {
 		return geminiWebPromptPlan{}, err
 	}
 	contents, _ := root["contents"].([]any)
-	if geminiWebHasMedia(root["systemInstruction"]) || geminiWebHasMedia(contents) {
-		return geminiWebPromptPlan{}, errors.New("gemini web provider currently supports text input only")
+	if geminiWebHasFileData(root["systemInstruction"]) || geminiWebHasFileData(contents) {
+		return geminiWebPromptPlan{}, errors.New("gemini web provider does not support fileData references; send files as inlineData")
+	}
+	var attachments []geminiweb.Attachment
+	for _, raw := range append([]any{root["systemInstruction"]}, contents...) {
+		content, _ := raw.(map[string]any)
+		var err error
+		if attachments, err = geminiWebTakeAttachments(content, attachments); err != nil {
+			return geminiWebPromptPlan{}, err
+		}
 	}
 	tools, requireTool := geminiWebDeclaredTools(root)
 	if len(tools) == 0 && !geminiWebHasToolHistory(contents) {
 		prompt, err := geminiWebLegacyPrompt(root, contents)
-		return geminiWebPromptPlan{Prompt: prompt}, err
+		return geminiWebPromptPlan{Prompt: prompt, Attachments: attachments}, err
 	}
 
 	var b strings.Builder
@@ -150,7 +158,42 @@ func geminiWebBuildPrompt(body []byte) (geminiWebPromptPlan, error) {
 		return geminiWebPromptPlan{}, errors.New("request contains no text parts")
 	}
 	_, _ = b.WriteString("</conversation>\n\nContinue the conversation as the assistant. Reply with only your next message.")
-	return geminiWebPromptPlan{Prompt: b.String(), Tools: tools, RequireTool: requireTool && len(tools) > 0}, nil
+	return geminiWebPromptPlan{Prompt: b.String(), Attachments: attachments, Tools: tools, RequireTool: requireTool && len(tools) > 0}, nil
+}
+
+var geminiWebBase64URLSafe = strings.NewReplacer("-", "+", "_", "/")
+
+// geminiWebMaxAttachments is the most files the Gemini app accepts with one
+// prompt.
+const geminiWebMaxAttachments = 10
+
+// geminiWebTakeAttachments moves the inlineData parts of one content into
+// attachments and puts a text marker in each one's place, so the flattened
+// prompt still says which turn a file belongs to.
+func geminiWebTakeAttachments(content map[string]any, attachments []geminiweb.Attachment) ([]geminiweb.Attachment, error) {
+	parts, _ := content["parts"].([]any)
+	for i, p := range parts {
+		part, _ := p.(map[string]any)
+		inline, ok := part["inlineData"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if len(attachments) >= geminiWebMaxAttachments {
+			return nil, fmt.Errorf("gemini web provider accepts at most %d attachments per request", geminiWebMaxAttachments)
+		}
+		mimeType, _ := inline["mimeType"].(string)
+		encoded, _ := inline["data"].(string)
+		// Like the Gemini API, accept standard and URL-safe base64, padded or not.
+		data, err := base64.RawStdEncoding.DecodeString(strings.TrimRight(geminiWebBase64URLSafe.Replace(strings.TrimSpace(encoded)), "="))
+		if err != nil || len(data) == 0 {
+			return nil, fmt.Errorf("attachment %d has invalid inlineData base64", len(attachments)+1)
+		}
+		att := geminiweb.Attachment{MimeType: strings.TrimSpace(mimeType), Data: data}
+		att.Name = geminiweb.AttachmentName(att, len(attachments))
+		attachments = append(attachments, att)
+		parts[i] = map[string]any{"text": fmt.Sprintf("[Attachment %d: %s]", len(attachments), att.Name)}
+	}
+	return attachments, nil
 }
 
 func geminiWebLegacyPrompt(root map[string]any, contents []any) (string, error) {
@@ -182,19 +225,16 @@ func geminiWebLegacyPrompt(root map[string]any, contents []any) (string, error) 
 	return strings.Join(parts, "\n"), nil
 }
 
-func geminiWebHasMedia(raw any) bool {
+func geminiWebHasFileData(raw any) bool {
 	switch v := raw.(type) {
 	case map[string]any:
-		if _, ok := v["inlineData"]; ok {
-			return true
-		}
 		if _, ok := v["fileData"]; ok {
 			return true
 		}
-		return geminiWebHasMedia(v["parts"])
+		return geminiWebHasFileData(v["parts"])
 	case []any:
 		for _, item := range v {
-			if geminiWebHasMedia(item) {
+			if geminiWebHasFileData(item) {
 				return true
 			}
 		}

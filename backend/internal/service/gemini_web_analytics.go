@@ -64,6 +64,8 @@ type geminiWebAttemptRecord struct {
 	Tools         int    `json:"tools,omitempty"`
 	Thinking      bool   `json:"thinking,omitempty"`
 	PromptChars   int    `json:"prompt_chars,omitempty"`
+	Attachments   int    `json:"attachments,omitempty"`
+	UploadMs      int64  `json:"upload_ms,omitempty"`
 	// Attempt is the account switch count of the request: 0 for the first
 	// account, 1 after one failover, and so on.
 	Attempt int `json:"attempt"`
@@ -184,12 +186,15 @@ func (s *GeminiMessagesCompatService) recordGeminiWebAttempt(ctx context.Context
 	rec := geminiWebAttemptRecord{
 		Type: "attempt", Time: time.Now().UTC(), AccountID: account.ID,
 		Model: model, ResponseModel: result.ResponseModel, Protocol: info.Protocol, Stream: info.Stream,
-		Tools: info.Tools, Thinking: thinking, PromptChars: t.PromptChars,
+		Tools: info.Tools, Thinking: thinking, PromptChars: t.PromptChars, Attachments: t.Attachments,
 		AccountInflight: inflight, SinceAccountLastMs: sinceLast,
 		Outcome: geminiWebAttemptOutcome(result, err, phrase), GenerationFailed: result.GenerationFailed,
 		PhraseMatch: phrase, UpstreamStatus: t.Status, TextChars: utf8.RuneCountInString(result.Text),
 		SessionMs: geminiWebStageMs(t.Session), HeadersMs: geminiWebStageMs(t.Headers),
 		FirstTextMs: geminiWebStageMs(t.FirstText), TotalMs: geminiWebStageMs(t.Total),
+	}
+	if t.Attachments > 0 {
+		rec.UploadMs = geminiWebStageMs(t.Upload)
 	}
 	geminiWebFillRequestFacts(ctx, &rec)
 	if err != nil {

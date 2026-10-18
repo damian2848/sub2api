@@ -58,10 +58,10 @@ func (s *GeminiMessagesCompatService) geminiWebClient() *geminiweb.Client {
 }
 
 func (s *GeminiMessagesCompatService) callGeminiWeb(ctx context.Context, account *Account, model, prompt string, thinking bool) (geminiweb.Result, error) {
-	return s.callGeminiWebWithCallback(ctx, account, model, prompt, thinking, nil)
+	return s.callGeminiWebWithCallback(ctx, account, model, geminiWebPromptPlan{Prompt: prompt}, thinking, nil)
 }
 
-func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Context, account *Account, model, prompt string, thinking bool, onResult func(geminiweb.Result) error) (geminiweb.Result, error) {
+func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Context, account *Account, model string, plan geminiWebPromptPlan, thinking bool, onResult func(geminiweb.Result) error) (geminiweb.Result, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	if _, ok := geminiweb.LookupModel(model); !ok {
@@ -87,7 +87,7 @@ func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Cont
 		return s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 	}
 	inflight, sinceLast, done := s.geminiWebActivity.begin(account.ID, time.Now())
-	result, err := s.geminiWebClient().Complete(requestCtx, cred, geminiweb.Request{Model: model, Prompt: prompt, Thinking: thinking, OnResult: onResult}, do)
+	result, err := s.geminiWebClient().Complete(requestCtx, cred, geminiweb.Request{Model: model, Prompt: plan.Prompt, Attachments: plan.Attachments, Thinking: thinking, OnResult: onResult}, do)
 	done()
 	logGeminiWebTiming(ctx, account, model, result, err)
 	s.recordGeminiWebAttempt(ctx, account, model, thinking, inflight, sinceLast, result, err)
@@ -144,6 +144,8 @@ func logGeminiWebTiming(ctx context.Context, account *Account, model string, res
 		zap.Int64("account_id", account.ID),
 		zap.String("model", model),
 		zap.Int("prompt_chars", t.PromptChars),
+		zap.Int("attachments", t.Attachments),
+		zap.Int64("upload_ms", geminiWebStageMs(t.Upload)),
 		zap.Int("upstream_status", t.Status),
 		zap.Int64("session_ms", geminiWebStageMs(t.Session)),
 		zap.Int64("headers_ms", geminiWebStageMs(t.Headers)),
@@ -170,18 +172,26 @@ func geminiWebStageMs(d time.Duration) int64 {
 	return d.Milliseconds()
 }
 
-func webUsageWithThinking(prompt, answer, thinking string) ClaudeUsage {
-	return ClaudeUsage{InputTokens: estimateTokensForText(prompt), OutputTokens: estimateTokensForText(answer) + estimateTokensForText(thinking)}
+// geminiWebAttachmentTokens is the input estimate for one attachment. Gemini
+// Web reports no usage; this is what the Gemini API charges for an image.
+const geminiWebAttachmentTokens = 258
+
+func geminiWebInputTokens(plan geminiWebPromptPlan) int {
+	return estimateTokensForText(plan.Prompt) + geminiWebAttachmentTokens*len(plan.Attachments)
+}
+
+func webUsageWithThinking(plan geminiWebPromptPlan, answer, thinking string) ClaudeUsage {
+	return ClaudeUsage{InputTokens: geminiWebInputTokens(plan), OutputTokens: estimateTokensForText(answer) + estimateTokensForText(thinking)}
 }
 
 func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context, c *gin.Context, account *Account, originalModel, action string, stream bool, body []byte) (*ForwardResult, error) {
 	start := time.Now()
 	if action == "countTokens" {
-		prompt, err := geminiWebPrompt(body)
+		plan, err := geminiWebBuildPrompt(body)
 		if err != nil {
 			return nil, s.writeGoogleError(c, http.StatusBadRequest, err.Error())
 		}
-		c.JSON(http.StatusOK, gin.H{"totalTokens": estimateTokensForText(prompt)})
+		c.JSON(http.StatusOK, gin.H{"totalTokens": geminiWebInputTokens(plan)})
 		return &ForwardResult{Model: originalModel, UpstreamModel: account.GetMappedModel(originalModel), Usage: ClaudeUsage{}}, nil
 	}
 	if action != "generateContent" && action != "streamGenerateContent" {
@@ -191,7 +201,6 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 	if err != nil {
 		return nil, s.writeGoogleError(c, http.StatusBadRequest, err.Error())
 	}
-	prompt := plan.Prompt
 	mapped := account.GetMappedModel(originalModel)
 	ctx = withGeminiWebCallInfo(ctx, geminiWebCallInfo{Protocol: "native", Stream: stream || action == "streamGenerateContent", Tools: len(plan.Tools)})
 	var streamWriter *geminiWebNativeStreamWriter
@@ -206,7 +215,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 		streamWriter.start = start
 		onResult = streamWriter.WriteResult
 	}
-	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, prompt, strings.Contains(strings.ToLower(originalModel), "thinking"), onResult)
+	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, plan, strings.Contains(strings.ToLower(originalModel), "thinking"), onResult)
 	if err == nil {
 		err = s.checkGeminiWebCannedReply(ctx, account, result, s.geminiWebCannedReplies(ctx))
 	}
@@ -216,7 +225,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 		}
 		return nil, geminiWebFailoverError(err)
 	}
-	usage := webUsageWithThinking(prompt, result.Text, result.Thinking)
+	usage := webUsageWithThinking(plan, result.Text, result.Thinking)
 	if stream || action == "streamGenerateContent" {
 		if err := streamWriter.Finish(result, usage); err != nil {
 			return nil, err
@@ -639,14 +648,14 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context
 	mapped := account.GetMappedModel(req.model)
 	thinking := strings.Contains(strings.ToLower(req.model), "thinking")
 	if !req.stream {
-		result, err := s.callGeminiWeb(ctx, account, mapped, req.plan.Prompt, thinking)
+		result, err := s.callGeminiWebWithCallback(ctx, account, mapped, req.plan, thinking, nil)
 		if err == nil {
 			err = s.checkGeminiWebCannedReply(ctx, account, result, s.geminiWebCannedReplies(ctx))
 		}
 		if err != nil {
 			return nil, geminiWebFailoverError(err)
 		}
-		usage := webUsageWithThinking(req.plan.Prompt, result.Text, result.Thinking)
+		usage := webUsageWithThinking(req.plan, result.Text, result.Thinking)
 		text, calls := geminiWebExtractToolCalls(result.Text, req.plan)
 		raw, geminiResp := geminiWebGeminiResponse(text, calls, usage, result.ResponseModel)
 		req.writeJSON(raw, geminiResp, usage)
@@ -659,7 +668,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context
 	pipe := newGeminiWebPipeStream(req.plan, req.includeThought, cancel, req.handleStream)
 	pipe.canned = s.geminiWebCannedReplies(ctx)
 	pipe.pingUntilFirstToken(c)
-	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, req.plan.Prompt, thinking, pipe.OnResult)
+	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, req.plan, thinking, pipe.OnResult)
 	if err == nil {
 		err = s.checkGeminiWebCannedReply(ctx, account, result, pipe.canned)
 	}
@@ -675,7 +684,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context
 		}
 		return nil, geminiWebCommittedStreamError(c, err, req.writeStreamError)
 	}
-	usage := webUsageWithThinking(req.plan.Prompt, result.Text, result.Thinking)
+	usage := webUsageWithThinking(req.plan, result.Text, result.Thinking)
 	streamResult, err := pipe.Finish(result, usage)
 	if err != nil {
 		return nil, err
