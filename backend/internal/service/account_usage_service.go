@@ -1144,6 +1144,7 @@ func (s *AccountUsageService) getGeminiWebUsage(ctx context.Context, account *Ac
 			usage.SevenDay = progress
 		}
 	}
+	applyGeminiWebQuotaRateLimit(ctx, s.accountRepo, account, result.Quota, now)
 	if usage.FiveHour == nil && usage.SevenDay == nil {
 		usage.Error = "Gemini Web returned no usage windows"
 		usage.ErrorCode = "network_error"
