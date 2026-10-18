@@ -733,7 +733,7 @@ func (p *geminiWebPipeStream) OnResult(result geminiweb.Result) error {
 	// be the start of a canned failure message.
 	text := ""
 	if !p.plan.toolsEnabled() {
-		text, p.released = geminiWebHoldPossibleCannedReply(geminiWebStreamableText(result.Text, false), p.sentText, p.released, p.canned)
+		text, p.released = geminiWebHoldPossibleCannedReply(result, geminiWebStreamableText(result.Text, false), p.sentText, p.released, p.canned)
 	}
 	chunk := p.chunkLocked(text, result.Thinking, nil, false, ClaudeUsage{}, result.ResponseModel)
 	if chunk == nil {

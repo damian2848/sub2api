@@ -40,8 +40,35 @@ func TestGeminiWebNativeStreamWriterAbortBeforeCommitAllowsFailover(t *testing.T
 	}
 }
 
+// Heartbeats carry no content: an attempt that only sent them (or found
+// earlier output on the response) still switches accounts on the same stream.
+func TestGeminiWebNativeStreamWriterHeartbeatOnlyAbortFailsOver(t *testing.T) {
+	for _, commitMode := range []string{"heartbeat", "earlier-concurrency-heartbeat"} {
+		t.Run(commitMode, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+			if commitMode == "earlier-concurrency-heartbeat" {
+				_, _ = c.Writer.Write([]byte("\n\n"))
+			}
+			w := newGeminiWebNativeStreamWriter(c, "gemini-pro", nil)
+			w.mu.Lock()
+			_ = w.writeHeartbeatLocked()
+			w.mu.Unlock()
+			err := w.Abort(geminiweb.ErrCannedReply)
+			var failover *UpstreamFailoverError
+			if !errors.As(err, &failover) || failover.Reason != GeminiWebCannedReplyReason {
+				t.Fatalf("heartbeat-only Abort() = %v, want canned-reply failover", err)
+			}
+			if body := strings.ReplaceAll(recorder.Body.String(), "\n", ""); body != "" {
+				t.Fatalf("only heartbeats may precede a failover, got %q", recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestGeminiWebNativeStreamWriterCommittedAbortEmitsGoogleError(t *testing.T) {
-	for _, commitMode := range []string{"heartbeat", "content", "earlier-concurrency-heartbeat"} {
+	for _, commitMode := range []string{"content"} {
 		t.Run(commitMode, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(recorder)

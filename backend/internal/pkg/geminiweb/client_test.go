@@ -390,3 +390,26 @@ func TestFrameParserKeepsTextAcrossEveryChunkBoundary(t *testing.T) {
 		}
 	}
 }
+
+// payload[31] == true is Google's failed-generation flag; it is set on
+// canned failure replies and absent from real answers and policy refusals.
+func TestApplyFrameGenerationFailedFlag(t *testing.T) {
+	frameWith := func(flag any) frame {
+		payload := make([]any, 40)
+		payload[4] = []any{[]any{nil, []any{"text"}}}
+		payload[31] = flag
+		raw, _ := json.Marshal(payload)
+		return frame{payload: string(raw)}
+	}
+	if got := applyFrame(Result{}, frameWith(true)); !got.GenerationFailed {
+		t.Fatal("payload[31]=true not recognized")
+	}
+	for _, flag := range []any{nil, false, "true", 1} {
+		if got := applyFrame(Result{}, frameWith(flag)); got.GenerationFailed {
+			t.Fatalf("payload[31]=%#v must not mark the reply failed", flag)
+		}
+	}
+	if got := applyFrame(Result{GenerationFailed: true}, frameWith(nil)); !got.GenerationFailed {
+		t.Fatal("a later frame without the flag must not clear it")
+	}
+}

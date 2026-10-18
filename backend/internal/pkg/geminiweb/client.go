@@ -59,11 +59,17 @@ type Result struct {
 	// requested model. Empty means Google did not identify the model used.
 	ResponseModel         string
 	ResponseModelConflict bool
-	Metadata              []any
-	CID                   string
-	RID                   string
-	RequestID             string
-	UpdatedCookie         string
+	// GenerationFailed is set when Google flags the reply as a failed
+	// generation (payload[31] == true). Gemini Web then returns a canned
+	// failure message, such as "I seem to be encountering an error...", as
+	// answer text with HTTP 200; real answers and policy refusals do not set
+	// the flag.
+	GenerationFailed bool
+	Metadata         []any
+	CID              string
+	RID              string
+	RequestID        string
+	UpdatedCookie    string
 	// Timing is filled in by Complete, on success and on error, so callers can
 	// tell where a slow or failed request spent its time.
 	Timing Timing
@@ -971,6 +977,9 @@ func applyFrame(r Result, f frame) Result {
 			}
 			r.ResponseModel = model
 		}
+	}
+	if failed, ok := topAt(top, 31).(bool); ok && failed {
+		r.GenerationFailed = true
 	}
 	if m, ok := topAt(top, 1).([]any); ok {
 		r.Metadata = m

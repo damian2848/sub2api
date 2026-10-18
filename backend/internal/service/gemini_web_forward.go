@@ -204,7 +204,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 	}
 	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, prompt, strings.Contains(strings.ToLower(originalModel), "thinking"), onResult)
 	if err == nil {
-		err = geminiWebCheckCannedReply(ctx, account, result, s.geminiWebCannedReplies(ctx))
+		err = s.checkGeminiWebCannedReply(ctx, account, result, s.geminiWebCannedReplies(ctx))
 	}
 	if err != nil {
 		if streamWriter != nil {
@@ -277,17 +277,22 @@ func writeGeminiWebNativeJSON(c *gin.Context, model, text string, calls []gemini
 // request finishes, keeping idle connections alive without triggering the
 // older Gemini CLI parsers that reject comment heartbeats.
 type geminiWebNativeStreamWriter struct {
-	c             *gin.Context
-	model         string
-	plan          geminiWebPromptPlan
-	start         time.Time
-	firstTokenMs  *int
-	mu            sync.Mutex
-	text          string
-	thinking      string
-	released      bool
-	canned        geminiweb.CannedReplies
-	committed     bool
+	c            *gin.Context
+	model        string
+	plan         geminiWebPromptPlan
+	start        time.Time
+	firstTokenMs *int
+	mu           sync.Mutex
+	text         string
+	thinking     string
+	released     bool
+	canned       geminiweb.CannedReplies
+	committed    bool
+	// contentWritten is set once a data event (not a heartbeat) was written.
+	// Until then a failed attempt can still switch accounts on this response.
+	contentWritten bool
+	// sizeBefore is GeminiWebPingAdjustedWrittenSize when the writer started.
+	sizeBefore    int
 	stopped       bool
 	writeErr      error
 	cancel        context.CancelFunc
@@ -303,13 +308,18 @@ func newGeminiWebNativeStreamWriter(c *gin.Context, model string, cancel context
 		cancel:        cancel,
 		stopKeepAlive: make(chan struct{}),
 		keepAliveDone: make(chan struct{}),
+		sizeBefore:    GeminiWebPingAdjustedWrittenSize(c),
 	}
 	go w.keepAlive()
 	return w
 }
 
+// geminiWebNativeHeartbeatInterval is how often native Gemini Web streams send
+// a blank-line heartbeat while no frame is due.
+var geminiWebNativeHeartbeatInterval = 5 * time.Second
+
 func (w *geminiWebNativeStreamWriter) keepAlive() {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(geminiWebNativeHeartbeatInterval)
 	defer ticker.Stop()
 	defer close(w.keepAliveDone)
 	for {
@@ -345,6 +355,12 @@ func (w *geminiWebNativeStreamWriter) commitLocked() {
 	if w.committed {
 		return
 	}
+	// An earlier attempt that failed over after heartbeats already committed
+	// the response; keep writing on it.
+	if w.c.Writer.Written() {
+		w.committed = true
+		return
+	}
 	w.c.Writer.Header().Set("Content-Type", "text/event-stream")
 	w.c.Writer.Header().Set("Cache-Control", "no-cache")
 	w.c.Writer.Header().Set("Connection", "keep-alive")
@@ -360,6 +376,10 @@ func (w *geminiWebNativeStreamWriter) flushLocked() {
 }
 
 func (w *geminiWebNativeStreamWriter) writeLocked(data []byte) error {
+	return w.writeFrameLocked(data, false)
+}
+
+func (w *geminiWebNativeStreamWriter) writeFrameLocked(data []byte, heartbeat bool) error {
 	if w.writeErr != nil {
 		return w.writeErr
 	}
@@ -368,6 +388,11 @@ func (w *geminiWebNativeStreamWriter) writeLocked(data []byte) error {
 	}
 	w.commitLocked()
 	n, err := w.c.Writer.Write(data)
+	if heartbeat {
+		addGeminiWebPingBytes(w.c, n)
+	} else if n > 0 {
+		w.contentWritten = true
+	}
 	if err == nil && n != len(data) {
 		err = io.ErrShortWrite
 	}
@@ -385,8 +410,9 @@ func (w *geminiWebNativeStreamWriter) writeLocked(data []byte) error {
 func (w *geminiWebNativeStreamWriter) writeHeartbeatLocked() error {
 	// Keep the heartbeat as an empty SSE event. Gemini CLI's bundled parser
 	// accepts the blank-line form across its supported SDK versions, while
-	// comment heartbeats are rejected by some older versions.
-	return w.writeLocked([]byte("\n\n"))
+	// comment heartbeats are rejected by some older versions. Heartbeats are
+	// not content: they are left out when deciding whether to fail over.
+	return w.writeFrameLocked([]byte("\n\n"), true)
 }
 
 func geminiWebCumulativeDelta(previous, current string) (delta, next string) {
@@ -406,8 +432,13 @@ func geminiWebCumulativeDelta(previous, current string) (delta, next string) {
 }
 
 func (w *geminiWebNativeStreamWriter) writeResultLocked(result geminiweb.Result) error {
-	text := geminiWebStreamableText(result.Text, w.plan.toolsEnabled())
-	text, w.released = geminiWebHoldPossibleCannedReply(text, w.text, w.released, w.canned)
+	// With tools, answer text is held until the reply is complete, like the
+	// compat streams: Gemini Web can replace a half-written answer with a
+	// canned failure message, and only an unsent answer can fail over.
+	text := ""
+	if !w.plan.toolsEnabled() {
+		text, w.released = geminiWebHoldPossibleCannedReply(result, result.Text, w.text, w.released, w.canned)
+	}
 	return w.writeSnapshotLocked(text, result.Thinking, nil, nil)
 }
 
@@ -482,10 +513,11 @@ func (w *geminiWebNativeStreamWriter) Abort(cause error) error {
 	if err := w.c.Request.Context().Err(); err != nil {
 		return err
 	}
-	// Account switching is only safe before any response has been sent. The
-	// concurrency-wait path may have committed a heartbeat before this writer
-	// was created, so inspect the Gin writer as well as our own state.
-	if !w.committed && !w.c.Writer.Written() {
+	// Account switching is safe while the client has received no data event:
+	// only blank-line heartbeats (ours, or output that was already there when
+	// this writer started, such as a concurrency-wait heartbeat). The next
+	// account then writes its stream on the same response.
+	if !w.contentWritten && GeminiWebPingAdjustedWrittenSize(w.c) == w.sizeBefore {
 		return geminiWebFailoverError(cause)
 	}
 	status, message := geminiWebStreamErrorStatus(cause)
@@ -602,7 +634,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context
 	if !req.stream {
 		result, err := s.callGeminiWeb(ctx, account, mapped, req.plan.Prompt, thinking)
 		if err == nil {
-			err = geminiWebCheckCannedReply(ctx, account, result, s.geminiWebCannedReplies(ctx))
+			err = s.checkGeminiWebCannedReply(ctx, account, result, s.geminiWebCannedReplies(ctx))
 		}
 		if err != nil {
 			return nil, geminiWebFailoverError(err)
@@ -622,7 +654,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context
 	pipe.pingUntilFirstToken(c)
 	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, req.plan.Prompt, thinking, pipe.OnResult)
 	if err == nil {
-		err = geminiWebCheckCannedReply(ctx, account, result, pipe.canned)
+		err = s.checkGeminiWebCannedReply(ctx, account, result, pipe.canned)
 	}
 	if err != nil {
 		started := pipe.Abort(err)
@@ -649,11 +681,15 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context
 // switches accounts while the client has received no content, and otherwise
 // ends the stream with an error.
 func geminiWebCheckCannedReply(ctx context.Context, account *Account, result geminiweb.Result, canned geminiweb.CannedReplies) error {
-	if !canned.Is(result.Text) {
+	phrase := canned.Is(result.Text)
+	if !result.GenerationFailed && !phrase {
 		return nil
 	}
 	logger.FromContext(ctx).Warn("gemini_web.canned_reply",
-		zap.Int64("account_id", account.ID), zap.String("text", result.Text))
+		zap.Int64("account_id", account.ID),
+		zap.Bool("generation_failed", result.GenerationFailed),
+		zap.Bool("phrase_match", phrase),
+		zap.String("text", result.Text))
 	return geminiweb.ErrCannedReply
 }
 
@@ -676,10 +712,11 @@ func geminiWebStreamErrorStatus(cause error) (int, string) {
 // the client as content. Once the text diverges it is released. A later
 // snapshot that rewrites the text already sent (sent is not its prefix) is
 // held again while it could be a canned reply: Gemini Web replaces a failed
-// answer wholesale.
-func geminiWebHoldPossibleCannedReply(text, sent string, released bool, canned geminiweb.CannedReplies) (string, bool) {
-	if text == "" {
-		return text, released
+// answer wholesale. A snapshot Google flags as a failed generation is always
+// held.
+func geminiWebHoldPossibleCannedReply(result geminiweb.Result, text, sent string, released bool, canned geminiweb.CannedReplies) (string, bool) {
+	if text == "" || result.GenerationFailed {
+		return "", released
 	}
 	if released && strings.HasPrefix(text, sent) {
 		return text, true

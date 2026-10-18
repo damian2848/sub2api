@@ -48,10 +48,10 @@ func (s *GeminiMessagesCompatService) geminiWebCannedReplies(ctx context.Context
 // canned failure phrases can be spotted, and saves the raw response when the
 // reply is a known canned phrase or worded like one.
 func (s *GeminiMessagesCompatService) observeGeminiWebShortReply(ctx context.Context, account *Account, model string, result geminiweb.Result) {
-	if utf8.RuneCountInString(result.Text) > geminiweb.SuspectedCannedReplyMaxChars {
+	if utf8.RuneCountInString(result.Text) > geminiweb.SuspectedCannedReplyMaxChars && !result.GenerationFailed {
 		return
 	}
-	canned := s.geminiWebCannedReplies(ctx).Is(result.Text)
+	canned := result.GenerationFailed || s.geminiWebCannedReplies(ctx).Is(result.Text)
 	suspected := !canned && geminiweb.SuspectedCannedReply(result.Text)
 	logger.FromContext(ctx).Info("gemini_web.short_reply",
 		zap.Int64("account_id", account.ID),
@@ -60,6 +60,7 @@ func (s *GeminiMessagesCompatService) observeGeminiWebShortReply(ctx context.Con
 		zap.Int("prompt_chars", result.Timing.PromptChars),
 		zap.Int("text_chars", utf8.RuneCountInString(result.Text)),
 		zap.Bool("canned", canned),
+		zap.Bool("generation_failed", result.GenerationFailed),
 		zap.Bool("suspected", suspected),
 		zap.String("text", result.Text),
 	)

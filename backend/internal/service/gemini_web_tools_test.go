@@ -376,8 +376,8 @@ func TestGeminiWebNativeToolCalls(t *testing.T) {
 			require.Contains(t, out, `"functionCall":{"args":{"city":"Tokyo"},"name":"get_weather"}`)
 			require.Equal(t, stream, result.FirstTokenMs != nil, "native streams record first_token_ms")
 			if stream {
-				require.Contains(t, out, `"text":"Let me check"`)
-				require.Contains(t, out, `"text":" both cities."`)
+				require.Equal(t, 1, strings.Count(out, `"text":`), "with tools, answer text is held until the reply is complete")
+				require.Contains(t, out, `"text":"Let me check both cities."`)
 			}
 		})
 	}

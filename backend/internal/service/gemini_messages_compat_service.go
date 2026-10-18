@@ -71,6 +71,8 @@ type GeminiMessagesCompatService struct {
 	// settingService supplies the operator's extra Gemini Web canned failure
 	// phrases. Nil means only the built-in phrases are recognized.
 	settingService *SettingService
+	// geminiWebCanned counts recent canned replies per account for cooldowns.
+	geminiWebCanned geminiWebCannedTracker
 }
 
 func (s *GeminiMessagesCompatService) readUpstreamErrorBody(resp *http.Response) []byte {

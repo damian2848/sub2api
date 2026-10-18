@@ -944,13 +944,25 @@ func googlePlatformError(c *gin.Context, status int, message string) {
 // 与 Claude / OpenAI 格式错误同口径分类；errType 为空时不登记。
 func googleErrorWithType(c *gin.Context, status int, errType, code, message string) {
 	service.SetOpsLocalErrorType(c, errType, code)
-	c.JSON(status, gin.H{
+	body := gin.H{
 		"error": gin.H{
 			"code":    status,
 			"message": message,
 			"status":  googleapi.HTTPStatusToGoogleStatus(status),
 		},
-	})
+	}
+	// 流已提交（如 Gemini Web 只发过心跳后所有账号都失败）：以 SSE 错误事件结束，
+	// 不能在事件流后追加裸 JSON。
+	if c.Writer.Written() && strings.Contains(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
+		service.MarkOpsStreamError(c, errType, message, status)
+		payload, _ := json.Marshal(body)
+		_, _ = c.Writer.Write([]byte("data: " + string(payload) + "\n\n"))
+		if flusher, ok := c.Writer.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		return
+	}
+	c.JSON(status, body)
 }
 
 // googleClientErrorType 返回客户端请求类 4xx 状态码对应的 ops 错误类型；其余状态码返回空串。
