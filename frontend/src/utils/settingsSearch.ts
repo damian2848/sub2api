@@ -37,6 +37,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   { tab: 'gateway', id: 'upstream-billing-probe', titleKey: 'admin.settings.upstreamBillingProbe.title' },
   { tab: 'gateway', id: 'ollama-cloud-usage', titleKey: 'admin.settings.ollamaCloudUsage.title' },
   { tab: 'gateway', id: 'opencode-go-usage', titleKey: 'admin.settings.opencodeGoUsage.title' },
+  { tab: 'gateway', id: 'gemini-web-canned-replies', titleKey: 'admin.settings.geminiWebCannedReplies.title' },
   { tab: 'gateway', id: 'scheduling', titleKey: 'admin.settings.scheduling.title' },
   { tab: 'gateway', id: 'gateway-forwarding', titleKey: 'admin.settings.gatewayForwarding.title' },
   { tab: 'gateway', id: 'web-search-emulation', titleKey: 'admin.settings.webSearchEmulation.title' },

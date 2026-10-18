@@ -174,6 +174,7 @@ type SettingService struct {
 
 	cyberSessionBlockRuntimeMu    sync.Mutex
 	cyberSessionBlockRuntimeCache atomic.Value // *cachedCyberSessionBlockRuntime
+	geminiWebCannedRepliesCache   atomic.Value // *cachedGeminiWebCannedReplies
 	cyberSessionBlockRuntimeSF    singleflight.Group
 
 	// panelRateLimitCache 面板 API 限流配置进程内缓存（*cachedPanelRateLimitSettings）。

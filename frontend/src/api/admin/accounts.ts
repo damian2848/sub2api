@@ -38,7 +38,8 @@ import type {
   GrokMediaEligibilityMode,
   GrokMediaEligibilityState,
   OpenCodeGoUsageSettings,
-  OpenCodeGoUsageState
+  OpenCodeGoUsageState,
+  GeminiWebCannedReplySettings
 } from '@/types'
 
 /**
@@ -1496,6 +1497,18 @@ export async function updateOpenCodeGoUsageSettings(
   return data
 }
 
+export async function getGeminiWebCannedReplies(): Promise<GeminiWebCannedReplySettings> {
+  const { data } = await apiClient.get<GeminiWebCannedReplySettings>('/admin/accounts/gemini-web/canned-replies')
+  return data
+}
+
+export async function updateGeminiWebCannedReplies(custom: string[]): Promise<GeminiWebCannedReplySettings> {
+  const { data } = await apiClient.put<GeminiWebCannedReplySettings>('/admin/accounts/gemini-web/canned-replies', {
+    custom
+  })
+  return data
+}
+
 export async function getOpenCodeGoUsage(id: number): Promise<OpenCodeGoUsageState> {
   const { data } = await apiClient.get<OpenCodeGoUsageState>(`/admin/accounts/${id}/opencode-go-usage`)
   return data
@@ -1686,6 +1699,8 @@ export const accountsAPI = {
   streamManualCodexHarvest,
   getOpenCodeGoUsageSettings,
   updateOpenCodeGoUsageSettings,
+  getGeminiWebCannedReplies,
+  updateGeminiWebCannedReplies,
   getOpenCodeGoUsage,
   setOpenCodeGoUsageAutoRefresh,
   refreshOpenCodeGoUsage

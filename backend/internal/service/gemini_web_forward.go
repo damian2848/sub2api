@@ -88,6 +88,9 @@ func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Cont
 	}
 	result, err := s.geminiWebClient().Complete(requestCtx, cred, geminiweb.Request{Model: model, Prompt: prompt, Thinking: thinking, OnResult: onResult}, do)
 	logGeminiWebTiming(ctx, account, model, result, err)
+	if err == nil {
+		s.observeGeminiWebShortReply(ctx, account, model, result)
+	}
 	if err == nil || (!errors.Is(err, geminiweb.ErrInvalidCredential) && !errors.Is(err, geminiweb.ErrRateLimited)) {
 		if live := s.geminiWebClient().CurrentCookie(cred); live != "" {
 			result.UpdatedCookie = live
@@ -195,12 +198,13 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 		defer cancel()
 		streamWriter = newGeminiWebNativeStreamWriter(c, originalModel, cancel)
 		streamWriter.plan = plan
+		streamWriter.canned = s.geminiWebCannedReplies(ctx)
 		streamWriter.start = start
 		onResult = streamWriter.WriteResult
 	}
 	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, prompt, strings.Contains(strings.ToLower(originalModel), "thinking"), onResult)
 	if err == nil {
-		err = geminiWebCheckCannedReply(ctx, account, result)
+		err = geminiWebCheckCannedReply(ctx, account, result, s.geminiWebCannedReplies(ctx))
 	}
 	if err != nil {
 		if streamWriter != nil {
@@ -282,6 +286,7 @@ type geminiWebNativeStreamWriter struct {
 	text          string
 	thinking      string
 	released      bool
+	canned        geminiweb.CannedReplies
 	committed     bool
 	stopped       bool
 	writeErr      error
@@ -402,7 +407,7 @@ func geminiWebCumulativeDelta(previous, current string) (delta, next string) {
 
 func (w *geminiWebNativeStreamWriter) writeResultLocked(result geminiweb.Result) error {
 	text := geminiWebStreamableText(result.Text, w.plan.toolsEnabled())
-	text, w.released = geminiWebHoldPossibleCannedReply(text, w.text, w.released)
+	text, w.released = geminiWebHoldPossibleCannedReply(text, w.text, w.released, w.canned)
 	return w.writeSnapshotLocked(text, result.Thinking, nil, nil)
 }
 
@@ -597,7 +602,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context
 	if !req.stream {
 		result, err := s.callGeminiWeb(ctx, account, mapped, req.plan.Prompt, thinking)
 		if err == nil {
-			err = geminiWebCheckCannedReply(ctx, account, result)
+			err = geminiWebCheckCannedReply(ctx, account, result, s.geminiWebCannedReplies(ctx))
 		}
 		if err != nil {
 			return nil, geminiWebFailoverError(err)
@@ -613,10 +618,11 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context
 	defer cancel()
 	sizeBefore := GeminiWebPingAdjustedWrittenSize(c)
 	pipe := newGeminiWebPipeStream(req.plan, req.includeThought, cancel, req.handleStream)
+	pipe.canned = s.geminiWebCannedReplies(ctx)
 	pipe.pingUntilFirstToken(c)
 	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, req.plan.Prompt, thinking, pipe.OnResult)
 	if err == nil {
-		err = geminiWebCheckCannedReply(ctx, account, result)
+		err = geminiWebCheckCannedReply(ctx, account, result, pipe.canned)
 	}
 	if err != nil {
 		started := pipe.Abort(err)
@@ -642,8 +648,8 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context
 // ErrCannedReply. The forward then fails, so the reply is never billed: it
 // switches accounts while the client has received no content, and otherwise
 // ends the stream with an error.
-func geminiWebCheckCannedReply(ctx context.Context, account *Account, result geminiweb.Result) error {
-	if !geminiweb.IsCannedReply(result.Text) {
+func geminiWebCheckCannedReply(ctx context.Context, account *Account, result geminiweb.Result, canned geminiweb.CannedReplies) error {
+	if !canned.Is(result.Text) {
 		return nil
 	}
 	logger.FromContext(ctx).Warn("gemini_web.canned_reply",
@@ -671,14 +677,14 @@ func geminiWebStreamErrorStatus(cause error) (int, string) {
 // snapshot that rewrites the text already sent (sent is not its prefix) is
 // held again while it could be a canned reply: Gemini Web replaces a failed
 // answer wholesale.
-func geminiWebHoldPossibleCannedReply(text, sent string, released bool) (string, bool) {
+func geminiWebHoldPossibleCannedReply(text, sent string, released bool, canned geminiweb.CannedReplies) (string, bool) {
 	if text == "" {
 		return text, released
 	}
 	if released && strings.HasPrefix(text, sent) {
 		return text, true
 	}
-	if geminiweb.CouldBecomeCannedReply(text) {
+	if canned.CouldBecome(text) {
 		return "", released
 	}
 	return text, true

@@ -561,6 +561,7 @@ type geminiWebPipeStream struct {
 	sentText     string
 	sentThinking string
 	released     bool
+	canned       geminiweb.CannedReplies
 	done         chan struct{}
 	result       *geminiStreamResult
 	handleErr    error
@@ -732,7 +733,7 @@ func (p *geminiWebPipeStream) OnResult(result geminiweb.Result) error {
 	// be the start of a canned failure message.
 	text := ""
 	if !p.plan.toolsEnabled() {
-		text, p.released = geminiWebHoldPossibleCannedReply(geminiWebStreamableText(result.Text, false), p.sentText, p.released)
+		text, p.released = geminiWebHoldPossibleCannedReply(geminiWebStreamableText(result.Text, false), p.sentText, p.released, p.canned)
 	}
 	chunk := p.chunkLocked(text, result.Thinking, nil, false, ClaudeUsage{}, result.ResponseModel)
 	if chunk == nil {

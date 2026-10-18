@@ -68,6 +68,9 @@ type GeminiMessagesCompatService struct {
 	cfg                       *config.Config
 	responseHeaderFilter      *responseheaders.CompiledHeaderFilter
 	geminiWeb                 *geminiweb.Client
+	// settingService supplies the operator's extra Gemini Web canned failure
+	// phrases. Nil means only the built-in phrases are recognized.
+	settingService *SettingService
 }
 
 func (s *GeminiMessagesCompatService) readUpstreamErrorBody(resp *http.Response) []byte {

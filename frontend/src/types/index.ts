@@ -1332,6 +1332,14 @@ export interface OpenCodeGoUsageState {
   snapshot?: OpenCodeGoUsageSnapshot
 }
 
+/** Canned failure messages that fail a Gemini Web reply (and skip billing). */
+export interface GeminiWebCannedReplySettings {
+  /** Always recognized; read-only. */
+  built_in: string[]
+  /** Operator-added phrases. */
+  custom: string[]
+}
+
 export interface OpenCodeGoUsageSettings {
   enabled: boolean
   /** Max wait while model requests keep arriving (minutes). */

@@ -84,10 +84,36 @@ contracts for:
 Streaming requests forward browser frames as they arrive on all three
 protocols. Claude Messages and Chat Completions reuse the native Gemini stream
 converters of regular Gemini accounts, so content blocks, `tool_use` /
-`tool_calls` and stop reasons match them. The client response starts with the
-first frame that carries content; a request that fails earlier can still fail
-over to another account. Gemini Web often spends several seconds before its
-first frame, which no gateway setting can shorten.
+`tool_calls` and stop reasons match them. When tools are declared, answer text
+is held until the reply is complete. If no content has arrived after 5 seconds,
+the response is committed and the client receives SSE comment pings; pings are
+not content, so until the first content is sent a failed request can still
+fail over to another account on the same response. Gemini Web often spends
+several seconds before its first frame, which no gateway setting can shorten.
+
+## Canned failure replies
+
+When generation fails, Gemini Web may replace the answer with a fixed message
+such as "I seem to be encountering an error. Can I try something else for
+you?" and still return HTTP 200. A reply that is entirely one of these phrases
+(ignoring case, extra whitespace and curly quotes) fails the request and is
+not billed: it fails over to another account while the client has received no
+content, and otherwise ends with an error saying the request was not billed.
+Streamed text that could still become a canned phrase is held back until it
+diverges.
+
+Three phrases are built in. Administrators can add more under Settings →
+Gateway → "Gemini Web canned error replies" (`GET`/`PUT
+/api/v1/admin/accounts/gemini-web/canned-replies`, stored in the
+`gemini_web_canned_replies` setting); changes apply to the next request.
+
+To find new phrases, every reply of at most 300 characters is logged in full as
+`gemini_web.short_reply` with `canned` and `suspected` flags. A reply that is
+canned, or short and worded like a failure, also has its raw response body
+saved under `$DATA_DIR/gemini-web-diagnostics/` (the newest 200 files are
+kept; the prompt and credentials are never saved). Each request also logs
+`gemini_web.completion_timing` with the time to headers, first frame and first
+text.
 
 Function calling is emulated, because the browser endpoint has no tool API.
 Declared tools (`functionDeclarations`, Claude `tools`, OpenAI `tools`) and

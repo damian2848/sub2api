@@ -5020,6 +5020,62 @@
             </div>
           </div>
 
+          <!-- Gemini Web canned error replies -->
+          <div class="card" data-testid="gemini-web-canned-replies-settings">
+            <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
+              <h2 id="settings-section-gemini-web-canned-replies" tabindex="-1" class="text-lg font-semibold text-gray-900 dark:text-white">
+                {{ t("admin.settings.geminiWebCannedReplies.title") }}
+              </h2>
+              <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                {{ t("admin.settings.geminiWebCannedReplies.description") }}
+              </p>
+            </div>
+            <div class="space-y-5 p-6">
+              <div v-if="geminiWebCannedLoading" class="flex items-center gap-2 text-gray-500">
+                <div class="h-4 w-4 animate-spin rounded-full border-b-2 border-primary-600"></div>
+                {{ t("common.loading") }}
+              </div>
+              <template v-else>
+                <div>
+                  <p class="mb-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                    {{ t("admin.settings.geminiWebCannedReplies.builtIn") }}
+                  </p>
+                  <ul class="space-y-1 text-sm text-gray-600 dark:text-gray-400" data-testid="gemini-web-canned-replies-built-in">
+                    <li v-for="phrase in geminiWebCannedBuiltIn" :key="phrase" class="break-words font-mono text-xs">
+                      {{ phrase }}
+                    </li>
+                  </ul>
+                </div>
+                <div>
+                  <label class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300" for="gemini-web-canned-replies-custom">
+                    {{ t("admin.settings.geminiWebCannedReplies.custom") }}
+                  </label>
+                  <textarea
+                    id="gemini-web-canned-replies-custom"
+                    v-model="geminiWebCannedCustomText"
+                    rows="4"
+                    class="input w-full font-mono text-xs"
+                    data-testid="gemini-web-canned-replies-custom"
+                  ></textarea>
+                  <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
+                    {{ t("admin.settings.geminiWebCannedReplies.customHint") }}
+                  </p>
+                </div>
+                <div class="flex justify-end border-t border-gray-100 pt-4 dark:border-dark-700">
+                  <button
+                    type="button"
+                    class="btn btn-primary btn-sm"
+                    :disabled="geminiWebCannedSaving"
+                    data-testid="gemini-web-canned-replies-save"
+                    @click="saveGeminiWebCannedReplies"
+                  >
+                    {{ geminiWebCannedSaving ? t("common.saving") : t("common.save") }}
+                  </button>
+                </div>
+              </template>
+            </div>
+          </div>
+
           <!-- Gateway Scheduling Settings -->
           <div class="card">
             <div
@@ -9585,6 +9641,11 @@ const opencodeGoUsageForm = reactive({
   debounce_minutes: 1,
 });
 
+const geminiWebCannedLoading = ref(true);
+const geminiWebCannedSaving = ref(false);
+const geminiWebCannedBuiltIn = ref<string[]>([]);
+const geminiWebCannedCustomText = ref("");
+
 // Overload Cooldown (529) 状态
 const overloadCooldownLoading = ref(true);
 const overloadCooldownSaving = ref(false);
@@ -12676,6 +12737,40 @@ async function saveOpenCodeGoUsageSettings() {
   }
 }
 
+function applyGeminiWebCannedReplies(settings: { built_in: string[]; custom: string[] }) {
+  geminiWebCannedBuiltIn.value = settings.built_in ?? [];
+  geminiWebCannedCustomText.value = (settings.custom ?? []).join("\n");
+}
+
+async function loadGeminiWebCannedReplies() {
+  geminiWebCannedLoading.value = true;
+  try {
+    applyGeminiWebCannedReplies(await adminAPI.accounts.getGeminiWebCannedReplies());
+  } catch (_error: unknown) {
+    // The built-in phrases still apply on the server when this cannot load.
+  } finally {
+    geminiWebCannedLoading.value = false;
+  }
+}
+
+async function saveGeminiWebCannedReplies() {
+  geminiWebCannedSaving.value = true;
+  try {
+    const custom = geminiWebCannedCustomText.value
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
+    applyGeminiWebCannedReplies(await adminAPI.accounts.updateGeminiWebCannedReplies(custom));
+    appStore.showSuccess(t("admin.settings.geminiWebCannedReplies.saved"));
+  } catch (error: unknown) {
+    appStore.showError(
+      extractApiErrorMessage(error, t("admin.settings.geminiWebCannedReplies.saveFailed")),
+    );
+  } finally {
+    geminiWebCannedSaving.value = false;
+  }
+}
+
 // Overload Cooldown 方法
 async function loadOverloadCooldownSettings() {
   overloadCooldownLoading.value = true;
@@ -13427,6 +13522,7 @@ onMounted(() => {
   loadUpstreamBillingProbeSettings();
   loadOllamaCloudUsageSettings();
   loadOpenCodeGoUsageSettings();
+  loadGeminiWebCannedReplies();
   loadOverloadCooldownSettings();
   loadRateLimit429CooldownSettings();
   loadPanelRateLimitSettings();

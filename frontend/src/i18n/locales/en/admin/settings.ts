@@ -556,6 +556,15 @@ export default {
         saved: 'OpenCode Go usage refresh settings saved',
         saveFailed: 'Failed to save OpenCode Go usage refresh settings'
       },
+      geminiWebCannedReplies: {
+        title: 'Gemini Web canned error replies',
+        description: 'When generation fails, Gemini Web replaces the answer with a fixed message (still HTTP 200). A reply that is entirely one of these phrases fails the request: it switches accounts if nothing has reached the client yet, otherwise returns an error, and is not billed.',
+        builtIn: 'Built-in phrases (always on)',
+        custom: 'Custom phrases',
+        customHint: 'One per line, up to 50 phrases of at most 300 characters. Matched against the whole reply, ignoring case, extra whitespace and curly quotes. Look for new phrases in the gemini_web.short_reply log.',
+        saved: 'Gemini Web canned error replies saved',
+        saveFailed: 'Failed to save Gemini Web canned error replies'
+      },
       gatewayForwarding: {
         title: 'Request Forwarding',
         description: 'Control how requests are forwarded to upstream OAuth accounts',

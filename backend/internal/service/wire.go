@@ -180,6 +180,25 @@ func ProvideTokenRefreshService(
 	return svc
 }
 
+// ProvideGeminiMessagesCompatService builds the Gemini compatibility service
+// with access to settings (Gemini Web canned failure phrases).
+func ProvideGeminiMessagesCompatService(
+	accountRepo AccountRepository,
+	groupRepo GroupRepository,
+	cache GatewayCache,
+	schedulerSnapshot *SchedulerSnapshotService,
+	tokenProvider *GeminiTokenProvider,
+	rateLimitService *RateLimitService,
+	httpUpstream HTTPUpstream,
+	antigravityGatewayService *AntigravityGatewayService,
+	cfg *config.Config,
+	settingService *SettingService,
+) *GeminiMessagesCompatService {
+	svc := NewGeminiMessagesCompatService(accountRepo, groupRepo, cache, schedulerSnapshot, tokenProvider, rateLimitService, httpUpstream, antigravityGatewayService, cfg)
+	svc.settingService = settingService
+	return svc
+}
+
 // ProvideGeminiWebCookieKeepaliveService creates the browser-cookie renewal
 // worker. It is a process-wide background job, so gateway-only replicas do
 // not independently rotate the same account credentials.
@@ -1044,7 +1063,7 @@ var ProviderSet = wire.NewSet(
 	NewAntigravityOAuthService,
 	ProvideOAuthRefreshAPI,
 	ProvideGeminiTokenProvider,
-	NewGeminiMessagesCompatService,
+	ProvideGeminiMessagesCompatService,
 	ProvideAntigravityTokenProvider,
 	ProvideGrokTokenProvider,
 	ProvideOpenAITokenProvider,

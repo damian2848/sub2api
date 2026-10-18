@@ -549,6 +549,15 @@ export default {
         saved: 'OpenCode Go 用量刷新设置已保存',
         saveFailed: '保存 OpenCode Go 用量刷新设置失败'
       },
+      geminiWebCannedReplies: {
+        title: 'Gemini Web 固定报错话术',
+        description: 'Gemini Web 生成失败时会用固定话术代替回答（仍返回 200）。完整回复匹配下列任一话术时，请求按失败处理：未向客户端发出内容时换账号重试，否则返回错误，且不计费。',
+        builtIn: '内置话术（始终生效）',
+        custom: '自定义话术',
+        customHint: '每行一条，最多 50 条、每条不超过 300 字。按整条回复匹配，忽略大小写、多余空白和弯引号。可在日志 gemini_web.short_reply 中查找新的话术。',
+        saved: 'Gemini Web 固定报错话术已保存',
+        saveFailed: '保存 Gemini Web 固定报错话术失败'
+      },
       gatewayForwarding: {
         title: '请求转发行为',
         description: '控制请求转发到上游 OAuth 账号时的行为',

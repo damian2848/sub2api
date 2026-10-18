@@ -67,6 +67,9 @@ type Result struct {
 	// Timing is filled in by Complete, on success and on error, so callers can
 	// tell where a slow or failed request spent its time.
 	Timing Timing
+	// Raw is the StreamGenerate response body as received, kept so callers can
+	// save suspicious replies for analysis. It holds no request data.
+	Raw []byte
 }
 
 // Timing records the stages of one Complete call. Each duration is measured
@@ -529,6 +532,7 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
+				result.Raw = raw.Bytes()
 				return result, readErr
 			}
 			break
@@ -543,6 +547,7 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 			}
 		}
 	}
+	result.Raw = raw.Bytes()
 	for _, code := range []string{"1016", "1037", "1050", "1052", "1060", "1013"} {
 		if strings.Contains(raw.String(), "BardErrorInfo") && strings.Contains(raw.String(), code) {
 			if code == "1016" {

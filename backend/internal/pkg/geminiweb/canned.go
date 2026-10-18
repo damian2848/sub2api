@@ -3,6 +3,7 @@ package geminiweb
 import (
 	"errors"
 	"strings"
+	"unicode/utf8"
 )
 
 // ErrCannedReply means Gemini Web replaced its answer with one of the fixed
@@ -10,33 +11,100 @@ import (
 // normal 200 with the message as answer text, so callers must check for it.
 var ErrCannedReply = errors.New("gemini web replied with a canned error message")
 
-// cannedReplies are the whole-answer fallbacks Gemini Web returns in place of
-// a failed generation, normalized by normalizeCannedReply.
-var cannedReplies = map[string]struct{}{
-	"i seem to be encountering an error. can i try something else for you?":                       {},
-	"i'm having a hard time fulfilling your request. can i help you with something else instead?": {},
-	"i encountered an error doing what you asked. could you try again?":                           {},
+// builtInCannedReplies are the whole-answer fallbacks seen from Gemini Web in
+// place of a failed generation. Operators can add more (see CannedReplies).
+var builtInCannedReplies = []string{
+	"I seem to be encountering an error. Can I try something else for you?",
+	"I'm having a hard time fulfilling your request. Can I help you with something else instead?",
+	"I encountered an error doing what you asked. Could you try again?",
 }
 
-// IsCannedReply reports whether text is entirely one of Gemini Web's canned
-// failure messages. A real answer that merely quotes one is not matched.
-func IsCannedReply(text string) bool {
-	_, ok := cannedReplies[normalizeCannedReply(text)]
+// BuiltInCannedReplies returns the canned failure messages that are always
+// recognized.
+func BuiltInCannedReplies() []string {
+	return append([]string(nil), builtInCannedReplies...)
+}
+
+// CannedReplies recognizes Gemini Web's canned failure messages: the built-in
+// ones plus any extra phrases. The zero value recognizes the built-in ones.
+type CannedReplies struct {
+	normalized map[string]struct{}
+}
+
+// NewCannedReplies returns a matcher for the built-in phrases plus extra.
+// Blank extra phrases are ignored.
+func NewCannedReplies(extra []string) CannedReplies {
+	set := make(map[string]struct{}, len(builtInCannedReplies)+len(extra))
+	for _, phrase := range append(BuiltInCannedReplies(), extra...) {
+		if normalized := NormalizeCannedReply(phrase); normalized != "" {
+			set[normalized] = struct{}{}
+		}
+	}
+	return CannedReplies{normalized: set}
+}
+
+var builtInMatcher = NewCannedReplies(nil)
+
+func (c CannedReplies) set() map[string]struct{} {
+	if c.normalized == nil {
+		return builtInMatcher.normalized
+	}
+	return c.normalized
+}
+
+// Is reports whether text is entirely one of the canned failure messages. A
+// real answer that merely quotes one is not matched.
+func (c CannedReplies) Is(text string) bool {
+	_, ok := c.set()[NormalizeCannedReply(text)]
 	return ok
 }
 
-func normalizeCannedReply(text string) string {
+// CouldBecome reports whether a partial answer is still a prefix of a canned
+// failure message. Streaming callers hold such text back until it either
+// diverges (a real answer) or completes as a canned reply.
+func (c CannedReplies) CouldBecome(partial string) bool {
+	normalized := NormalizeCannedReply(partial)
+	for reply := range c.set() {
+		if strings.HasPrefix(reply, normalized) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsCannedReply reports whether text is entirely a built-in canned message.
+func IsCannedReply(text string) bool { return builtInMatcher.Is(text) }
+
+// CouldBecomeCannedReply reports whether partial is a prefix of a built-in
+// canned message.
+func CouldBecomeCannedReply(partial string) bool { return builtInMatcher.CouldBecome(partial) }
+
+// NormalizeCannedReply is the form canned phrases are compared in: lower case,
+// straight apostrophes and single spaces.
+func NormalizeCannedReply(text string) string {
 	text = strings.NewReplacer("’", "'", "‘", "'").Replace(text)
 	return strings.ToLower(strings.Join(strings.Fields(text), " "))
 }
 
-// CouldBecomeCannedReply reports whether a partial answer is still a prefix of
-// a canned failure message. Streaming callers hold such text back until it
-// either diverges (a real answer) or completes as a canned reply.
-func CouldBecomeCannedReply(partial string) bool {
-	normalized := normalizeCannedReply(partial)
-	for reply := range cannedReplies {
-		if strings.HasPrefix(reply, normalized) {
+// SuspectedCannedReplyMaxChars bounds the replies SuspectedCannedReply looks at.
+const SuspectedCannedReplyMaxChars = 300
+
+// suspectedFailureWords are phrases canned failure messages are built from.
+var suspectedFailureWords = []string{
+	"error", "try again", "something else", "hard time", "unable to", "can't help", "cannot help",
+	"not able to", "went wrong", "can't do that", "not sure how to help",
+}
+
+// SuspectedCannedReply flags a short reply worded like a failure message that
+// may be a canned phrase not yet configured. It never fails a request: it only
+// marks replies worth keeping for analysis, so new canned phrases can be found.
+func SuspectedCannedReply(text string) bool {
+	if utf8.RuneCountInString(text) > SuspectedCannedReplyMaxChars {
+		return false
+	}
+	normalized := NormalizeCannedReply(text)
+	for _, word := range suspectedFailureWords {
+		if strings.Contains(normalized, word) {
 			return true
 		}
 	}

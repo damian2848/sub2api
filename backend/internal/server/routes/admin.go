@@ -410,6 +410,8 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 		accounts.POST("/:id/manual-harvest", h.Admin.Account.ManualCodexHarvest)
 		accounts.GET("/opencode-go-usage/settings", h.Admin.Account.GetOpenCodeGoUsageSettings)
 		accounts.PUT("/opencode-go-usage/settings", h.Admin.Account.UpdateOpenCodeGoUsageSettings)
+		accounts.GET("/gemini-web/canned-replies", h.Admin.Account.GetGeminiWebCannedReplies)
+		accounts.PUT("/gemini-web/canned-replies", h.Admin.Account.UpdateGeminiWebCannedReplies)
 		accounts.GET("/:id", h.Admin.Account.GetByID)
 		if h.Admin.OpenAIOAuthReauth != nil {
 			accounts.GET("/:id/openai-reauth", h.Admin.OpenAIOAuthReauth.GetStatus)

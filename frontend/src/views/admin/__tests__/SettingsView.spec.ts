@@ -42,6 +42,8 @@ const {
   updateUpstreamBillingProbeSettings,
   getOllamaCloudUsageSettings,
   updateOllamaCloudUsageSettings,
+  getGeminiWebCannedReplies,
+  updateGeminiWebCannedReplies,
   getGroups,
   listProxies,
   getProviders,
@@ -83,6 +85,8 @@ const {
     debounce_minutes: 1,
   }),
   updateOllamaCloudUsageSettings: vi.fn().mockImplementation(async (payload) => payload),
+  getGeminiWebCannedReplies: vi.fn(),
+  updateGeminiWebCannedReplies: vi.fn(),
   getGroups: vi.fn(),
   listProxies: vi.fn(),
   getProviders: vi.fn(),
@@ -119,6 +123,8 @@ vi.mock("@/api", () => ({
       updateUpstreamBillingProbeSettings,
       getOllamaCloudUsageSettings,
       updateOllamaCloudUsageSettings,
+      getGeminiWebCannedReplies,
+      updateGeminiWebCannedReplies,
     },
     groups: {
       getAll: getGroups,
@@ -742,6 +748,16 @@ describe("admin SettingsView payment visible method controls", () => {
       debounce_minutes: 1,
     });
     updateOllamaCloudUsageSettings.mockImplementation(async (payload) => payload);
+    getGeminiWebCannedReplies.mockReset();
+    getGeminiWebCannedReplies.mockResolvedValue({
+      built_in: ["I seem to be encountering an error. Can I try something else for you?"],
+      custom: ["Something went wrong."],
+    });
+    updateGeminiWebCannedReplies.mockReset();
+    updateGeminiWebCannedReplies.mockImplementation(async (custom: string[]) => ({
+      built_in: ["I seem to be encountering an error. Can I try something else for you?"],
+      custom,
+    }));
     getGroups.mockResolvedValue([]);
     listProxies.mockResolvedValue({
       items: [],
@@ -1990,6 +2006,28 @@ describe("admin SettingsView payment visible method controls", () => {
       interval_minutes: 90,
       debounce_minutes: 3,
     });
+  });
+
+  it("shows built-in Gemini Web canned replies and saves trimmed custom phrases", async () => {
+    const wrapper = mountView();
+
+    await flushPromises();
+    await openGatewayTab(wrapper);
+
+    const card = wrapper.get('[data-testid="gemini-web-canned-replies-settings"]');
+    expect(card.get('[data-testid="gemini-web-canned-replies-built-in"]').text()).toContain(
+      "I seem to be encountering an error.",
+    );
+    const textarea = card.get('[data-testid="gemini-web-canned-replies-custom"]');
+    expect((textarea.element as HTMLTextAreaElement).value).toBe("Something went wrong.");
+
+    await textarea.setValue("  Something went wrong.  \n\nPlease try later.\n");
+    await card.get('[data-testid="gemini-web-canned-replies-save"]').trigger("click");
+    await flushPromises();
+
+    expect(updateGeminiWebCannedReplies).toHaveBeenCalledWith(["Something went wrong.", "Please try later."]);
+    expect(showSuccess).toHaveBeenCalled();
+    expect((textarea.element as HTMLTextAreaElement).value).toBe("Something went wrong.\nPlease try later.");
   });
 
   it.each([false, true])("clears the OAuth rate without losing zero (weighted=%s)", async (weighted) => {

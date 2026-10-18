@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -57,6 +58,13 @@ func (u *cannedFirstGeminiWebUpstream) Do(req *http.Request, _ string, accountID
 
 func newGeminiWebCannedHandler(t *testing.T, upstream *cannedFirstGeminiWebUpstream) *geminiClientCancelFixture {
 	t.Helper()
+	// Canned replies save raw captures under DATA_DIR in the background; keep
+	// them out of the repo. Removal is best effort because a capture may land
+	// after the test ends.
+	dataDir, err := os.MkdirTemp("", "sub2api-handler-gemini-web-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dataDir) })
+	t.Setenv("DATA_DIR", dataDir)
 	f := newGeminiClientCancelFixture(t)
 	f.ctx = context.Background()
 	groupID := f.group.ID
