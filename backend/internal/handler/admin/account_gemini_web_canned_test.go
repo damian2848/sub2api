@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/geminiweb"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -53,7 +54,8 @@ func TestGeminiWebCannedRepliesEndpoints(t *testing.T) {
 
 	code, got := call(http.MethodGet, "")
 	require.Equal(t, http.StatusOK, code)
-	require.Len(t, got.BuiltIn, 3)
+	require.ElementsMatch(t, geminiweb.BuiltInCannedReplies(), got.BuiltIn)
+	require.Contains(t, got.BuiltIn, "Sorry, something went wrong. Please try your request again.")
 	require.Empty(t, got.Custom)
 
 	code, got = call(http.MethodPut, `{"custom":["  Gemini is busy.  ",""]}`)
