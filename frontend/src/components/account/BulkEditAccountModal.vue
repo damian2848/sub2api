@@ -484,7 +484,7 @@
               <ModelWhitelistSelector
                 v-model="allowedModels"
                 :model-mappings="modelMappings"
-                :platforms="targetSelectedPlatforms"
+                :platforms="modelCatalogPlatforms"
               />
 
               <p class="text-xs text-gray-500 dark:text-gray-400">
@@ -1594,6 +1594,7 @@ import { applyAccountRPMSettings } from '@/components/account/accountRpm'
 import Icon from '@/components/icons/Icon.vue'
 import {
   buildModelMappingObject as buildModelMappingPayload,
+  getModelCatalogPlatforms,
   getPresetMappingsByPlatform
 } from '@/composables/useModelWhitelist'
 import HeaderOverrideEditor from '@/components/account/HeaderOverrideEditor.vue'
@@ -1723,11 +1724,15 @@ const allAnthropicOAuthOrSetupToken = computed(() => {
   )
 })
 
+const modelCatalogPlatforms = computed(() =>
+  getModelCatalogPlatforms(targetSelectedPlatforms.value, targetSelectedTypes.value)
+)
+
 const filteredPresets = computed(() => {
-  if (targetSelectedPlatforms.value.length === 0) return []
+  if (modelCatalogPlatforms.value.length === 0) return []
 
   const dedupedPresets = new Map<string, ReturnType<typeof getPresetMappingsByPlatform>[number]>()
-  for (const platform of targetSelectedPlatforms.value) {
+  for (const platform of modelCatalogPlatforms.value) {
     for (const preset of getPresetMappingsByPlatform(platform)) {
       const key = `${preset.from}=>${preset.to}`
       if (!dedupedPresets.has(key)) {

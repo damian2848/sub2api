@@ -4,7 +4,14 @@ vi.mock('@/api/admin/accounts', () => ({
   getAntigravityDefaultModelMapping: vi.fn()
 }))
 
-import { buildModelMappingObject, getModelsByPlatform, getPresetMappingsByPlatform, splitModelMappingObject } from '../useModelWhitelist'
+import {
+  buildModelMappingObject,
+  getModelCatalogPlatform,
+  getModelCatalogPlatforms,
+  getModelsByPlatform,
+  getPresetMappingsByPlatform,
+  splitModelMappingObject
+} from '../useModelWhitelist'
 import { BUILTIN_PLATFORM_CATALOG, resetPlatformCatalog, setPlatformCatalog } from '@/constants/platformCatalog'
 
 describe('useModelWhitelist', () => {
@@ -184,6 +191,15 @@ describe('useModelWhitelist', () => {
     for (const preset of presets) {
       expect(webModels).toContain(preset.to)
     }
+  })
+
+  it('Gemini Web 账号（platform=gemini, type=gemini_web）按 gemini_web 取模型目录', () => {
+    expect(getModelCatalogPlatform('gemini', 'gemini_web')).toBe('gemini_web')
+    expect(getModelCatalogPlatform('gemini', 'oauth')).toBe('gemini')
+    expect(getModelCatalogPlatform('antigravity', 'gemini_web')).toBe('antigravity')
+    expect(getModelCatalogPlatforms(['gemini'], ['gemini_web'])).toEqual(['gemini_web'])
+    expect(getModelCatalogPlatforms(['gemini'], ['oauth', 'gemini_web'])).toEqual(['gemini', 'gemini_web'])
+    expect(getModelCatalogPlatforms(['gemini', 'openai'], ['apikey'])).toEqual(['gemini', 'openai'])
   })
 
   it('antigravity 模型列表会把新的 Gemini 图片模型排在前面', () => {

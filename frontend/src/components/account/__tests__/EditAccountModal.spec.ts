@@ -2504,6 +2504,26 @@ describe('EditAccountModal', () => {
       'antigravity_project_id'
     )
   })
+
+  it('Gemini Web 账号的模型映射提供 Gemini Web 预设', async () => {
+    const account = {
+      ...buildAccount(),
+      name: 'Gemini Web',
+      platform: 'gemini',
+      type: 'gemini_web',
+      credentials: { model_mapping: { 'gemini-4-argon-high': 'gemini-4-argon' } }
+    }
+    const wrapper = mountModal(account)
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('+ 2.5 Image')
+    const preset = wrapper.findAll('button').find((btn) => btn.text() === '+ 3.8 Flash High')
+    expect(preset).toBeTruthy()
+    await preset!.trigger('click')
+
+    const inputs = wrapper.findAll<HTMLInputElement>('input[type="text"]').map((input) => input.element.value)
+    expect(inputs).toEqual(expect.arrayContaining(['gemini-3.8-flash-high', 'gemini-3.8-flash']))
+  })
 })
 
 describe('EditAccountModal OpenAI 自动使用重置卡', () => {

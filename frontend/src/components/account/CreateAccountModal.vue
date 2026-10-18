@@ -954,6 +954,17 @@
             <button type="button" @click="addModelMapping" class="btn btn-secondary text-sm">
               + {{ t('admin.accounts.addMapping') }}
             </button>
+            <div class="flex flex-wrap gap-2">
+              <button
+                v-for="preset in presetMappings"
+                :key="'gemini-web-' + preset.label"
+                type="button"
+                @click="addPresetMapping(preset.from, preset.to)"
+                :class="['rounded-lg px-3 py-1 text-xs transition-colors', preset.color]"
+              >
+                + {{ preset.label }}
+              </button>
+            </div>
           </div>
         </div>
 
@@ -4220,6 +4231,7 @@ import { useAuthStore } from '@/stores/auth'
 import {
   claudeModels,
   getPresetMappingsByPlatform,
+  getModelCatalogPlatform,
   getModelsByPlatform,
   commonErrorCodes,
   buildModelMappingObject,
@@ -5101,7 +5113,11 @@ const geminiHelpLinks = {
 }
 
 // Computed: current preset mappings based on platform
-const presetMappings = computed(() => getPresetMappingsByPlatform(form.platform))
+const presetMappings = computed(() =>
+  getPresetMappingsByPlatform(
+    getModelCatalogPlatform(form.platform, accountCategory.value === 'gemini-web' ? 'gemini_web' : form.type)
+  )
+)
 const tempUnschedScopeOptions = computed<Array<{ value: TempUnschedulableScope; label: string; description: string }>>(() => [
   {
     value: 'model',
@@ -5419,10 +5435,10 @@ watch(
   [modelRestrictionMode, () => form.platform, accountCategory],
   ([newMode]) => {
     if (newMode === 'whitelist') {
-      const catalogPlatform =
-        form.platform === 'gemini' && accountCategory.value === 'gemini-web'
-          ? 'gemini_web'
-          : form.platform
+      const catalogPlatform = getModelCatalogPlatform(
+        form.platform,
+        accountCategory.value === 'gemini-web' ? 'gemini_web' : form.type
+      )
       allowedModels.value = [...getModelsByPlatform(catalogPlatform)]
     }
   }

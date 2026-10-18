@@ -582,6 +582,20 @@ export function getPresetMappingsByPlatform(platform: string) {
   return anthropicPresetMappings
 }
 
+// Gemini Web 账号的 platform 仍是 gemini，靠账号类型 gemini_web 区分；
+// 模型列表和预设映射要按 gemini_web 取，否则会拿到官方 Gemini API 的那一套
+export function getModelCatalogPlatform(platform: string, type?: string): string {
+  return platform === 'gemini' && type === 'gemini_web' ? 'gemini_web' : platform
+}
+
+// 批量编辑只知道选中账号的平台集合和类型集合：选中了 Gemini Web 账号就加入 gemini_web，
+// 全部都是 Gemini Web 账号时去掉官方 gemini
+export function getModelCatalogPlatforms(platforms: string[], types: string[] = []): string[] {
+  if (!platforms.includes('gemini') || !types.includes('gemini_web')) return platforms
+  const onlyWeb = types.every(type => type === 'gemini_web')
+  return [...platforms.filter(platform => !(onlyWeb && platform === 'gemini')), 'gemini_web']
+}
+
 // =====================
 // 构建模型映射对象（用于 API）
 // =====================

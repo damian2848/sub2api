@@ -524,6 +524,29 @@ describe('BulkEditAccountModal', () => {
     expect(wrapper.text()).not.toContain('GPT-5.3 Codex Spark')
   })
 
+  it('全部目标为 Gemini Web 账号时，映射预设和白名单使用 Gemini Web 模型', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['gemini'], selectedTypes: ['gemini_web'] })
+
+    expect(wrapper.findComponent(ModelWhitelistSelector).props('platforms')).toEqual(['gemini_web'])
+
+    const mappingTab = wrapper.findAll('button').find((btn) => btn.text().includes('admin.accounts.modelMapping'))
+    await mappingTab!.trigger('click')
+
+    expect(wrapper.text()).toContain('4 Argon High')
+    expect(wrapper.text()).toContain('3.8 Flash High')
+    expect(wrapper.text()).not.toContain('2.5 Image')
+  })
+
+  it('Gemini Web 与其他 Gemini 账号混选时，两套映射预设都提供', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['gemini'], selectedTypes: ['oauth', 'gemini_web'] })
+
+    const mappingTab = wrapper.findAll('button').find((btn) => btn.text().includes('admin.accounts.modelMapping'))
+    await mappingTab!.trigger('click')
+
+    expect(wrapper.text()).toContain('4 Argon High')
+    expect(wrapper.text()).toContain('2.5 Image')
+  })
+
   it('仅勾选模型限制且白名单留空时，应提交空 model_mapping 以支持所有模型', async () => {
     const wrapper = mountModal({
       selectedPlatforms: ['anthropic'],
