@@ -369,3 +369,24 @@ func response(status int, body string, headers http.Header) *http.Response {
 	}
 	return &http.Response{StatusCode: status, Status: http.StatusText(status), Header: headers, Body: io.NopCloser(strings.NewReader(body))}
 }
+
+// A network chunk can end anywhere, including right after a space inside a
+// frame's JSON string. Every split must decode to the same text.
+func TestFrameParserKeepsTextAcrossEveryChunkBoundary(t *testing.T) {
+	want := "<html lang=\"zh-CN\">\n  <body> a  b </body>"
+	body := frameBody(want) + "\n" + frameBody(want+" end")
+	for i := 1; i < len(body); i++ {
+		p := newFrameParser()
+		var got Result
+		frames := append(p.feed(body[:i]), p.feed(body[i:])...)
+		frames = append(frames, p.flush()...)
+		var texts []string
+		for _, f := range frames {
+			got = applyFrame(got, f)
+			texts = append(texts, got.Text)
+		}
+		if len(texts) != 2 || texts[0] != want || texts[1] != want+" end" {
+			t.Fatalf("split at byte %d (after %q) decoded %q", i, body[i-1:i], texts)
+		}
+	}
+}

@@ -875,7 +875,10 @@ func newFrameParser() *frameParser               { return &frameParser{} }
 func (p *frameParser) feed(chunk string) []frame { p.buf += chunk; return p.take(false) }
 func (p *frameParser) flush() []frame            { return p.take(true) }
 func (p *frameParser) take(flush bool) []frame {
-	p.buf = strings.TrimPrefix(strings.TrimSpace(p.buf), ")]}'")
+	// Only trim the front. The tail may be the middle of an unfinished frame,
+	// and trimming it would delete a space inside a JSON string whenever a
+	// network chunk ends right after that space.
+	p.buf = strings.TrimPrefix(strings.TrimLeft(p.buf, " \t\r\n"), ")]}'")
 	var out []frame
 	for {
 		start := strings.IndexByte(p.buf, '[')
