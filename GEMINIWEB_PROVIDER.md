@@ -128,6 +128,26 @@ kept; the prompt and credentials are never saved). Each request also logs
 `gemini_web.completion_timing` with the time to headers, first frame and first
 text.
 
+## Canned reply analytics
+
+Every Gemini Web call made for gateway traffic is appended as one JSON line to
+`$DATA_DIR/gemini-web-analytics/attempts-YYYYMMDD.jsonl` (UTC dates, 30 days
+kept; container logs only hold about a day). A record has the request ID,
+user, group, account, model and response model, protocol, stream, tool count,
+prompt size, the account switch count of the request, the Gemini Web calls in
+flight on the account and the time since its previous call, the timings, and
+an outcome: `ok`, `canned`, `refusal`, `empty`, `timeout`, `canceled`,
+`credential`, `rate_limited`, `session_rejected`, `bard_error` or `error`.
+Account cooldowns are recorded as `"type":"cooldown"` lines. Prompts and
+credentials are never recorded; reply text is kept only for short canned,
+refusal and suspected replies.
+
+`backend/scripts/gemini_web_attempts_report.py DIR [--since HOURS] [--json]`
+summarizes the files: the canned rate of answered calls, how many requests
+recovered on another account, the canned rate by account, model, protocol,
+tools, prompt size, in-flight count, time since the account's last call,
+attempt and hour, cooldowns, and the most frequent canned and refusal texts.
+
 Function calling is emulated, because the browser endpoint has no tool API.
 Declared tools (`functionDeclarations`, Claude `tools`, OpenAI `tools`) and
 `toolConfig` / `tool_choice` are described in the prompt, earlier calls and

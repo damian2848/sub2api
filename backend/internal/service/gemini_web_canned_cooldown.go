@@ -83,6 +83,7 @@ func (s *GeminiMessagesCompatService) recordGeminiWebCannedReply(ctx context.Con
 		return
 	}
 	account.TempUnschedulableUntil = &until
+	recordGeminiWebCooldown(ctx, account, until)
 	logger.FromContext(ctx).Warn("gemini_web.canned_reply_cooldown",
 		zap.Int64("account_id", account.ID),
 		zap.Int("canned_replies", geminiWebCannedCooldownThreshold),

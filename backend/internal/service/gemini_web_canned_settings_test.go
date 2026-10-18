@@ -27,6 +27,8 @@ import (
 func init() {
 	dir := filepath.Join(os.TempDir(), "sub2api-test-gemini-web-diagnostics")
 	geminiWebDiagnosticsDir = func() string { return dir }
+	analytics := filepath.Join(os.TempDir(), "sub2api-test-gemini-web-analytics")
+	geminiWebAnalyticsDir = func() string { return analytics }
 }
 
 // geminiWebCannedSettingRepo is a map-backed setting store; getErr makes

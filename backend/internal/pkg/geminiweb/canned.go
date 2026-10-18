@@ -111,3 +111,24 @@ func SuspectedCannedReply(text string) bool {
 	}
 	return false
 }
+
+// policyRefusalMarkers appear in Gemini Web's templated policy refusals, such
+// as "Your request may go against my [guidelines](https://gemini.google/...)".
+// Unlike canned failure replies these are not flagged as failed generations.
+var policyRefusalMarkers = []string{"gemini.google/policy-guidelines", "my safety filters", "go against my guidelines"}
+
+// IsPolicyRefusal reports whether a short reply is one of Gemini Web's
+// templated policy refusals. It is used for analysis only; such replies are
+// returned to the client as answers.
+func IsPolicyRefusal(text string) bool {
+	if utf8.RuneCountInString(text) > 2*SuspectedCannedReplyMaxChars {
+		return false
+	}
+	lower := strings.ToLower(text)
+	for _, marker := range policyRefusalMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}

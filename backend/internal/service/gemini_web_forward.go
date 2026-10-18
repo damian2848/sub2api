@@ -86,8 +86,11 @@ func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Cont
 	do := func(req *http.Request) (*http.Response, error) {
 		return s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 	}
+	inflight, sinceLast, done := s.geminiWebActivity.begin(account.ID, time.Now())
 	result, err := s.geminiWebClient().Complete(requestCtx, cred, geminiweb.Request{Model: model, Prompt: prompt, Thinking: thinking, OnResult: onResult}, do)
+	done()
 	logGeminiWebTiming(ctx, account, model, result, err)
+	s.recordGeminiWebAttempt(ctx, account, model, thinking, inflight, sinceLast, result, err)
 	if err == nil {
 		s.observeGeminiWebShortReply(ctx, account, model, result)
 	}
@@ -190,6 +193,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 	}
 	prompt := plan.Prompt
 	mapped := account.GetMappedModel(originalModel)
+	ctx = withGeminiWebCallInfo(ctx, geminiWebCallInfo{Protocol: "native", Stream: stream || action == "streamGenerateContent", Tools: len(plan.Tools)})
 	var streamWriter *geminiWebNativeStreamWriter
 	var onResult func(geminiweb.Result) error
 	if stream || action == "streamGenerateContent" {
@@ -552,7 +556,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebClaude(ctx context.Context
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
 	return s.forwardGeminiWebCompat(ctx, c, account, geminiWebCompatRequest{
-		model: req.Model, stream: req.Stream, plan: plan, start: start,
+		protocol: "claude", model: req.Model, stream: req.Stream, plan: plan, start: start,
 		includeThought: geminiWebClaudeThinkingEnabled(body),
 		handleStream: func(resp *http.Response) (*geminiStreamResult, error) {
 			return s.handleStreamingResponse(c, resp, start, req.Model)
@@ -593,7 +597,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebChatCompletions(ctx contex
 	}
 	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 	return s.forwardGeminiWebCompat(ctx, c, account, geminiWebCompatRequest{
-		model: req.Model, stream: req.Stream, plan: plan, start: start,
+		protocol: "chat", model: req.Model, stream: req.Stream, plan: plan, start: start,
 		includeThought: geminiWebClaudeThinkingEnabled(claudeBody),
 		handleStream: func(resp *http.Response) (*geminiStreamResult, error) {
 			return s.handleChatCompletionsStreamingResponseFromGemini(c, resp, start, req.Model, false, includeUsage)
@@ -618,6 +622,8 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebChatCompletions(ctx contex
 // the converters of regular Gemini accounts, so tool_use / tool_calls,
 // stop reasons and stream framing match the other Gemini account types.
 type geminiWebCompatRequest struct {
+	// protocol is the client protocol ("claude" or "chat"), for analytics.
+	protocol         string
 	model            string
 	stream           bool
 	includeThought   bool
@@ -629,6 +635,7 @@ type geminiWebCompatRequest struct {
 }
 
 func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context, c *gin.Context, account *Account, req geminiWebCompatRequest) (*ForwardResult, error) {
+	ctx = withGeminiWebCallInfo(ctx, geminiWebCallInfo{Protocol: req.protocol, Stream: req.stream, Tools: len(req.plan.Tools)})
 	mapped := account.GetMappedModel(req.model)
 	thinking := strings.Contains(strings.ToLower(req.model), "thinking")
 	if !req.stream {

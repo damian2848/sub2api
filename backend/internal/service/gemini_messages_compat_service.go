@@ -73,6 +73,8 @@ type GeminiMessagesCompatService struct {
 	settingService *SettingService
 	// geminiWebCanned counts recent canned replies per account for cooldowns.
 	geminiWebCanned geminiWebCannedTracker
+	// geminiWebActivity tracks in-flight calls per account for analytics.
+	geminiWebActivity geminiWebAccountActivity
 }
 
 func (s *GeminiMessagesCompatService) readUpstreamErrorBody(resp *http.Response) []byte {
