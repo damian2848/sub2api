@@ -72,7 +72,9 @@ func uploadAttachment(ctx context.Context, cred Credential, att Attachment, do D
 	var body bytes.Buffer
 	form := multipart.NewWriter(&body)
 	header := make(textproto.MIMEHeader)
-	header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": "file", "filename": att.Name}))
+	// Google rejects the alphabetical, unquoted form mime.FormatMediaType
+	// produces ("filename=x; name=file") as a malformed multipart body.
+	header.Set("Content-Disposition", multipart.FileContentDisposition("file", att.Name))
 	header.Set("Content-Type", defaultString(att.MimeType, "application/octet-stream"))
 	part, err := form.CreatePart(header)
 	if err != nil {

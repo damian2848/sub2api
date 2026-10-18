@@ -26,6 +26,10 @@ func TestClientCompleteUploadsAttachmentsOnceAndReferencesThem(t *testing.T) {
 			if err != nil {
 				t.Fatalf("upload form: %v", err)
 			}
+			// Google's parser wants the browser's form: name first, both quoted.
+			if got, want := header.Header.Get("Content-Disposition"), `form-data; name="file"; filename="`+header.Filename+`"`; got != want {
+				t.Fatalf("Content-Disposition = %q, want %q", got, want)
+			}
 			data, _ := io.ReadAll(file)
 			mu.Lock()
 			uploads[header.Filename] = string(data)
