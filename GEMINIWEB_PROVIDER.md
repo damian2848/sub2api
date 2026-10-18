@@ -102,10 +102,13 @@ content, and otherwise ends with an error saying the request was not billed.
 Streamed text that could still become a canned phrase is held back until it
 diverges.
 
-Three phrases are built in. Administrators can add more under Settings →
+Built-in phrases are always recognized, including "Sorry, something went
+wrong. Please try your request again." Administrators can add more under Settings →
 Gateway → "Gemini Web canned error replies" (`GET`/`PUT
 /api/v1/admin/accounts/gemini-web/canned-replies`, stored in the
 `gemini_web_canned_replies` setting); changes apply to the next request.
+Account connection tests use the same built-in and custom phrases and report
+a failed test instead of treating these replies as successful answers.
 
 To find new phrases, every reply of at most 300 characters is logged in full as
 `gemini_web.short_reply` with `canned` and `suspected` flags. A reply that is
