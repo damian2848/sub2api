@@ -136,6 +136,12 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	reqStream bool,
 	startTime time.Time,
 ) (*OpenAIForwardResult, error) {
+	if account != nil && account.Platform == PlatformOpenAI {
+		groupID := getOpenAIGroupIDFromContext(c)
+		if err := s.ValidateOpenAIEncryptedContentAccount(ctx, &groupID, getAPIKeyIDFromContext(c), account.ID, body); err != nil {
+			return nil, err
+		}
+	}
 	requestedModel := reqModel
 	upstreamPassthroughModel := ""
 	if isOpenAIResponsesCompactPath(c) && !account.IsCopilotSDKEnabled() {
@@ -358,6 +364,8 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		c.Set("openai_passthrough", true)
 	}
 
+	encryptedRecovery := beginOpenAIHTTPEncryptedRecovery(ctx, c, account, body)
+	defer c.Set(openAIHTTPEncryptedRecoveryKey, (*openAIHTTPEncryptedRecovery)(nil))
 	agentTaskRecoveryTried := false
 	compactModelFallbackRetried := false
 	rejectedFieldRetryState := openAIResponsesRejectedFieldRetryStateForRequest(c, body)
@@ -368,6 +376,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	imageCount := 0
 	var imageOutputSizes []string
 	for {
+		encryptedRecovery.body = body
 		actualModel := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 		if actualModel == "" {
 			actualModel = reqModel
@@ -427,6 +436,13 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 				// reason to fail over or rewrite fields and retry the request.
 				c.Data(resp.StatusCode, "application/json", probeBody)
 				return nil, fmt.Errorf("copilot sidecar rejected request: %d", resp.StatusCode)
+			}
+			if resp.StatusCode == http.StatusBadRequest {
+				if signal := encryptedRecovery.prepare(probeBody); signal != nil {
+					body = s.applyOpenAIHTTPEncryptedRecovery(c, account, resp, encryptedRecovery, signal, true)
+					rejectedFieldRetryState.remember(body)
+					continue
+				}
 			}
 			if retryBody, reason, changed, retryErr := normalizeOpenAIResponsesRejectedFieldRetryBody(resp.StatusCode, body, probeBody); retryErr != nil {
 				return nil, fmt.Errorf("normalize passthrough rejected Responses field retry body: %w", retryErr)
@@ -492,6 +508,11 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			}
 			result, handleErr := s.handleStreamingResponsePassthroughWithImage(ctx, resp, c, account, startTime, reqModel, upstreamPassthroughModel, imageBillingModel, effort)
 			if handleErr != nil {
+				if signal, ok := asOpenAIHTTPEncryptedRecoverySignal(handleErr); ok {
+					body = s.applyOpenAIHTTPEncryptedRecovery(c, account, resp, encryptedRecovery, signal, true)
+					rejectedFieldRetryState.remember(body)
+					continue
+				}
 				if retryBody, fallbackModel, retry := s.applyOpenAIPassthroughCompactFallbackFromSignal(
 					c, account, requestedModel, body, handleErr, compactModelFallbackRetried, resp,
 				); retry {
@@ -537,6 +558,11 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		} else {
 			result, handleErr := s.handleNonStreamingResponsePassthrough(ctx, resp, c, account, reqModel, upstreamPassthroughModel)
 			if handleErr != nil {
+				if signal, ok := asOpenAIHTTPEncryptedRecoverySignal(handleErr); ok {
+					body = s.applyOpenAIHTTPEncryptedRecovery(c, account, resp, encryptedRecovery, signal, true)
+					rejectedFieldRetryState.remember(body)
+					continue
+				}
 				if retryBody, fallbackModel, retry := s.applyOpenAIPassthroughCompactFallbackFromSignal(
 					c, account, requestedModel, body, handleErr, compactModelFallbackRetried, resp,
 				); retry {
@@ -856,6 +882,9 @@ func stripOpenAILegacyResponsesBeta(headers http.Header) {
 }
 
 func shouldFailoverOpenAIPassthroughResponse(account *Account, statusCode int, responseBody []byte) bool {
+	if isOpenAIEncryptedContentRejection(responseBody) {
+		return false
+	}
 	if hit, _, _ := detectOpenAICyberPolicy(responseBody); hit {
 		return false
 	}
@@ -1631,6 +1660,9 @@ func applyOpenAIStreamFailedErrorPassthroughRule(
 }
 
 func openAIStreamFailedEventShouldFailover(payload []byte, message string) bool {
+	if isOpenAIEncryptedContentRejection(payload) {
+		return false
+	}
 	if hit, _, _ := detectOpenAICyberPolicy(payload); hit {
 		return false
 	}
@@ -1683,6 +1715,9 @@ func openAIStreamFailedEventShouldFailover(payload []byte, message string) bool 
 }
 
 func openAIStreamErrorEventShouldFailover(payload []byte, message string) bool {
+	if isOpenAIEncryptedContentRejection(payload) {
+		return false
+	}
 	if hit, _, _ := detectOpenAICyberPolicy(payload); hit {
 		return false
 	}
@@ -1985,6 +2020,7 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 	imageBillingModel string,
 	reasoningEfforts ...string,
 ) (*openaiStreamingResultPassthrough, error) {
+	encryptedObserver := s.NewOpenAIEncryptedContentObserverForRequest(ctx, c, account)
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
@@ -2217,6 +2253,9 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 				}
 			}
 			eventType := effectiveOpenAISSEEventType(dataBytes, rawEventType)
+			if err := encryptedObserver.ObserveEvent(eventType, dataBytes); err != nil {
+				return resultWithUsage(), err
+			}
 			createdAtTracker.Observe(dataBytes, eventType)
 			if codexFailureTerminal && sawBareError && !sawResponseFailed && eventType != "response.failed" {
 				suppressCurrentEvent = true
@@ -2258,6 +2297,17 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 					})
 				}
 				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
+				// A bare error is usually followed by response.failed, which can be
+				// the only frame reporting executed work. Decide on that frame or EOF.
+				if !codexFailureTerminal || eventType != "error" {
+					failureFrames := [][]byte{dataBytes}
+					if codexFailureTerminal && sawBareError {
+						failureFrames = append(failureFrames, bareErrorPayload)
+					}
+					if recoveryErr := newOpenAIHTTPEncryptedFailureRecoverySignal(c, outputStarted || semanticOutputSeen, failureFrames...); recoveryErr != nil {
+						return resultWithUsage(), recoveryErr
+					}
+				}
 				if !outputStarted && !cyberHit {
 					if compactErr := newOpenAICompactFallbackSignal(c, dataBytes, failedMessage); compactErr != nil {
 						return resultWithUsage(), compactErr
@@ -2404,6 +2454,13 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthroughWithImage(
 		// 必须继续读取，不适用提前结束。
 		if (sawDone || sawTerminalEvent) && line == "" && (!codexFailureTerminal || !sawBareError) {
 			break
+		}
+	}
+	// Only a clean EOF proves no response.failed follows a bare error; a read
+	// error or timeout may have dropped the frame that reports executed work.
+	if codexFailureTerminal && sawBareError && !sawResponseFailed && !failureDelivered && documentScanner.Err() == nil {
+		if recoveryErr := newOpenAIHTTPEncryptedFailureRecoverySignal(c, openAIStreamClientOutputStarted(c, clientOutputStarted) || semanticOutputSeen, bareErrorPayload); recoveryErr != nil {
+			return resultWithUsage(), recoveryErr
 		}
 	}
 	ensureResponseFailedTerminal()
@@ -2559,6 +2616,9 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	if err != nil {
 		return nil, fmt.Errorf("restore OpenAI Responses client tools: %w", err)
 	}
+	if err := s.observeOpenAIEncryptedHTTPBody(ctx, c, account, body); err != nil {
+		return nil, err
+	}
 	if !writeOpenAICompactSSEBridge(c, resp.StatusCode, body) {
 		c.Data(resp.StatusCode, contentType, body)
 	}
@@ -2576,12 +2636,19 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 // preserving passthrough payloads, except compact-only model remapping may
 // rewrite model fields back to the original requested model.
 func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c *gin.Context, account *Account, body []byte, originalModel string, mappedModel string) (*openaiNonStreamingResultPassthrough, error) {
+	ctx := context.Background()
+	if c.Request != nil {
+		ctx = c.Request.Context()
+	}
 	bodyText := string(body)
 	terminalType, terminalPayload, terminalOK := extractOpenAISSETerminalEvent(bodyText)
 	if terminalOK && (terminalType == "response.failed" || terminalType == "error") {
 		msg := extractOpenAISSEErrorMessage(terminalPayload)
 		if msg == "" {
 			msg = "Upstream compact response failed"
+		}
+		if recoveryErr := newOpenAIHTTPEncryptedRecoverySignal(c, terminalPayload, openAISSEBodyHasSemanticOutput(bodyText)); recoveryErr != nil {
+			return nil, recoveryErr
 		}
 		if compactErr := newOpenAICompactFallbackSignal(c, terminalPayload, msg); compactErr != nil {
 			return nil, compactErr
@@ -2640,6 +2707,9 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 		if contentType == "" {
 			contentType = "text/event-stream"
 		}
+	}
+	if err := s.observeOpenAIEncryptedHTTPBody(ctx, c, account, body); err != nil {
+		return nil, err
 	}
 	if !writeOpenAICompactSSEBridge(c, resp.StatusCode, body) {
 		c.Data(resp.StatusCode, contentType, body)

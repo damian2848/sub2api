@@ -922,6 +922,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	c.Request = c.Request.WithContext(service.WithOpenAIGuardianParentAffinity(
 		c.Request.Context(), c, sessionHashBody, reqModel,
 	))
+	c.Request = c.Request.WithContext(service.WithOpenAIEncryptedContentAffinity(
+		c.Request.Context(), apiKey.ID, sessionHashBody,
+	))
 	requireCompact := legacyCompact
 
 	maxAccountSwitches := h.maxAccountSwitches
@@ -984,6 +987,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		if err != nil {
 			if failoverClientGone(c) {
 				reqLog.Info("openai.account_select_aborted_client_disconnected", zap.Error(err))
+				return
+			}
+			if h.handleOpenAIEncryptedContentAffinityError(c, err, streamStarted) {
 				return
 			}
 			err = rpmAdmission.selectionError(err)
@@ -1179,6 +1185,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			})
 		}
 		if err != nil {
+			if h.handleOpenAIEncryptedContentAffinityError(c, err, streamStarted) {
+				return
+			}
 			if service.IsOpenAITurnAdmissionError(err) {
 				h.handleTurnAdmissionError(c, err, streamStarted)
 				return
@@ -3097,6 +3106,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		openAIWSIngressFallbackSessionSeed(subject.UserID, apiKey.ID, apiKey.GroupID),
 	)
 	ctx = service.WithOpenAIGuardianParentAffinity(ctx, c, firstMessage, reqModel)
+	ctx = service.WithOpenAIEncryptedContentAffinity(ctx, apiKey.ID, firstMessage)
 	maxAccountSwitches := h.maxAccountSwitches
 	switchCount := 0
 	var forbiddenBudget grokForbiddenFailoverBudget
@@ -3212,6 +3222,11 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		)
 		if err != nil {
 			err = rpmAdmission.selectionError(err)
+			var encryptedAffinityErr *service.OpenAIEncryptedContentAffinityError
+			if errors.As(err, &encryptedAffinityErr) {
+				closeOpenAIClientWS(wsConn, openAIEncryptedContentWSCloseStatus(encryptedAffinityErr.HTTPStatus()), encryptedAffinityErr.Message)
+				return
+			}
 			if errors.Is(err, service.ErrOpenAIRPMExhausted) {
 				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "All eligible OpenAI OAuth accounts are at their per-minute request limit; retry after the current minute resets")
 				return
@@ -3728,6 +3743,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			err := h.gatewayService.ProxyResponsesWebSocketFromClient(ctx, c, wsConn, account, token, wsFirstMessage, hooks)
 			if err == nil {
 				reqLog.Info("openai.websocket_ingress_closed", zap.Int64("account_id", account.ID))
+				return
+			}
+			var encryptedAffinityErr *service.OpenAIEncryptedContentAffinityError
+			if errors.As(err, &encryptedAffinityErr) {
+				releaseTurnSlots()
+				closeOpenAIClientWS(wsConn, openAIEncryptedContentWSCloseStatus(encryptedAffinityErr.HTTPStatus()), encryptedAffinityErr.Message)
 				return
 			}
 			if isOpenAIRPMError(err) {

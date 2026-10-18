@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -12,13 +13,14 @@ import (
 )
 
 const (
-	openAIWSResponseAccountCachePrefix = "openai:response:"
-	openAIHTTPResponseOwnerUserPrefix  = "openai:http-response-owner:user:"
-	openAIHTTPResponseOwnerKeyPrefix   = "openai:http-response-owner:key:"
-	openAIWSStateStoreCleanupInterval  = time.Minute
-	openAIWSStateStoreCleanupMaxPerMap = 512
-	openAIWSStateStoreMaxEntriesPerMap = 65536
-	openAIWSStateStoreRedisTimeout     = 3 * time.Second
+	openAIWSResponseAccountCachePrefix       = "openai:response:"
+	openAIEncryptedContentAccountCachePrefix = "openai:encrypted-content-account:"
+	openAIHTTPResponseOwnerUserPrefix        = "openai:http-response-owner:user:"
+	openAIHTTPResponseOwnerKeyPrefix         = "openai:http-response-owner:key:"
+	openAIWSStateStoreCleanupInterval        = time.Minute
+	openAIWSStateStoreCleanupMaxPerMap       = 512
+	openAIWSStateStoreMaxEntriesPerMap       = 65536
+	openAIWSStateStoreRedisTimeout           = 3 * time.Second
 )
 
 type openAIWSAccountBinding struct {
@@ -66,6 +68,10 @@ const openAIWSInvalidEncryptedDigestsPerSession = 512
 // response_id -> account_id 优先走 GatewayCache（Redis），同时维护本地热缓存。
 // response_id -> conn_id 仅在本进程内有效。
 type OpenAIWSStateStore interface {
+	// Ciphertext ownership is scoped to the authenticated key and group. Unlike
+	// best-effort response affinity, cache failures must reach the caller.
+	BindEncryptedContentAccount(ctx context.Context, groupID, apiKeyID int64, digest string, accountID int64, ttl time.Duration) error
+	GetEncryptedContentAccount(ctx context.Context, groupID, apiKeyID int64, digest string) (int64, error)
 	BindResponseAccount(ctx context.Context, groupID int64, responseID string, accountID int64, ttl time.Duration) error
 	GetResponseAccount(ctx context.Context, groupID int64, responseID string) (int64, error)
 	DeleteResponseAccount(ctx context.Context, groupID int64, responseID string) error
@@ -99,6 +105,8 @@ type defaultOpenAIWSStateStore struct {
 
 	responseToAccountMu  sync.RWMutex
 	responseToAccount    map[string]openAIWSAccountBinding
+	encryptedToAccountMu sync.RWMutex
+	encryptedToAccount   map[string]openAIWSAccountBinding
 	responseOwnerMu      sync.RWMutex
 	responseOwners       map[string]openAIHTTPResponseOwnerBinding
 	responseToConnMu     sync.RWMutex
@@ -119,6 +127,7 @@ func NewOpenAIWSStateStore(cache GatewayCache) OpenAIWSStateStore {
 	store := &defaultOpenAIWSStateStore{
 		cache:                   cache,
 		responseToAccount:       make(map[string]openAIWSAccountBinding, 256),
+		encryptedToAccount:      make(map[string]openAIWSAccountBinding, 256),
 		responseOwners:          make(map[string]openAIHTTPResponseOwnerBinding, 256),
 		responseToConn:          make(map[string]openAIWSConnBinding, 256),
 		sessionToTurnState:      make(map[string]openAIWSTurnStateBinding, 256),
@@ -217,6 +226,90 @@ func (s *defaultOpenAIWSStateStore) BindResponseAccount(ctx context.Context, gro
 	cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(ctx)
 	defer cancel()
 	return s.cache.SetSessionAccountID(cacheCtx, groupID, cacheKey, accountID, ttl)
+}
+
+func openAIEncryptedContentAccountCacheKey(id string) string {
+	digest := sha256.Sum256([]byte(id))
+	return openAIEncryptedContentAccountCachePrefix + hex.EncodeToString(digest[:])
+}
+
+func openAIEncryptedContentBindingID(apiKeyID int64, digest string) string {
+	return fmt.Sprintf("encrypted-content:v1:%d:%s", apiKeyID, digest)
+}
+
+func (s *defaultOpenAIWSStateStore) BindEncryptedContentAccount(ctx context.Context, groupID, apiKeyID int64, digest string, accountID int64, ttl time.Duration) error {
+	if apiKeyID <= 0 || accountID <= 0 || len(digest) != sha256.Size*2 {
+		return fmt.Errorf("invalid encrypted content ownership binding")
+	}
+	id := openAIEncryptedContentBindingID(apiKeyID, digest)
+	ttl = normalizeOpenAIWSTTL(ttl)
+	mapKey := openAIWSResponseAccountMapKey(groupID, id)
+	s.encryptedToAccountMu.RLock()
+	existing, found := s.encryptedToAccount[mapKey]
+	s.encryptedToAccountMu.RUnlock()
+	if found && time.Now().Before(existing.expiresAt) {
+		if existing.accountID != accountID {
+			return openAIEncryptedContentConflictError()
+		}
+		// Active conversations retain their binding without a Redis write on
+		// every history replay. Refresh after half the configured lifetime.
+		if time.Until(existing.expiresAt) > ttl/2 {
+			return nil
+		}
+	}
+	// Publish the local binding only after the shared cache write succeeds: the
+	// child can immediately arrive on another gateway after receiving this item.
+	if s.cache != nil {
+		claimer, ok := s.cache.(interface {
+			ClaimSessionAccountID(context.Context, int64, string, int64, time.Duration) (int64, error)
+		})
+		if !ok {
+			return fmt.Errorf("gateway cache does not support atomic ownership claims")
+		}
+		cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(ctx)
+		defer cancel()
+		owner, err := claimer.ClaimSessionAccountID(cacheCtx, groupID, openAIEncryptedContentAccountCacheKey(id), accountID, ttl)
+		if err != nil {
+			return err
+		}
+		if owner != accountID {
+			return openAIEncryptedContentConflictError()
+		}
+	}
+	s.maybeCleanup()
+	s.encryptedToAccountMu.Lock()
+	if previous, exists := s.encryptedToAccount[mapKey]; exists && time.Now().Before(previous.expiresAt) && previous.accountID != accountID {
+		s.encryptedToAccountMu.Unlock()
+		return openAIEncryptedContentConflictError()
+	}
+	ensureBindingCapacity(s.encryptedToAccount, mapKey, openAIWSStateStoreMaxEntriesPerMap)
+	s.encryptedToAccount[mapKey] = openAIWSAccountBinding{accountID: accountID, expiresAt: time.Now().Add(ttl)}
+	s.encryptedToAccountMu.Unlock()
+	return nil
+}
+
+func (s *defaultOpenAIWSStateStore) GetEncryptedContentAccount(ctx context.Context, groupID, apiKeyID int64, digest string) (int64, error) {
+	if apiKeyID <= 0 || len(digest) != sha256.Size*2 {
+		return 0, nil
+	}
+	id := openAIEncryptedContentBindingID(apiKeyID, digest)
+	s.maybeCleanup()
+	s.encryptedToAccountMu.RLock()
+	binding, found := s.encryptedToAccount[openAIWSResponseAccountMapKey(groupID, id)]
+	s.encryptedToAccountMu.RUnlock()
+	if found && time.Now().Before(binding.expiresAt) {
+		return binding.accountID, nil
+	}
+	if s.cache == nil {
+		return 0, nil
+	}
+	cacheCtx, cancel := withOpenAIWSStateStoreRedisTimeout(ctx)
+	defer cancel()
+	accountID, err := s.cache.GetSessionAccountID(cacheCtx, groupID, openAIEncryptedContentAccountCacheKey(id))
+	if errors.Is(err, ErrStickySessionNotFound) {
+		return 0, nil
+	}
+	return accountID, err
 }
 
 func cleanupExpiredHTTPResponseOwnerBindings(bindings map[string]openAIHTTPResponseOwnerBinding, now time.Time, maxScan int) {
@@ -508,6 +601,10 @@ func (s *defaultOpenAIWSStateStore) maybeCleanup() {
 	s.responseToAccountMu.Lock()
 	cleanupExpiredAccountBindings(s.responseToAccount, now, openAIWSStateStoreCleanupMaxPerMap)
 	s.responseToAccountMu.Unlock()
+
+	s.encryptedToAccountMu.Lock()
+	cleanupExpiredAccountBindings(s.encryptedToAccount, now, openAIWSStateStoreCleanupMaxPerMap)
+	s.encryptedToAccountMu.Unlock()
 
 	s.responseOwnerMu.Lock()
 	cleanupExpiredHTTPResponseOwnerBindings(s.responseOwners, now, openAIWSStateStoreCleanupMaxPerMap)

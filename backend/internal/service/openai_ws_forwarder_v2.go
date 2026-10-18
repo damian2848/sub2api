@@ -547,6 +547,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	}
 
 	usage := &OpenAIUsage{}
+	encryptedContentObserver := s.NewOpenAIEncryptedContentObserverForRequest(ctx, c, account)
 	imageCounter := newOpenAIImageOutputCounter()
 	var firstTokenMs *int
 	responseID := ""
@@ -843,6 +844,10 @@ readLoop:
 				}
 			}
 			message = restoreCodexToolNamesFromContext(c, message)
+			if err := encryptedContentObserver.Observe(message); err != nil {
+				lease.MarkBroken()
+				return resultWithUsage(), err
+			}
 		}
 		if openAIWSMessageShouldParseUsage(eventType, message) {
 			regionalMeterObserveUsage(ctx, message, eventType)
@@ -863,6 +868,11 @@ readLoop:
 				errMsg = "Upstream websocket error"
 			}
 			fallbackReason, canFallback := classifyOpenAIWSErrorEventFromRaw(errCodeRaw, errTypeRaw, errMsgRaw)
+			if fallbackReason == openAIWSFallbackReasonInvalidEncryptedContent && openAIEncryptedRejectionHasOutput(message) {
+				// The error frame itself may report completed work. A fallback
+				// loses this payload and could otherwise replay the turn.
+				canFallback = false
+			}
 			errCode, errType, errMessage := summarizeOpenAIWSErrorEventFieldsFromRaw(errCodeRaw, errTypeRaw, errMsgRaw)
 			logOpenAIWSModeInfo(
 				"error_event account_id=%d conn_id=%s idx=%d fallback_reason=%s can_fallback=%v err_code=%s err_type=%s err_message=%s",

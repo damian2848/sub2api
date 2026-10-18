@@ -31,8 +31,9 @@ type openAIWSClientFrameConn struct {
 	waitingForNextTurn   atomic.Bool
 	// The relay observes upstream payloads, while clients must keep seeing the
 	// model identifier they supplied for the current turn.
-	restoreResponseModel func([]byte) []byte
-	restoreToolNames     func([]byte) []byte
+	restoreResponseModel    func([]byte) []byte
+	restoreToolNames        func([]byte) []byte
+	observeEncryptedContent func([]byte) error
 }
 
 // openAIWSPolicyEnforcingFrameConn wraps a client-side FrameConn and runs
@@ -694,6 +695,11 @@ func (c *openAIWSClientFrameConn) WriteFrame(ctx context.Context, msgType coderw
 			payload = c.restoreToolNames(payload)
 		}
 	}
+	if (msgType == coderws.MessageText || msgType == coderws.MessageBinary) && c.observeEncryptedContent != nil {
+		if err := c.observeEncryptedContent(payload); err != nil {
+			return err
+		}
+	}
 	return WriteCapturedWSClient(ctx, c.conn, msgType, payload)
 }
 
@@ -728,6 +734,12 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 	}
 	if account == nil {
 		return errors.New("account is nil")
+	}
+	encryptedContentObserver := s.NewOpenAIEncryptedContentObserverForRequest(ctx, c, account)
+	encryptedContentGroupID, _ := openAITurnAdmissionGroupFromContext(c)
+	encryptedContentAPIKeyID := getAPIKeyIDFromContext(c)
+	if err := s.ValidateOpenAIEncryptedContentAccount(ctx, &encryptedContentGroupID, encryptedContentAPIKeyID, account.ID, firstClientMessage); err != nil {
+		return err
 	}
 	if err := validateOpenAIWSBearerToken(account, token); err != nil {
 		return err
@@ -1044,6 +1056,7 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		restoreToolNames: func(payload []byte) []byte {
 			return restoreCodexToolNamesFromContext(c, payload)
 		},
+		observeEncryptedContent: encryptedContentObserver.Observe,
 	}
 	policyClientConn := &openAIWSPolicyEnforcingFrameConn{
 		inner: clientFrameConn,
@@ -1054,6 +1067,9 @@ func (s *OpenAIGatewayService) proxyResponsesWebSocketV2Passthrough(
 		filter: func(msgType coderws.MessageType, payload []byte) (out []byte, blocked *OpenAIFastBlockedError, filterErr error) {
 			if msgType != coderws.MessageText && msgType != coderws.MessageBinary {
 				return payload, nil, nil
+			}
+			if err := s.ValidateOpenAIEncryptedContentAccount(ctx, &encryptedContentGroupID, encryptedContentAPIKeyID, account.ID, payload); err != nil {
+				return payload, nil, err
 			}
 			eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
 			isResponseCreate := eventType == "response.create"
@@ -1631,6 +1647,14 @@ func openAIWSPassthroughRelayClientClose(exit openaiwsv2.RelayExit, completedTur
 	var closeErr *OpenAIWSClientCloseError
 	if errors.As(exit.Err, &closeErr) {
 		return closeErr.StatusCode(), closeErr.Reason(), true
+	}
+	var affinityErr *OpenAIEncryptedContentAffinityError
+	if errors.As(exit.Err, &affinityErr) {
+		status := coderws.StatusPolicyViolation
+		if affinityErr.HTTPStatus() == http.StatusConflict || affinityErr.HTTPStatus() >= http.StatusInternalServerError {
+			status = coderws.StatusTryAgainLater
+		}
+		return status, affinityErr.Message, true
 	}
 	var activeTurnTimeoutErr *openAIWSPassthroughActiveTurnTimeoutError
 	if errors.As(exit.Err, &activeTurnTimeoutErr) {
