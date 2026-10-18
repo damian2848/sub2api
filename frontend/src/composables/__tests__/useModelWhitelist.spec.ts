@@ -171,6 +171,21 @@ describe('useModelWhitelist', () => {
     ])
   })
 
+  it('Gemini Web 预设映射把档位后缀收敛到真实模型，且目标都在 Web 模型列表内', () => {
+    const presets = getPresetMappingsByPlatform('gemini_web')
+    expect(presets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from: 'gemini-3.8-flash-high', to: 'gemini-3.8-flash' }),
+      expect.objectContaining({ from: 'gemini-4-argon-high', to: 'gemini-4-argon' }),
+      expect.objectContaining({ from: 'gemini-4-argon-medium', to: 'gemini-4-argon' }),
+      expect.objectContaining({ from: 'gemini-4-argon-low', to: 'gemini-4-argon' }),
+      expect.objectContaining({ from: 'gemini-3.5-flash-lite', to: 'gemini-3.5-flash-lite' })
+    ]))
+    const webModels = getModelsByPlatform('gemini_web')
+    for (const preset of presets) {
+      expect(webModels).toContain(preset.to)
+    }
+  })
+
   it('antigravity 模型列表会把新的 Gemini 图片模型排在前面', () => {
     const models = getModelsByPlatform('antigravity')
 
