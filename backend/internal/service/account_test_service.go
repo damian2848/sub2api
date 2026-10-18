@@ -2774,6 +2774,9 @@ func (s *AccountTestService) testGeminiWebAccountConnection(c *gin.Context, acco
 	if strings.TrimSpace(result.Text) == "" {
 		return s.sendErrorAndEnd(c, "Gemini Web returned no text")
 	}
+	if err := geminiWebCheckCannedReply(c.Request.Context(), account, result, s.settingService.GeminiWebCannedReplies(c.Request.Context())); err != nil {
+		return s.sendErrorAndEnd(c, GeminiWebCannedReplyClientMessage)
+	}
 	s.sendEvent(c, TestEvent{Type: "content", Text: result.Text})
 	return s.finishAccountModelTest(c, modelID, result.ResponseModel, result.ResponseModelConflict, true)
 }

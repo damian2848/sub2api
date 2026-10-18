@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	geminiWebCannedText    = "I seem to be encountering an error. Can I try something else for you?"
-	geminiWebCannedTools   = `"tools":[{"name":"write_file","description":"Write","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}]`
-	geminiWebToolReplyText = "Writing.\n<tool_call>\n{\"name\": \"write_file\", \"arguments\": {\"path\": \"pelican.html\"}}\n</tool_call>"
+	geminiWebCannedText             = "I seem to be encountering an error. Can I try something else for you?"
+	geminiWebRetryRequestCannedText = "Sorry, something went wrong. Please try your request again."
+	geminiWebCannedTools            = `"tools":[{"name":"write_file","description":"Write","input_schema":{"type":"object","properties":{"path":{"type":"string"}}}}]`
+	geminiWebToolReplyText          = "Writing.\n<tool_call>\n{\"name\": \"write_file\", \"arguments\": {\"path\": \"pelican.html\"}}\n</tool_call>"
 )
 
 func geminiWebCannedRequest(endpoint string, stream bool, tools bool) []byte {
@@ -183,4 +184,36 @@ func TestGeminiWebNativeCannedReplyFails(t *testing.T) {
 func TestGeminiWebCannedReplyErrorIsNotTheCannedText(t *testing.T) {
 	require.True(t, errors.Is(geminiweb.ErrCannedReply, geminiweb.ErrCannedReply))
 	require.NotContains(t, GeminiWebCannedReplyClientMessage, "encountering")
+}
+
+func TestGeminiWebRetryRequestCannedReplyFails(t *testing.T) {
+	for _, endpoint := range []string{"messages", "chat", "native"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", endpoint, stream), func(t *testing.T) {
+				frames, _ := geminiWebFramesStub(t, "Sorry,", "Sorry, something went wrong.", geminiWebRetryRequestCannedText)
+				svc := &GeminiMessagesCompatService{httpUpstream: frames}
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+				var result *ForwardResult
+				var err error
+				if endpoint == "native" {
+					action := "generateContent"
+					if stream {
+						action = "streamGenerateContent"
+					}
+					result, err = svc.ForwardNative(context.Background(), c, geminiWebTestAccount(), "gemini-4-argon", action, stream,
+						[]byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`))
+				} else {
+					result, err = forwardGeminiWebCanned(svc, c, endpoint, geminiWebCannedRequest(endpoint, stream, false))
+				}
+				require.Nil(t, result, "a failed reply produces no usage to bill")
+				var failover *UpstreamFailoverError
+				require.ErrorAs(t, err, &failover)
+				require.Equal(t, http.StatusBadGateway, failover.StatusCode)
+				require.Equal(t, GeminiWebCannedReplyReason, failover.Reason)
+				require.NotContains(t, recorder.Body.String(), "Sorry,", "canned text is held back for account failover")
+			})
+		}
+	}
 }

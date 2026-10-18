@@ -17,6 +17,7 @@ var builtInCannedReplies = []string{
 	"I seem to be encountering an error. Can I try something else for you?",
 	"I'm having a hard time fulfilling your request. Can I help you with something else instead?",
 	"I encountered an error doing what you asked. Could you try again?",
+	"Sorry, something went wrong. Please try your request again.",
 }
 
 // BuiltInCannedReplies returns the canned failure messages that are always
