@@ -868,6 +868,11 @@ func (h *GatewayHandler) handleGeminiFailoverExhausted(c *gin.Context, failoverE
 
 	statusCode := failoverErr.StatusCode
 	responseBody := failoverErr.ResponseBody
+	if failoverErr.Reason == service.GeminiWebCannedReplyReason {
+		service.SetOpsUpstreamError(c, http.StatusBadGateway, service.GeminiWebCannedReplyClientMessage, "")
+		googleError(c, http.StatusBadGateway, service.GeminiWebCannedReplyClientMessage)
+		return
+	}
 
 	// 先检查透传规则
 	if h.errorPassthroughService != nil && len(responseBody) > 0 {

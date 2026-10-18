@@ -24,6 +24,11 @@ import (
 const (
 	GeminiWebCredentialRejectedReason        GatewayFailureReason = "gemini_web_credential_rejected"
 	GeminiWebCredentialRejectedClientMessage string               = "Gemini Web Cookie is invalid or expired; update the account Cookie and retry"
+	// GeminiWebCannedReplyReason marks a reply Gemini Web replaced with its
+	// built-in failure message. The request fails (and is not billed) unless
+	// another account answers.
+	GeminiWebCannedReplyReason        GatewayFailureReason = "gemini_web_canned_reply"
+	GeminiWebCannedReplyClientMessage string               = "Gemini Web failed to generate a reply (upstream returned its built-in error message); this request was not billed, please retry"
 )
 
 func geminiWebAuthUser(account *Account) (int, bool) {
@@ -194,6 +199,9 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebNative(ctx context.Context
 		onResult = streamWriter.WriteResult
 	}
 	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, prompt, strings.Contains(strings.ToLower(originalModel), "thinking"), onResult)
+	if err == nil {
+		err = geminiWebCheckCannedReply(ctx, account, result)
+	}
 	if err != nil {
 		if streamWriter != nil {
 			return nil, streamWriter.Abort(err)
@@ -238,6 +246,10 @@ func geminiWebFailoverError(err error) error {
 		reason = GeminiWebCredentialRejectedReason
 		message = GeminiWebCredentialRejectedClientMessage
 	}
+	if errors.Is(err, geminiweb.ErrCannedReply) {
+		reason = GeminiWebCannedReplyReason
+		message = GeminiWebCannedReplyClientMessage
+	}
 	return &UpstreamFailoverError{StatusCode: status, Stage: stage, Scope: scope, Reason: reason, ClientStatusCode: status, ClientMessage: message}
 }
 
@@ -269,6 +281,7 @@ type geminiWebNativeStreamWriter struct {
 	mu            sync.Mutex
 	text          string
 	thinking      string
+	released      bool
 	committed     bool
 	stopped       bool
 	writeErr      error
@@ -388,7 +401,9 @@ func geminiWebCumulativeDelta(previous, current string) (delta, next string) {
 }
 
 func (w *geminiWebNativeStreamWriter) writeResultLocked(result geminiweb.Result) error {
-	return w.writeSnapshotLocked(geminiWebStreamableText(result.Text, w.plan.toolsEnabled()), result.Thinking, nil, nil)
+	text := geminiWebStreamableText(result.Text, w.plan.toolsEnabled())
+	text, w.released = geminiWebHoldPossibleCannedReply(text, w.text, w.released)
+	return w.writeSnapshotLocked(text, result.Thinking, nil, nil)
 }
 
 func (w *geminiWebNativeStreamWriter) writeSnapshotLocked(text, thinking string, calls []geminiWebToolCall, extra gin.H) error {
@@ -468,12 +483,7 @@ func (w *geminiWebNativeStreamWriter) Abort(cause error) error {
 	if !w.committed && !w.c.Writer.Written() {
 		return geminiWebFailoverError(cause)
 	}
-	status, message := http.StatusBadGateway, "Gemini Web upstream request failed"
-	if errors.Is(cause, geminiweb.ErrInvalidCredential) {
-		status, message = http.StatusUnauthorized, GeminiWebCredentialRejectedClientMessage
-	} else if errors.Is(cause, geminiweb.ErrRateLimited) {
-		status, message = http.StatusTooManyRequests, "Gemini Web account is rate limited; retry later"
-	}
+	status, message := geminiWebStreamErrorStatus(cause)
 	SetOpsUpstreamError(w.c, status, message, "")
 	MarkOpsStreamFailure(w.c, "upstream_error", "gemini_web", message, status)
 	payload, _ := json.Marshal(gin.H{"error": gin.H{
@@ -586,6 +596,9 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context
 	thinking := strings.Contains(strings.ToLower(req.model), "thinking")
 	if !req.stream {
 		result, err := s.callGeminiWeb(ctx, account, mapped, req.plan.Prompt, thinking)
+		if err == nil {
+			err = geminiWebCheckCannedReply(ctx, account, result)
+		}
 		if err != nil {
 			return nil, geminiWebFailoverError(err)
 		}
@@ -598,18 +611,22 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	sizeBefore := GeminiWebPingAdjustedWrittenSize(c)
 	pipe := newGeminiWebPipeStream(req.plan, req.includeThought, cancel, req.handleStream)
 	pipe.pingUntilFirstToken(c)
 	result, err := s.callGeminiWebWithCallback(ctx, account, mapped, req.plan.Prompt, thinking, pipe.OnResult)
+	if err == nil {
+		err = geminiWebCheckCannedReply(ctx, account, result)
+	}
 	if err != nil {
-		if !pipe.Abort(err) && !c.Writer.Written() {
-			if ctxErr := c.Request.Context().Err(); ctxErr != nil {
-				return nil, ctxErr
-			}
-			return nil, geminiWebFailoverError(err)
-		}
+		started := pipe.Abort(err)
 		if ctxErr := c.Request.Context().Err(); ctxErr != nil {
 			return nil, ctxErr
+		}
+		// Only first-token pings reached the client: another account can
+		// still answer on the same response.
+		if !started && GeminiWebPingAdjustedWrittenSize(c) == sizeBefore {
+			return nil, geminiWebFailoverError(err)
 		}
 		return nil, geminiWebCommittedStreamError(c, err, req.writeStreamError)
 	}
@@ -619,6 +636,52 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebCompat(ctx context.Context
 		return nil, err
 	}
 	return geminiWebCompatForwardResult(req, mapped, result, usage, streamResult), nil
+}
+
+// geminiWebCheckCannedReply turns Gemini Web's canned failure message into
+// ErrCannedReply. The forward then fails, so the reply is never billed: it
+// switches accounts while the client has received no content, and otherwise
+// ends the stream with an error.
+func geminiWebCheckCannedReply(ctx context.Context, account *Account, result geminiweb.Result) error {
+	if !geminiweb.IsCannedReply(result.Text) {
+		return nil
+	}
+	logger.FromContext(ctx).Warn("gemini_web.canned_reply",
+		zap.Int64("account_id", account.ID), zap.String("text", result.Text))
+	return geminiweb.ErrCannedReply
+}
+
+// geminiWebStreamErrorStatus is the status and client message for an error
+// reported inside an already committed stream.
+func geminiWebStreamErrorStatus(cause error) (int, string) {
+	switch {
+	case errors.Is(cause, geminiweb.ErrInvalidCredential):
+		return http.StatusUnauthorized, GeminiWebCredentialRejectedClientMessage
+	case errors.Is(cause, geminiweb.ErrRateLimited):
+		return http.StatusTooManyRequests, "Gemini Web account is rate limited; retry later"
+	case errors.Is(cause, geminiweb.ErrCannedReply):
+		return http.StatusBadGateway, GeminiWebCannedReplyClientMessage
+	}
+	return http.StatusBadGateway, "Gemini Web upstream request failed"
+}
+
+// geminiWebHoldPossibleCannedReply holds back streamed answer text while it is
+// still the start of a canned failure message, so such a reply never reaches
+// the client as content. Once the text diverges it is released. A later
+// snapshot that rewrites the text already sent (sent is not its prefix) is
+// held again while it could be a canned reply: Gemini Web replaces a failed
+// answer wholesale.
+func geminiWebHoldPossibleCannedReply(text, sent string, released bool) (string, bool) {
+	if text == "" {
+		return text, released
+	}
+	if released && strings.HasPrefix(text, sent) {
+		return text, true
+	}
+	if geminiweb.CouldBecomeCannedReply(text) {
+		return "", released
+	}
+	return text, true
 }
 
 func geminiWebCompatForwardResult(req geminiWebCompatRequest, mapped string, result geminiweb.Result, usage ClaudeUsage, stream *geminiStreamResult) *ForwardResult {
@@ -637,12 +700,7 @@ func geminiWebCompatForwardResult(req geminiWebCompatRequest, mapped string, res
 // has already sent output. Like the native writer, it must not be wrapped as a
 // failover error once the client has received bytes.
 func geminiWebCommittedStreamError(c *gin.Context, cause error, write func(string)) error {
-	status, message := http.StatusBadGateway, "Gemini Web upstream request failed"
-	if errors.Is(cause, geminiweb.ErrInvalidCredential) {
-		status, message = http.StatusUnauthorized, GeminiWebCredentialRejectedClientMessage
-	} else if errors.Is(cause, geminiweb.ErrRateLimited) {
-		status, message = http.StatusTooManyRequests, "Gemini Web account is rate limited; retry later"
-	}
+	status, message := geminiWebStreamErrorStatus(cause)
 	SetOpsUpstreamError(c, status, message, "")
 	MarkOpsStreamFailure(c, "upstream_error", "gemini_web", message, status)
 	write(message)

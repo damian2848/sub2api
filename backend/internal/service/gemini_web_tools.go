@@ -30,11 +30,44 @@ const (
 var geminiWebKeepAliveInterval = 5 * time.Second
 
 // geminiWebFirstTokenPingDelay is how long a compat stream stays silent while
-// Gemini Web has produced no answer yet. Until then the request can still
-// switch accounts; after it, the response is committed and the client gets
-// SSE comment pings so its first-byte timeout does not fire while a Pro model
-// is thinking.
+// Gemini Web has produced no answer yet. After it, the response is committed
+// and the client gets SSE comment pings so its first-byte timeout does not fire
+// while a Pro model is thinking. Pings are not content: until the converter
+// starts, the request can still switch accounts on the same response.
 var geminiWebFirstTokenPingDelay = 5 * time.Second
+
+// geminiWebPingBytesKey counts the SSE comment ping bytes written to the client
+// before any content. The handlers subtract them (GeminiWebPingAdjustedWrittenSize)
+// so an attempt that only sent pings can still switch accounts.
+const geminiWebPingBytesKey = "gemini_web_ping_bytes"
+
+func addGeminiWebPingBytes(c *gin.Context, n int) {
+	current, _ := c.Get(geminiWebPingBytesKey)
+	total, _ := current.(int)
+	c.Set(geminiWebPingBytesKey, total+n)
+}
+
+// GeminiWebPingAdjustedWrittenSize is the client writer size without the
+// first-token pings of Gemini Web compat streams. Compare it before and after a
+// forward attempt: equal values mean the client has received no content, so
+// failing over to another account cannot corrupt the stream. Like gin's own
+// Size, it is -1 while nothing but pings has been written, and it is exactly
+// c.Writer.Size() when no pings were sent.
+func GeminiWebPingAdjustedWrittenSize(c *gin.Context) int {
+	if c == nil || c.Writer == nil {
+		return -1
+	}
+	size := c.Writer.Size()
+	current, _ := c.Get(geminiWebPingBytesKey)
+	pings, _ := current.(int)
+	if pings <= 0 {
+		return size
+	}
+	if real := size - pings; real > 0 {
+		return real
+	}
+	return -1
+}
 
 type geminiWebTool struct {
 	Name        string
@@ -527,6 +560,7 @@ type geminiWebPipeStream struct {
 	lastWrite    time.Time
 	sentText     string
 	sentThinking string
+	released     bool
 	done         chan struct{}
 	result       *geminiStreamResult
 	handleErr    error
@@ -613,16 +647,20 @@ func (p *geminiWebPipeStream) pingBeforeFirstToken(c *gin.Context) bool {
 	if p.started || p.finished || p.writeErr != nil {
 		return false
 	}
-	if !p.committed {
+	// An earlier attempt that failed over after its own pings has already
+	// committed the response; keep writing on it.
+	if !p.committed && !c.Writer.Written() {
 		c.Writer.Header().Set("Content-Type", "text/event-stream")
 		c.Writer.Header().Set("Cache-Control", "no-cache")
 		c.Writer.Header().Set("Connection", "keep-alive")
 		c.Writer.Header().Set("X-Accel-Buffering", "no")
 		c.Writer.WriteHeader(http.StatusOK)
-		p.committed = true
 		MarkResponseCommitted(c)
 	}
-	if _, err := c.Writer.Write([]byte(": ping\n\n")); err != nil {
+	p.committed = true
+	n, err := c.Writer.Write([]byte(": ping\n\n"))
+	addGeminiWebPingBytes(c, n)
+	if err != nil {
 		p.writeErr = err
 		if p.cancel != nil {
 			p.cancel()
@@ -687,7 +725,15 @@ func (p *geminiWebPipeStream) OnResult(result geminiweb.Result) error {
 		}
 		return errGeminiWebStreamFinished
 	}
-	text := geminiWebStreamableText(result.Text, p.plan.toolsEnabled())
+	// With tools, answer text is held until the reply is complete: Gemini Web
+	// can replace a half-written answer with a canned failure message, and
+	// only an unsent answer can still fail over to another account.
+	// Without tools, text streams as it arrives, except while it could still
+	// be the start of a canned failure message.
+	text := ""
+	if !p.plan.toolsEnabled() {
+		text, p.released = geminiWebHoldPossibleCannedReply(geminiWebStreamableText(result.Text, false), p.sentText, p.released)
+	}
 	chunk := p.chunkLocked(text, result.Thinking, nil, false, ClaudeUsage{}, result.ResponseModel)
 	if chunk == nil {
 		return nil
@@ -715,19 +761,18 @@ func (p *geminiWebPipeStream) Finish(result geminiweb.Result, usage ClaudeUsage)
 	return p.result, p.handleErr
 }
 
-// Abort ends the stream after an upstream error. It reports whether the
-// client response had already started (output or first-token pings); if not,
-// the caller may fail over.
+// Abort ends the stream after an upstream error. It reports whether content
+// had reached the converter. First-token pings do not count: the caller checks
+// GeminiWebPingAdjustedWrittenSize to decide whether it may still fail over.
 func (p *geminiWebPipeStream) Abort(cause error) bool {
 	p.stopOnce.Do(func() { close(p.stopKeep) })
 	p.mu.Lock()
 	p.finished = true
 	started := p.started
-	committed := p.committed
 	_ = p.pw.CloseWithError(cause)
 	p.mu.Unlock()
 	if started {
 		<-p.done
 	}
-	return started || committed
+	return started
 }

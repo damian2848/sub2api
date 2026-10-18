@@ -198,7 +198,7 @@ func TestGeminiWebClaudeToolCalls(t *testing.T) {
 			} else {
 				require.NotNil(t, result.FirstTokenMs)
 				blocks, stopReason = collectClaudeSSEBlocks(t, out)
-				require.Greater(t, strings.Count(out, `"type":"text_delta"`), 1, "text is streamed incrementally")
+				require.Equal(t, 1, strings.Count(out, `"type":"text_delta"`), "with tools, answer text is held until the reply is complete")
 			}
 			require.Equal(t, "tool_use", stopReason)
 			require.Len(t, blocks, 3)
@@ -401,10 +401,8 @@ func TestGeminiWebCompatStreamFailsOverBeforeOutput(t *testing.T) {
 	require.False(t, c.Writer.Written())
 }
 
-func TestGeminiWebPipeStreamKeepAliveBecomesClientPing(t *testing.T) {
-	previous := geminiWebKeepAliveInterval
-	geminiWebKeepAliveInterval = 20 * time.Millisecond
-	defer func() { geminiWebKeepAliveInterval = previous }()
+func TestGeminiWebPipeStreamPingsWhileToolReplyIsHeld(t *testing.T) {
+	shortenGeminiWebFirstTokenPing(t)
 
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -414,12 +412,14 @@ func TestGeminiWebPipeStreamKeepAliveBecomesClientPing(t *testing.T) {
 	pipe := newGeminiWebPipeStream(plan, false, func() {}, func(resp *http.Response) (*geminiStreamResult, error) {
 		return svc.handleStreamingResponse(c, resp, time.Now(), "gemini-3.5-flash-lite")
 	})
+	pipe.pingUntilFirstToken(c)
 	require.NoError(t, pipe.OnResult(geminiweb.Result{Text: "Writing.\n<tool_call>\n{\"name\": \"write_file\""}))
 	time.Sleep(120 * time.Millisecond)
+	require.NotContains(t, recorder.Body.String(), "Writing.", "partial answer text is held back")
 	_, err := pipe.Finish(geminiweb.Result{Text: "Writing.\n<tool_call>\n{\"name\": \"write_file\", \"arguments\": {\"path\": \"a\"}}\n</tool_call>"}, ClaudeUsage{InputTokens: 1, OutputTokens: 2})
 	require.NoError(t, err)
 	out := recorder.Body.String()
-	require.Contains(t, out, "event: ping", "a held-back tool call keeps the client stream alive")
+	require.True(t, strings.HasPrefix(out, ": ping\n\n"), "a held-back reply keeps the client stream alive: %q", out)
 	require.NotContains(t, out, geminiWebKeepAliveLine)
 	blocks, stop := collectClaudeSSEBlocks(t, out)
 	require.Equal(t, "tool_use", stop)
@@ -476,7 +476,9 @@ func TestGeminiWebCompatStreamPingsBeforeFirstToken(t *testing.T) {
 	}
 }
 
-func TestGeminiWebCompatStreamErrorAfterPingDoesNotFailOver(t *testing.T) {
+// Pings carry no content, so an upstream error after ping-only output still
+// fails over; the handler writes the in-stream error if every account fails.
+func TestGeminiWebCompatStreamErrorAfterPingOnlyFailsOver(t *testing.T) {
 	shortenGeminiWebFirstTokenPing(t)
 	svc := &GeminiMessagesCompatService{httpUpstream: slowGeminiWebStub(150*time.Millisecond, func(req *http.Request) (*http.Response, error) {
 		if req.Method == http.MethodPost {
@@ -488,13 +490,13 @@ func TestGeminiWebCompatStreamErrorAfterPingDoesNotFailOver(t *testing.T) {
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
 	_, err := svc.Forward(context.Background(), c, geminiWebTestAccount(), []byte(`{"model":"gemini-3.5-flash-lite","stream":true,"max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
-	require.Error(t, err)
 	var failover *UpstreamFailoverError
-	require.False(t, errors.As(err, &failover), "a committed stream must not switch accounts")
+	require.True(t, errors.As(err, &failover), "err = %v", err)
+	require.Equal(t, http.StatusTooManyRequests, failover.StatusCode)
 	out := recorder.Body.String()
 	require.True(t, strings.HasPrefix(out, ": ping\n\n"), "out = %q", out)
-	require.Contains(t, out, "event: error")
-	require.Contains(t, out, "rate limited")
+	require.Empty(t, strings.ReplaceAll(out, ": ping\n\n", ""), "nothing but pings before failover: %q", out)
+	require.Equal(t, -1, GeminiWebPingAdjustedWrittenSize(c))
 }
 
 func TestGeminiWebClaudeToolChoice(t *testing.T) {

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -285,8 +286,9 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			continue
 		}
 
-		// 5. Forward request
-		writerSizeBeforeForward := c.Writer.Size()
+		// 5. Forward request. Gemini Web first-token pings are not content, so
+		// they are left out of the size used to decide whether to fail over.
+		writerSizeBeforeForward := service.GeminiWebPingAdjustedWrittenSize(c)
 		forwardBody := body
 		if channelMapping.Mapped {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
@@ -323,9 +325,14 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
-				if c.Writer.Size() != writerSizeBeforeForward {
+				if service.GeminiWebPingAdjustedWrittenSize(c) != writerSizeBeforeForward {
 					h.handleCCFailoverExhausted(c, failoverErr, true)
 					return
+				}
+				// After ping-only output the response is already an SSE stream,
+				// so later errors must be written in-stream.
+				if c.Writer.Written() {
+					streamStarted = true
 				}
 				action := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
 				switch action {
@@ -402,8 +409,34 @@ func (h *GatewayHandler) chatCompletionsErrorResponse(c *gin.Context, status int
 }
 
 // handleCCFailoverExhausted writes a failover-exhausted error in CC format.
+// writeChatCompletionsStreamError ends a committed Chat Completions stream with
+// an OpenAI-style error frame and records it for the ops error log.
+func writeChatCompletionsStreamError(c *gin.Context, status int, errType, message string) {
+	service.MarkOpsStreamError(c, errType, message, status)
+	payload, _ := json.Marshal(gin.H{"error": gin.H{"message": message, "type": errType}})
+	_, _ = c.Writer.Write([]byte("data: " + string(payload) + "\n\n"))
+	if flusher, ok := c.Writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func (h *GatewayHandler) handleCCFailoverExhausted(c *gin.Context, lastErr *service.UpstreamFailoverError, streamStarted bool) {
+	canned := lastErr != nil && lastErr.Reason == service.GeminiWebCannedReplyReason
 	if streamStarted {
+		// A stream that has carried only Gemini Web first-token pings has
+		// no content yet; end it with an error frame instead of silently.
+		if service.GeminiWebPingAdjustedWrittenSize(c) < 0 {
+			message := "All available accounts exhausted"
+			if canned {
+				message = service.GeminiWebCannedReplyClientMessage
+			}
+			writeChatCompletionsStreamError(c, http.StatusBadGateway, "upstream_error", message)
+		}
+		return
+	}
+	if canned {
+		service.SetOpsUpstreamError(c, http.StatusBadGateway, service.GeminiWebCannedReplyClientMessage, "")
+		h.chatCompletionsErrorResponse(c, http.StatusBadGateway, "upstream_error", service.GeminiWebCannedReplyClientMessage)
 		return
 	}
 	if lastErr != nil {
