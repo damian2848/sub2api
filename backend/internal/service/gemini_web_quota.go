@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminiweb"
@@ -23,9 +24,24 @@ func (s *GeminiMessagesCompatService) passesGeminiWebQuotaPreCheck(ctx context.C
 	if s == nil || account == nil || !account.IsGeminiWeb() || s.httpUpstream == nil {
 		return true
 	}
+	if strings.TrimSpace(account.GetCredential("gemini_web_cookie")) == "" {
+		return false
+	}
+	quota, err := s.readGeminiWebQuota(ctx, account, geminiWebQuotaPrecheckTimeout, false)
+	if err != nil {
+		return !errors.Is(err, geminiweb.ErrInvalidCredential) && !errors.Is(err, geminiweb.ErrRateLimited)
+	}
+	now := time.Now()
+	applyGeminiWebQuotaRateLimit(ctx, s.accountRepo, account, quota, now)
+	return geminiWebQuotaAvailable(quota, now)
+}
+
+// readGeminiWebQuota fetches the usage windows, keeps the rotated cookie and
+// applies the cookie / 429 side effects of a failed read.
+func (s *GeminiMessagesCompatService) readGeminiWebQuota(ctx context.Context, account *Account, timeout time.Duration, force bool) (geminiweb.Quota, error) {
 	cookie := account.GetCredential("gemini_web_cookie")
 	if strings.TrimSpace(cookie) == "" {
-		return false
+		return geminiweb.Quota{}, geminiweb.ErrInvalidCredential
 	}
 	authUser, authUserSet := geminiWebAuthUser(account)
 	cred := geminiweb.Credential{Cookie: cookie, AuthUser: authUser, AuthUserSet: authUserSet, BaseURL: "https://gemini.google.com", UserAgent: account.GetCredential("user_agent")}
@@ -36,9 +52,15 @@ func (s *GeminiMessagesCompatService) passesGeminiWebQuotaPreCheck(ctx context.C
 	do := func(req *http.Request) (*http.Response, error) {
 		return s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 	}
-	quotaCtx, cancel := context.WithTimeout(ctx, geminiWebQuotaPrecheckTimeout)
+	quotaCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	result, err := s.geminiWebClient().FetchQuota(quotaCtx, cred, do)
+	var result geminiweb.QuotaResult
+	var err error
+	if force {
+		result, err = s.geminiWebClient().RefreshQuota(quotaCtx, cred, do)
+	} else {
+		result, err = s.geminiWebClient().FetchQuota(quotaCtx, cred, do)
+	}
 	if live := s.geminiWebClient().CurrentCookie(cred); live != "" {
 		result.UpdatedCookie = live
 	}
@@ -47,12 +69,62 @@ func (s *GeminiMessagesCompatService) passesGeminiWebQuotaPreCheck(ctx context.C
 	}
 	if err != nil {
 		s.handleGeminiWebQuotaError(ctx, account, cookie, err)
-		return !errors.Is(err, geminiweb.ErrInvalidCredential) && !errors.Is(err, geminiweb.ErrRateLimited)
+		return geminiweb.Quota{}, err
 	}
-	now := time.Now()
-	applyGeminiWebQuotaRateLimit(ctx, s.accountRepo, account, result.Quota, now)
-	return geminiWebQuotaAvailable(result.Quota, now)
+	return result.Quota, nil
 }
+
+const (
+	// geminiWebQuotaRefreshInterval caps how often one account's usage page is
+	// re-read after its requests; bursts share a single read.
+	geminiWebQuotaRefreshInterval = 15 * time.Second
+	geminiWebQuotaRefreshTimeout  = 20 * time.Second
+)
+
+// geminiWebQuotaRefreshGate admits at most one post-request usage read per
+// account per geminiWebQuotaRefreshInterval.
+type geminiWebQuotaRefreshGate struct {
+	mu   sync.Mutex
+	last map[int64]time.Time
+}
+
+func (g *geminiWebQuotaRefreshGate) allow(accountID int64, now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.last == nil {
+		g.last = make(map[int64]time.Time)
+	}
+	if last, ok := g.last[accountID]; ok && now.Sub(last) < geminiWebQuotaRefreshInterval {
+		return false
+	}
+	g.last[accountID] = now
+	return true
+}
+
+// refreshGeminiWebQuotaAfterRequest re-reads the usage windows in the
+// background after a Gemini Web call, so an account whose call used up a
+// window is rate limited for every scheduler, not only the ones that run the
+// quota precheck.
+func (s *GeminiMessagesCompatService) refreshGeminiWebQuotaAfterRequest(account *Account) {
+	if s == nil || account == nil || account.ID <= 0 || s.accountRepo == nil || s.httpUpstream == nil {
+		return
+	}
+	if !s.geminiWebQuotaRefresh.allow(account.ID, time.Now()) {
+		return
+	}
+	// The request goroutine keeps using its account; the read works on a copy.
+	snapshot := *account
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), geminiWebQuotaRefreshTimeout)
+		defer cancel()
+		quota, err := s.readGeminiWebQuota(ctx, &snapshot, geminiWebQuotaRefreshTimeout, true)
+		if err != nil {
+			return
+		}
+		applyGeminiWebQuotaRateLimit(ctx, s.accountRepo, &snapshot, quota, time.Now())
+	}()
+}
+
 func geminiWebQuotaAvailable(quota geminiweb.Quota, now time.Time) bool {
 	for _, w := range quota.Windows {
 		if !geminiWebWindowExhausted(w) {

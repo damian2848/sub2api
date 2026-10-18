@@ -114,6 +114,9 @@ func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Cont
 			account.Credentials = updated
 		}
 	}
+	if !errors.Is(err, geminiweb.ErrInvalidCredential) {
+		s.refreshGeminiWebQuotaAfterRequest(account)
+	}
 	if err != nil {
 		if errors.Is(err, geminiweb.ErrInvalidCredential) {
 			s.geminiWebClient().Invalidate(cookie)

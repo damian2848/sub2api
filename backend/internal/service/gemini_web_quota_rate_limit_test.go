@@ -2,6 +2,12 @@ package service
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -149,4 +155,66 @@ func TestApplyGeminiWebQuotaRateLimitKeepsLimitWhileExhaustedWithoutReset(t *tes
 	require.Zero(t, repo.clearCalls)
 	require.Empty(t, repo.setCalls)
 	require.Equal(t, quotaLimit, *account.RateLimitResetAt)
+}
+
+type geminiWebQuotaAsyncRepo struct {
+	AccountRepository
+	rateLimited chan time.Time
+}
+
+func (r *geminiWebQuotaAsyncRepo) SetRateLimited(_ context.Context, _ int64, resetAt time.Time) error {
+	r.rateLimited <- resetAt
+	return nil
+}
+
+type geminiWebQuotaUpstream struct {
+	HTTPUpstream
+	fiveHourReset time.Time
+	quotaReads    atomic.Int32
+}
+
+func (u *geminiWebQuotaUpstream) Do(req *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	body := `"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid"`
+	if req.Method == http.MethodPost {
+		u.quotaReads.Add(1)
+		payload, _ := json.Marshal([]any{2, []any{
+			[]any{"", "1", 1, []any{strconv.FormatInt(u.fiveHourReset.Unix(), 10), "0"}},
+			[]any{"", "0.28", 2, []any{strconv.FormatInt(u.fiveHourReset.Add(96*time.Hour).Unix(), 10), "0"}},
+		}})
+		outer, _ := json.Marshal([]any{[]any{"wrb.fr", "jSf9Qc", string(payload)}})
+		body = ")]}'\n" + string(outer)
+	}
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+}
+
+func TestRefreshGeminiWebQuotaAfterRequestRateLimitsExhaustedAccount(t *testing.T) {
+	reset := time.Now().Add(35 * time.Minute).Truncate(time.Second)
+	upstream := &geminiWebQuotaUpstream{fiveHourReset: reset}
+	repo := &geminiWebQuotaAsyncRepo{rateLimited: make(chan time.Time, 2)}
+	svc := &GeminiMessagesCompatService{accountRepo: repo, httpUpstream: upstream}
+	account := &Account{ID: 268, Platform: PlatformGemini, Credentials: map[string]any{"gemini_web_cookie": "__Secure-1PSID=psid"}}
+
+	svc.refreshGeminiWebQuotaAfterRequest(account)
+	select {
+	case got := <-repo.rateLimited:
+		require.True(t, got.Equal(reset), "rate limit until %v, want %v", got, reset)
+	case <-time.After(5 * time.Second):
+		t.Fatal("exhausted five-hour window did not rate limit the account")
+	}
+	// The request's own account is left alone; the background read used a copy.
+	require.Nil(t, account.RateLimitResetAt)
+
+	// A burst right after shares the read that just happened.
+	svc.refreshGeminiWebQuotaAfterRequest(account)
+	time.Sleep(100 * time.Millisecond)
+	require.Equal(t, int32(1), upstream.quotaReads.Load())
+}
+
+func TestGeminiWebQuotaRefreshGate(t *testing.T) {
+	var gate geminiWebQuotaRefreshGate
+	now := time.Now()
+	require.True(t, gate.allow(1, now))
+	require.False(t, gate.allow(1, now.Add(geminiWebQuotaRefreshInterval-time.Second)))
+	require.True(t, gate.allow(2, now))
+	require.True(t, gate.allow(1, now.Add(geminiWebQuotaRefreshInterval)))
 }

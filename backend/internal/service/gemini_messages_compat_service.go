@@ -75,6 +75,8 @@ type GeminiMessagesCompatService struct {
 	geminiWebCanned geminiWebCannedTracker
 	// geminiWebActivity tracks in-flight calls per account for analytics.
 	geminiWebActivity geminiWebAccountActivity
+	// geminiWebQuotaRefresh throttles the usage read that follows each call.
+	geminiWebQuotaRefresh geminiWebQuotaRefreshGate
 }
 
 func (s *GeminiMessagesCompatService) readUpstreamErrorBody(resp *http.Response) []byte {
