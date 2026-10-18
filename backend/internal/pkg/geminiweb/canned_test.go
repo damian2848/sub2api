@@ -19,6 +19,13 @@ func TestIsCannedReply(t *testing.T) {
 		{"背景滚动效果。I seem to be encountering an error. Can I try something else for you?", false},
 		{"The page shows: I encountered an error doing what you asked. Could you try again?", false},
 		{"I seem to be encountering an error.", false},
+		{"我只是一个语言模型，无法提供这方面的帮助。", true},
+		{"我是一个文本 AI，这超出了我的能力范围。", true},
+		{" 我是一个文本  AI，这超出了我的能力范围。\n", true},
+		{"一旦您的额度重置，我就可以创建更多图片。请在“设置”中查看您的使用情况。", true},
+		{"I can create more videos as soon as your limit resets. Check your usage in Settings.\n\n", true},
+		{"代码如下。我只是一个语言模型，无法提供这方面的帮助。", false},
+		{"我只是一个语言模型。", false},
 		{"", false},
 	} {
 		if got := IsCannedReply(tc.text); got != tc.want {
@@ -40,6 +47,10 @@ func TestCouldBecomeCannedReply(t *testing.T) {
 		{"I seem to be encountering an error. Can I try something else for you?", true},
 		{"I will create", false},
 		{"我将创建", false},
+		{"我只是一个语言模型，", true},
+		{"由于程序代码的局限", true},
+		{"一旦您的额度重置", true},
+		{"我只是一个语言模型，但", false},
 		{"I seem to be fine", false},
 	} {
 		if got := CouldBecomeCannedReply(tc.text); got != tc.want {

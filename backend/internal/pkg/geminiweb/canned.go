@@ -18,6 +18,23 @@ var builtInCannedReplies = []string{
 	"I'm having a hard time fulfilling your request. Can I help you with something else instead?",
 	"I encountered an error doing what you asked. Could you try again?",
 	"Sorry, something went wrong. Please try your request again.",
+	// Chinese-locale failures, flagged as failed generations like the above.
+	"请恕我爱莫能助，我只是一个语言模型，不能理解或回复你的这个问题。",
+	"由于程序代码的局限，我没法办到。",
+	"我只是一个语言模型，无法提供这方面的帮助。",
+	"我只会生成文本，你提出的问题超出了我的程序逻辑范畴。",
+	"我是一个文本 AI，这超出了我的能力范围。",
+	"身为一个语言模型，我没办法提供这方面的帮助。",
+	"我是一个语言模型，这超出了我的设计用途。",
+	"我无法提供这方面的帮助，因为我只是一个语言模型。",
+	"我只是一个语言模型，理解不了这个问题，因此没法帮上忙。",
+	"我只是一个文本 AI，在这方面没法帮到你。",
+	"我只是一个语言模型，不具备这方面的信息或能力，因此没法帮到你。",
+	// The account's image / video generation limit is used up.
+	"I can create more videos as soon as your limit resets. Check your usage in Settings.",
+	"I can create more images as soon as your limit resets. Check your usage in Settings.",
+	"一旦您的额度重置，我就可以创建更多视频。请在“设置”中查看您的使用情况。",
+	"一旦您的额度重置，我就可以创建更多图片。请在“设置”中查看您的使用情况。",
 }
 
 // BuiltInCannedReplies returns the canned failure messages that are always
