@@ -67,8 +67,11 @@
         </div>
 
         <div v-if="errorItems.length" class="mt-2">
-          <div class="text-sm font-medium text-red-600 dark:text-red-400">
-            {{ t('admin.accounts.dataImportErrors') }}
+          <div
+            class="text-sm font-medium"
+            :class="hasFailures ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'"
+          >
+            {{ hasFailures ? t('admin.accounts.dataImportErrors') : t('admin.accounts.dataImportNotices') }}
           </div>
           <div
             class="mt-2 max-h-48 overflow-auto rounded-lg bg-gray-50 p-3 font-mono text-xs dark:bg-dark-800"
@@ -150,6 +153,9 @@ const selectedFilesLabel = computed(() => {
 const fileListTitle = computed(() => files.value.map((item) => item.name).join(', '))
 
 const errorItems = computed(() => result.value?.errors || [])
+const hasFailures = computed(
+  () => (result.value?.account_failed ?? 0) > 0 || (result.value?.proxy_failed ?? 0) > 0
+)
 
 watch(
   () => props.show,
@@ -319,21 +325,29 @@ const handleImport = async () => {
       skip_default_group_bind: true
     })
 
-    result.value = res
+    result.value = { ...res, account_updated: res.account_updated ?? 0 }
 
     const msgParams: Record<string, unknown> = {
       account_created: res.account_created,
+      account_updated: res.account_updated ?? 0,
       account_failed: res.account_failed,
       proxy_created: res.proxy_created,
       proxy_reused: res.proxy_reused,
       proxy_failed: res.proxy_failed,
     }
+    const changedData = res.account_created > 0 || (res.account_updated ?? 0) > 0 || res.proxy_created > 0
     if (res.account_failed > 0 || res.proxy_failed > 0) {
-      // 部分成功也创建了数据;弹窗关闭时通过 imported 通知父组件刷新列表
-      if (res.account_created > 0 || res.proxy_created > 0) {
+      // 部分成功也写入了数据;弹窗关闭时通过 imported 通知父组件刷新列表
+      if (changedData) {
         hasCreatedData.value = true
       }
       appStore.showError(t('admin.accounts.dataImportCompletedWithErrors', msgParams))
+    } else if (res.errors?.length) {
+      // 没有失败但有提示（如同名账号有多个），保留弹窗让用户看到明细
+      if (changedData) {
+        hasCreatedData.value = true
+      }
+      appStore.showWarning(t('admin.accounts.dataImportCompletedWithNotices', msgParams))
     } else {
       appStore.showSuccess(t('admin.accounts.dataImportSuccess', msgParams))
       emit('imported')

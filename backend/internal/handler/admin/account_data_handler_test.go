@@ -3,6 +3,7 @@ package admin
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -338,4 +339,140 @@ func TestExportDataExcludesCodexTicketMaterial(t *testing.T) {
 	require.NotContains(t, rec.Body.String(), "legacy-proxy-secret")
 	require.Contains(t, extra, "codex_turn_ticket:gpt-6-astra")
 	require.Contains(t, extra, "codex_harvest_proxy_url")
+}
+
+func postAccountDataImport(t *testing.T, router http.Handler, accounts []map[string]any) DataImportResult {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"data": map[string]any{
+			"type":     dataType,
+			"version":  dataVersion,
+			"proxies":  []map[string]any{},
+			"accounts": accounts,
+		},
+		"skip_default_group_bind": true,
+	})
+	require.NoError(t, err)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/accounts/data", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp struct {
+		Code int              `json:"code"`
+		Data DataImportResult `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Equal(t, 0, resp.Code)
+	return resp.Data
+}
+
+func geminiWebImportEntry(name, cookie string) map[string]any {
+	return map[string]any{
+		"name":        name,
+		"notes":       "Imported from browser Cookie JSON",
+		"platform":    service.PlatformGemini,
+		"type":        service.AccountTypeGeminiWeb,
+		"credentials": map[string]any{"gemini_web_cookie": cookie},
+		"concurrency": 10,
+		"priority":    1,
+	}
+}
+
+func TestImportDataUpdatesExistingAccountWithSameName(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	shadowParent := int64(400)
+	adminSvc.accounts = []service.Account{
+		// 已有重复账号：更新 ID 最小的那个，不论列表顺序。
+		{ID: 256, Name: "gemini-web-a@gmail.com", Platform: service.PlatformGemini, Type: service.AccountTypeGeminiWeb,
+			Credentials: map[string]any{"gemini_web_cookie": "__Secure-1PSID=dup"}},
+		{ID: 243, Name: "gemini-web-a@gmail.com", Platform: service.PlatformGemini, Type: service.AccountTypeGeminiWeb,
+			Credentials: map[string]any{"gemini_web_cookie": "__Secure-1PSID=old", "user_agent": "UA", "auth_user": float64(1)}},
+		// 影子账号与其它类型的同名账号不参与匹配。
+		{ID: 401, Name: "gemini-web-a@gmail.com", Platform: service.PlatformGemini, Type: service.AccountTypeGeminiWeb,
+			ParentAccountID: &shadowParent},
+		{ID: 402, Name: "gemini-web-a@gmail.com", Platform: service.PlatformGemini, Type: service.AccountTypeOAuth},
+	}
+
+	result := postAccountDataImport(t, router, []map[string]any{
+		geminiWebImportEntry("gemini-web-a@gmail.com", "__Secure-1PSID=fresh"),
+	})
+
+	require.Equal(t, 0, result.AccountCreated)
+	require.Equal(t, 1, result.AccountUpdated)
+	require.Equal(t, 0, result.AccountFailed)
+	require.Empty(t, adminSvc.createdAccounts)
+	require.Equal(t, []int64{243}, adminSvc.updatedAccountIDs)
+
+	input := adminSvc.lastUpdateAccountInput
+	require.NotNil(t, input)
+	require.Equal(t, "__Secure-1PSID=fresh", input.Credentials["gemini_web_cookie"])
+	require.Equal(t, "UA", input.Credentials["user_agent"])
+	require.Equal(t, float64(1), input.Credentials["auth_user"])
+	// 导入文件里的默认并发/优先级/备注不覆盖管理员调过的设置，分组与代理保持原样。
+	require.Nil(t, input.ProxyID)
+	require.Nil(t, input.GroupIDs)
+	require.Nil(t, input.Concurrency)
+	require.Nil(t, input.Priority)
+	require.Nil(t, input.Notes)
+	require.Empty(t, input.Name)
+	require.Equal(t, "__Secure-1PSID=old", adminSvc.accounts[1].Credentials["gemini_web_cookie"])
+
+	require.Len(t, result.Errors, 1)
+	require.Contains(t, result.Errors[0].Message, "2 existing accounts")
+	require.Contains(t, result.Errors[0].Message, "#243")
+}
+
+func TestImportDataSameNameInOneBatchCreatesOnce(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+
+	result := postAccountDataImport(t, router, []map[string]any{
+		geminiWebImportEntry("gemini-web-b@gmail.com", "__Secure-1PSID=first"),
+		geminiWebImportEntry("gemini-web-b@gmail.com", "__Secure-1PSID=second"),
+	})
+
+	require.Equal(t, 1, result.AccountCreated)
+	require.Equal(t, 1, result.AccountUpdated)
+	require.Len(t, adminSvc.createdAccounts, 1)
+	require.Equal(t, []int64{300}, adminSvc.updatedAccountIDs)
+	require.Equal(t, "__Secure-1PSID=second", adminSvc.lastUpdateAccountInput.Credentials["gemini_web_cookie"])
+	require.Empty(t, result.Errors)
+}
+
+func TestImportDataUpdateAppliesProxyFromFile(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	adminSvc.proxies = []service.Proxy{{ID: 7, Name: "p", Protocol: "http", Host: "10.0.0.1", Port: 8080, Status: service.StatusActive}}
+	adminSvc.accounts = []service.Account{
+		{ID: 50, Name: "gemini-web-c@gmail.com", Platform: service.PlatformGemini, Type: service.AccountTypeGeminiWeb,
+			Credentials: map[string]any{"gemini_web_cookie": "__Secure-1PSID=old"}},
+	}
+	entry := geminiWebImportEntry("gemini-web-c@gmail.com", "__Secure-1PSID=fresh")
+	entry["proxy_key"] = "http|10.0.0.1|8080||"
+
+	result := postAccountDataImport(t, router, []map[string]any{entry})
+
+	require.Equal(t, 1, result.AccountUpdated)
+	require.NotNil(t, adminSvc.lastUpdateAccountInput.ProxyID)
+	require.Equal(t, int64(7), *adminSvc.lastUpdateAccountInput.ProxyID)
+}
+
+func TestImportDataUpdateFailureDoesNotCreateDuplicate(t *testing.T) {
+	router, adminSvc := setupAccountDataRouter()
+	adminSvc.accounts = []service.Account{
+		{ID: 60, Name: "gemini-web-d@gmail.com", Platform: service.PlatformGemini, Type: service.AccountTypeGeminiWeb,
+			Credentials: map[string]any{"gemini_web_cookie": "__Secure-1PSID=old"}},
+	}
+	adminSvc.updateAccountErr = errors.New("cookie rejected")
+
+	result := postAccountDataImport(t, router, []map[string]any{
+		geminiWebImportEntry("gemini-web-d@gmail.com", "__Secure-1PSID=bad"),
+	})
+
+	require.Equal(t, 0, result.AccountCreated)
+	require.Equal(t, 0, result.AccountUpdated)
+	require.Equal(t, 1, result.AccountFailed)
+	require.Empty(t, adminSvc.createdAccounts)
+	require.Len(t, result.Errors, 1)
+	require.Equal(t, "cookie rejected", result.Errors[0].Message)
 }

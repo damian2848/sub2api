@@ -1853,6 +1853,8 @@ export interface AdminDataImportResult {
   proxy_reused: number
   proxy_failed: number
   account_created: number
+  /** Existing accounts with the same platform, type and name whose credentials were refreshed. */
+  account_updated?: number
   account_failed: number
   errors?: AdminDataImportError[]
 }

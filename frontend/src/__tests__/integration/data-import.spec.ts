@@ -216,4 +216,76 @@ describe('ImportDataModal', () => {
     expect(wrapper.emitted('imported')).toHaveLength(1)
     expect(wrapper.emitted('close')).toHaveLength(1)
   })
+
+  it('只更新同名账号时也通知父组件刷新', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
+      proxy_created: 0,
+      proxy_reused: 0,
+      proxy_failed: 0,
+      account_created: 0,
+      account_updated: 2,
+      account_failed: 0
+    })
+
+    const wrapper = mountModal()
+    const input = wrapper.find('input[type="file"]')
+    setInputFiles(input.element, [
+      makeJsonFile(
+        'refresh.json',
+        JSON.stringify({ exported_at: '2026-10-18T00:00:00Z', proxies: [], accounts: [{ name: 'a' }, { name: 'b' }] })
+      )
+    ])
+
+    await input.trigger('change')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(showSuccess).toHaveBeenCalledWith('admin.accounts.dataImportSuccess')
+    expect(wrapper.emitted('imported')).toHaveLength(1)
+  })
+
+  it('没有失败但有提示时保留弹窗展示提示，关闭后再刷新', async () => {
+    const { adminAPI } = await import('@/api/admin')
+    vi.mocked(adminAPI.accounts.importData).mockResolvedValue({
+      proxy_created: 0,
+      proxy_reused: 0,
+      proxy_failed: 0,
+      account_created: 0,
+      account_updated: 1,
+      account_failed: 0,
+      errors: [
+        {
+          kind: 'account',
+          name: 'gemini-web-a@gmail.com',
+          message: '2 existing accounts share this name; updated the oldest (#243), delete the others if they are duplicates'
+        }
+      ]
+    })
+
+    const wrapper = mountModal()
+    const input = wrapper.find('input[type="file"]')
+    setInputFiles(input.element, [
+      makeJsonFile(
+        'dup.json',
+        JSON.stringify({ exported_at: '2026-10-18T00:00:00Z', proxies: [], accounts: [{ name: 'gemini-web-a@gmail.com' }] })
+      )
+    ])
+
+    await input.trigger('change')
+    await wrapper.find('form').trigger('submit')
+    await flushPromises()
+
+    expect(showWarning).toHaveBeenCalledWith('admin.accounts.dataImportCompletedWithNotices')
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(wrapper.emitted('imported')).toBeUndefined()
+    expect(wrapper.text()).toContain('admin.accounts.dataImportNotices')
+    expect(wrapper.text()).not.toContain('admin.accounts.dataImportErrors')
+    expect(wrapper.text()).toContain('#243')
+
+    await wrapper.findAll('button.btn-secondary')[1]!.trigger('click')
+
+    expect(wrapper.emitted('imported')).toHaveLength(1)
+    expect(wrapper.emitted('close')).toHaveLength(1)
+  })
 })

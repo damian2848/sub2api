@@ -44,6 +44,7 @@ type stubAdminService struct {
 	createSparkShadowErr                error
 	updateAccountErr                    error
 	lastUpdateAccountInput              *service.UpdateAccountInput
+	updatedAccountIDs                   []int64
 	bulkUpdateAccountErr                error
 	lastBulkUpdateAccountInput          *service.BulkUpdateAccountsInput
 	getAccountResult                    *service.Account
@@ -547,6 +548,7 @@ func (s *stubAdminService) RecoverDuplicateAccount(ctx context.Context, id int64
 func (s *stubAdminService) UpdateAccount(ctx context.Context, id int64, input *service.UpdateAccountInput) (*service.Account, error) {
 	s.updateAccountCalls++
 	s.lastUpdateAccountInput = input
+	s.updatedAccountIDs = append(s.updatedAccountIDs, id)
 	if s.updateAccountErr != nil {
 		return nil, s.updateAccountErr
 	}

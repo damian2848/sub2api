@@ -84,6 +84,7 @@ type DataImportResult struct {
 	ProxyReused    int               `json:"proxy_reused"`
 	ProxyFailed    int               `json:"proxy_failed"`
 	AccountCreated int               `json:"account_created"`
+	AccountUpdated int               `json:"account_updated"` // 同平台/类型/名称的已有账号，原地更新凭据
 	AccountFailed  int               `json:"account_failed"`
 	Errors         []DataImportError `json:"errors,omitempty"`
 }
@@ -278,6 +279,11 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 	if err != nil {
 		return result, err
 	}
+	// 在任何写入之前加载，失败时整批不落库。
+	existingAccounts, err := h.loadImportAccountIndex(ctx, dataPayload.Accounts)
+	if err != nil {
+		return result, err
+	}
 
 	proxyKeyToID := make(map[string]int64, len(existingProxies))
 	// proxyNameToID 用于 backup_proxy_name 反查：DB 已有 + 本批次新建均会写入
@@ -456,6 +462,35 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 
 		enrichCredentialsFromIDToken(&item)
 
+		// 同平台、同类型、同名视为同一账号：更新而不是再建一个重复账号。
+		key := importAccountKey(item.Platform, item.Type, item.Name)
+		if match, ok := existingAccounts[key]; ok {
+			updated, updateErr := h.updateImportedDataAccount(ctx, match.account, item, proxyID)
+			if updateErr != nil {
+				result.AccountFailed++
+				result.Errors = append(result.Errors, DataImportError{
+					Kind:    "account",
+					Name:    item.Name,
+					Message: updateErr.Error(),
+				})
+				continue
+			}
+			if match.duplicates > 0 {
+				result.Errors = append(result.Errors, DataImportError{
+					Kind: "account",
+					Name: item.Name,
+					Message: fmt.Sprintf("%d existing accounts share this name; updated the oldest (#%d), delete the others if they are duplicates",
+						match.duplicates+1, match.account.ID),
+				})
+				// 同一批次再次命中时只提示一次。
+				match.duplicates = 0
+			}
+			match.account = updated
+			h.scheduleGrokImportProbe(updated)
+			result.AccountUpdated++
+			continue
+		}
+
 		accountInput := &service.CreateAccountInput{
 			Name:                 item.Name,
 			Notes:                item.Notes,
@@ -490,6 +525,8 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 		}
 		h.scheduleGrokImportProbe(created)
 		result.AccountCreated++
+		// 同一文件（或多文件合并）里后面的同名条目更新这里刚建的账号。
+		existingAccounts[key] = &importAccountMatch{account: created}
 	}
 
 	// 异步设置 Antigravity 隐私，避免大量导入时阻塞请求
@@ -510,6 +547,85 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 	}
 
 	return result, nil
+}
+
+// importAccountMatch 是导入时按名称命中的已有账号；duplicates 记录同键的其余账号数。
+type importAccountMatch struct {
+	account    *service.Account
+	duplicates int
+}
+
+func importAccountKey(platform, accountType, name string) string {
+	return strings.TrimSpace(platform) + "\x00" + strings.TrimSpace(accountType) + "\x00" + strings.TrimSpace(name)
+}
+
+// loadImportAccountIndex 按导入条目涉及的平台/类型加载已有账号，同键多个时取 ID 最小的
+// （最早创建、通常已绑定分组的那个）。影子账号不持凭据，不参与匹配。
+func (h *AccountHandler) loadImportAccountIndex(ctx context.Context, items []DataAccount) (map[string]*importAccountMatch, error) {
+	index := make(map[string]*importAccountMatch)
+	scanned := make(map[string]struct{})
+	for i := range items {
+		platform := strings.TrimSpace(items[i].Platform)
+		accountType := strings.TrimSpace(items[i].Type)
+		if validateDataAccount(items[i]) != nil {
+			continue
+		}
+		scope := platform + "\x00" + accountType
+		if _, ok := scanned[scope]; ok {
+			continue
+		}
+		scanned[scope] = struct{}{}
+		accounts, err := h.listAccountsFiltered(ctx, platform, accountType, "", "", 0, "", "id", "asc")
+		if err != nil {
+			return nil, err
+		}
+		for j := range accounts {
+			account := &accounts[j]
+			if account.IsShadow() || account.Platform != platform || account.Type != accountType {
+				continue
+			}
+			key := importAccountKey(account.Platform, account.Type, account.Name)
+			match, ok := index[key]
+			if !ok {
+				index[key] = &importAccountMatch{account: account}
+				continue
+			}
+			match.duplicates++
+			if account.ID < match.account.ID {
+				match.account = account
+			}
+		}
+	}
+	return index, nil
+}
+
+// updateImportedDataAccount 用导入文件刷新同名账号的凭据：文件里的凭据键覆盖旧值，
+// 文件没有的键（如 model_mapping）保留；文件指定了 proxy_key 时同步代理。
+// 分组、并发、优先级、倍率、备注、状态等由管理员维护的设置保持不变。
+func (h *AccountHandler) updateImportedDataAccount(ctx context.Context, existing *service.Account, item DataAccount, proxyID *int64) (*service.Account, error) {
+	credentials := make(map[string]any, len(existing.Credentials)+len(item.Credentials))
+	for k, v := range existing.Credentials {
+		credentials[k] = v
+	}
+	for k, v := range item.Credentials {
+		credentials[k] = v
+	}
+	updated, err := h.adminService.UpdateAccount(ctx, existing.ID, &service.UpdateAccountInput{
+		Credentials: credentials,
+		ProxyID:     proxyID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if updated == nil {
+		updated = existing
+	}
+	if h.tokenCacheInvalidator != nil {
+		if invalidateErr := h.tokenCacheInvalidator.InvalidateToken(ctx, updated); invalidateErr != nil {
+			slog.Warn("import_account_token_invalidate_failed", "account_id", updated.ID, "error", invalidateErr)
+		}
+	}
+	return updated, nil
 }
 
 func (h *AccountHandler) listAllProxies(ctx context.Context) ([]service.Proxy, error) {
