@@ -188,7 +188,15 @@ func (s *GatewayService) ForwardAsChatCompletions(
 	var result *ForwardResult
 	var handleErr error
 	if clientStream {
+		writerSizeBeforeStream := c.Writer.Size()
 		result, handleErr = s.handleCCStreamingFromAnthropic(resp, c, originalModel, mappedModel, reasoningEffort, startTime)
+		var sseErr *sseStreamErrorEventError
+		switch {
+		case errors.As(handleErr, &sseErr):
+			return nil, s.sseStreamErrorEventFailover(ctx, c, account, resp, sseErr.RawData, mappedModel, c.Writer.Size() != writerSizeBeforeStream)
+		case errors.Is(handleErr, errAnthropicNativeStreamIdle) && s.rateLimitService != nil:
+			s.rateLimitService.HandleStreamTimeout(ctx, account, originalModel)
+		}
 	} else {
 		result, handleErr = s.handleCCBufferedFromAnthropic(resp, c, originalModel, mappedModel, reasoningEffort, startTime)
 	}
@@ -385,21 +393,10 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 	var usage ClaudeUsage
 	var firstTokenMs *int
 	firstChunk := true
-	// 客户端断开后停止向下游写入，继续读完上游以合并 message_delta 的最终 usage。
-	clientDisconnected := false
+	writerSizeBeforeStream := c.Writer.Size()
 
-	scanner := bufio.NewScanner(resp.Body)
-	maxLineSize := defaultMaxLineSize
-	if s.cfg != nil && s.cfg.Gateway.MaxLineSize > 0 {
-		maxLineSize = s.cfg.Gateway.MaxLineSize
-	}
-	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
-	streamInterval := s.anthropicCompatStreamInterval()
-	pump := newAnthropicNativeLinePump(scanner, streamInterval)
-	defer pump.stop()
-	nextLine := func() (string, bool) {
-		return nextAnthropicCompatLine(pump, resp.Body, streamInterval, "forward_as_cc", requestID, clientDisconnected)
-	}
+	stream := newAnthropicCompatStream(s.cfg, c, resp, "forward_as_cc", requestID)
+	defer stream.stop()
 
 	resultWithUsage := func() *ForwardResult {
 		result := &ForwardResult{
@@ -412,17 +409,10 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 			Stream:           true,
 			Duration:         time.Since(startTime),
 			FirstTokenMs:     firstTokenMs,
-			ClientDisconnect: clientDisconnected,
+			ClientDisconnect: stream.clientDisconnected,
 		}
 		applyObservedGatewayResponseModel(c, result)
 		return result
-	}
-
-	markClientDisconnected := func() {
-		clientDisconnected = true
-		logger.L().Info("forward_as_cc stream: client disconnected, continuing to drain upstream for billing",
-			zap.String("request_id", requestID),
-		)
 	}
 
 	writeChunk := func(chunk apicompat.ChatCompletionsChunk) bool {
@@ -444,11 +434,11 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 			return
 		}
 		if event.Type == "ping" {
-			if clientDisconnected {
+			if stream.clientDisconnected {
 				return
 			}
 			if _, err := fmt.Fprint(c.Writer, ": ping\n\n"); err != nil {
-				markClientDisconnected()
+				stream.markClientDisconnected()
 				return
 			}
 			c.Writer.Flush()
@@ -468,7 +458,7 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 		if event.Type == "message_start" && event.Message != nil {
 			mergeAnthropicUsage(&usage, event.Message.Usage)
 		}
-		if clientDisconnected {
+		if stream.clientDisconnected {
 			return
 		}
 
@@ -483,7 +473,7 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 			ccChunks := apicompat.ResponsesEventToChatChunks(&resEvt, ccState)
 			for _, chunk := range ccChunks {
 				if disconnected := writeChunk(chunk); disconnected {
-					markClientDisconnected()
+					stream.markClientDisconnected()
 					return
 				}
 			}
@@ -492,7 +482,7 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 	}
 
 	for {
-		line, ok := nextLine()
+		line, ok := stream.nextLine()
 		if !ok {
 			break
 		}
@@ -501,7 +491,7 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 			continue
 		}
 
-		dataLine, ok := nextLine()
+		dataLine, ok := stream.nextLine()
 		if !ok {
 			break
 		}
@@ -520,10 +510,19 @@ func (s *GatewayService) handleCCStreamingFromAnthropic(
 		// The intermediate Responses converter synthesizes usage even when absent.
 		ccState.IncludeUsage = ccState.IncludeUsage || anthropicChatStreamHasUsage(&event, payload)
 
+		stream.observe(&event, payload)
+		if stream.upstreamErrType != "" {
+			break
+		}
 		processAnthropicEvent(&event)
 	}
 
-	if clientDisconnected {
+	if failure := stream.failure(); failure != nil {
+		return finishAnthropicCompatStreamFailure(c, writerSizeBeforeStream, failure, resultWithUsage(), func() {
+			writeAnthropicCompatCCStreamFailure(c, failure)
+		})
+	}
+	if stream.clientDisconnected {
 		return resultWithUsage(), nil
 	}
 
@@ -557,42 +556,6 @@ func writeGatewayCCError(c *gin.Context, statusCode int, errType, message string
 			"message": message,
 		},
 	})
-}
-
-// anthropicCompatStreamInterval 返回 Anthropic 上游协议转换流的逐行读间隔上限，
-// gateway.stream_data_interval_timeout <= 0 时不限。
-func (s *GatewayService) anthropicCompatStreamInterval() time.Duration {
-	if s.cfg != nil && s.cfg.Gateway.StreamDataIntervalTimeout > 0 {
-		return time.Duration(s.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
-	}
-	return 0
-}
-
-// nextAnthropicCompatLine 从行泵取下一行；ok=false 表示上游流已结束（EOF、读错误
-// 或读间隔超时），调用方按已累计的 usage 收尾。读间隔超时时关闭 body，解除泵
-// goroutine 阻塞中的读并释放上游连接。
-func nextAnthropicCompatLine(pump *anthropicNativeLinePump, body io.Closer, interval time.Duration, logPrefix, requestID string, clientDisconnected bool) (string, bool) {
-	line, err := pump.next()
-	if err == nil {
-		return line, true
-	}
-	switch {
-	case errors.Is(err, errAnthropicNativeStreamIdle):
-		_ = body.Close()
-		logger.L().Warn(logPrefix+" stream: data interval timeout",
-			zap.String("request_id", requestID),
-			zap.Duration("interval", interval),
-			zap.Bool("client_disconnected", clientDisconnected),
-		)
-	case errors.Is(err, io.EOF), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		// 正常收流或取消：不记日志。
-	default:
-		logger.L().Warn(logPrefix+" stream: read error",
-			zap.Error(err),
-			zap.String("request_id", requestID),
-		)
-	}
-	return "", false
 }
 
 // anthropicChatStreamHasUsage distinguishes an explicit zero-valued usage object
