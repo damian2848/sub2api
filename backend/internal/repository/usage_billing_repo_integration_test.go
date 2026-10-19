@@ -217,6 +217,54 @@ func TestUsageBillingRepositoryApply_DeletedAPIKeyStillBillsBalance(t *testing.T
 	require.Equal(t, 1, dedupCount)
 }
 
+func TestUsageBillingRepositoryApply_DeletedAccountStillBillsBalance(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := NewUsageBillingRepository(client, integrationDB)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("usage-billing-deleted-account-user-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+		Balance:      100,
+	})
+	apiKey := mustCreateApiKey(t, client, &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-usage-billing-deleted-account-" + uuid.NewString(),
+		Name:   "billing-deleted-account",
+	})
+	account := mustCreateAccount(t, client, &service.Account{
+		Name:     "usage-billing-deleted-account-" + uuid.NewString(),
+		Platform: service.PlatformGemini,
+		Type:     service.AccountTypeServiceAccount,
+	})
+
+	_, err := integrationDB.ExecContext(ctx, "UPDATE accounts SET deleted_at = NOW() WHERE id = $1", account.ID)
+	require.NoError(t, err)
+
+	requestID := uuid.NewString()
+	result, err := repo.Apply(ctx, &service.UsageBillingCommand{
+		RequestID:        requestID,
+		APIKeyID:         apiKey.ID,
+		UserID:           user.ID,
+		AccountID:        account.ID,
+		AccountType:      service.AccountTypeServiceAccount,
+		BalanceCost:      1.25,
+		AccountQuotaCost: 1.25,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Applied)
+	require.Nil(t, result.QuotaState)
+
+	var balance float64
+	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT balance FROM users WHERE id = $1", user.ID).Scan(&balance))
+	require.InDelta(t, 98.75, balance, 0.000001)
+
+	var dedupCount int
+	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT COUNT(*) FROM usage_billing_dedup WHERE request_id = $1 AND api_key_id = $2", requestID, apiKey.ID).Scan(&dedupCount))
+	require.Equal(t, 1, dedupCount)
+}
+
 func TestUsageBillingRepositoryApply_UpdatesAccountQuota(t *testing.T) {
 	ctx := context.Background()
 	client := testEntClient(t)
@@ -252,6 +300,60 @@ func TestUsageBillingRepositoryApply_UpdatesAccountQuota(t *testing.T) {
 	var quotaUsed float64
 	require.NoError(t, integrationDB.QueryRowContext(ctx, "SELECT COALESCE((extra->>'quota_used')::numeric, 0) FROM accounts WHERE id = $1", account.ID).Scan(&quotaUsed))
 	require.InDelta(t, 3.5, quotaUsed, 0.000001)
+}
+
+// service_account 只设总上限：累加 quota_used；日/周用量只在设置了对应 limit 时累加，未跨越上限不入队调度 outbox。
+func TestUsageBillingRepositoryApply_UpdatesServiceAccountQuota(t *testing.T) {
+	ctx := context.Background()
+	client := testEntClient(t)
+	repo := NewUsageBillingRepository(client, integrationDB)
+
+	user := mustCreateUser(t, client, &service.User{
+		Email:        fmt.Sprintf("usage-billing-sa-user-%d@example.com", time.Now().UnixNano()),
+		PasswordHash: "hash",
+	})
+	apiKey := mustCreateApiKey(t, client, &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-usage-billing-sa-" + uuid.NewString(),
+		Name:   "billing-sa",
+	})
+	account := mustCreateAccount(t, client, &service.Account{
+		Name:     "usage-billing-sa-quota-" + uuid.NewString(),
+		Platform: service.PlatformGemini,
+		Type:     service.AccountTypeServiceAccount,
+		Extra: map[string]any{
+			"quota_limit": 100.0,
+		},
+	})
+
+	for _, cost := range []float64{2.25, 1.5} {
+		_, err := repo.Apply(ctx, &service.UsageBillingCommand{
+			RequestID:        uuid.NewString(),
+			APIKeyID:         apiKey.ID,
+			UserID:           user.ID,
+			AccountID:        account.ID,
+			AccountType:      service.AccountTypeServiceAccount,
+			AccountQuotaCost: cost,
+		})
+		require.NoError(t, err)
+	}
+
+	var quotaUsed float64
+	var hasDailyUsed, hasWeeklyUsed bool
+	require.NoError(t, integrationDB.QueryRowContext(ctx,
+		"SELECT COALESCE((extra->>'quota_used')::numeric, 0), extra ? 'quota_daily_used', extra ? 'quota_weekly_used' FROM accounts WHERE id = $1",
+		account.ID,
+	).Scan(&quotaUsed, &hasDailyUsed, &hasWeeklyUsed))
+	require.InDelta(t, 3.75, quotaUsed, 0.000001)
+	require.False(t, hasDailyUsed)
+	require.False(t, hasWeeklyUsed)
+
+	var outboxCount int
+	require.NoError(t, integrationDB.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM scheduler_outbox WHERE event_type = $1 AND account_id = $2",
+		service.SchedulerOutboxEventAccountChanged, account.ID,
+	).Scan(&outboxCount))
+	require.Zero(t, outboxCount, "service_account under its limit must not enqueue scheduler outbox")
 }
 
 func TestUsageBillingRepositoryApply_EnqueuesSchedulerOutboxOnQuotaCrossing(t *testing.T) {
