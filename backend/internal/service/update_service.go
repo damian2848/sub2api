@@ -678,7 +678,8 @@ func compareVersions(current, latest string) int {
 
 func parseVersion(v string) [3]int {
 	v = strings.TrimPrefix(v, "v")
-	if idx := strings.IndexByte(v, '-'); idx != -1 {
+	// Drop pre-release ("-rc.1") and build metadata ("+cookie-recovery.1").
+	if idx := strings.IndexAny(v, "-+"); idx != -1 {
 		v = v[:idx]
 	}
 	parts := strings.Split(v, ".")

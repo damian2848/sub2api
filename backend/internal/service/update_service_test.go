@@ -211,3 +211,11 @@ func TestCreateUpdateTempDirReportsReadOnlyProgramDir(t *testing.T) {
 	require.NoError(t, err)
 	require.DirExists(t, tempDir)
 }
+
+func TestCompareVersionsIgnoresBuildMetadata(t *testing.T) {
+	require.Equal(t, 0, compareVersions("v0.2.69+cookie-recovery.1", "v0.2.69"))
+	require.Equal(t, 0, compareVersions("0.2.69+build.5", "0.2.69"))
+	require.Equal(t, -1, compareVersions("v0.2.68+cookie-recovery.1", "v0.2.69"))
+	require.Equal(t, 1, compareVersions("v0.2.70+hotfix", "v0.2.69"))
+	require.Equal(t, 0, compareVersions("v0.2.69-rc.1", "v0.2.69"))
+}
