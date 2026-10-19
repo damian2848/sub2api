@@ -2748,7 +2748,7 @@ func (s *AccountTestService) testGeminiWebAccountConnection(c *gin.Context, acco
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: modelID})
 
 	cookie := account.GetCredential("gemini_web_cookie")
-	cred := geminiweb.Credential{
+	cred := geminiweb.Credential{CacheGeneration: account.GetCredential(geminiWebCookieGeneration),
 		Cookie:    cookie,
 		AuthUser:  int(account.GetCredentialAsInt64("auth_user")),
 		BaseURL:   "https://gemini.google.com",

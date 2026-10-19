@@ -23,6 +23,22 @@ func persistAccountCredentials(ctx context.Context, repo AccountRepository, acco
 		return nil
 	}
 
+	// Recovery changes the generation atomically. A response issued against an
+	// older generation may update its caller but must never replace the DB cookie.
+	if account.IsGeminiWeb() {
+		if updater, ok := any(repo).(interface {
+			UpdateGeminiWebCredentials(context.Context, int64, string, map[string]any) (bool, error)
+		}); ok {
+			applied, err := updater.UpdateGeminiWebCredentials(ctx, account.ID, account.GetCredential(geminiWebCookieGeneration), credentials)
+			if err != nil {
+				return err
+			}
+			if applied {
+				account.Credentials = shallowCopyMap(credentials)
+			}
+			return nil
+		}
+	}
 	account.Credentials = shallowCopyMap(credentials)
 	if updater, ok := any(repo).(accountCredentialsUpdater); ok {
 		return updater.UpdateCredentials(ctx, account.ID, account.Credentials)

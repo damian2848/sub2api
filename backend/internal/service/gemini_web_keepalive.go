@@ -132,7 +132,7 @@ func (s *GeminiWebCookieKeepaliveService) refreshAccount(parent context.Context,
 	requestCtx, cancel := context.WithTimeout(parent, geminiWebKeepaliveTimeout)
 	defer cancel()
 	authUser, authUserSet := geminiWebAuthUser(account)
-	cred := geminiweb.Credential{
+	cred := geminiweb.Credential{CacheGeneration: account.GetCredential(geminiWebCookieGeneration),
 		Cookie: cookie, AuthUser: authUser, AuthUserSet: authUserSet,
 		BaseURL: "https://gemini.google.com", UserAgent: account.GetCredential("user_agent"),
 	}
@@ -171,8 +171,7 @@ func (s *GeminiWebCookieKeepaliveService) refreshAccount(parent context.Context,
 	}
 	switch {
 	case errors.Is(err, geminiweb.ErrInvalidCredential):
-		until := time.Now().Add(10 * time.Minute)
-		_ = s.accountRepo.SetTempUnschedulable(parent, account.ID, until, "Gemini Web cookie rotation rejected")
+		markGeminiWebCookieRejected(parent, s.accountRepo, account, "Gemini Web cookie rotation rejected")
 	case errors.Is(err, geminiweb.ErrRateLimited):
 		_ = s.accountRepo.SetRateLimited(parent, account.ID, time.Now().Add(time.Minute))
 	}

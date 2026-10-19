@@ -44,7 +44,7 @@ func (s *GeminiMessagesCompatService) readGeminiWebQuota(ctx context.Context, ac
 		return geminiweb.Quota{}, geminiweb.ErrInvalidCredential
 	}
 	authUser, authUserSet := geminiWebAuthUser(account)
-	cred := geminiweb.Credential{Cookie: cookie, AuthUser: authUser, AuthUserSet: authUserSet, BaseURL: "https://gemini.google.com", UserAgent: account.GetCredential("user_agent")}
+	cred := geminiweb.Credential{CacheGeneration: account.GetCredential(geminiWebCookieGeneration), Cookie: cookie, AuthUser: authUser, AuthUserSet: authUserSet, BaseURL: "https://gemini.google.com", UserAgent: account.GetCredential("user_agent")}
 	proxyURL := ""
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
@@ -231,11 +231,9 @@ func (s *GeminiMessagesCompatService) persistGeminiWebQuotaCookie(ctx context.Co
 }
 func (s *GeminiMessagesCompatService) handleGeminiWebQuotaError(ctx context.Context, account *Account, cookie string, err error) {
 	if errors.Is(err, geminiweb.ErrInvalidCredential) {
-		s.geminiWebClient().Invalidate(cookie)
+		s.geminiWebClient().InvalidateCredential(geminiWebCacheCredential(account, cookie))
 		if s.accountRepo != nil && account.ID > 0 {
-			until := time.Now().Add(10 * time.Minute)
-			_ = s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, "Gemini Web cookie expired or rejected")
-			account.TempUnschedulableUntil = &until
+			markGeminiWebCookieRejected(ctx, s.accountRepo, account, "Gemini Web cookie expired or rejected")
 		}
 		return
 	}

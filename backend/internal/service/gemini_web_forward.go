@@ -75,7 +75,7 @@ func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Cont
 		return geminiweb.Result{}, errors.New("upstream HTTP client is not configured")
 	}
 	authUser, authUserSet := geminiWebAuthUser(account)
-	cred := geminiweb.Credential{
+	cred := geminiweb.Credential{CacheGeneration: account.GetCredential(geminiWebCookieGeneration),
 		Cookie: cookie, AuthUser: authUser, AuthUserSet: authUserSet,
 		BaseURL: "https://gemini.google.com", UserAgent: account.GetCredential("user_agent"),
 	}
@@ -119,11 +119,9 @@ func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Cont
 	}
 	if err != nil {
 		if errors.Is(err, geminiweb.ErrInvalidCredential) {
-			s.geminiWebClient().Invalidate(cookie)
+			s.geminiWebClient().InvalidateCredential(geminiWebCacheCredential(account, cookie))
 			if s.accountRepo != nil && account.ID > 0 {
-				until := time.Now().Add(10 * time.Minute)
-				_ = s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, "Gemini Web cookie expired or rejected")
-				account.TempUnschedulableUntil = &until
+				markGeminiWebCookieRejected(ctx, s.accountRepo, account, "Gemini Web cookie expired or rejected")
 			}
 		} else if errors.Is(err, geminiweb.ErrRateLimited) && s.accountRepo != nil && account.ID > 0 {
 			now := time.Now()

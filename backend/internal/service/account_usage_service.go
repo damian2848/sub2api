@@ -1077,7 +1077,7 @@ func (s *AccountUsageService) getGeminiWebUsage(ctx context.Context, account *Ac
 		return usage, nil
 	}
 	authUser, authUserSet := geminiWebAuthUser(account)
-	cred := geminiweb.Credential{
+	cred := geminiweb.Credential{CacheGeneration: account.GetCredential(geminiWebCookieGeneration),
 		Cookie: cookie, AuthUser: authUser, AuthUserSet: authUserSet,
 		BaseURL: "https://gemini.google.com", UserAgent: account.GetCredential("user_agent"),
 	}
@@ -1110,7 +1110,7 @@ func (s *AccountUsageService) getGeminiWebUsage(ctx context.Context, account *Ac
 		switch {
 		case errors.Is(err, geminiweb.ErrInvalidCredential):
 			usage.ErrorCode = "unauthenticated"
-			s.geminiWeb.Invalidate(cookie)
+			s.geminiWeb.InvalidateCredential(cred)
 		case errors.Is(err, geminiweb.ErrRateLimited):
 			usage.ErrorCode = "rate_limited"
 		default:

@@ -65,7 +65,7 @@ func (c *Client) fetchQuota(ctx context.Context, cred Credential, do Doer, force
 	if base == "" {
 		base = "https://gemini.google.com"
 	}
-	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet)
+	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet, cred.CacheGeneration)
 	c.mu.Lock()
 	if c.quotaCache == nil {
 		c.quotaCache = make(map[string]quotaCacheEntry)

@@ -23,7 +23,7 @@ func (s *AccountTestService) fetchGeminiWebUpstreamModels(ctx context.Context, a
 		return nil, nil, newUpstreamModelSyncConfigError("Gemini Web cookie is not configured", nil)
 	}
 	authUser, authUserSet := geminiWebAuthUser(account)
-	cred := geminiweb.Credential{
+	cred := geminiweb.Credential{CacheGeneration: account.GetCredential(geminiWebCookieGeneration),
 		Cookie: cookie, AuthUser: authUser, AuthUserSet: authUserSet,
 		BaseURL: "https://gemini.google.com", UserAgent: account.GetCredential("user_agent"),
 	}

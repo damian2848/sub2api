@@ -33,11 +33,13 @@ var (
 )
 
 type Credential struct {
-	Cookie      string
-	AuthUser    int
-	AuthUserSet bool
-	BaseURL     string
-	UserAgent   string
+	Cookie string
+	// CacheGeneration isolates an externally recovered session, even when PSID is unchanged.
+	CacheGeneration string
+	AuthUser        int
+	AuthUserSet     bool
+	BaseURL         string
+	UserAgent       string
 }
 
 type Request struct {
@@ -176,8 +178,12 @@ func (cred Credential) hasAuthUser() bool {
 	return cred.AuthUserSet || cred.AuthUser > 0
 }
 
-func credentialKey(cookie string, authUser int, authUserSet bool) string {
-	return cookieKey(cookie) + "\x00" + strconv.Itoa(authUser) + "\x00" + strconv.FormatBool(authUserSet)
+func credentialKey(cookie string, authUser int, authUserSet bool, generation ...string) string {
+	key := cookieKey(cookie) + "\x00" + strconv.Itoa(authUser) + "\x00" + strconv.FormatBool(authUserSet)
+	if len(generation) > 0 && generation[0] != "" {
+		key += "\x00" + generation[0]
+	}
+	return key
 }
 
 func NewClient() *Client {
@@ -344,7 +350,7 @@ func (c *Client) RefreshCookies(ctx context.Context, cred Credential, do Doer) (
 	if do == nil {
 		return cred.Cookie, errors.New("gemini web transport is nil")
 	}
-	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet)
+	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet, cred.CacheGeneration)
 	c.mu.Lock()
 	if live := c.liveCookies[key]; live != "" {
 		cred.Cookie = live
@@ -527,11 +533,11 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		stale := resp.StatusCode == http.StatusMethodNotAllowed || len(bytes.TrimSpace(body)) == 0
 		if stale && !retried {
-			c.Invalidate(cred.Cookie)
+			c.InvalidateCredential(cred)
 			return c.complete(ctx, postCred, req, do, true, clock)
 		}
 		if stale {
-			c.Invalidate(cred.Cookie)
+			c.InvalidateCredential(cred)
 		}
 		if len(body) > 0 {
 			return Result{UpdatedCookie: updatedCookie}, fmt.Errorf("gemini web session rejected: %s: %s", resp.Status, strings.TrimSpace(string(body)))
@@ -622,7 +628,7 @@ func applyHeaders(r *http.Request, cred Credential, base string, sess session, m
 }
 
 func (c *Client) getSession(ctx context.Context, cred Credential, base string, do Doer) (session, string, error) {
-	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet)
+	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet, cred.CacheGeneration)
 	c.mu.Lock()
 	cached, ok := c.sessions[key]
 	liveCookie := c.liveCookies[key]
@@ -637,7 +643,7 @@ func (c *Client) getSession(ctx context.Context, cred Credential, base string, d
 		cookie := defaultString(liveCookie, defaultString(cached.Cookie, cred.Cookie))
 		if cached.CookieRefreshed.IsZero() || time.Since(cached.CookieRefreshed) >= geminiWebCookieRefreshInterval {
 			rotated, rotateErr := c.RefreshCookies(ctx, Credential{
-				Cookie: cookie, AuthUser: cred.AuthUser, AuthUserSet: cred.AuthUserSet, BaseURL: base, UserAgent: cred.UserAgent,
+				Cookie: cookie, AuthUser: cred.AuthUser, AuthUserSet: cred.AuthUserSet, BaseURL: base, UserAgent: cred.UserAgent, CacheGeneration: cred.CacheGeneration,
 			}, do)
 			if rotateErr == nil && rotated != "" {
 				// RefreshCookies already merged the response into the cache. Read
@@ -748,7 +754,7 @@ func (c *Client) updateSessionCookie(cred Credential, cookie string) {
 	if strings.TrimSpace(cookie) == "" {
 		return
 	}
-	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet)
+	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet, cred.CacheGeneration)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	previousCookie := c.liveCookies[key]
@@ -783,7 +789,7 @@ func (c *Client) updateSessionCookie(cred Credential, cookie string) {
 }
 
 func (c *Client) currentSessionCookie(cred Credential) string {
-	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet)
+	key := credentialKey(cred.Cookie, cred.AuthUser, cred.AuthUserSet, cred.CacheGeneration)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if live := c.liveCookies[key]; live != "" {

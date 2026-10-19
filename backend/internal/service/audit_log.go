@@ -126,7 +126,7 @@ func auditNormalizeBodyKey(key string) string {
 var auditBodySensitiveExactKeys = func() map[string]struct{} {
 	builtin := []string{
 		"code", "codes", "pin", "cvv",
-		"authorization", "cookie", "x-api-key",
+		"authorization", "cookie", "cookie_json", "x-api-key",
 		"key",
 		// 字符串值内嵌完整凭证的字段：
 		// proxy_key 为 protocol|host|port|username|password 拼接，
