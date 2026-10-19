@@ -32,8 +32,11 @@ func TestRecoveryGenerationCASIncludesAtomicOutboxAndExactGuards(t *testing.T) {
 func TestRecoveryGenerationRedisCleanupPreservesLaterFailure(t *testing.T) {
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
-	defer client.Close()
-	cache := NewTempUnschedCache(client).(*tempUnschedCache)
+	defer func() { _ = client.Close() }()
+	cache, ok := NewTempUnschedCache(client).(*tempUnschedCache)
+	if !ok {
+		t.Fatal("unexpected temp unsched cache type")
+	}
 	ctx := context.Background()
 	old := &service.TempUnschedState{UntilUnix: time.Now().Add(time.Minute).Unix(), ErrorMessage: service.GeminiWebCookieRotationRejected}
 	if err := cache.SetTempUnsched(ctx, 12, old); err != nil {
