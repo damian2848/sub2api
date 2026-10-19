@@ -549,6 +549,8 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	var usage ClaudeUsage
 	var firstTokenMs *int
 	firstChunk := true
+	// 客户端断开后停止向下游写入，继续读完上游以合并 message_delta 的最终 usage。
+	clientDisconnected := false
 
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
@@ -556,25 +558,32 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 		maxLineSize = s.cfg.Gateway.MaxLineSize
 	}
 	scanner.Buffer(make([]byte, 0, 64*1024), maxLineSize)
+	streamInterval := s.anthropicCompatStreamInterval()
+	pump := newAnthropicNativeLinePump(scanner, streamInterval)
+	defer pump.stop()
+	nextLine := func() (string, bool) {
+		return nextAnthropicCompatLine(pump, resp.Body, streamInterval, "forward_as_responses", requestID, clientDisconnected)
+	}
 
 	resultWithUsage := func() *ForwardResult {
 		result := &ForwardResult{
-			RequestID:       requestID,
-			UpstreamHeaders: resp.Header,
-			Usage:           usage,
-			Model:           originalModel,
-			UpstreamModel:   mappedModel,
-			ReasoningEffort: reasoningEffort,
-			Stream:          true,
-			Duration:        time.Since(startTime),
-			FirstTokenMs:    firstTokenMs,
+			RequestID:        requestID,
+			UpstreamHeaders:  resp.Header,
+			Usage:            usage,
+			Model:            originalModel,
+			UpstreamModel:    mappedModel,
+			ReasoningEffort:  reasoningEffort,
+			Stream:           true,
+			Duration:         time.Since(startTime),
+			FirstTokenMs:     firstTokenMs,
+			ClientDisconnect: clientDisconnected,
 		}
 		applyObservedGatewayResponseModel(c, result)
 		return result
 	}
 
 	// processEvent handles a single parsed Anthropic SSE event.
-	processEvent := func(event *apicompat.AnthropicStreamEvent) bool {
+	processEvent := func(event *apicompat.AnthropicStreamEvent) {
 		if firstChunk {
 			firstChunk = false
 			ms := int(time.Since(startTime).Milliseconds())
@@ -588,6 +597,9 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 		// Also capture usage from message_start
 		if event.Type == "message_start" && event.Message != nil {
 			mergeAnthropicUsage(&usage, event.Message.Usage)
+		}
+		if clientDisconnected {
+			return
 		}
 
 		// Keep the terminal Responses usage aligned with the normalized billing
@@ -619,20 +631,23 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 			for _, restored := range payloads {
 				eventType := gjson.GetBytes(restored, "type").String()
 				if _, err := fmt.Fprintf(c.Writer, "event: %s\ndata: %s\n\n", eventType, restored); err != nil {
-					logger.L().Info("forward_as_responses stream: client disconnected",
+					clientDisconnected = true
+					logger.L().Info("forward_as_responses stream: client disconnected, continuing to drain upstream for billing",
 						zap.String("request_id", requestID),
 					)
-					return true // client disconnected
+					return
 				}
 			}
 		}
 		if len(events) > 0 {
 			c.Writer.Flush()
 		}
-		return false
 	}
 
 	finalizeStream := func() (*ForwardResult, error) {
+		if clientDisconnected {
+			return resultWithUsage(), nil
+		}
 		if finalEvents := apicompat.FinalizeAnthropicResponsesStream(state); len(finalEvents) > 0 {
 			for _, evt := range finalEvents {
 				sse, err := apicompat.ResponsesEventToSSE(evt)
@@ -648,18 +663,21 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 	}
 
 	// Read Anthropic SSE events
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		line, ok := nextLine()
+		if !ok {
+			break
+		}
 		eventType, ok := parseAnthropicSSEField(line, "event")
 		if !ok {
 			continue
 		}
 
 		// Read data line
-		if !scanner.Scan() {
+		dataLine, ok := nextLine()
+		if !ok {
 			break
 		}
-		dataLine := scanner.Text()
 		payload, ok := parseAnthropicSSEField(dataLine, "data")
 		if !ok {
 			continue
@@ -676,18 +694,7 @@ func (s *GatewayService) handleResponsesStreamingResponse(
 			continue
 		}
 
-		if processEvent(&event) {
-			return resultWithUsage(), nil
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-			logger.L().Warn("forward_as_responses stream: read error",
-				zap.Error(err),
-				zap.String("request_id", requestID),
-			)
-		}
+		processEvent(&event)
 	}
 
 	return finalizeStream()
