@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
+	"github.com/stretchr/testify/require"
 )
 
 type keepaliveAccountRepoStub struct {
@@ -15,6 +17,32 @@ type keepaliveAccountRepoStub struct {
 	account     Account
 	updated     map[string]any
 	updateCalls int
+}
+
+func TestGeminiWebCookieKeepalive429DoesNotShortenConcurrentQuotaLimit(t *testing.T) {
+	longReset := time.Now().Add(3 * time.Hour)
+	repo := &geminiWebQuotaRateLimitRepo{storedResetAt: &longReset}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	upstream := &geminiWebUsageHTTPStub{do: func(req *http.Request) (*http.Response, error) {
+		require.Equal(t, "/RotateCookies", req.URL.Path)
+		// The worker can stop after the response arrives; the observed 429
+		// still needs a bounded, cancellation-independent state write.
+		cancel()
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     http.Header{},
+			Body:       io.NopCloser(strings.NewReader("rate limited")),
+		}, nil
+	}}
+	svc := NewGeminiWebCookieKeepaliveService(repo, upstream)
+
+	svc.refreshAccount(ctx, geminiWebGenerationQuotaAccount())
+
+	require.Len(t, repo.setCalls, 1)
+	require.Zero(t, repo.legacySetCalls)
+	require.Nil(t, repo.stateContextErr)
+	require.Equal(t, longReset, *repo.storedResetAt)
 }
 
 func (r *keepaliveAccountRepoStub) ListByPlatform(_ context.Context, platform string) ([]Account, error) {

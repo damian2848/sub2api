@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/gemini"
@@ -176,7 +177,7 @@ func TestGeminiWebDefaultAliasesReachCanonicalUpstreamAcrossProtocols(t *testing
 				frames, _ := geminiWebFramesStub(t, "Hello from the requested model.")
 				var generationHeader string
 				upstream := &geminiWebUsageHTTPStub{do: func(req *http.Request) (*http.Response, error) {
-					if req.Method == http.MethodPost {
+					if strings.Contains(req.URL.Path, "StreamGenerate") {
 						generationHeader = req.Header.Get("x-goog-ext-525001261-jspb")
 					}
 					return frames.do(req)

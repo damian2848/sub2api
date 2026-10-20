@@ -14,12 +14,13 @@ const geminiAccountReselectInterval = time.Second
 
 var errGeminiAccountCannotWait = errors.New("no available Gemini account wait plan")
 
-// The Antigravity admission/retry clock is request-scoped, starting at first
-// selection and activated when Antigravity is selected. It never becomes the
+// The Gemini Web / Antigravity admission/retry clock is request-scoped, starting
+// at first selection and activated when either provider is selected. It never becomes the
 // context of a forwarded request: an admitted generation may last minutes.
 type geminiAdmissionBudget struct {
-	startedAt time.Time
-	deadline  time.Time
+	startedAt          time.Time
+	deadline           time.Time
+	excludeForwardTime bool
 }
 
 func newGeminiAdmissionBudget() *geminiAdmissionBudget {
@@ -27,8 +28,30 @@ func newGeminiAdmissionBudget() *geminiAdmissionBudget {
 }
 
 func (b *geminiAdmissionBudget) observeAccount(account *service.Account) {
-	if account != nil && account.Platform == service.PlatformAntigravity && b.deadline.IsZero() {
+	if account != nil && (account.Platform == service.PlatformAntigravity || account.IsGeminiWeb()) && b.deadline.IsZero() {
 		b.deadline = b.startedAt.Add(maxConcurrencyWait)
+		b.excludeForwardTime = account.IsGeminiWeb()
+	}
+	if account != nil && account.Platform == service.PlatformAntigravity {
+		b.excludeForwardTime = false
+	}
+}
+
+// Web generation often takes longer than the queue allowance. Only selection,
+// admission and retry backoff consume its budget; a slow failed generation
+// must still be able to use the remaining allowance on another account.
+func (b *geminiAdmissionBudget) pauseForForward() func(error) {
+	if !b.excludeForwardTime {
+		return func(error) {}
+	}
+	started := time.Now()
+	return func(err error) {
+		var failoverErr *service.UpstreamFailoverError
+		if errors.As(err, &failoverErr) && isGeminiWebAdmissionRejection(failoverErr) {
+			// An account rejected before generation only consumed admission time.
+			return
+		}
+		b.deadline = b.deadline.Add(time.Since(started))
 	}
 }
 
@@ -59,6 +82,32 @@ func (b *geminiAdmissionBudget) err(c *gin.Context) error {
 
 type geminiAlternativeSelector func(context.Context, int64) (*service.AccountSelectionResult, error)
 
+func isGeminiWebAdmissionRejection(err *service.UpstreamFailoverError) bool {
+	return err != nil && (err.Reason == service.GeminiWebHealthCooldownReason || err.Reason == service.GeminiWebQuotaPrecheckReason)
+}
+
+// Revalidation owns cleanup on rejection so every protocol balances a slot
+// acquired just before another request placed this account in cooldown.
+func (h *GatewayHandler) revalidateGeminiWebAdmission(c *gin.Context, selection *service.AccountSelectionResult, budget *geminiAdmissionBudget, groupID *int64, model string) error {
+	if !selection.Account.IsGeminiWeb() {
+		return nil
+	}
+	ctx, cancel := budget.context(c)
+	defer cancel()
+	latest, err := h.gatewayService.RevalidateGeminiWebAdmission(ctx, groupID, selection.Account, model)
+	if err == nil {
+		err = budget.err(c)
+	}
+	if err != nil {
+		if selection.ReleaseFunc != nil {
+			selection.ReleaseFunc()
+		}
+		return err
+	}
+	selection.Account = latest
+	return nil
+}
+
 // acquireGeminiAccount keeps one queue reservation while checking periodically
 // for an already-acquired eligible alternative. Busy alternatives are ignored;
 // they neither move the queue nor create a sticky-session/signature switch.
@@ -86,9 +135,9 @@ func acquireGeminiAccount(
 	}
 	plan := selection.WaitPlan
 	_, hasRetryDeadline := service.AntigravityRetryDeadline(c)
-	reselectionEnabled := selection.Account.Platform == service.PlatformAntigravity || hasRetryDeadline
+	reselectionEnabled := selection.Account.Platform == service.PlatformAntigravity || selection.Account.IsGeminiWeb() || hasRetryDeadline
 	// Other providers keep their configured per-account wait policy. An actual
-	// Antigravity retry budget still follows a mixed-pool request across accounts.
+	// Gemini Web / Antigravity budget still follows a mixed-pool request across accounts.
 	if budget.deadlineFor(c).IsZero() {
 		budget = &geminiAdmissionBudget{deadline: time.Now().Add(plan.Timeout)}
 	}
@@ -122,6 +171,7 @@ func acquireGeminiAccount(
 			}
 			return nil, nil
 		}
+		budget.observeAccount(alternative.Account)
 		return alternative, nil
 	}
 

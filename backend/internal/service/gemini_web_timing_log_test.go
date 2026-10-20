@@ -44,7 +44,7 @@ func TestGeminiWebCompletionTimingLog(t *testing.T) {
 			upstream := &geminiWebUsageHTTPStub{do: func(req *http.Request) (*http.Response, error) {
 				body := `"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid"`
 				status := http.StatusOK
-				if req.Method == http.MethodPost {
+				if strings.Contains(req.URL.Path, "StreamGenerate") {
 					status, body = tc.status, ""
 					if tc.body != "" {
 						body = geminiWebTimingAnswerBody(t, tc.body)

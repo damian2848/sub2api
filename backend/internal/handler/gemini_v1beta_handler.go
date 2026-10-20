@@ -565,6 +565,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	}
 	fs := NewFailoverState(maxAccountSwitches, hasBoundSession)
 	admissionBudget := newGeminiAdmissionBudget()
+	admissionRejected := false
 
 	// 单账号分组提前设置 SingleAccountRetry 标记，让 Service 层首次 503 就不设模型限流标记。
 	// 避免单账号分组收到 503 (MODEL_CAPACITY_EXHAUSTED) 时设 29s 限流，导致后续请求连续快速失败。
@@ -613,6 +614,10 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 				googleError(c, http.StatusServiceUnavailable, geminiCachedContentUnavailableMessage)
 				return
 			}
+			if admissionRejected && fs.LastFailoverErr == nil {
+				h.handleGeminiAdmissionFailure(c, errGeminiAccountCannotWait, nil, cachedContentBinding != nil)
+				return
+			}
 			if len(fs.FailedAccountIDs) == 0 {
 				diagPlatform := service.PlatformGemini
 				if p := effectiveAPIKeyPlatform(c, apiKey); p == service.PlatformAntigravity {
@@ -658,6 +663,16 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			reqLog.Warn("gemini.account_slot_acquire_failed", zap.Int64("account_id", queuedAccountID), zap.Error(err))
 			h.handleGeminiAdmissionFailure(c, err, fs.LastFailoverErr, cachedContentBinding != nil)
 			return
+		}
+		if err := h.revalidateGeminiWebAdmission(c, selection, admissionBudget, apiKey.GroupID, modelName); err != nil {
+			reqLog.Info("gemini.account_admission_rejected", zap.Int64("account_id", selection.Account.ID), zap.Error(err))
+			if cachedContentBinding != nil {
+				h.handleGeminiAdmissionFailure(c, errGeminiAccountCannotWait, fs.LastFailoverErr, true)
+				return
+			}
+			admissionRejected = true
+			fs.FailedAccountIDs[selection.Account.ID] = struct{}{}
+			continue
 		}
 		account := selection.Account
 		setOpsSelectedAccount(c, account.ID, account.Platform)
@@ -721,6 +736,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		accountReleaseFunc = wrapReleaseOnDone(c.Request.Context(), accountReleaseFunc)
 
 		// 5) forward (根据平台分流)
+		resumeAdmission := admissionBudget.pauseForForward()
 		var result *service.ForwardResult
 		requestCtx := c.Request.Context()
 		if fs.SwitchCount > 0 {
@@ -742,6 +758,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		} else {
 			result, err = h.geminiCompatService.ForwardNative(requestCtx, c, account, modelName, action, stream, body)
 		}
+		resumeAdmission(err)
 		if accountReleaseFunc != nil {
 			accountReleaseFunc()
 		}
@@ -750,6 +767,15 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			if errors.As(err, &failoverErr) {
 				if streamStarted || c.Writer.Written() {
 					return
+				}
+				if isGeminiWebAdmissionRejection(failoverErr) {
+					if cachedContentBinding != nil {
+						h.handleGeminiAdmissionFailure(c, errGeminiAccountCannotWait, fs.LastFailoverErr, true)
+						return
+					}
+					admissionRejected = true
+					fs.FailedAccountIDs[account.ID] = struct{}{}
+					continue
 				}
 				retryCtx, retryCancel := admissionBudget.context(c)
 				failoverAction := fs.HandleFailoverError(retryCtx, h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)

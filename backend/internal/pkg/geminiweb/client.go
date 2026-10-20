@@ -545,7 +545,7 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 		return Result{UpdatedCookie: updatedCookie}, fmt.Errorf("gemini web session rejected: %s", resp.Status)
 	}
 	if resp.StatusCode >= 400 {
-		return Result{UpdatedCookie: updatedCookie}, fmt.Errorf("gemini web upstream: %s", resp.Status)
+		return Result{UpdatedCookie: updatedCookie}, &UpstreamHTTPError{StatusCode: resp.StatusCode}
 	}
 	result := Result{UpdatedCookie: updatedCookie}
 	var raw bytes.Buffer
@@ -718,7 +718,7 @@ func (c *Client) getSession(ctx context.Context, cred Credential, base string, d
 		return session{}, updated, ErrRateLimited
 	}
 	if resp.StatusCode >= 400 {
-		return session{}, updated, fmt.Errorf("gemini web session upstream: %s", resp.Status)
+		return session{}, updated, &UpstreamHTTPError{StatusCode: resp.StatusCode, Operation: "session"}
 	}
 	now := time.Now()
 	s := session{At: findValue(string(b), `"SNlM0e"\s*:\s*"([^"]+)"`), Build: findValue(string(b), `"cfb2h"\s*:\s*"([^"]+)"`), Fsid: findValue(string(b), `"FdrFJe"\s*:\s*"([^"]+)"`), Language: findValue(string(b), `"TuX5cc"\s*:\s*"([^"]+)"`), Cookie: updated, CookieRefreshed: now, Fetched: now}

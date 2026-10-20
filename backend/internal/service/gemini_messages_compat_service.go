@@ -73,6 +73,8 @@ type GeminiMessagesCompatService struct {
 	settingService *SettingService
 	// geminiWebCanned counts recent canned replies per account for cooldowns.
 	geminiWebCanned geminiWebCannedTracker
+	// geminiWebHealth isolates repeated 5xx/empty replies and serializes recovery probes.
+	geminiWebHealth geminiWebHealthTracker
 	// geminiWebActivity tracks in-flight calls per account for analytics.
 	geminiWebActivity geminiWebAccountActivity
 	// geminiWebQuotaRefresh throttles the usage read that follows each call.

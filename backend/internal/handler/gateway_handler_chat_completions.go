@@ -191,14 +191,43 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		fs = NewFailoverState(h.maxAccountSwitchesGemini, false)
 	}
 
+	admissionBudget := newGeminiAdmissionBudget()
+	admissionRejected := false
+	handleAdmissionFailure := func(err error) {
+		if failoverClientGone(c) {
+			return
+		}
+		if fs.LastFailoverErr != nil {
+			h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
+		} else if errors.Is(err, errGeminiAccountCannotWait) {
+			markOpsRoutingCapacityLimited(c)
+			h.chatCompletionsErrorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
+		} else {
+			h.handleConcurrencyError(c, err, "account", streamStarted)
+		}
+	}
 	for {
 		if failoverClientGone(c) {
 			return
 		}
-		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, selectionSessionHash, reqModel, fs.FailedAccountIDs, "", int64(0))
+		if err := admissionBudget.err(c); err != nil {
+			handleAdmissionFailure(err)
+			return
+		}
+		selectionCtx, selectionCancel := admissionBudget.context(c)
+		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(selectionCtx, apiKey.GroupID, selectionSessionHash, reqModel, fs.FailedAccountIDs, "", int64(0))
+		selectionCancel()
 		if err != nil {
+			if budgetErr := admissionBudget.err(c); budgetErr != nil {
+				handleAdmissionFailure(budgetErr)
+				return
+			}
 			if failoverClientGone(c) {
 				reqLog.Info("gateway.cc.account_select_aborted_client_disconnected", zap.Error(err))
+				return
+			}
+			if admissionRejected && fs.LastFailoverErr == nil {
+				handleAdmissionFailure(errGeminiAccountCannotWait)
 				return
 			}
 			if len(fs.FailedAccountIDs) == 0 {
@@ -214,12 +243,14 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				h.chatCompletionsErrorResponseWithCode(c, cls.Status, cls.ErrType, cls.Code, message)
 				return
 			}
-			action := fs.HandleSelectionExhausted(c.Request.Context())
+			retryCtx, retryCancel := admissionBudget.context(c)
+			action := fs.HandleSelectionExhausted(retryCtx)
+			retryCancel()
 			switch action {
 			case FailoverContinue:
 				continue
 			case FailoverCanceled:
-				failoverClientGone(c)
+				handleAdmissionFailure(&ConcurrencyError{SlotType: "account", IsTimeout: true})
 				return
 			default:
 				if fs.LastFailoverErr != nil {
@@ -235,7 +266,23 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 
 		// 4. Acquire account concurrency slot
 		accountReleaseFunc := selection.ReleaseFunc
-		if !selection.Acquired {
+		queuedAccountID := account.ID
+		geminiWebAdmission := account.IsGeminiWeb() || !admissionBudget.deadline.IsZero()
+		if geminiWebAdmission {
+			selection, err = acquireGeminiAccount(c, h.concurrencyHelper, selection, admissionBudget, false, &streamStarted,
+				func(ctx context.Context, busyAccountID int64) (*service.AccountSelectionResult, error) {
+					excluded := mergeAccountIDSets(fs.FailedAccountIDs, map[int64]struct{}{busyAccountID: {}})
+					return h.gatewayService.SelectAccountWithLoadAwareness(service.WithDeferredGatewayStickyBinding(ctx), apiKey.GroupID, selectionSessionHash, reqModel, excluded, "", int64(0))
+				})
+			if err != nil {
+				reqLog.Warn("gateway.cc.account_slot_acquire_failed", zap.Int64("account_id", queuedAccountID), zap.Error(err))
+				handleAdmissionFailure(err)
+				return
+			}
+			account = selection.Account
+			accountReleaseFunc = selection.ReleaseFunc
+			setOpsSelectedAccount(c, account.ID, account.Platform)
+		} else if !selection.Acquired {
 			if selection.WaitPlan == nil {
 				markOpsRoutingCapacityLimited(c)
 				h.chatCompletionsErrorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
@@ -259,6 +306,13 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				return
 			}
 		}
+		if err := h.revalidateGeminiWebAdmission(c, selection, admissionBudget, apiKey.GroupID, reqModel); err != nil {
+			reqLog.Info("gateway.cc.account_admission_rejected", zap.Int64("account_id", account.ID), zap.Error(err))
+			admissionRejected = true
+			fs.FailedAccountIDs[account.ID] = struct{}{}
+			continue
+		}
+		account = selection.Account
 		// 终检与准入后绑定使用选号结果携带的门（见 responses 同名注释）。
 		admissionCtx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
 		latest, vetoed, reason := h.gatewayService.GatewayProfitControlVetoLatest(admissionCtx, account)
@@ -276,7 +330,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 		account = latest
 		selection.Account = latest
-		if selection.ProfitGateActive() {
+		if selection.ProfitGateActive() || (geminiWebAdmission && (!selection.Acquired || account.ID != queuedAccountID)) {
 			if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, apiKey.GroupID, selectionSessionHash, account.ID); err != nil {
 				reqLog.Warn("gateway.cc.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			}
@@ -298,6 +352,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		if channelMapping.Mapped {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
 		}
+		resumeAdmission := admissionBudget.pauseForForward()
 		var result *service.ForwardResult
 		setActualUpstreamEndpoint(c, "")
 		if account.Platform == service.PlatformGemini {
@@ -323,6 +378,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			result, err = h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, parsedReq)
 		}
 
+		resumeAdmission(err)
 		if accountReleaseFunc != nil {
 			accountReleaseFunc()
 		}
@@ -339,7 +395,14 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				if c.Writer.Written() {
 					streamStarted = true
 				}
-				action := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
+				if isGeminiWebAdmissionRejection(failoverErr) {
+					admissionRejected = true
+					fs.FailedAccountIDs[account.ID] = struct{}{}
+					continue
+				}
+				retryCtx, retryCancel := admissionBudget.context(c)
+				action := fs.HandleFailoverError(retryCtx, h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
+				retryCancel()
 				switch action {
 				case FailoverContinue:
 					continue
@@ -347,7 +410,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 					h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
 					return
 				case FailoverCanceled:
-					failoverClientGone(c)
+					handleAdmissionFailure(&ConcurrencyError{SlotType: "account", IsTimeout: true})
 					return
 				}
 			}

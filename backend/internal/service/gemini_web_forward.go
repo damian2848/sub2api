@@ -29,7 +29,16 @@ const (
 	// another account answers.
 	GeminiWebCannedReplyReason        GatewayFailureReason = "gemini_web_canned_reply"
 	GeminiWebCannedReplyClientMessage string               = "Gemini Web failed to generate a reply (upstream returned its built-in error message); this request was not billed, please retry"
+	// Admission rejections did not attempt generation and do not consume the
+	// handler's upstream failover budget.
+	GeminiWebHealthCooldownReason GatewayFailureReason = "gemini_web_health_cooldown"
+	GeminiWebQuotaPrecheckReason  GatewayFailureReason = "gemini_web_quota_precheck"
 )
+
+type geminiWebQuotaPrecheckError struct{ cause error }
+
+func (e *geminiWebQuotaPrecheckError) Error() string { return e.cause.Error() }
+func (e *geminiWebQuotaPrecheckError) Unwrap() error { return e.cause }
 
 func geminiWebAuthUser(account *Account) (int, bool) {
 	if account == nil || account.Credentials == nil {
@@ -74,6 +83,25 @@ func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Cont
 	if s.httpUpstream == nil {
 		return geminiweb.Result{}, errors.New("upstream HTTP client is not configured")
 	}
+	if err := requestCtx.Err(); err != nil {
+		return geminiweb.Result{}, err
+	}
+	healthAttempt, admitted := s.geminiWebHealth.begin(account, time.Now())
+	if !admitted {
+		return geminiweb.Result{}, errGeminiWebHealthCooling
+	}
+	// HTTP recovery may catch a panic in an upstream adapter. Never leave a
+	// recovery probe owned forever; finishing an already-finished token is safe.
+	defer func() {
+		s.geminiWebHealth.finish(healthAttempt, geminiWebHealthNeutral, time.Now())
+	}()
+	// Only the selected account is checked. A rejected admission is not an
+	// upstream generation attempt and must release a half-open health probe.
+	// The quota helper owns credential/429 persistence for this read.
+	if err := s.precheckGeminiWebGenerationQuota(requestCtx, account); err != nil {
+		return geminiweb.Result{}, &geminiWebQuotaPrecheckError{cause: err}
+	}
+	cookie = account.GetCredential("gemini_web_cookie")
 	authUser, authUserSet := geminiWebAuthUser(account)
 	cred := geminiweb.Credential{CacheGeneration: account.GetCredential(geminiWebCookieGeneration),
 		Cookie: cookie, AuthUser: authUser, AuthUserSet: authUserSet,
@@ -87,8 +115,10 @@ func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Cont
 		return s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 	}
 	inflight, sinceLast, done := s.geminiWebActivity.begin(account.ID, time.Now())
+	defer done()
 	result, err := s.geminiWebClient().Complete(requestCtx, cred, geminiweb.Request{Model: model, Prompt: plan.Prompt, Attachments: plan.Attachments, Thinking: thinking, OnResult: onResult}, do)
 	done()
+	s.finishGeminiWebHealth(requestCtx, account, healthAttempt, result, err)
 	logGeminiWebTiming(ctx, account, model, result, err)
 	s.recordGeminiWebAttempt(ctx, account, model, thinking, inflight, sinceLast, result, err)
 	if err == nil {
@@ -124,11 +154,7 @@ func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Cont
 				markGeminiWebCookieRejected(ctx, s.accountRepo, account, "Gemini Web cookie expired or rejected")
 			}
 		} else if errors.Is(err, geminiweb.ErrRateLimited) && s.accountRepo != nil && account.ID > 0 {
-			now := time.Now()
-			resetAt := now.Add(time.Minute)
-			_ = s.accountRepo.SetRateLimited(ctx, account.ID, resetAt)
-			account.RateLimitedAt = &now
-			account.RateLimitResetAt = &resetAt
+			applyGeminiWebShortRateLimit(ctx, s.accountRepo, account)
 		}
 		return result, err
 	}
@@ -260,6 +286,17 @@ func geminiWebFailoverError(err error) error {
 	}
 	reason := GatewayFailureReason("gemini_web")
 	message := ""
+	if errors.Is(err, geminiweb.ErrEmptyResponse) {
+		reason = "gemini_web_empty_response"
+	}
+	var upstream *geminiweb.UpstreamHTTPError
+	if errors.As(err, &upstream) && upstream.StatusCode >= 500 && upstream.StatusCode <= 599 {
+		reason = GatewayFailureReason("gemini_web_upstream_" + strconv.Itoa(upstream.StatusCode))
+	}
+	if errors.Is(err, errGeminiWebHealthCooling) {
+		reason = GeminiWebHealthCooldownReason
+		scope = GatewayFailureScopeAccount
+	}
 	if errors.Is(err, geminiweb.ErrInvalidCredential) {
 		reason = GeminiWebCredentialRejectedReason
 		message = GeminiWebCredentialRejectedClientMessage
@@ -267,6 +304,11 @@ func geminiWebFailoverError(err error) error {
 	if errors.Is(err, geminiweb.ErrCannedReply) {
 		reason = GeminiWebCannedReplyReason
 		message = GeminiWebCannedReplyClientMessage
+	}
+	var precheck *geminiWebQuotaPrecheckError
+	if errors.As(err, &precheck) {
+		reason = GeminiWebQuotaPrecheckReason
+		scope = GatewayFailureScopeAccount
 	}
 	return &UpstreamFailoverError{StatusCode: status, Stage: stage, Scope: scope, Reason: reason, ClientStatusCode: status, ClientMessage: message}
 }

@@ -343,3 +343,97 @@ func TestGeminiAdmissionFailure_LocalBudgetPreservesUpstream429(t *testing.T) {
 		require.NotContains(t, rec.Body.String(), "Concurrency")
 	})
 }
+
+func TestGeminiWebAccountWait_ReselectsAndSharesBudgetAcrossFailover(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c, _ := newHelperTestContext(http.MethodPost, "/")
+		cache := newGeminiWaitCache()
+		helper := NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, 0)
+		start := time.Now()
+		budget := newGeminiAdmissionBudget()
+		selection := geminiWaitingSelection(1)
+		selection.Account.Platform, selection.Account.Type = service.PlatformGemini, service.AccountTypeGeminiWeb
+		selection.WaitPlan.Timeout = 120 * time.Second
+		started, probes, releases := false, 0, 0
+		admitted, err := acquireGeminiAccount(c, helper, selection, budget, false, &started,
+			func(context.Context, int64) (*service.AccountSelectionResult, error) {
+				probes++
+				if probes < 2 {
+					return nil, service.ErrNoAvailableAccounts
+				}
+				return &service.AccountSelectionResult{Account: &service.Account{ID: 2, Platform: service.PlatformGemini, Type: service.AccountTypeGeminiWeb}, Acquired: true, ReleaseFunc: func() { releases++ }}, nil
+			})
+		require.NoError(t, err)
+		require.Equal(t, int64(2), admitted.Account.ID)
+		require.Equal(t, 2*time.Second, time.Since(start))
+		resumeAdmission := budget.pauseForForward()
+		time.Sleep(35 * time.Second)
+		resumeAdmission(nil)
+		require.NoError(t, budget.err(c), "a slow failed generation must leave the remaining queue allowance intact")
+		admitted.ReleaseFunc()
+		require.Equal(t, 1, releases)
+		_, err = acquireGeminiAccount(c, helper, selection, budget, false, &started, nil)
+		var timeout *ConcurrencyError
+		require.ErrorAs(t, err, &timeout)
+		require.True(t, timeout.IsTimeout)
+		require.Equal(t, 35*time.Second+maxConcurrencyWait, time.Since(start), "Web failover must share one budget even with 120s sticky waits")
+		require.Equal(t, map[int64]int{1: 2}, cache.increments)
+		require.Equal(t, cache.increments, cache.decrements)
+		require.NoError(t, c.Request.Context().Err())
+	})
+}
+
+func TestGeminiAdmissionBudget_ForwardPausePreservesAntigravityClock(t *testing.T) {
+	for _, fromWeb := range []bool{false, true} {
+		t.Run(map[bool]string{false: "direct", true: "alternative_from_web"}[fromWeb], func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				c, _ := newHelperTestContext(http.MethodPost, "/")
+				budget := newGeminiAdmissionBudget()
+				antigravity := &service.Account{ID: 2, Platform: service.PlatformAntigravity}
+				if fromWeb {
+					cache := newGeminiWaitCache()
+					cache.denyWait = true
+					helper := NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, 0)
+					selection := geminiWaitingSelection(1)
+					selection.Account.Platform, selection.Account.Type = service.PlatformGemini, service.AccountTypeGeminiWeb
+					started := false
+					_, err := acquireGeminiAccount(c, helper, selection, budget, false, &started,
+						func(context.Context, int64) (*service.AccountSelectionResult, error) {
+							return &service.AccountSelectionResult{Account: antigravity, Acquired: true}, nil
+						})
+					require.NoError(t, err)
+				} else {
+					budget.observeAccount(antigravity)
+				}
+				resumeAdmission := budget.pauseForForward()
+				time.Sleep(35 * time.Second)
+				resumeAdmission(nil)
+				var timeout *ConcurrencyError
+				require.ErrorAs(t, budget.err(c), &timeout)
+				require.True(t, timeout.IsTimeout, "the existing Antigravity admission/retry clock must not change")
+			})
+		})
+	}
+}
+
+func TestGeminiWebAdmissionBudget_PrecheckRejectionsConsumeBudget(t *testing.T) {
+	for _, reason := range []service.GatewayFailureReason{service.GeminiWebHealthCooldownReason, service.GeminiWebQuotaPrecheckReason} {
+		t.Run(string(reason), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				c, _ := newHelperTestContext(http.MethodPost, "/")
+				budget := newGeminiAdmissionBudget()
+				budget.observeAccount(&service.Account{Platform: service.PlatformGemini, Type: service.AccountTypeGeminiWeb})
+				for range 10 {
+					resumeAdmission := budget.pauseForForward()
+					time.Sleep(3 * time.Second)
+					resumeAdmission(&service.UpstreamFailoverError{Reason: reason})
+				}
+				var timeout *ConcurrencyError
+				require.ErrorAs(t, budget.err(c), &timeout)
+				require.True(t, timeout.IsTimeout, "precheck time must not create an unbounded admission loop")
+			})
+		})
+	}
+	require.False(t, isGeminiWebAdmissionRejection(&service.UpstreamFailoverError{StatusCode: http.StatusTooManyRequests, Reason: "gemini_web"}), "a real generation failure still consumes the failover allowance")
+	require.False(t, isGeminiWebAdmissionRejection(&service.UpstreamFailoverError{StatusCode: http.StatusUnauthorized, Reason: service.GeminiWebCredentialRejectedReason}))
+}

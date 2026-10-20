@@ -173,6 +173,6 @@ func (s *GeminiWebCookieKeepaliveService) refreshAccount(parent context.Context,
 	case errors.Is(err, geminiweb.ErrInvalidCredential):
 		markGeminiWebCookieRejected(parent, s.accountRepo, account, "Gemini Web cookie rotation rejected")
 	case errors.Is(err, geminiweb.ErrRateLimited):
-		_ = s.accountRepo.SetRateLimited(parent, account.ID, time.Now().Add(time.Minute))
+		applyGeminiWebShortRateLimit(parent, s.accountRepo, account)
 	}
 }

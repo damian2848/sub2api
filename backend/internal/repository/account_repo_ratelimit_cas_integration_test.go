@@ -11,6 +11,70 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestAccountRepositoryClearRateLimitIfObservedSupportedAccounts(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		platform string
+		typeName string
+		canClear bool
+	}{
+		{"grok-oauth", service.PlatformGrok, service.AccountTypeOAuth, true},
+		{"gemini-web", service.PlatformGemini, service.AccountTypeGeminiWeb, true},
+		{"gemini-oauth", service.PlatformGemini, service.AccountTypeOAuth, false},
+		{"gemini-api-key", service.PlatformGemini, service.AccountTypeAPIKey, false},
+		{"grok-web", service.PlatformGrok, service.AccountTypeGeminiWeb, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			tx := testEntTx(t)
+			repo := newAccountRepositoryWithSQL(tx.Client(), tx, nil)
+			account := mustCreateAccount(t, tx.Client(), &service.Account{
+				Name: "observed-clear-" + tc.name, Platform: tc.platform, Type: tc.typeName,
+			})
+			resetAt := time.Now().Add(3 * time.Hour).UTC().Truncate(time.Second)
+			require.NoError(t, repo.SetRateLimitedIfLater(ctx, account.ID, resetAt))
+			observed, err := repo.GetByID(ctx, account.ID)
+			require.NoError(t, err)
+			require.NotNil(t, observed.RateLimitedAt)
+			require.NotNil(t, observed.RateLimitResetAt)
+
+			// A one-minute 429 from a stale request cannot shorten the quota
+			// limit or change the generation used by conditional recovery.
+			require.NoError(t, repo.SetRateLimitedIfLater(ctx, account.ID, time.Now().Add(time.Minute)))
+			afterShort, err := repo.GetByID(ctx, account.ID)
+			require.NoError(t, err)
+			require.True(t, afterShort.RateLimitedAt.Equal(*observed.RateLimitedAt))
+			require.True(t, afterShort.RateLimitResetAt.Equal(*observed.RateLimitResetAt))
+
+			cleared, err := repo.ClearRateLimitIfObserved(ctx, account.ID, *observed.RateLimitedAt, *observed.RateLimitResetAt)
+			require.NoError(t, err)
+			require.Equal(t, tc.canClear, cleared)
+			if !tc.canClear {
+				return
+			}
+
+			// Re-arm the same reset boundary with a new generation. Matching
+			// the reset alone must not allow the old success to erase it.
+			newLimitedAt := observed.RateLimitedAt.Add(time.Second)
+			_, err = tx.Client().Account.UpdateOneID(account.ID).
+				SetRateLimitedAt(newLimitedAt).
+				SetRateLimitResetAt(resetAt).
+				Save(ctx)
+			require.NoError(t, err)
+			cleared, err = repo.ClearRateLimitIfObserved(ctx, account.ID, *observed.RateLimitedAt, *observed.RateLimitResetAt)
+			require.NoError(t, err)
+			require.False(t, cleared)
+			current, err := repo.GetByID(ctx, account.ID)
+			require.NoError(t, err)
+			require.NotNil(t, current.RateLimitedAt)
+			require.NotNil(t, current.RateLimitResetAt)
+			cleared, err = repo.ClearRateLimitIfObserved(ctx, account.ID, *current.RateLimitedAt, *current.RateLimitResetAt)
+			require.NoError(t, err)
+			require.True(t, cleared)
+		})
+	}
+}
+
 // TestAccountRepositorySetRateLimitedIfUnchanged exercises the atomic generation
 // CAS backing the Ollama Cloud usage probe write-back (SetRateLimitedIfUnchanged).
 // It must only write when the row still carries the exact UpdatedAt /

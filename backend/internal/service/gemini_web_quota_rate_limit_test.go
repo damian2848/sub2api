@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -17,18 +18,49 @@ import (
 
 type geminiWebQuotaRateLimitRepo struct {
 	AccountRepository
-	setCalls   []time.Time
-	clearCalls int
+	setCalls         []time.Time
+	clearCalls       int
+	legacySetCalls   int
+	legacyClearCalls int
+	rejectClear      bool
+	writeErr         error
+	stateContextErr  error
+	stateDeadline    time.Time
+	storedResetAt    *time.Time
+	observedAt       time.Time
+	observedResetAt  time.Time
 }
 
 func (r *geminiWebQuotaRateLimitRepo) SetRateLimited(_ context.Context, _ int64, resetAt time.Time) error {
+	r.legacySetCalls++
 	r.setCalls = append(r.setCalls, resetAt)
 	return nil
 }
 
 func (r *geminiWebQuotaRateLimitRepo) ClearRateLimit(_ context.Context, _ int64) error {
-	r.clearCalls++
+	r.legacyClearCalls++
 	return nil
+}
+
+func (r *geminiWebQuotaRateLimitRepo) SetRateLimitedIfLater(ctx context.Context, _ int64, resetAt time.Time) error {
+	r.stateContextErr = ctx.Err()
+	r.stateDeadline, _ = ctx.Deadline()
+	r.setCalls = append(r.setCalls, resetAt)
+	if r.writeErr != nil {
+		return r.writeErr
+	}
+	if r.storedResetAt == nil || r.storedResetAt.Before(resetAt) {
+		r.storedResetAt = &resetAt
+	}
+	return nil
+}
+
+func (r *geminiWebQuotaRateLimitRepo) ClearRateLimitIfObserved(ctx context.Context, _ int64, observedAt, observedResetAt time.Time) (bool, error) {
+	r.stateContextErr = ctx.Err()
+	r.stateDeadline, _ = ctx.Deadline()
+	r.clearCalls++
+	r.observedAt, r.observedResetAt = observedAt, observedResetAt
+	return !r.rejectClear, r.writeErr
 }
 
 func geminiWebTestWindow(id string, usedPercent float64, resetAt *time.Time) geminiweb.QuotaWindow {
@@ -46,6 +78,7 @@ func TestApplyGeminiWebQuotaRateLimit(t *testing.T) {
 	fiveHourReset := now.Add(35 * time.Minute)
 	weeklyReset := now.Add(4*24*time.Hour + 17*time.Hour)
 	past := now.Add(-time.Minute)
+	unknownResetCooldown := now.Add(time.Minute)
 
 	cases := []struct {
 		name      string
@@ -72,8 +105,9 @@ func TestApplyGeminiWebQuotaRateLimit(t *testing.T) {
 			windows: []geminiweb.QuotaWindow{geminiWebTestWindow("five_hour", 99, &fiveHourReset), geminiWebTestWindow("weekly", 28, &weeklyReset)},
 		},
 		{
-			name:    "exhausted without reset",
-			windows: []geminiweb.QuotaWindow{geminiWebTestWindow("five_hour", 100, nil), geminiWebTestWindow("weekly", 28, &weeklyReset)},
+			name:      "exhausted without reset",
+			windows:   []geminiweb.QuotaWindow{geminiWebTestWindow("five_hour", 100, nil), geminiWebTestWindow("weekly", 28, &weeklyReset)},
+			wantUntil: &unknownResetCooldown,
 		},
 		{
 			name:    "exhausted with past reset",
@@ -130,6 +164,9 @@ func TestApplyGeminiWebQuotaRateLimitClearsQuotaLimitWhenUsageFallsBack(t *testi
 	account := &Account{ID: 259, RateLimitedAt: &limitedAt, RateLimitResetAt: &quotaLimit}
 	applyGeminiWebQuotaRateLimit(context.Background(), repo, account, quota, now)
 	require.Equal(t, 1, repo.clearCalls)
+	require.Zero(t, repo.legacyClearCalls)
+	require.Equal(t, limitedAt, repo.observedAt)
+	require.Equal(t, quotaLimit, repo.observedResetAt)
 	require.Nil(t, account.RateLimitResetAt)
 
 	// A short 429 cooldown is not a quota limit and stays in place.
@@ -140,6 +177,98 @@ func TestApplyGeminiWebQuotaRateLimitClearsQuotaLimitWhenUsageFallsBack(t *testi
 	applyGeminiWebQuotaRateLimit(context.Background(), repo, account, quota, now)
 	require.Zero(t, repo.clearCalls)
 	require.Equal(t, cooldownUntil, *account.RateLimitResetAt)
+}
+
+func TestApplyGeminiWebQuotaRateLimitDoesNotClearNewerGeneration(t *testing.T) {
+	now := time.Now()
+	limitedAt := now.Add(-time.Hour)
+	resetAt := now.Add(time.Hour)
+	repo := &geminiWebQuotaRateLimitRepo{rejectClear: true}
+	account := &Account{ID: 259, RateLimitedAt: &limitedAt, RateLimitResetAt: &resetAt}
+	quota := geminiweb.Quota{Windows: []geminiweb.QuotaWindow{geminiWebTestWindow("five_hour", 20, nil)}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	applyGeminiWebQuotaRateLimit(ctx, repo, account, quota, now)
+
+	require.Equal(t, 1, repo.clearCalls)
+	require.Zero(t, repo.legacyClearCalls)
+	require.Nil(t, repo.stateContextErr)
+	require.WithinDuration(t, time.Now().Add(2*time.Second), repo.stateDeadline, time.Second)
+	require.Equal(t, limitedAt, repo.observedAt)
+	require.Equal(t, resetAt, repo.observedResetAt)
+	require.Equal(t, &limitedAt, account.RateLimitedAt)
+	require.Equal(t, &resetAt, account.RateLimitResetAt)
+}
+
+func TestApplyGeminiWebQuotaRateLimitClearFailureKeepsSnapshot(t *testing.T) {
+	now := time.Now()
+	limitedAt := now.Add(-time.Hour)
+	resetAt := now.Add(time.Hour)
+	repo := &geminiWebQuotaRateLimitRepo{writeErr: errors.New("database unavailable")}
+	account := &Account{ID: 259, RateLimitedAt: &limitedAt, RateLimitResetAt: &resetAt}
+	quota := geminiweb.Quota{Windows: []geminiweb.QuotaWindow{geminiWebTestWindow("five_hour", 20, nil)}}
+
+	applyGeminiWebQuotaRateLimit(context.Background(), repo, account, quota, now)
+
+	require.Equal(t, 1, repo.clearCalls)
+	require.Equal(t, &limitedAt, account.RateLimitedAt)
+	require.Equal(t, &resetAt, account.RateLimitResetAt)
+}
+
+func TestApplyGeminiWebShortRateLimitKeepsObservedLongerLimit(t *testing.T) {
+	now := time.Now()
+	limitedAt := now.Add(-time.Hour)
+	resetAt := now.Add(3 * time.Hour)
+	repo := &geminiWebQuotaRateLimitRepo{}
+	account := &Account{ID: 259, RateLimitedAt: &limitedAt, RateLimitResetAt: &resetAt}
+
+	applyGeminiWebShortRateLimit(context.Background(), repo, account)
+
+	require.Empty(t, repo.setCalls)
+	require.Equal(t, &limitedAt, account.RateLimitedAt)
+	require.Equal(t, &resetAt, account.RateLimitResetAt)
+}
+
+func TestApplyGeminiWebShortRateLimitDoesNotShortenConcurrentQuotaLimit(t *testing.T) {
+	resetAt := time.Now().Add(3 * time.Hour)
+	repo := &geminiWebQuotaRateLimitRepo{storedResetAt: &resetAt}
+	// The request snapshot predates a longer quota limit written elsewhere.
+	account := &Account{ID: 259}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	applyGeminiWebShortRateLimit(ctx, repo, account)
+
+	require.Len(t, repo.setCalls, 1)
+	require.Zero(t, repo.legacySetCalls)
+	require.Nil(t, repo.stateContextErr)
+	require.WithinDuration(t, time.Now().Add(2*time.Second), repo.stateDeadline, time.Second)
+	require.Equal(t, resetAt, *repo.storedResetAt)
+}
+
+func TestApplyGeminiWebShortRateLimitWriteFailureKeepsSnapshot(t *testing.T) {
+	repo := &geminiWebQuotaRateLimitRepo{writeErr: errors.New("database unavailable")}
+	account := &Account{ID: 259}
+
+	applyGeminiWebShortRateLimit(context.Background(), repo, account)
+
+	require.Len(t, repo.setCalls, 1)
+	require.Nil(t, account.RateLimitedAt)
+	require.Nil(t, account.RateLimitResetAt)
+}
+
+func TestHandleGeminiWebQuotaErrorPreservesLongLimitOn429(t *testing.T) {
+	resetAt := time.Now().Add(3 * time.Hour)
+	repo := &geminiWebQuotaRateLimitRepo{storedResetAt: &resetAt}
+	svc := &GeminiMessagesCompatService{accountRepo: repo}
+	account := &Account{ID: 259}
+
+	svc.handleGeminiWebQuotaError(context.Background(), account, "", geminiweb.ErrRateLimited)
+
+	require.Len(t, repo.setCalls, 1)
+	require.Zero(t, repo.legacySetCalls)
+	require.Equal(t, resetAt, *repo.storedResetAt)
 }
 
 func TestApplyGeminiWebQuotaRateLimitKeepsLimitWhileExhaustedWithoutReset(t *testing.T) {

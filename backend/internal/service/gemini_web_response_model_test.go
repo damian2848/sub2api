@@ -32,7 +32,7 @@ func TestGeminiWebForwardResponseModelAudit(t *testing.T) {
 					calls := 0
 					upstream := &geminiWebUsageHTTPStub{do: func(req *http.Request) (*http.Response, error) {
 						body := `"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid"`
-						if req.Method == http.MethodPost {
+						if strings.Contains(req.URL.Path, "StreamGenerate") {
 							calls++
 							body = ""
 							for _, id := range tc.ids {

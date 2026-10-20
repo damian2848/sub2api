@@ -155,7 +155,7 @@ func geminiWebFramesStub(t *testing.T, snapshots ...string) (*geminiWebUsageHTTP
 	var prompt string
 	return &geminiWebUsageHTTPStub{do: func(req *http.Request) (*http.Response, error) {
 		body := `"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid"`
-		if req.Method == http.MethodPost {
+		if strings.Contains(req.URL.Path, "StreamGenerate") {
 			raw, _ := io.ReadAll(req.Body)
 			form, err := url.ParseQuery(string(raw))
 			require.NoError(t, err)
@@ -418,7 +418,7 @@ func TestGeminiWebNativeToolCalls(t *testing.T) {
 
 func TestGeminiWebCompatStreamFailsOverBeforeOutput(t *testing.T) {
 	upstream := &geminiWebUsageHTTPStub{do: func(req *http.Request) (*http.Response, error) {
-		if req.Method == http.MethodPost {
+		if strings.Contains(req.URL.Path, "StreamGenerate") {
 			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid"`))}, nil
@@ -463,7 +463,7 @@ func TestGeminiWebPipeStreamPingsWhileToolReplyIsHeld(t *testing.T) {
 // thinks before Google sends the first answer frame.
 func slowGeminiWebStub(delay time.Duration, next func(*http.Request) (*http.Response, error)) *geminiWebUsageHTTPStub {
 	return &geminiWebUsageHTTPStub{do: func(req *http.Request) (*http.Response, error) {
-		if req.Method == http.MethodPost {
+		if strings.Contains(req.URL.Path, "StreamGenerate") {
 			time.Sleep(delay)
 		}
 		return next(req)
@@ -514,7 +514,7 @@ func TestGeminiWebCompatStreamPingsBeforeFirstToken(t *testing.T) {
 func TestGeminiWebCompatStreamErrorAfterPingOnlyFailsOver(t *testing.T) {
 	shortenGeminiWebFirstTokenPing(t)
 	svc := &GeminiMessagesCompatService{httpUpstream: slowGeminiWebStub(150*time.Millisecond, func(req *http.Request) (*http.Response, error) {
-		if req.Method == http.MethodPost {
+		if strings.Contains(req.URL.Path, "StreamGenerate") {
 			return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(""))}, nil
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid"`))}, nil
@@ -563,7 +563,7 @@ func TestGeminiWebForwardUploadsImages(t *testing.T) {
 					uploads = append(uploads, header.Filename+"="+string(data))
 					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("/contrib_service/ttl_1d/" + header.Filename))}, nil
 				}
-				if req.Method == http.MethodPost {
+				if strings.Contains(req.URL.Path, "StreamGenerate") {
 					raw, _ := io.ReadAll(req.Body)
 					form, _ := url.ParseQuery(string(raw))
 					var outer []json.RawMessage
