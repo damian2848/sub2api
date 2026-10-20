@@ -26,6 +26,7 @@ import (
 	dbgroup "github.com/Wei-Shaw/sub2api/ent/group"
 	dbpredicate "github.com/Wei-Shaw/sub2api/ent/predicate"
 	dbproxy "github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -3427,9 +3428,33 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 			return 0, err
 		}
 		credentialPlaceholder = "$" + itoa(idx)
-		setClauses = append(setClauses, "credentials = COALESCE(credentials, '{}'::jsonb) || "+credentialPlaceholder+"::jsonb")
 		args = append(args, payload)
 		idx++
+		credentialsExpr := "COALESCE(credentials, '{}'::jsonb) || " + credentialPlaceholder + "::jsonb"
+		if updates.MergeModelMapping {
+			defaults, err := json.Marshal(domain.DefaultAntigravityModelMapping)
+			if err != nil {
+				return 0, err
+			}
+			defaultsPlaceholder := "$" + itoa(idx)
+			args = append(args, defaults)
+			idx++
+			patch := "(" + credentialPlaceholder + "::jsonb -> 'model_mapping')"
+			// Read each current row inside the UPDATE, avoiding a stale read/merge
+			// that could discard concurrent mapping edits. Empty merges are no-ops.
+			// Existing aliases win over incoming identity/whitelist entries.
+			credentialsExpr = "COALESCE(credentials, '{}'::jsonb) || (" + credentialPlaceholder + "::jsonb - 'model_mapping') || " +
+				"CASE WHEN " + patch + " = '{}'::jsonb THEN '{}'::jsonb ELSE jsonb_build_object('model_mapping', (" +
+				"SELECT base.mapping || " + patch + " || COALESCE((" +
+				"SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(base.mapping) e " +
+				"WHERE e.value <> to_jsonb(e.key) AND " + patch + " -> e.key = to_jsonb(e.key)" +
+				"), '{}'::jsonb) FROM (SELECT CASE " +
+				"WHEN jsonb_typeof(credentials -> 'model_mapping') = 'object' AND credentials -> 'model_mapping' <> '{}'::jsonb " +
+				"THEN credentials -> 'model_mapping' " +
+				"WHEN platform = 'antigravity' THEN " + defaultsPlaceholder + "::jsonb ELSE '{}'::jsonb END AS mapping) base" +
+				")) END"
+		}
+		setClauses = append(setClauses, "credentials = "+credentialsExpr)
 	}
 
 	ollamaGroupIdentityChanges := make([]string, 0, 2)

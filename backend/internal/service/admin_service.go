@@ -479,21 +479,22 @@ type UpdateAccountInput struct {
 
 // BulkUpdateAccountsInput describes the payload for bulk updating accounts.
 type BulkUpdateAccountsInput struct {
-	AccountIDs          []int64
-	Filters             *BulkUpdateAccountFilters
-	Name                string
-	ProxyID             *int64
-	Concurrency         *int
-	Priority            *int
-	RateMultiplier      *float64 // 账号计费倍率（>=0，允许 0）
-	GroupRateMultiplier *float64 // 账号级分组计费倍率（>=0，默认 1）
-	LoadFactor          *int
-	Status              string
-	Schedulable         *bool
-	GroupIDs            *[]int64
-	Credentials         map[string]any
-	Extra               map[string]any
-	ProbeEnabled        *bool
+	AccountIDs             []int64
+	Filters                *BulkUpdateAccountFilters
+	Name                   string
+	ProxyID                *int64
+	Concurrency            *int
+	Priority               *int
+	RateMultiplier         *float64 // 账号计费倍率（>=0，允许 0）
+	GroupRateMultiplier    *float64 // 账号级分组计费倍率（>=0，默认 1）
+	LoadFactor             *int
+	Status                 string
+	Schedulable            *bool
+	GroupIDs               *[]int64
+	Credentials            map[string]any
+	ModelMappingUpdateMode string
+	Extra                  map[string]any
+	ProbeEnabled           *bool
 	// SkipMixedChannelCheck skips the mixed channel risk check when binding groups.
 	// This should only be set when the caller has explicitly confirmed the risk.
 	SkipMixedChannelCheck bool

@@ -682,9 +682,13 @@ export async function batchUpdateCredentials(request: {
  * @param updates - Fields to update
  * @returns Success confirmation
  */
+export interface BulkAccountUpdates extends Record<string, unknown> {
+  model_mapping_update_mode?: 'merge' | 'replace'
+}
+
 export async function bulkUpdate(
-  accountIdsOrPayload: number[] | Record<string, unknown>,
-  updates?: Record<string, unknown>
+  accountIdsOrPayload: number[] | BulkAccountUpdates,
+  updates?: BulkAccountUpdates
 ): Promise<{
   success: number
   failed: number

@@ -465,6 +465,25 @@
           </div>
 
           <template v-else>
+            <div v-if="allTargetsAntigravity" class="mb-4">
+              <label class="input-label" for="bulk-edit-model-mapping-update-mode">
+                {{ t('admin.accounts.bulkModelMappingUpdateMode') }}
+              </label>
+              <select
+                id="bulk-edit-model-mapping-update-mode"
+                v-model="modelMappingUpdateMode"
+                class="input"
+                :disabled="!enableModelRestriction"
+              >
+                <option value="merge">{{ t('admin.accounts.bulkModelMappingMerge') }}</option>
+                <option value="replace">{{ t('admin.accounts.bulkModelMappingReplace') }}</option>
+              </select>
+              <p class="input-hint" data-testid="bulk-model-mapping-update-hint">
+                {{ t(modelMappingUpdateMode === 'merge'
+                  ? 'admin.accounts.bulkModelMappingMergeHint'
+                  : 'admin.accounts.bulkModelMappingReplaceHint') }}
+              </p>
+            </div>
             <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.modelRestrictionCombinedHint') }}
             </p>
@@ -551,8 +570,11 @@
 
               <p class="text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-                <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{
+                <span v-if="!allTargetsAntigravity && allowedModels.length === 0 && modelMappings.length === 0">{{
                   t('admin.accounts.supportsAllModels')
+                }}</span>
+                <span v-else-if="allTargetsAntigravity && modelMappingUpdateMode === 'replace' && allowedModels.length === 0 && modelMappings.length === 0">{{
+                  t('admin.accounts.antigravityDefaultModelsHint')
                 }}</span>
               </p>
             </div>
@@ -1716,6 +1738,11 @@ const allTargetsGrok = computed(
     targetSelectedPlatforms.value.length > 0 &&
     targetSelectedPlatforms.value.every((p) => p === 'grok')
 )
+const allTargetsAntigravity = computed(
+  () =>
+    targetSelectedPlatforms.value.length > 0 &&
+    targetSelectedPlatforms.value.every((platform) => platform === 'antigravity')
+)
 const isMixedPlatform = computed(() => targetSelectedPlatforms.value.length > 1)
 
 const allOpenAIPassthroughCapable = computed(() => {
@@ -1854,6 +1881,7 @@ const mixedChannelWarningMessage = ref('')
 const pendingUpdatesForConfirm = ref<Record<string, unknown> | null>(null)
 const baseUrl = ref('')
 const modelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
+const modelMappingUpdateMode = ref<'merge' | 'replace'>('merge')
 const allowedModels = ref<string[]>([])
 const modelMappings = ref<ModelMapping[]>([])
 const selectedErrorCodes = ref<number[]>([])
@@ -2271,10 +2299,16 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
   }
 
   if (enableModelRestriction.value && !isOpenAIModelRestrictionDisabled.value) {
-    // Tabs only choose the editor; both sides are saved together. An explicitly
-    // enabled empty configuration still clears existing custom restrictions.
-    credentials.model_mapping = buildModelMappingObject() ?? {}
-    credentialsChanged = true
+    // Tabs only choose the editor; both sides are saved together. Antigravity
+    // merges by default so editing one side preserves other existing rules.
+    const mapping = buildModelMappingObject()
+    if (!allTargetsAntigravity.value || modelMappingUpdateMode.value === 'replace' || mapping) {
+      credentials.model_mapping = mapping ?? {}
+      credentialsChanged = true
+      if (allTargetsAntigravity.value) {
+        updates.model_mapping_update_mode = modelMappingUpdateMode.value
+      }
+    }
   }
 
   if (enableOpenAIModelAliases.value && allOpenAIOAuthOnly.value) {
@@ -2675,6 +2709,7 @@ watch(
       openAIEndpointCapabilities.value = ['chat_completions', 'embeddings']
       openAIResponsesMode.value = 'auto'
       modelRestrictionMode.value = 'whitelist'
+      modelMappingUpdateMode.value = 'merge'
       allowedModels.value = []
       modelMappings.value = []
       selectedErrorCodes.value = []
