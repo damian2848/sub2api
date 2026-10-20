@@ -327,6 +327,55 @@ func TestOpenAIEncryptedContentSchedulerNeverEscapesUnavailableProducer(t *testi
 	requireEncryptedAffinityCode(t, err, "encrypted_content_account_unavailable")
 }
 
+func encryptedAffinityModelCooldown(reason string) func(*Account) {
+	return func(a *Account) {
+		a.Extra = map[string]any{modelRateLimitsKey: map[string]any{"gpt-5.6-sol": map[string]any{
+			"rate_limit_reset_at": time.Now().Add(20 * time.Minute).UTC().Format(time.RFC3339),
+			"reason":              reason,
+		}}}
+	}
+}
+
+// A transient model-not-found on the producer must not fail the conversation
+// for the whole cooldown: the producer is the only account that can read it.
+func TestOpenAIEncryptedContentSchedulerProbesProducerDuringModelNotFoundCooldown(t *testing.T) {
+	for _, reason := range []string{upstreamModelNotFoundReason, upstreamModelNotFound401Reason} {
+		for _, mode := range []string{"false", "true"} {
+			t.Run(reason+"/"+mode, func(t *testing.T) {
+				svc, groupID := encryptedAffinitySchedulerService(t, mode, encryptedAffinityModelCooldown(reason))
+				ctx := WithOpenAIEncryptedContentAffinity(context.Background(), 12, encryptedAffinityInput(t, "task"))
+				selection, decision, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "child", "gpt-5.6-sol", nil, OpenAIUpstreamTransportAny, false)
+				require.NoError(t, err)
+				require.NotNil(t, selection)
+				require.Equal(t, int64(401), selection.Account.ID)
+				require.Equal(t, openAIAccountScheduleLayerEncryptedContent, decision.Layer)
+				if selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+
+				// Requests without the producer's ciphertext still avoid it.
+				plain, _, err := svc.SelectAccountWithScheduler(context.Background(), &groupID, "", "fresh", "gpt-5.6-sol", nil, OpenAIUpstreamTransportAny, false)
+				require.NoError(t, err)
+				require.NotNil(t, plain)
+				require.Equal(t, int64(402), plain.Account.ID)
+				if plain.ReleaseFunc != nil {
+					plain.ReleaseFunc()
+				}
+			})
+		}
+	}
+}
+
+func TestOpenAIEncryptedContentSchedulerHonorsProducerQuotaCooldown(t *testing.T) {
+	for _, reason := range []string{"", upstreamCodexPlanGatedModelReason} {
+		svc, groupID := encryptedAffinitySchedulerService(t, "true", encryptedAffinityModelCooldown(reason))
+		ctx := WithOpenAIEncryptedContentAffinity(context.Background(), 12, encryptedAffinityInput(t, "task"))
+		selection, _, err := svc.SelectAccountWithScheduler(ctx, &groupID, "", "child", "gpt-5.6-sol", nil, OpenAIUpstreamTransportAny, false)
+		require.Nil(t, selection)
+		requireEncryptedAffinityCode(t, err, "encrypted_content_account_unavailable")
+	}
+}
+
 func TestOpenAIEncryptedContentSchedulerWaitsForProducerCapacity(t *testing.T) {
 	svc, groupID := encryptedAffinitySchedulerService(t, "true", nil)
 	svc.concurrencyService = NewConcurrencyService(schedulerTestConcurrencyCache{acquireResults: map[int64]bool{401: false, 402: true}})

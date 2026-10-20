@@ -37,9 +37,46 @@ func (a *Account) getRateLimitRemainingForKey(key string) time.Duration {
 	return 0
 }
 
+type openAIEncryptedContentOwnerProbeContextKey struct{}
+
+// withOpenAIEncryptedContentOwnerProbe marks a scheduling attempt pinned to
+// the only account that can read the request's encrypted messages. A
+// model-not-found cooldown on that account is then treated as a hint, not a
+// hard block: refusing would fail the conversation for the whole cooldown,
+// while trying once either succeeds or re-arms the cooldown and fails over.
+func withOpenAIEncryptedContentOwnerProbe(ctx context.Context, accountID int64) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, openAIEncryptedContentOwnerProbeContextKey{}, accountID)
+}
+
+func openAIEncryptedContentOwnerProbeFor(ctx context.Context, account *Account) bool {
+	if ctx == nil || account == nil || account.ID <= 0 {
+		return false
+	}
+	accountID, _ := ctx.Value(openAIEncryptedContentOwnerProbeContextKey{}).(int64)
+	return accountID == account.ID
+}
+
+// modelRateLimitBypassedForKey reports a model-not-found cooldown that the
+// encrypted-content owner may ignore. Quota, capacity and plan-gated
+// cooldowns still apply.
+func (a *Account) modelRateLimitBypassedForKey(ctx context.Context, key string) bool {
+	if !openAIEncryptedContentOwnerProbeFor(ctx, a) {
+		return false
+	}
+	switch a.modelRateLimitReason(key) {
+	case upstreamModelNotFoundReason, upstreamModelNotFound401Reason:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *Account) isModelRateLimitedWithContext(ctx context.Context, requestedModel string) bool {
 	for _, key := range a.modelRateLimitKeysForRequest(ctx, requestedModel) {
-		if a.isRateLimitActiveForKey(key) {
+		if a.isRateLimitActiveForKey(key) && !a.modelRateLimitBypassedForKey(ctx, key) {
 			return true
 		}
 	}
@@ -55,6 +92,9 @@ func (a *Account) GetModelRateLimitRemainingTime(requestedModel string) time.Dur
 func (a *Account) GetModelRateLimitRemainingTimeWithContext(ctx context.Context, requestedModel string) time.Duration {
 	remaining := time.Duration(0)
 	for _, key := range a.modelRateLimitKeysForRequest(ctx, requestedModel) {
+		if a.modelRateLimitBypassedForKey(ctx, key) {
+			continue
+		}
 		if keyRemaining := a.getRateLimitRemainingForKey(key); keyRemaining > remaining {
 			remaining = keyRemaining
 		}

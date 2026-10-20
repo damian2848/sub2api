@@ -2582,6 +2582,10 @@ func parseOpenAIImageTryAgainCooldown(body []byte) time.Duration {
 }
 
 const upstreamModelNotFoundCooldown = 30 * time.Minute
+
+// API-key upstreams are usually relays whose own pools gain and lose models;
+// their model-not-found is often transient, so it gets a shorter cooldown.
+const upstreamAPIKeyModelNotFoundCooldown = 5 * time.Minute
 const upstreamModelNotFoundReason = "upstream_404_model_not_found"
 const upstreamModelNotFound401Reason = "upstream_401_model_not_found"
 const upstreamCodexPlanGatedModelCooldown = 30 * time.Minute
@@ -2606,11 +2610,15 @@ func (s *RateLimitService) HandleUpstreamModelNotFound(ctx context.Context, acco
 	}
 	var cooldown time.Duration
 	var reason string
+	modelNotFoundCooldown := upstreamModelNotFoundCooldown
+	if account.Type == AccountTypeAPIKey {
+		modelNotFoundCooldown = upstreamAPIKeyModelNotFoundCooldown
+	}
 	switch {
 	case isUpstreamModelNotFoundError(statusCode, responseBody):
-		cooldown, reason = upstreamModelNotFoundCooldown, upstreamModelNotFoundReason
+		cooldown, reason = modelNotFoundCooldown, upstreamModelNotFoundReason
 	case statusCode == http.StatusUnauthorized && account.Type == AccountTypeAPIKey && account.IsOpenAICompatible() && isOpenAICompatibleModelNotFoundBody(responseBody):
-		cooldown, reason = upstreamModelNotFoundCooldown, upstreamModelNotFound401Reason
+		cooldown, reason = modelNotFoundCooldown, upstreamModelNotFound401Reason
 	case isOpenAIOAuthAccount(account) && isOpenAICodexPlanGatedModelError(statusCode, responseBody):
 		cooldown, reason = upstreamCodexPlanGatedModelCooldown, upstreamCodexPlanGatedModelReason
 	default:

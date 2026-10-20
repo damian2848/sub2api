@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -346,6 +347,7 @@ func (s *OpenAIGatewayService) selectOpenAIEncryptedContentAccount(ctx context.C
 	if req.SessionHash == "" {
 		req.SessionHash = "encrypted-content-owner"
 	}
+	ctx = withOpenAIEncryptedContentOwnerProbe(ctx, owner)
 	scheduler := &defaultOpenAIAccountScheduler{service: s, stats: newOpenAIAccountRuntimeStats()}
 	selection, _, err := scheduler.selectBySessionHash(ctx, req)
 	if err != nil {
@@ -355,5 +357,17 @@ func (s *OpenAIGatewayService) selectOpenAIEncryptedContentAccount(ctx context.C
 		return nil, decision, openAIEncryptedContentError("encrypted_content_account_unavailable", "The upstream session needed for these encrypted messages is unavailable for this request. Retry later or start a new conversation with the original task.", http.StatusServiceUnavailable, nil)
 	}
 	decision.SelectedAccountID, decision.SelectedAccountType = selection.Account.ID, selection.Account.Type
+	if selection.Account.GetRateLimitRemainingTime(req.RequestedModel) > 0 {
+		slog.Info("openai.encrypted_content_owner_model_cooldown_probe", "account_id", owner, "model", req.RequestedModel)
+	}
 	return selection, decision, nil
+}
+
+// shouldClearOpenAIStickySession keeps shouldClearStickySession's behavior,
+// except that the encrypted-content owner may skip a model-not-found cooldown.
+func shouldClearOpenAIStickySession(ctx context.Context, account *Account, requestedModel string) bool {
+	if !openAIEncryptedContentOwnerProbeFor(ctx, account) {
+		return shouldClearStickySession(account, requestedModel)
+	}
+	return !account.IsSchedulable() || account.GetRateLimitRemainingTimeWithContext(ctx, requestedModel) > 0
 }
