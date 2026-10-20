@@ -292,6 +292,9 @@
           </div>
 
           <template v-else>
+            <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.modelRestrictionCombinedHint') }}
+            </p>
             <!-- Mode Toggle -->
             <div class="mb-4 flex gap-2">
               <button
@@ -860,6 +863,9 @@
         </div>
 
         <template v-else>
+          <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.modelRestrictionCombinedHint') }}
+          </p>
           <!-- Mode Toggle -->
           <div class="mb-4 flex gap-2">
             <button
@@ -998,8 +1004,12 @@
       </div>
 
       <!-- Gemini Web model restriction (the web account is not an API-key form) -->
-      <div v-if="account.type === 'gemini_web'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="account.type === 'gemini_web'" data-testid="gemini-web-model-restriction" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
+        <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+          {{ t('admin.accounts.modelRestrictionCombinedHint') }}
+          {{ t('admin.accounts.geminiWebDefaultModelsHint') }}
+        </p>
         <div class="mb-4 flex gap-2">
           <button
             type="button"
@@ -1035,7 +1045,7 @@
           />
           <p class="text-xs text-gray-500 dark:text-gray-400">
             {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-            <span v-if="allowedModels.length === 0">{{ t('admin.accounts.supportsAllModels') }}</span>
+            <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{ t('admin.accounts.supportsAllModels') }}</span>
           </p>
         </div>
         <div v-else class="space-y-2">
@@ -1153,6 +1163,9 @@
         <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
           <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
 
+          <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.modelRestrictionCombinedHint') }}
+          </p>
           <!-- Mode Toggle -->
           <div class="mb-4 flex gap-2">
             <button
@@ -1401,6 +1414,9 @@
         <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
           <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
 
+          <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.modelRestrictionCombinedHint') }}
+          </p>
           <!-- Mode Toggle -->
           <div class="mb-4 flex gap-2">
             <button
@@ -3679,6 +3695,7 @@ import {
 } from '@/utils/openaiWsMode'
 import {
   getPresetMappingsByPlatform,
+  getGeminiWebDefaultModelSettings,
   getModelCatalogPlatform,
   commonErrorCodes,
   buildModelMappingObject,
@@ -5054,8 +5071,16 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   }
 
   // Initialize model mappings for Gemini Web, then API Key fields for apikey type.
-  if (newAccount.type === 'gemini_web' && newAccount.credentials) {
-    loadModelRestrictionFromMapping(credentials?.model_mapping as Record<string, unknown> | undefined)
+  if (newAccount.type === 'gemini_web') {
+    const mapping = credentials?.model_mapping as Record<string, unknown> | undefined
+    if (!mapping || Object.keys(mapping).length === 0) {
+      const defaults = getGeminiWebDefaultModelSettings()
+      allowedModels.value = defaults.allowedModels
+      modelMappings.value = defaults.modelMappings
+      modelRestrictionMode.value = 'whitelist'
+    } else {
+      loadModelRestrictionFromMapping(mapping)
+    }
   } else if (newAccount.type === 'apikey' && newAccount.credentials) {
     const credentials = newAccount.credentials as Record<string, unknown>
     // 国产供应商：读取 account_mode 与 api_protocol 作为可编辑初始值

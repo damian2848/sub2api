@@ -104,6 +104,7 @@ type windowStatsCache struct {
 type antigravityUsageCache struct {
 	usageInfo *UsageInfo
 	timestamp time.Time
+	baseURL   string // Quota snapshots from production and daily are not interchangeable.
 }
 
 const (
@@ -203,6 +204,10 @@ type UsageInfo struct {
 
 	// Antigravity 多模型配额
 	AntigravityQuota map[string]*AntigravityModelQuota `json:"antigravity_quota,omitempty"`
+	// Official quota summary groups preserve independent model pools and windows.
+	AntigravityQuotaGroups []AntigravityQuotaGroup `json:"antigravity_quota_groups,omitempty"`
+	AntigravityQuotaSource string                  `json:"antigravity_quota_source,omitempty"`
+	AntigravityQuotaError  string                  `json:"antigravity_quota_error,omitempty"`
 
 	// Grok / xAI 被动额度快照
 	GrokRequestQuota       *xai.QuotaWindow `json:"grok_request_quota,omitempty"`
@@ -397,8 +402,8 @@ func (s *AccountUsageService) getUsageForAccount(ctx context.Context, account *A
 
 	// Antigravity 平台：使用 AntigravityQuotaFetcher 获取额度
 	if account.Platform == PlatformAntigravity {
-		usage, err := s.getAntigravityUsage(ctx, account)
-		if err == nil {
+		usage, err := s.getAntigravityUsage(ctx, account, forceProbe)
+		if err == nil && usage != nil && usage.Error == "" && usage.ErrorCode == "" && usage.AntigravityQuotaError == "" {
 			s.tryClearRecoverableAccountError(ctx, account)
 		}
 		return usage, err
@@ -1203,54 +1208,41 @@ func (s *AccountUsageService) persistGeminiWebUsageCookie(ctx context.Context, a
 }
 
 // getAntigravityUsage 获取 Antigravity 账户额度
-func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *Account) (*UsageInfo, error) {
+func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *Account, force bool) (*UsageInfo, error) {
 	if s.antigravityQuotaFetcher == nil || !s.antigravityQuotaFetcher.CanFetch(account) {
 		now := time.Now()
 		return &UsageInfo{UpdatedAt: &now}, nil
 	}
+	baseURL := resolveAntigravityForwardBaseURL(account)
 
-	// 1. 检查缓存
-	if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
-		if cache, ok := cached.(*antigravityUsageCache); ok {
-			ttl := antigravityCacheTTL(cache.usageInfo)
-			if time.Since(cache.timestamp) < ttl {
-				usage := cache.usageInfo
-				if usage.FiveHour != nil && usage.FiveHour.ResetsAt != nil {
-					usage.FiveHour.RemainingSeconds = int(time.Until(*usage.FiveHour.ResetsAt).Seconds())
+	// 强制刷新绕过成功和错误缓存；普通查询保留快照的实际查询时间。
+	if !force {
+		if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
+			if cache, ok := cached.(*antigravityUsageCache); ok && cache.usageInfo != nil && cache.baseURL == baseURL {
+				if time.Since(cache.timestamp) < antigravityCacheTTL(cache.usageInfo) {
+					return snapshotAntigravityUsage(cache.usageInfo)
 				}
-				return usage, nil
 			}
 		}
 	}
 
-	// 2. singleflight 防止并发击穿
-	flightKey := fmt.Sprintf("ag-usage:%d", account.ID)
-	result, flightErr, _ := s.cache.antigravityFlight.Do(flightKey, func() (any, error) {
-		// 再次检查缓存（等待期间可能已被填充）
-		if cached, ok := s.cache.antigravityCache.Load(account.ID); ok {
-			if cache, ok := cached.(*antigravityUsageCache); ok {
-				ttl := antigravityCacheTTL(cache.usageInfo)
-				if time.Since(cache.timestamp) < ttl {
-					usage := cache.usageInfo
-					// 重新计算 RemainingSeconds，避免返回过时的剩余秒数
-					recalcAntigravityRemainingSeconds(usage)
-					return usage, nil
-				}
-			}
-		}
-
+	// flight 始终进行真实查询，保证强制刷新即使加入普通查询的 flight，
+	// 也不会复用一次缓存命中。共享结果只读，各调用方返回独立副本。
+	flightKey := fmt.Sprintf("ag-usage:%d:%s", account.ID, baseURL)
+	resultCh := s.cache.antigravityFlight.DoChan(flightKey, func() (any, error) {
 		// 使用独立 context，避免调用方 cancel 导致所有共享 flight 的请求失败
 		fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer fetchCancel()
 
 		proxyURL := s.antigravityQuotaFetcher.GetProxyURL(fetchCtx, account)
-		fetchResult, err := s.antigravityQuotaFetcher.FetchQuota(fetchCtx, account, proxyURL)
+		fetchResult, err := s.antigravityQuotaFetcher.fetchQuotaFromURL(fetchCtx, account, proxyURL, baseURL)
 		if err != nil {
 			degraded := buildAntigravityDegradedUsage(err)
 			enrichUsageWithAccountError(degraded, account)
 			s.cache.antigravityCache.Store(account.ID, &antigravityUsageCache{
 				usageInfo: degraded,
 				timestamp: time.Now(),
+				baseURL:   baseURL,
 			})
 			return degraded, nil
 		}
@@ -1259,19 +1251,40 @@ func (s *AccountUsageService) getAntigravityUsage(ctx context.Context, account *
 		s.cache.antigravityCache.Store(account.ID, &antigravityUsageCache{
 			usageInfo: fetchResult.UsageInfo,
 			timestamp: time.Now(),
+			baseURL:   baseURL,
 		})
 		return fetchResult.UsageInfo, nil
 	})
 
-	if flightErr != nil {
-		return nil, flightErr
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case result := <-resultCh:
+		if result.Err != nil {
+			return nil, result.Err
+		}
+		usage, ok := result.Val.(*UsageInfo)
+		if !ok || usage == nil {
+			return nil, fmt.Errorf("antigravity quota query returned no usage")
+		}
+		return snapshotAntigravityUsage(usage)
 	}
-	usage, ok := result.(*UsageInfo)
-	if !ok || usage == nil {
-		now := time.Now()
-		return &UsageInfo{UpdatedAt: &now}, nil
+}
+
+// snapshotAntigravityUsage isolates every nested quota/window from the shared
+// cache and flight result. UpdatedAt remains the upstream query time; only the
+// countdown is recalculated for the response.
+func snapshotAntigravityUsage(info *UsageInfo) (*UsageInfo, error) {
+	data, err := json.Marshal(info)
+	if err != nil {
+		return nil, fmt.Errorf("copy antigravity usage snapshot: %w", err)
 	}
-	return usage, nil
+	var snapshot UsageInfo
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return nil, fmt.Errorf("copy antigravity usage snapshot: %w", err)
+	}
+	recalcAntigravityRemainingSeconds(&snapshot)
+	return &snapshot, nil
 }
 
 func (s *AccountUsageService) getGrokUsage(ctx context.Context, account *Account, force bool) (*UsageInfo, error) {
@@ -1436,12 +1449,15 @@ func recalcAntigravityRemainingSeconds(info *UsageInfo) {
 	if info == nil {
 		return
 	}
-	if info.FiveHour != nil && info.FiveHour.ResetsAt != nil {
-		remaining := int(time.Until(*info.FiveHour.ResetsAt).Seconds())
+	for _, window := range []*UsageProgress{info.FiveHour, info.SevenDay, info.SevenDaySonnet, info.SevenDayFable} {
+		if window == nil || window.ResetsAt == nil {
+			continue
+		}
+		remaining := int(time.Until(*window.ResetsAt).Seconds())
 		if remaining < 0 {
 			remaining = 0
 		}
-		info.FiveHour.RemainingSeconds = remaining
+		window.RemainingSeconds = remaining
 	}
 }
 
@@ -1455,7 +1471,7 @@ func antigravityCacheTTL(info *UsageInfo) time.Duration {
 	if info.IsForbidden {
 		return apiCacheTTL // 封号/验证状态不会很快变
 	}
-	if info.ErrorCode != "" || info.Error != "" {
+	if info.ErrorCode != "" || info.Error != "" || info.AntigravityQuotaError != "" {
 		return antigravityErrorTTL
 	}
 	return apiCacheTTL

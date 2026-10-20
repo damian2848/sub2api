@@ -6,6 +6,7 @@ vi.mock('@/api/admin/accounts', () => ({
 
 import {
   buildModelMappingObject,
+  getGeminiWebDefaultModelSettings,
   getModelCatalogPlatform,
   getModelCatalogPlatforms,
   getModelsByPlatform,
@@ -191,6 +192,25 @@ describe('useModelWhitelist', () => {
     for (const preset of presets) {
       expect(webModels).toContain(preset.to)
     }
+  })
+
+  it('Gemini Web defaults expose three concrete models and four client aliases together', () => {
+    const defaults = getGeminiWebDefaultModelSettings()
+    expect(defaults.allowedModels).toEqual(['gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.5-flash-lite'])
+    expect(buildModelMappingObject('combined', defaults.allowedModels, defaults.modelMappings)).toEqual({
+      'gemini-4-argon': 'gemini-4-argon',
+      'gemini-3.8-flash': 'gemini-3.8-flash',
+      'gemini-3.5-flash-lite': 'gemini-3.5-flash-lite',
+      'gemini-3.8-flash-high': 'gemini-3.8-flash',
+      'gemini-4-argon-high': 'gemini-4-argon',
+      'gemini-4-argon-low': 'gemini-4-argon',
+      'gemini-4-argon-medium': 'gemini-4-argon',
+    })
+    defaults.allowedModels.pop()
+    defaults.modelMappings[0].to = 'changed-in-form'
+    const next = getGeminiWebDefaultModelSettings()
+    expect(next.allowedModels).toHaveLength(3)
+    expect(next.modelMappings[0].to).toBe('gemini-3.8-flash')
   })
 
   it('Gemini Web 账号（platform=gemini, type=gemini_web）按 gemini_web 取模型目录', () => {

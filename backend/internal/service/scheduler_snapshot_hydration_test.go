@@ -162,6 +162,40 @@ func TestOpenAINewAcquiredSelectionResult_ReleasesSlotWhenHydrationFails(t *test
 	}
 }
 
+func TestGatewayNewSelectionResultReleasesSlotWhenHydrationFails(t *testing.T) {
+	cache := &snapshotHydrationCache{accounts: map[int64]*Account{}}
+	svc := &GatewayService{schedulerSnapshot: NewSchedulerSnapshotService(cache, nil, stubOpenAIAccountRepo{}, nil, nil)}
+	released := 0
+	selection, err := svc.newSelectionResult(context.Background(), &Account{ID: 1001}, true, func() { released++ }, nil)
+	require.Error(t, err)
+	require.Nil(t, selection)
+	require.Equal(t, 1, released, "an acquired slot must be returned before losing selection ownership")
+}
+
+func TestGatewayNewSelectionResultTransfersSlotOnlyAfterHydration(t *testing.T) {
+	account := &Account{ID: 1001}
+	cache := &snapshotHydrationCache{accounts: map[int64]*Account{account.ID: account}}
+	svc := &GatewayService{schedulerSnapshot: NewSchedulerSnapshotService(cache, nil, nil, nil, nil)}
+	released := 0
+	selection, err := svc.newSelectionResult(context.Background(), account, true, func() { released++ }, nil)
+	require.NoError(t, err)
+	require.NotNil(t, selection)
+	require.Zero(t, released, "successful hydration transfers ownership to the handler")
+	selection.ReleaseFunc()
+	require.Equal(t, 1, released)
+}
+
+func TestGatewayNewSelectionResultReleasesSlotOnProbeCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	svc := &GatewayService{schedulerSnapshot: NewSchedulerSnapshotService(&snapshotHydrationCache{}, nil, nil, nil, nil)}
+	released := 0
+	selection, err := svc.newSelectionResult(ctx, &Account{ID: 1001}, true, func() { released++ }, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Nil(t, selection)
+	require.Equal(t, 1, released)
+}
+
 func TestOpenAISelectAccountWithLoadAwareness_PreservesAccountRequestID(t *testing.T) {
 	liveAccount := func() *Account {
 		return &Account{

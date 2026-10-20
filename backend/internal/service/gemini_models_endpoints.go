@@ -128,9 +128,27 @@ func (s *GeminiMessagesCompatService) ForwardListModels(ctx context.Context, acc
 		return nil, errors.New("account is nil")
 	}
 	if account.IsGeminiWeb() {
-		models := make([]gemini.Model, 0, len(geminiweb.Models()))
-		for _, item := range geminiweb.Models() {
-			models = append(models, gemini.FallbackModel(item.ID))
+		modelIDs := make(map[string]struct{})
+		for model := range account.GetModelMapping() {
+			if !strings.Contains(model, "*") {
+				modelIDs[model] = struct{}{}
+			}
+		}
+		// Concrete catalog entries make wildcard mappings discoverable without
+		// advertising the wildcard itself as a requestable model name.
+		for _, model := range geminiweb.Models() {
+			modelIDs[model.ID] = struct{}{}
+		}
+		ids := make([]string, 0, len(modelIDs))
+		for model := range modelIDs {
+			if _, known := geminiweb.LookupModel(account.GetMappedModel(model)); known && account.IsModelSupported(model) {
+				ids = append(ids, model)
+			}
+		}
+		slices.Sort(ids)
+		models := make([]gemini.Model, 0, len(ids))
+		for _, model := range ids {
+			models = append(models, gemini.FallbackModel(model))
 		}
 		return geminiModelsJSONResult(http.StatusOK, gemini.ModelsListResponse{Models: models})
 	}
@@ -162,13 +180,8 @@ func (s *GeminiMessagesCompatService) ForwardGetModel(ctx context.Context, accou
 		return nil, errors.New("account is nil")
 	}
 	if account.IsGeminiWeb() {
-		if _, known := geminiweb.LookupModel(model); known {
-			resolved := geminiweb.ResolveModel(model)
-			for _, item := range geminiweb.Models() {
-				if item.ID == resolved.ID {
-					return geminiModelsJSONResult(http.StatusOK, gemini.FallbackModel(item.ID))
-				}
-			}
+		if _, known := geminiweb.LookupModel(account.GetMappedModel(model)); known && account.IsModelSupported(model) {
+			return geminiModelsJSONResult(http.StatusOK, gemini.FallbackModel(model))
 		}
 		return geminiModelsJSONResult(http.StatusNotFound, map[string]any{"error": map[string]any{"code": http.StatusNotFound, "message": fmt.Sprintf("models/%s is not found", model)}})
 	}

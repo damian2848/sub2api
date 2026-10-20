@@ -169,7 +169,8 @@ func (s *AntigravityGatewayService) forwardAntigravityCompat(
 	c *gin.Context,
 	account *Account,
 	request antigravityCompatRequest,
-) (*ForwardResult, error) {
+) (forwardResult *ForwardResult, forwardErr error) {
+	defer decorateAntigravityRetryDeadline(c, &forwardErr)
 	beginUpstreamResponseModelObservation(c)
 	call, err := s.prepareAntigravityCompatCall(ctx, c, account, request)
 	if err != nil {
@@ -367,6 +368,9 @@ func antigravityCompatProxyURL(account *Account) string {
 }
 
 func (s *AntigravityGatewayService) handleAntigravityCompatTransportError(c *gin.Context, err error) error {
+	if terminal := antigravityTerminalRetryError(err); terminal != nil {
+		return terminal
+	}
 	if switchErr, ok := IsAntigravityAccountSwitchError(err); ok {
 		return &UpstreamFailoverError{
 			StatusCode:        http.StatusServiceUnavailable,

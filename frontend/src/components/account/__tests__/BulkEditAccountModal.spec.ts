@@ -537,6 +537,63 @@ describe('BulkEditAccountModal', () => {
     expect(wrapper.text()).not.toContain('2.5 Image')
   })
 
+  it.each(['whitelist', 'mapping'])('saves whitelist and aliases together from the %s tab', async (activeTab) => {
+    const wrapper = mountModal({ selectedPlatforms: ['gemini'], selectedTypes: ['gemini_web'] })
+    await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+    const section = wrapper.get('#bulk-edit-model-restriction-body')
+    expect(section.text()).toContain('admin.accounts.modelRestrictionCombinedHint')
+    section.getComponent(ModelWhitelistSelector).vm.$emit('update:modelValue', ['gemini-4-argon', 'gemini-3.8-flash'])
+    await nextTick()
+    await section.findAll('button').find((button) => button.text() === 'admin.accounts.modelMapping')!.trigger('click')
+    await section.findAll('button').find((button) => button.text() === '+ 4 Argon High')!.trigger('click')
+    if (activeTab === 'whitelist') {
+      await section.findAll('button').find((button) => button.text() === 'admin.accounts.modelWhitelist')!.trigger('click')
+      expect(section.getComponent(ModelWhitelistSelector).props('modelValue')).toEqual(['gemini-4-argon', 'gemini-3.8-flash'])
+    }
+
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+      credentials: { model_mapping: {
+        'gemini-4-argon': 'gemini-4-argon',
+        'gemini-3.8-flash': 'gemini-3.8-flash',
+        'gemini-4-argon-high': 'gemini-4-argon'
+      } }
+    })
+    wrapper.unmount()
+  })
+
+  it('does not describe an empty whitelist as unrestricted when aliases remain', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['gemini'], selectedTypes: ['gemini_web'] })
+    await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+    const section = wrapper.get('#bulk-edit-model-restriction-body')
+    await section.findAll('button').find((button) => button.text() === 'admin.accounts.modelMapping')!.trigger('click')
+    await section.findAll('button').find((button) => button.text() === '+ 4 Argon High')!.trigger('click')
+    await section.findAll('button').find((button) => button.text() === 'admin.accounts.modelWhitelist')!.trigger('click')
+    expect(section.text()).not.toContain('admin.accounts.supportsAllModels')
+
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+      credentials: { model_mapping: { 'gemini-4-argon-high': 'gemini-4-argon' } }
+    })
+    wrapper.unmount()
+  })
+
+  it.each(['whitelist', 'mapping'])('explicitly clears both configurations when enabled and empty on the %s tab', async (activeTab) => {
+    const wrapper = mountModal({ selectedPlatforms: ['gemini'], selectedTypes: ['gemini_web'] })
+    await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+    if (activeTab === 'mapping') {
+      await wrapper.get('#bulk-edit-model-restriction-body').findAll('button')
+        .find((button) => button.text() === 'admin.accounts.modelMapping')!.trigger('click')
+    }
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], { credentials: { model_mapping: {} } })
+    wrapper.unmount()
+  })
+
   it('Gemini Web 与其他 Gemini 账号混选时，两套映射预设都提供', async () => {
     const wrapper = mountModal({ selectedPlatforms: ['gemini'], selectedTypes: ['oauth', 'gemini_web'] })
 

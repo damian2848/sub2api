@@ -2660,6 +2660,91 @@ describe('EditAccountModal', () => {
     const inputs = wrapper.findAll<HTMLInputElement>('input[type="text"]').map((input) => input.element.value)
     expect(inputs).toEqual(expect.arrayContaining(['gemini-3.8-flash-high', 'gemini-3.8-flash']))
   })
+
+  it.each([
+    { mapping: undefined, tab: 'whitelist' },
+    { mapping: {}, tab: 'mapping' }
+  ])('loads and saves Gemini Web defaults when custom mapping is $mapping from the $tab tab', async ({ mapping, tab }) => {
+    const account = {
+      ...buildAccount(), platform: 'gemini', type: 'gemini_web',
+      credentials: { model_mapping: mapping },
+      credentials_status: { has_gemini_web_cookie: true }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await flushPromises()
+    const section = wrapper.get('[data-testid="gemini-web-model-restriction"]')
+    const selector = section.getComponent(ModelWhitelistSelectorStub)
+    expect(selector.props('modelValue')).toEqual(['gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.5-flash-lite'])
+    expect(selector.props('modelMappings')).toEqual([
+      { from: 'gemini-3.8-flash-high', to: 'gemini-3.8-flash' },
+      { from: 'gemini-4-argon-high', to: 'gemini-4-argon' },
+      { from: 'gemini-4-argon-low', to: 'gemini-4-argon' },
+      { from: 'gemini-4-argon-medium', to: 'gemini-4-argon' }
+    ])
+    expect(section.text()).toContain('admin.accounts.modelRestrictionCombinedHint')
+    expect(section.text()).toContain('admin.accounts.geminiWebDefaultModelsHint')
+    if (tab === 'mapping') {
+      await section.findAll('button').find((button) => button.text() === 'admin.accounts.modelMapping')!.trigger('click')
+      expect(section.findAll('input[placeholder="admin.accounts.requestModel"]')).toHaveLength(4)
+    }
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.model_mapping).toEqual({
+      'gemini-4-argon': 'gemini-4-argon',
+      'gemini-3.8-flash': 'gemini-3.8-flash',
+      'gemini-3.5-flash-lite': 'gemini-3.5-flash-lite',
+      'gemini-3.8-flash-high': 'gemini-3.8-flash',
+      'gemini-4-argon-high': 'gemini-4-argon',
+      'gemini-4-argon-low': 'gemini-4-argon',
+      'gemini-4-argon-medium': 'gemini-4-argon'
+    })
+  })
+
+  it('preserves a custom Gemini Web alias-only configuration without adding default whitelist entries', async () => {
+    const mapping = { 'custom-alias': 'gemini-3.8-flash' }
+    const account = {
+      ...buildAccount(), platform: 'gemini', type: 'gemini_web',
+      credentials: { model_mapping: mapping },
+      credentials_status: { has_gemini_web_cookie: true }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await flushPromises()
+    const section = wrapper.get('[data-testid="gemini-web-model-restriction"]')
+    expect(section.findAll('input[placeholder="admin.accounts.requestModel"]')).toHaveLength(1)
+    await section.findAll('button').find((button) => button.text() === 'admin.accounts.modelWhitelist')!.trigger('click')
+    expect(section.getComponent(ModelWhitelistSelectorStub).props('modelValue')).toEqual([])
+    expect(section.text()).not.toContain('admin.accounts.supportsAllModels')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.model_mapping).toEqual(mapping)
+  })
+
+  it('clears Gemini Web custom restrictions only after removing both whitelist and aliases', async () => {
+    const account = {
+      ...buildAccount(), platform: 'gemini', type: 'gemini_web',
+      credentials: { model_mapping: { 'gemini-4-argon': 'gemini-4-argon', 'custom-alias': 'gemini-4-argon' } },
+      credentials_status: { has_gemini_web_cookie: true }
+    }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await flushPromises()
+    const section = wrapper.get('[data-testid="gemini-web-model-restriction"]')
+    section.getComponent(ModelWhitelistSelectorStub).vm.$emit('update:modelValue', [])
+    await flushPromises()
+    expect(section.text()).not.toContain('admin.accounts.supportsAllModels')
+    await section.findAll('button').find((button) => button.text() === 'admin.accounts.modelMapping')!.trigger('click')
+    await section.get('button.text-red-500').trigger('click')
+    await section.findAll('button').find((button) => button.text() === 'admin.accounts.modelWhitelist')!.trigger('click')
+    expect(section.text()).toContain('admin.accounts.supportsAllModels')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).not.toHaveProperty('model_mapping')
+  })
 })
 
 describe('EditAccountModal OpenAI 自动使用重置卡', () => {

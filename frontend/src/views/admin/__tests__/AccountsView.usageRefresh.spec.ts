@@ -103,6 +103,7 @@ describe('AccountsView active usage refresh', () => {
 
     cell.props('requestBatchedUsage')(cell.props('account'), { force: true })
     await vi.advanceTimersByTimeAsync(1)
+    expect(getBatchUsage).toHaveBeenCalledWith([12], true)
     expect(cell.props('batchedUsageLoading')).toBe(true)
     cell.vm.$emit('usage-loaded', freshUsage)
     await flushPromises()

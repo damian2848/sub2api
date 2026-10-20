@@ -236,7 +236,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 				h.responsesErrorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
 				return
 			}
-			accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
+			accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithRetryBudget(
 				c,
 				account.ID,
 				selection.WaitPlan.MaxConcurrency,
@@ -246,6 +246,10 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 			)
 			if err != nil {
 				reqLog.Warn("gateway.responses.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+				if errors.Is(err, errAntigravityRetryWaitExhausted) && fs.LastFailoverErr != nil {
+					h.handleResponsesFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
+					return
+				}
 				h.handleConcurrencyError(c, err, "account", streamStarted)
 				return
 			}

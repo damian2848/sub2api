@@ -44,7 +44,7 @@ func (d ModelAvailabilityDiagnosis) AllModelAccountsRateLimited() bool {
 		d.ModelRateLimitedAccounts == d.ModelSupportedAccounts && d.EarliestRateLimitResetAt != nil
 }
 
-func (d *ModelAvailabilityDiagnosis) recordAccount(account *Account, supported bool, now time.Time) {
+func (d *ModelAvailabilityDiagnosis) recordAccount(ctx context.Context, account *Account, requestedModel string, supported bool, now time.Time) {
 	d.HasAccountsInPool = true
 	d.ConfiguredAccounts++
 	if !supported {
@@ -52,14 +52,48 @@ func (d *ModelAvailabilityDiagnosis) recordAccount(account *Account, supported b
 	}
 	d.HasModelSupport = true
 	d.ModelSupportedAccounts++
-	if account.RateLimitResetAt == nil || !account.RateLimitResetAt.After(now) {
+	resetAt := modelAvailabilityRateLimitResetAt(ctx, account, requestedModel, now)
+	if resetAt == nil {
 		return
 	}
 	d.ModelRateLimitedAccounts++
-	if d.EarliestRateLimitResetAt == nil || account.RateLimitResetAt.Before(*d.EarliestRateLimitResetAt) {
-		resetAt := *account.RateLimitResetAt
-		d.EarliestRateLimitResetAt = &resetAt
+	if d.EarliestRateLimitResetAt == nil || resetAt.Before(*d.EarliestRateLimitResetAt) {
+		d.EarliestRateLimitResetAt = resetAt
 	}
+}
+
+// An account can recover only after both its global cooldown and all model
+// scopes used by selection have expired. Overages can bypass model cooldowns,
+// but cannot bypass a global cooldown.
+func modelAvailabilityRateLimitResetAt(ctx context.Context, account *Account, requestedModel string, now time.Time) *time.Time {
+	var resetAt, modelResetAt *time.Time
+	if account.RateLimitResetAt != nil && account.RateLimitResetAt.After(now) {
+		resetAt = account.RateLimitResetAt
+	}
+	for _, key := range account.modelRateLimitKeysForRequest(ctx, requestedModel) {
+		if candidate := account.modelRateLimitResetAt(key); candidate != nil && candidate.After(now) &&
+			(modelResetAt == nil || candidate.After(*modelResetAt)) {
+			modelResetAt = candidate
+		}
+	}
+	if account.Platform == PlatformAntigravity && account.IsOveragesEnabled() {
+		creditsResetAt := account.modelRateLimitResetAt(creditsExhaustedKey)
+		if creditsResetAt == nil || !creditsResetAt.After(now) {
+			modelResetAt = nil
+		} else if modelResetAt != nil && creditsResetAt.Before(*modelResetAt) {
+			// Once the credits cooldown expires, selection permits overages even
+			// when the ordinary model quota is still cooling down.
+			modelResetAt = creditsResetAt
+		}
+	}
+	if modelResetAt != nil && (resetAt == nil || modelResetAt.After(*resetAt)) {
+		resetAt = modelResetAt
+	}
+	if resetAt == nil {
+		return nil
+	}
+	result := *resetAt
+	return &result
 }
 
 // ModelAvailabilityDiagnoser is implemented by gateway services that can
@@ -141,7 +175,7 @@ func (s *GatewayService) DiagnoseModelAvailabilityForPlatform(
 		if useMixed && accounts[i].Platform == PlatformAntigravity && !accounts[i].IsMixedSchedulingEnabled() {
 			continue
 		}
-		diag.recordAccount(&accounts[i], s.isModelSupportedByAccountInGroup(ctx, &accounts[i], groupID, requestedModel) &&
+		diag.recordAccount(ctx, &accounts[i], requestedModel, s.isModelSupportedByAccountInGroup(ctx, &accounts[i], groupID, requestedModel) &&
 			!accounts[i].modelCapabilityRejectedForRequest(ctx, requestedModel), now)
 	}
 	return diag

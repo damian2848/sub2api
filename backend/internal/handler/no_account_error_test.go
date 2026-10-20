@@ -329,6 +329,43 @@ func TestModelCapacityExhausted_ResponseAndRetryAfter(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), `"code":"model_capacity_exhausted"`)
 }
 
+func TestModelCapacityDiagnosis_GeminiNativeRetryAfter(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		supported      int
+		limited        int
+		wantStatus     int
+		wantRetryAfter bool
+	}{
+		{name: "all model scopes cooling down", supported: 2, limited: 2, wantStatus: http.StatusServiceUnavailable, wantRetryAfter: true},
+		{name: "another supporting account can serve", supported: 2, limited: 1, wantStatus: http.StatusServiceUnavailable},
+		{name: "model unsupported", wantStatus: http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAt := time.Now().Add(90 * time.Second)
+			diag := &fakeDiagnoser{resp: service.ModelAvailabilityDiagnosis{
+				Complete: true, HasAccountsInPool: true, HasModelSupport: tc.supported > 0,
+				ConfiguredAccounts: 3, ModelSupportedAccounts: tc.supported,
+				ModelRateLimitedAccounts: tc.limited, EarliestRateLimitResetAt: &resetAt,
+			}}
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-4-argon-high:streamGenerateContent?alt=sse", nil)
+			cls := classifyNoAccountErrorFromGin(c, diag, &service.APIKey{GroupID: ptrInt64(52)},
+				"gemini-4-argon-high", "gemini-4-argon-high", service.PlatformAntigravity)
+			googleError(c, cls.Status, cls.Message)
+
+			require.Equal(t, tc.wantStatus, recorder.Code)
+			if tc.wantRetryAfter {
+				require.Equal(t, "90", recorder.Header().Get("Retry-After"), "native Google error responses must preserve the cooldown retry hint")
+				require.Contains(t, recorder.Body.String(), "Earliest quota reset")
+			} else {
+				require.Empty(t, recorder.Header().Get("Retry-After"))
+			}
+		})
+	}
+}
+
 func TestModelCapacityDiagnosis_ConservativeFallbacks(t *testing.T) {
 	resetAt := time.Now().Add(time.Minute)
 	for _, tc := range []struct {

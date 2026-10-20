@@ -465,6 +465,9 @@
           </div>
 
           <template v-else>
+            <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.modelRestrictionCombinedHint') }}
+            </p>
             <!-- Mode Toggle -->
             <div class="mb-4 flex gap-2">
               <button
@@ -548,7 +551,7 @@
 
               <p class="text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-                <span v-if="allowedModels.length === 0">{{
+                <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{
                   t('admin.accounts.supportsAllModels')
                 }}</span>
               </p>
@@ -2124,7 +2127,7 @@ const removeErrorCode = (code: number) => {
 
 const buildModelMappingObject = (): Record<string, string> | null => {
   return buildModelMappingPayload(
-    modelRestrictionMode.value,
+    'combined',
     allowedModels.value,
     modelMappings.value
   )
@@ -2268,22 +2271,10 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
   }
 
   if (enableModelRestriction.value && !isOpenAIModelRestrictionDisabled.value) {
-    // 统一使用 model_mapping 字段
-    if (modelRestrictionMode.value === 'whitelist') {
-      // 白名单模式：将模型转换为 model_mapping 格式（key=value）
-      // 空白名单表示“支持所有模型”，需显式发送空对象以覆盖已有限制。
-      const mapping: Record<string, string> = {}
-      for (const m of allowedModels.value) {
-        mapping[m] = m
-      }
-      credentials.model_mapping = mapping
-      credentialsChanged = true
-    } else {
-      // 映射模式下空配置同样表示“支持所有模型”。
-      const modelMapping = buildModelMappingObject()
-      credentials.model_mapping = modelMapping ?? {}
-      credentialsChanged = true
-    }
+    // Tabs only choose the editor; both sides are saved together. An explicitly
+    // enabled empty configuration still clears existing custom restrictions.
+    credentials.model_mapping = buildModelMappingObject() ?? {}
+    credentialsChanged = true
   }
 
   if (enableOpenAIModelAliases.value && allOpenAIOAuthOnly.value) {

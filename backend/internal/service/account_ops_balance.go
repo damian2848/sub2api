@@ -207,7 +207,7 @@ func (s *AccountOpsService) usageWindows(ctx context.Context, a *Account, now ti
 	}
 	if a.Platform == PlatformAntigravity {
 		if v, ok := s.usageCache.antigravityCache.Load(a.ID); ok {
-			if cached, ok := v.(*antigravityUsageCache); ok && cached.usageInfo != nil {
+			if cached, ok := v.(*antigravityUsageCache); ok && cached.usageInfo != nil && cached.baseURL == resolveAntigravityForwardBaseURL(a) {
 				windows = []AccountOpsUsageWindow{}
 				for key, q := range cached.usageInfo.AntigravityQuota {
 					if q == nil {

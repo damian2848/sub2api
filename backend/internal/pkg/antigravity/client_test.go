@@ -1523,6 +1523,30 @@ func TestClient_FetchAvailableModelsFromURL_DoesNotFollowAnotherEndpoint(t *test
 	}
 }
 
+func TestClient_FetchAvailableModelsFromURL_PreservesForwardingAvailability(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"models":{"gemini-3.8-flash-high":{}}}`))
+	}))
+	defer server.Close()
+	withMockBaseURLs(t, []string{"https://preferred.example", server.URL})
+	originalAvailability := DefaultURLAvailability
+	DefaultURLAvailability = NewURLAvailability(time.Minute)
+	t.Cleanup(func() { DefaultURLAvailability = originalAvailability })
+	DefaultURLAvailability.MarkSuccess("https://preferred.example")
+	DefaultURLAvailability.MarkUnavailable(server.URL)
+
+	_, _, err := mustNewClient(t, "").FetchAvailableModelsFromURL(context.Background(), server.URL, "token", "project", defaultFetchAvailableModelsBodyLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if DefaultURLAvailability.IsAvailable(server.URL) {
+		t.Fatal("metadata success must not clear the forwarding cooldown")
+	}
+	if urls := DefaultURLAvailability.GetAvailableURLs(); len(urls) != 1 || urls[0] != "https://preferred.example" {
+		t.Fatalf("metadata success changed forwarding URL priority: %v", urls)
+	}
+}
+
 func TestClient_FetchAvailableModelsFromURL_DoesNotFallbackOnFailure(t *testing.T) {
 	for _, status := range []int{http.StatusNotFound, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusForbidden} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {

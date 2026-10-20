@@ -442,7 +442,7 @@ describe('AccountUsageCell', () => {
     expect(wrapper.text()).not.toContain('-')
   })
 
-  it('Antigravity 图片用量会聚合新旧 image 模型', async () => {
+  it('Antigravity 旧模型额度保留各模型的使用率和重置时间，不捏造共享额度', async () => {
     getUsage.mockResolvedValue({
       antigravity_quota: {
         'gemini-2.5-flash-image': {
@@ -482,7 +482,197 @@ describe('AccountUsageCell', () => {
 
     await flushPromises()
 
-    expect(wrapper.text()).toContain('admin.accounts.usageWindow.gemini3Image|70|2026-03-01T09:00:00Z')
+    expect(wrapper.findAll('.usage-bar')).toHaveLength(3)
+    expect(wrapper.text()).toContain('gemini-2.5-flash-image')
+    expect(wrapper.text()).toContain('gemini-3.1-flash-image')
+    expect(wrapper.text()).toContain('gemini-3-pro-image')
+    expect(wrapper.text()).toContain('|45|2026-03-01T11:00:00Z')
+    expect(wrapper.text()).toContain('|20|2026-03-01T10:00:00Z')
+    expect(wrapper.text()).toContain('|70|2026-03-01T09:00:00Z')
+    expect(wrapper.text()).toContain('admin.accounts.usageWindow.modelQuotaUnknownPeriod')
+  })
+
+  describe('Antigravity quota groups and fresh queries', () => {
+    const makeUsage = (utilization = 18): AccountUsageInfo => ({
+      updated_at: '2026-10-20T03:04:05Z',
+      five_hour: null,
+      seven_day: null,
+      seven_day_sonnet: null,
+      antigravity_quota_source: 'quota_summary',
+      antigravity_quota_groups: [{
+        group_id: 'gemini', display_name: 'Gemini', buckets: [
+          { bucket_id: '5h', display_name: 'Five hours', window: '18000s', utilization, disabled: false, reset_time: '2026-10-20T08:00:00Z' },
+          { bucket_id: 'week', display_name: 'Weekly', window: '604800s', utilization: 42, disabled: false, reset_time: '2026-10-27T03:00:00Z' }
+        ]
+      }]
+    })
+
+    const mountAntigravity = (extraProps = {}) => mount(AccountUsageCell, {
+      props: { account: makeAccount({ id: 4510 }), ...extraProps },
+      global: { stubs: {
+        UsageProgressBar: {
+          props: ['label', 'utilization', 'resetsAt'],
+          template: '<div class="usage-bar">{{ label }}|{{ utilization }}|{{ resetsAt }}</div>'
+        },
+        AccountQuotaInfo: true
+      } }
+    })
+
+    it('展示完整 Gemini / GPT 与 Claude / Argon 分组及各自两个窗口', async () => {
+      const usage = makeUsage()
+      usage.antigravity_quota_groups?.push({
+        group_id: 'claude-gpt', display_name: 'GPT & Claude', buckets: [
+          { bucket_id: '5h', display_name: 'Five hours', window: '5h', utilization: 30, disabled: false },
+          { bucket_id: 'week', display_name: 'Weekly', window: 'weekly', utilization: 65, disabled: false }
+        ]
+      }, {
+        group_id: 'argon', display_name: 'gemini-4-argon', buckets: [
+          { bucket_id: '5h', display_name: 'Five hours', window: '5 hours', utilization: 5, disabled: false },
+          { bucket_id: 'week', display_name: 'Weekly', window: '7 days', utilization: 8, disabled: false }
+        ]
+      })
+      usage.antigravity_quota = { 'legacy-model': { utilization: 99, reset_time: '' } }
+      getUsage.mockResolvedValue(usage)
+      const wrapper = mountAntigravity()
+      await flushPromises()
+
+      expect(wrapper.findAll('.usage-bar')).toHaveLength(6)
+      expect(wrapper.text()).toContain('Gemini')
+      expect(wrapper.text()).toContain('GPT & Claude')
+      expect(wrapper.text()).toContain('gemini-4-argon')
+      expect(wrapper.text()).toContain('5h|18|2026-10-20T08:00:00Z')
+      expect(wrapper.text()).toContain('7d|42|2026-10-27T03:00:00Z')
+      expect(wrapper.text()).not.toContain('legacy-model')
+      expect(wrapper.get('[data-test="antigravity-updated-at"]').attributes('title')).toBe(usage.updated_at)
+      expect(wrapper.get('[data-test="antigravity-updated-at"]').text()).toContain(new Date(usage.updated_at!).toLocaleString())
+      wrapper.unmount()
+    })
+
+    it('未知周期不推断为 5h 或周额度，缺失百分比不渲染为零', async () => {
+      const usage = makeUsage()
+      usage.antigravity_quota_groups![0]!.buckets = [
+        { bucket_id: 'custom', display_name: 'Custom', window: 'rolling', utilization: 9, disabled: false, reset_time: '2026-10-20T08:00:00Z' },
+        { bucket_id: 'no-percent', display_name: 'Count only', window: '', remaining_amount: 12, disabled: false },
+        { bucket_id: 'disabled', display_name: 'Disabled', window: '', disabled: true }
+      ]
+      getUsage.mockResolvedValue(usage)
+      const wrapper = mountAntigravity()
+      await flushPromises()
+
+      expect(wrapper.findAll('.usage-bar')).toHaveLength(1)
+      expect(wrapper.text()).toContain('rolling|9|')
+      expect(wrapper.text()).toContain('Count only')
+      expect(wrapper.text()).toContain('admin.accounts.usageWindow.quotaRemaining')
+      expect(wrapper.text()).toContain('admin.accounts.usageWindow.quotaUnavailable')
+      expect(wrapper.text()).not.toContain('5h|')
+      expect(wrapper.text()).not.toContain('7d|')
+      wrapper.unmount()
+    })
+
+    it('未命名分组不显示内部序号', async () => {
+      const usage = makeUsage()
+      usage.antigravity_quota_groups![0]!.display_name = ' '
+      usage.antigravity_quota_groups![0]!.group_id = '0'
+      getUsage.mockResolvedValue(usage)
+      const wrapper = mountAntigravity()
+      await flushPromises()
+      expect(wrapper.text()).toContain('Antigravity')
+      expect(wrapper.findAll('div').some(node => node.text() === '0')).toBe(false)
+      wrapper.unmount()
+    })
+
+    it('旧协议动态显示 Argon 和 GPT，并保留查询分组失败提示', async () => {
+      getUsage.mockResolvedValue({
+        ...makeUsage(), antigravity_quota_groups: [], antigravity_quota_source: 'model_quota',
+        antigravity_quota_error: 'Quota summary unavailable',
+        antigravity_quota: {
+          'gemini-4-argon': { utilization: 12, reset_time: '' },
+          'gpt-new-model': { utilization: 43, reset_time: '' }
+        }
+      })
+      const wrapper = mountAntigravity()
+      await flushPromises()
+      expect(wrapper.text()).toContain('gemini-4-argon')
+      expect(wrapper.text()).toContain('gpt-new-model')
+      expect(wrapper.findAll('.usage-bar')).toHaveLength(2)
+      expect(wrapper.text()).toContain('admin.accounts.usageWindow.modelQuotaUnknownPeriod')
+      expect(wrapper.text()).toContain('admin.accounts.usageWindow.quotaSummaryUnavailable')
+      wrapper.unmount()
+    })
+
+    it('整页手动刷新在没有 source 参数时也向后端传 force', async () => {
+      getUsage.mockResolvedValue(makeUsage())
+      const wrapper = mountAntigravity({ manualRefreshToken: 0 })
+      await flushPromises()
+      await wrapper.setProps({ manualRefreshToken: 1 })
+      await flushPromises()
+      expect(getUsage).toHaveBeenLastCalledWith(4510, undefined, true)
+      wrapper.unmount()
+    })
+
+    it('单账号主动查询强制取新额度并通知父缓存，旧请求不能覆盖结果', async () => {
+      let resolveInitial!: (usage: AccountUsageInfo) => void
+      let resolveActive!: (usage: AccountUsageInfo) => void
+      getUsage.mockImplementationOnce(() => new Promise(resolve => { resolveInitial = resolve }))
+        .mockImplementationOnce(() => new Promise(resolve => { resolveActive = resolve }))
+      const wrapper = mountAntigravity()
+      await flushPromises()
+      const button = wrapper.get('[data-test="antigravity-query"]')
+      await button.trigger('click')
+      expect(getUsage).toHaveBeenLastCalledWith(4510, 'active', true)
+      expect(button.attributes('disabled')).toBeDefined()
+      const refreshed = makeUsage(60)
+      resolveActive(refreshed)
+      await flushPromises()
+      resolveInitial(makeUsage(5))
+      await flushPromises()
+      expect(wrapper.text()).toContain('5h|60|')
+      expect(wrapper.text()).not.toContain('5h|5|')
+      expect(wrapper.emitted('usage-loaded')?.at(-1)).toEqual([refreshed])
+      expect(button.attributes('disabled')).toBeUndefined()
+      wrapper.unmount()
+    })
+
+    it('主动查询后忽略更旧的批量快照，仍接受更新快照和其他账号数据', async () => {
+      const initial = { ...makeUsage(5), updated_at: '2026-10-20T01:00:00Z' }
+      getUsage.mockResolvedValue(makeUsage(60))
+      const wrapper = mountAntigravity({ batchedUsage: initial, requestBatchedUsage: vi.fn() })
+      await flushPromises()
+      await wrapper.get('[data-test="antigravity-query"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('5h|60|')
+
+      await wrapper.setProps({ batchedUsage: { ...initial, updated_at: '2026-10-20T02:00:00Z' } })
+      expect(wrapper.text()).toContain('5h|60|')
+      expect(wrapper.get('[data-test="antigravity-updated-at"]').attributes('title')).toBe(makeUsage().updated_at)
+
+      await wrapper.setProps({ batchedUsage: { ...makeUsage(75), updated_at: '2026-10-20T04:00:00Z' } })
+      expect(wrapper.text()).toContain('5h|75|')
+
+      await wrapper.setProps({ account: makeAccount({ id: 4511 }), batchedUsage: initial })
+      expect(wrapper.text()).toContain('5h|5|')
+      expect(wrapper.text()).not.toContain('5h|75|')
+      wrapper.unmount()
+    })
+
+    it('首次查询失败仍可主动重试，失败不改写采集时间', async () => {
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+      getUsage.mockRejectedValueOnce(new Error('unavailable')).mockResolvedValueOnce(makeUsage())
+      const wrapper = mountAntigravity()
+      await flushPromises()
+      expect(wrapper.find('[data-test="antigravity-updated-at"]').exists()).toBe(false)
+      await wrapper.get('[data-test="antigravity-query"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('5h|18|')
+      getUsage.mockRejectedValueOnce(new Error('unavailable'))
+      await wrapper.get('[data-test="antigravity-query"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('common.error')
+      expect(wrapper.get('[data-test="antigravity-updated-at"]').attributes('title')).toBe(makeUsage().updated_at)
+      expect(wrapper.get('[data-test="antigravity-query"]').attributes('disabled')).toBeUndefined()
+      wrapper.unmount()
+      log.mockRestore()
+    })
   })
 
   it('Antigravity 会显示 AI Credits 余额信息', async () => {
@@ -786,7 +976,7 @@ describe('AccountUsageCell', () => {
 
     // 手动刷新再拉一次
     expect(getUsage).toHaveBeenCalledTimes(2)
-    expect(getUsage).toHaveBeenCalledWith(2010)
+    expect(getUsage).toHaveBeenLastCalledWith(2010, undefined, true)
     // 单一数据源：始终使用 /usage API 值
     expect(wrapper.text()).toContain('5h|18|900')
   })

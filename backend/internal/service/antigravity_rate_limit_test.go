@@ -153,7 +153,7 @@ func TestAntigravityRetryLoop_NoURLFallback_UsesConfiguredBaseURL(t *testing.T) 
 	defer func() { _ = result.resp.Body.Close() }()
 	require.Equal(t, http.StatusTooManyRequests, result.resp.StatusCode)
 	require.True(t, handleErrorCalled)
-	require.Len(t, upstream.calls, antigravityMaxRetries)
+	require.Len(t, upstream.calls, 1, "a generic 429 must fail over without repeating the same request")
 	for _, callURL := range upstream.calls {
 		require.True(t, strings.HasPrefix(callURL, base1))
 	}

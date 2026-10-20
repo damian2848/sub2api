@@ -298,44 +298,48 @@
         {{ error }}
       </div>
 
-      <!-- Usage data from API -->
-      <div v-else-if="hasAntigravityQuotaFromAPI" class="space-y-1">
-        <!-- Gemini 3 Pro -->
-        <UsageProgressBar
-          v-if="antigravity3ProUsageFromAPI !== null"
-          :label="t('admin.accounts.usageWindow.gemini3Pro')"
-          :utilization="antigravity3ProUsageFromAPI.utilization"
-          :resets-at="antigravity3ProUsageFromAPI.resetTime"
-          color="indigo"
-        />
-
-        <!-- Gemini 3 Flash -->
-        <UsageProgressBar
-          v-if="antigravity3FlashUsageFromAPI !== null"
-          :label="t('admin.accounts.usageWindow.gemini3Flash')"
-          :utilization="antigravity3FlashUsageFromAPI.utilization"
-          :resets-at="antigravity3FlashUsageFromAPI.resetTime"
-          color="emerald"
-        />
-
-        <!-- Gemini 3 Image -->
-        <UsageProgressBar
-          v-if="antigravity3ImageUsageFromAPI !== null"
-          :label="t('admin.accounts.usageWindow.gemini3Image')"
-          :utilization="antigravity3ImageUsageFromAPI.utilization"
-          :resets-at="antigravity3ImageUsageFromAPI.resetTime"
-          color="purple"
-        />
-
-        <!-- Claude -->
-        <UsageProgressBar
-          v-if="antigravityClaudeUsageFromAPI !== null"
-          :label="t('admin.accounts.usageWindow.claude')"
-          :utilization="antigravityClaudeUsageFromAPI.utilization"
-          :resets-at="antigravityClaudeUsageFromAPI.resetTime"
-          color="amber"
-        />
-
+      <!-- Quota groups and windows are reported by the upstream quota summary. -->
+      <div v-else-if="hasAntigravityQuotaFromAPI" class="space-y-2">
+        <div
+          v-for="(group, groupIndex) in antigravityQuotaGroups"
+          :key="group.group_id || groupIndex"
+          class="space-y-1"
+        >
+          <div class="max-w-[260px] truncate text-[10px] font-medium text-gray-600 dark:text-gray-300" :title="group.description || group.display_name">
+            {{ group.display_name?.trim() || 'Antigravity' }}
+          </div>
+          <template v-for="(bucket, bucketIndex) in group.buckets" :key="`${bucket.bucket_id}:${bucketIndex}`">
+            <div v-if="bucket.disabled" class="text-[10px] text-gray-400" :title="antigravityBucketTitle(bucket)">
+              {{ antigravityBucketLabel(bucket) }} · {{ t('admin.accounts.usageWindow.quotaUnavailable') }}
+            </div>
+            <UsageProgressBar
+              v-else-if="typeof bucket.utilization === 'number' && Number.isFinite(bucket.utilization)"
+              :label="antigravityBucketLabel(bucket)"
+              :title="antigravityBucketTitle(bucket)"
+              :utilization="bucket.utilization"
+              :resets-at="bucket.reset_time"
+              label-width="auto"
+              :color="antigravityGroupColor(groupIndex)"
+            />
+            <div v-else class="text-[10px] text-gray-500 dark:text-gray-400" :title="antigravityBucketTitle(bucket)">
+              {{ antigravityBucketLabel(bucket) }} · {{ typeof bucket.remaining_amount === 'number'
+                ? t('admin.accounts.usageWindow.quotaRemaining', { count: bucket.remaining_amount.toLocaleString() })
+                : t('admin.accounts.usageWindow.quotaUnknown') }}
+            </div>
+          </template>
+        </div>
+        <div v-if="!antigravityQuotaGroups.length" class="space-y-1">
+          <div class="text-[9px] text-gray-400">{{ t('admin.accounts.usageWindow.modelQuotaUnknownPeriod') }}</div>
+          <div v-for="[model, quota] in antigravityModelQuotas" :key="model" class="space-y-0.5">
+            <div class="max-w-[260px] truncate text-[10px] text-gray-600 dark:text-gray-300" :title="model">{{ model }}</div>
+            <UsageProgressBar
+              :label="t('admin.accounts.usageWindow.quotaUsed')"
+              :utilization="quota.utilization"
+              :resets-at="quota.reset_time"
+              color="indigo"
+            />
+          </div>
+        </div>
         <div v-if="aiCreditsDisplay" class="mt-1 text-[10px] text-gray-500 dark:text-gray-400">
           💳 {{ t('admin.accounts.aiCreditsBalance') }}: {{ aiCreditsDisplay }}
         </div>
@@ -344,6 +348,30 @@
         💳 {{ t('admin.accounts.aiCreditsBalance') }}: {{ aiCreditsDisplay }}
       </div>
       <div v-else class="text-xs text-gray-400">-</div>
+      <div v-if="usageInfo?.antigravity_quota_error" class="mt-1 max-w-[260px] text-[9px] text-amber-600 dark:text-amber-400" :title="usageInfo.antigravity_quota_error">
+        {{ t('admin.accounts.usageWindow.quotaSummaryUnavailable') }}
+      </div>
+      <div class="mt-1 flex flex-wrap items-center gap-1.5">
+        <button
+          type="button"
+          data-test="antigravity-query"
+          class="inline-flex items-center gap-0.5 rounded px-1.5 py-0.5 text-[10px] font-medium text-blue-600 transition-colors hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-blue-400 dark:hover:bg-blue-900/30"
+          :disabled="activeQueryLoading"
+          @click="loadActiveUsage"
+        >
+          <svg class="h-2.5 w-2.5" :class="{ 'animate-spin': activeQueryLoading }" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          {{ t('admin.accounts.usageWindow.checkUsage') }}
+        </button>
+        <span
+          v-if="antigravityUpdatedAt"
+          data-test="antigravity-updated-at"
+          class="text-[9px] text-gray-400 dark:text-gray-500"
+          :title="usageInfo?.updated_at ?? undefined"
+        >{{ t('admin.accounts.usageWindow.lastUpdated') }} {{ antigravityUpdatedAt }}</span>
+        <span v-else class="text-[9px] text-gray-400 dark:text-gray-500">{{ t('admin.accounts.usageWindow.observationTimeUnknown') }}</span>
+      </div>
     </template>
 
     <!-- Grok OAuth accounts: passive xAI quota headers + local Sub2API usage -->
@@ -708,7 +736,7 @@ import { ref, computed, onMounted, onBeforeUnmount, onUnmounted, watch } from 'v
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import { useI18n } from 'vue-i18n'
 import { adminAPI } from '@/api/admin'
-import type { Account, AccountUsageInfo, GeminiCredentials, WindowStats } from '@/types'
+import type { Account, AccountUsageInfo, AntigravityQuotaBucket, GeminiCredentials, WindowStats } from '@/types'
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
 import { formatCompactNumber } from '@/utils/format'
@@ -768,6 +796,8 @@ const loading = ref(false)
 const activeQueryLoading = ref(false)
 const error = ref<string | null>(null)
 const usageInfo = ref<AccountUsageInfo | null>(null)
+let usageRequestSequence = 0
+let usageInfoAccountID = props.account.id
 watch(usageInfo, (usage) => {
   if (usage) emit('usage-loaded', usage)
 })
@@ -901,78 +931,37 @@ const shouldLazyLoadOnMobile = computed(() => {
   return shouldFetchUsage.value && !isDesktopViewport.value
 })
 
-// Antigravity quota types (用于 API 返回的数据)
-interface AntigravityUsageResult {
-  utilization: number
-  resetTime: string | null
+// Preserve upstream quota groups and each bucket independently. Model quota
+// snapshots are a fallback only: they do not identify a 5h or weekly window.
+const antigravityQuotaGroups = computed(() => (usageInfo.value?.antigravity_quota_groups ?? [])
+  .map(group => ({
+    ...group,
+    buckets: [...(group.buckets ?? [])].sort((a, b) => antigravityBucketOrder(a) - antigravityBucketOrder(b))
+  })))
+const antigravityModelQuotas = computed(() => Object.entries(usageInfo.value?.antigravity_quota ?? {})
+  .filter(([, quota]) => Number.isFinite(quota.utilization))
+  .sort(([a], [b]) => a.localeCompare(b)))
+const hasAntigravityQuotaFromAPI = computed(() =>
+  antigravityQuotaGroups.value.length > 0 || antigravityModelQuotas.value.length > 0)
+
+const antigravityGroupColor = (index: number): 'indigo' | 'emerald' | 'purple' | 'amber' =>
+  (['indigo', 'emerald', 'purple', 'amber'] as const)[index % 4]!
+
+const antigravityBucketLabel = (bucket: AntigravityQuotaBucket): string => {
+  const window = bucket.window?.trim() ?? ''
+  // These are explicit window durations, never an inference from reset_time.
+  if (/^(?:5h|5[ _-]?hours?|18000(?:\.0+)?s)$/i.test(window)) return '5h'
+  if (/^(?:7d|7[ _-]?days?|1w|weekly|604800(?:\.0+)?s)$/i.test(window)) return '7d'
+  return window || bucket.display_name || bucket.bucket_id || t('admin.accounts.usageWindow.quotaPeriodUnknown')
 }
 
-// ===== Antigravity quota from API (usageInfo.antigravity_quota) =====
-
-// 检查是否有从 API 获取的配额数据
-const hasAntigravityQuotaFromAPI = computed(() => {
-  return usageInfo.value?.antigravity_quota && Object.keys(usageInfo.value.antigravity_quota).length > 0
-})
-
-// 从 API 配额数据中获取使用率（多模型取最高使用率）
-const getAntigravityUsageFromAPI = (
-  modelNames: string[]
-): AntigravityUsageResult | null => {
-  const quota = usageInfo.value?.antigravity_quota
-  if (!quota) return null
-
-  let maxUtilization = 0
-  let earliestReset: string | null = null
-
-  for (const model of modelNames) {
-    const modelQuota = quota[model]
-    if (!modelQuota) continue
-
-    if (modelQuota.utilization > maxUtilization) {
-      maxUtilization = modelQuota.utilization
-    }
-    if (modelQuota.reset_time) {
-      if (!earliestReset || modelQuota.reset_time < earliestReset) {
-        earliestReset = modelQuota.reset_time
-      }
-    }
-  }
-
-  // 如果没有找到任何匹配的模型
-  if (maxUtilization === 0 && earliestReset === null) {
-    const hasAnyData = modelNames.some((m) => quota[m])
-    if (!hasAnyData) return null
-  }
-
-  return {
-    utilization: maxUtilization,
-    resetTime: earliestReset
-  }
+const antigravityBucketOrder = (bucket: AntigravityQuotaBucket): number => {
+  const label = antigravityBucketLabel(bucket)
+  return label === '5h' ? 0 : label === '7d' ? 1 : 2
 }
 
-// Gemini 3 Pro from API
-const antigravity3ProUsageFromAPI = computed(() =>
-  getAntigravityUsageFromAPI(['gemini-3-pro-low', 'gemini-3-pro-high', 'gemini-3-pro-preview'])
-)
-
-// Gemini 3 Flash from API
-const antigravity3FlashUsageFromAPI = computed(() => getAntigravityUsageFromAPI(['gemini-3-flash']))
-
-// Gemini Image from API
-const antigravity3ImageUsageFromAPI = computed(() =>
-  getAntigravityUsageFromAPI(['gemini-2.5-flash-image', 'gemini-3.1-flash-image', 'gemini-3-pro-image'])
-)
-
-// Claude from API (all Claude model variants)
-const antigravityClaudeUsageFromAPI = computed(() =>
-  getAntigravityUsageFromAPI([
-    'claude-fable-5-1',
-    'claude-fable-5',
-    'claude-sonnet-4-5', 'claude-opus-4-5-thinking',
-    'claude-sonnet-4-6', 'claude-opus-4-6', 'claude-opus-4-6-thinking',
-    'claude-opus-4-7', 'claude-opus-4-8',
-  ])
-)
+const antigravityBucketTitle = (bucket: AntigravityQuotaBucket): string =>
+  [bucket.display_name, bucket.description, bucket.window, bucket.bucket_id].filter(Boolean).join(' · ')
 
 const aiCreditsDisplay = computed(() => {
   const credits = usageInfo.value?.ai_credits
@@ -980,6 +969,13 @@ const aiCreditsDisplay = computed(() => {
   const total = credits.reduce((sum, credit) => sum + (credit.amount ?? 0), 0)
   if (total <= 0) return null
   return total.toFixed(0)
+})
+
+const antigravityUpdatedAt = computed(() => {
+  const timestamp = usageInfo.value?.updated_at
+  if (!timestamp) return null
+  const date = new Date(timestamp)
+  return Number.isNaN(date.getTime()) ? null : date.toLocaleString()
 })
 
 // Antigravity 账户类型（从 load_code_assist 响应中提取）
@@ -1511,7 +1507,18 @@ const requestParentBatchUsage = (options?: { force?: boolean }) => {
 
 const syncManagedUsageState = () => {
   if (!isBatchManaged.value) return
-  usageInfo.value = props.batchedUsage ?? null
+  const nextUsage = props.batchedUsage ?? null
+  const currentUpdatedAt = Date.parse(usageInfo.value?.updated_at ?? '')
+  const nextUpdatedAt = Date.parse(nextUsage?.updated_at ?? '')
+  // Parent request tokens protect its cache; this also protects the cell when a
+  // late batch prop update arrives after a direct active query has completed.
+  const isOlderSnapshot = usageInfoAccountID === props.account.id
+    && Number.isFinite(currentUpdatedAt) && Number.isFinite(nextUpdatedAt)
+    && nextUpdatedAt < currentUpdatedAt
+  if (!isOlderSnapshot) {
+    usageInfo.value = nextUsage
+    usageInfoAccountID = props.account.id
+  }
   error.value = props.batchedUsageError ?? null
   loading.value = props.batchedUsageLoading === true
 }
@@ -1528,6 +1535,7 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
     const cached = _usageCache.get(props.account.id)
     if (cached && Date.now() - cached.ts < USAGE_CACHE_TTL) {
       usageInfo.value = cached.data
+      usageInfoAccountID = props.account.id
       loading.value = false
       return
     }
@@ -1535,23 +1543,26 @@ const loadUsage = async (options?: { source?: 'passive' | 'active'; bypassCache?
 
   loading.value = true
   error.value = null
+  const accountID = props.account.id
+  const requestSequence = ++usageRequestSequence
 
   try {
-		const fetchFn = () => options?.source
-			? adminAPI.accounts.getUsage(props.account.id, options.source, options.bypassCache === true)
-			: adminAPI.accounts.getUsage(props.account.id)
+    const fetchFn = () => options?.source || options?.bypassCache
+      ? adminAPI.accounts.getUsage(accountID, options?.source, options?.bypassCache === true)
+      : adminAPI.accounts.getUsage(accountID)
     const result = await enqueueUsageRequest(props.account, fetchFn)
-    if (!unmounted.value) {
+    if (!unmounted.value && props.account.id === accountID && requestSequence === usageRequestSequence) {
       usageInfo.value = result
-      _usageCache.set(props.account.id, { data: result, ts: Date.now() })
+      usageInfoAccountID = accountID
+      _usageCache.set(accountID, { data: result, ts: Date.now() })
     }
   } catch (e: any) {
-    if (!unmounted.value) {
+    if (!unmounted.value && props.account.id === accountID && requestSequence === usageRequestSequence) {
       error.value = t('common.error')
       console.error('Failed to load usage:', e)
     }
   } finally {
-    if (!unmounted.value) loading.value = false
+    if (!unmounted.value && requestSequence === usageRequestSequence) loading.value = false
   }
 }
 
@@ -1608,19 +1619,24 @@ const attachVisibilityObserver = () => {
 const loadActiveUsage = async () => {
   if (activeQueryLoading.value) return
   const accountID = props.account.id
+  const requestSequence = ++usageRequestSequence
   activeQueryLoading.value = true
   error.value = null
   try {
     const result = await adminAPI.accounts.getUsage(accountID, 'active', true)
-    if (unmounted.value || props.account.id !== accountID) return
+    if (unmounted.value || props.account.id !== accountID || requestSequence !== usageRequestSequence) return
     usageInfo.value = result
+    usageInfoAccountID = accountID
     _usageCache.set(accountID, { data: result, ts: Date.now() })
   } catch (e: any) {
-    if (unmounted.value || props.account.id !== accountID) return
-    if (props.account.type === 'gemini_web') error.value = t('common.error')
+    if (unmounted.value || props.account.id !== accountID || requestSequence !== usageRequestSequence) return
+    if (props.account.type === 'gemini_web' || props.account.platform === 'antigravity') error.value = t('common.error')
     console.error('Failed to load active usage:', e)
   } finally {
-    if (!unmounted.value) activeQueryLoading.value = false
+    if (!unmounted.value) {
+      activeQueryLoading.value = false
+      if (requestSequence === usageRequestSequence) loading.value = false
+    }
   }
 }
 

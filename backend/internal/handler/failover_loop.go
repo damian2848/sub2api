@@ -130,6 +130,7 @@ type FailoverState struct {
 	LastFailoverErr       *service.UpstreamFailoverError
 	ForceCacheBilling     bool
 	hasBoundSession       bool
+	requestRetryDeadline  time.Time
 
 	// profitVetoedAccountIDs 记录被分组利润门终检否决的账号，是 FailedAccountIDs
 	// 的子集。之所以单独维护：HandleSelectionExhausted 的 503 退避分支会清空
@@ -150,6 +151,35 @@ func NewFailoverState(maxSwitches int, hasBoundSession bool) *FailoverState {
 		hasBoundSession:        hasBoundSession,
 		profitVetoedAccountIDs: make(map[int64]struct{}),
 	}
+}
+
+// A provider's retry budget follows the request across account changes and
+// empty-pool backoff. It never cancels an admitted upstream generation.
+func (s *FailoverState) observeRetryDeadline(failure *service.UpstreamFailoverError) {
+	if failure != nil && !failure.RequestRetryDeadline.IsZero() &&
+		(s.requestRetryDeadline.IsZero() || failure.RequestRetryDeadline.Before(s.requestRetryDeadline)) {
+		s.requestRetryDeadline = failure.RequestRetryDeadline
+	}
+}
+
+func (s *FailoverState) retryBudgetExhausted() bool {
+	return !s.requestRetryDeadline.IsZero() && !time.Now().Before(s.requestRetryDeadline)
+}
+
+func (s *FailoverState) waitForRetry(ctx context.Context, delay time.Duration) FailoverAction {
+	if ctx.Err() != nil {
+		return FailoverCanceled
+	}
+	if !s.requestRetryDeadline.IsZero() && time.Until(s.requestRetryDeadline) <= delay {
+		return FailoverExhausted
+	}
+	if !sleepWithContext(ctx, delay) {
+		return FailoverCanceled
+	}
+	if s.retryBudgetExhausted() {
+		return FailoverExhausted
+	}
+	return FailoverContinue
 }
 
 // RecordProfitVeto 记录一次分组利润门终检否决：把账号加入排除列表（同时登记到
@@ -204,6 +234,10 @@ func (s *FailoverState) HandleFailoverError(
 		return FailoverCanceled
 	}
 	s.LastFailoverErr = failoverErr
+	s.observeRetryDeadline(failoverErr)
+	if s.retryBudgetExhausted() {
+		return FailoverExhausted
+	}
 	if failoverErr == nil || !failoverErr.ShouldRetryNextAccount() {
 		return FailoverExhausted
 	}
@@ -227,8 +261,8 @@ func (s *FailoverState) HandleFailoverError(
 			zap.Int("same_account_retry_max", retryLimit),
 			zap.Duration("retry_delay", retryDelay),
 		)
-		if !sleepWithContext(ctx, retryDelay) {
-			return FailoverCanceled
+		if action := s.waitForRetry(ctx, retryDelay); action != FailoverContinue {
+			return action
 		}
 		return FailoverContinue
 	}
@@ -258,8 +292,8 @@ func (s *FailoverState) HandleFailoverError(
 	// Antigravity 平台换号线性递增延时
 	if platform == service.PlatformAntigravity {
 		delay := time.Duration(s.SwitchCount-1) * time.Second
-		if !sleepWithContext(ctx, delay) {
-			return FailoverCanceled
+		if action := s.waitForRetry(ctx, delay); action != FailoverContinue {
+			return action
 		}
 	}
 
@@ -278,6 +312,10 @@ func (s *FailoverState) HandleSelectionExhausted(ctx context.Context) FailoverAc
 	// 不代表账号耗尽，直接按取消终止。
 	if ctx.Err() != nil {
 		return FailoverCanceled
+	}
+	s.observeRetryDeadline(s.LastFailoverErr)
+	if s.retryBudgetExhausted() || (s.LastFailoverErr != nil && !s.LastFailoverErr.ShouldRetryNextAccount()) {
+		return FailoverExhausted
 	}
 
 	if s.LastFailoverErr != nil &&
@@ -300,8 +338,8 @@ func (s *FailoverState) HandleSelectionExhausted(ctx context.Context) FailoverAc
 			zap.Int("switch_count", s.SwitchCount),
 			zap.Int("max_switches", s.MaxSwitches),
 		)
-		if !sleepWithContext(ctx, singleAccountBackoffDelay) {
-			return FailoverCanceled
+		if action := s.waitForRetry(ctx, singleAccountBackoffDelay); action != FailoverContinue {
+			return action
 		}
 		logger.FromContext(ctx).Warn("gateway.failover_single_account_retry",
 			zap.Int("switch_count", s.SwitchCount),

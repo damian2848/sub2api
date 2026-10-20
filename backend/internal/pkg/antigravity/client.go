@@ -772,8 +772,11 @@ func (c *Client) fetchAvailableModels(ctx context.Context, availableURLs []strin
 		var rawResp map[string]any
 		_ = json.Unmarshal(respBodyBytes, &rawResp)
 
-		// 标记成功的 URL，下次优先使用
-		DefaultURLAvailability.MarkSuccess(baseURL)
+		// A fixed-endpoint metadata query does not prove generation is healthy.
+		// Keep its success from clearing a forwarding endpoint's cooldown.
+		if !fixedEndpoint {
+			DefaultURLAvailability.MarkSuccess(baseURL)
+		}
 		return &modelsResp, rawResp, nil
 	}
 

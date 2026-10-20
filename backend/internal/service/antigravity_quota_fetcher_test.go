@@ -205,128 +205,20 @@ func TestBuildUsageInfo_ModelWithNilQuotaInfo(t *testing.T) {
 	require.Empty(t, info.AntigravityQuotaDetails, "models with nil QuotaInfo should be skipped from details too")
 }
 
-func TestBuildUsageInfo_FiveHourPriorityOrder(t *testing.T) {
-	fetcher := &AntigravityQuotaFetcher{}
-
-	// priorityModels = ["claude-sonnet-4-20250514", "claude-sonnet-4", "gemini-2.5-pro"]
-	// When the first priority model exists, it should be used for FiveHour
-	modelsResp := &antigravity.FetchAvailableModelsResponse{
-		Models: map[string]antigravity.ModelInfo{
-			"gemini-2.5-pro": {
-				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.40,
-					ResetTime:         "2026-03-08T18:00:00Z",
+func TestBuildUsageInfo_ModelQuotaDoesNotInventWindow(t *testing.T) {
+	for _, model := range []string{"claude-sonnet-4-20250514", "claude-sonnet-4", "gemini-2.5-pro", "gemini-4-argon", "gpt-5"} {
+		t.Run(model, func(t *testing.T) {
+			info := (&AntigravityQuotaFetcher{}).buildUsageInfo(&antigravity.FetchAvailableModelsResponse{
+				Models: map[string]antigravity.ModelInfo{
+					model: {QuotaInfo: &antigravity.ModelQuotaInfo{RemainingFraction: 0.5, ResetTime: "2026-10-20T12:00:00Z"}},
 				},
-			},
-			"claude-sonnet-4-20250514": {
-				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.80,
-					ResetTime:         "2026-03-08T12:00:00Z",
-				},
-			},
-		},
+			}, "", "", nil)
+			require.Nil(t, info.FiveHour, "a model quota has no window identity")
+			require.Nil(t, info.SevenDay)
+			require.Equal(t, 50, info.AntigravityQuota[model].Utilization)
+			require.Equal(t, "active", info.Source)
+		})
 	}
-
-	info := fetcher.buildUsageInfo(modelsResp, "", "", nil)
-
-	require.NotNil(t, info.FiveHour, "FiveHour should be set when a priority model exists")
-	// claude-sonnet-4-20250514 is first in priority list, so it should be used
-	expectedUtilization := (1.0 - 0.80) * 100 // 20
-	require.InDelta(t, expectedUtilization, info.FiveHour.Utilization, 0.01)
-	require.NotNil(t, info.FiveHour.ResetsAt, "ResetsAt should be parsed from ResetTime")
-}
-
-func TestBuildUsageInfo_FiveHourFallbackToClaude4(t *testing.T) {
-	fetcher := &AntigravityQuotaFetcher{}
-
-	// Only claude-sonnet-4 exists (second in priority list), not claude-sonnet-4-20250514
-	modelsResp := &antigravity.FetchAvailableModelsResponse{
-		Models: map[string]antigravity.ModelInfo{
-			"claude-sonnet-4": {
-				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.60,
-					ResetTime:         "2026-03-08T14:00:00Z",
-				},
-			},
-			"gemini-2.5-pro": {
-				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.30,
-				},
-			},
-		},
-	}
-
-	info := fetcher.buildUsageInfo(modelsResp, "", "", nil)
-
-	require.NotNil(t, info.FiveHour)
-	expectedUtilization := (1.0 - 0.60) * 100 // 40
-	require.InDelta(t, expectedUtilization, info.FiveHour.Utilization, 0.01)
-}
-
-func TestBuildUsageInfo_FiveHourFallbackToGemini(t *testing.T) {
-	fetcher := &AntigravityQuotaFetcher{}
-
-	// Only gemini-2.5-pro exists (third in priority list)
-	modelsResp := &antigravity.FetchAvailableModelsResponse{
-		Models: map[string]antigravity.ModelInfo{
-			"gemini-2.5-pro": {
-				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.30,
-				},
-			},
-			"other-model": {
-				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.90,
-				},
-			},
-		},
-	}
-
-	info := fetcher.buildUsageInfo(modelsResp, "", "", nil)
-
-	require.NotNil(t, info.FiveHour)
-	expectedUtilization := (1.0 - 0.30) * 100 // 70
-	require.InDelta(t, expectedUtilization, info.FiveHour.Utilization, 0.01)
-}
-
-func TestBuildUsageInfo_FiveHourNoPriorityModel(t *testing.T) {
-	fetcher := &AntigravityQuotaFetcher{}
-
-	// None of the priority models exist
-	modelsResp := &antigravity.FetchAvailableModelsResponse{
-		Models: map[string]antigravity.ModelInfo{
-			"some-other-model": {
-				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.50,
-				},
-			},
-		},
-	}
-
-	info := fetcher.buildUsageInfo(modelsResp, "", "", nil)
-
-	require.Nil(t, info.FiveHour, "FiveHour should be nil when no priority model exists")
-}
-
-func TestBuildUsageInfo_FiveHourWithEmptyResetTime(t *testing.T) {
-	fetcher := &AntigravityQuotaFetcher{}
-
-	modelsResp := &antigravity.FetchAvailableModelsResponse{
-		Models: map[string]antigravity.ModelInfo{
-			"claude-sonnet-4-20250514": {
-				QuotaInfo: &antigravity.ModelQuotaInfo{
-					RemainingFraction: 0.50,
-					ResetTime:         "", // empty reset time
-				},
-			},
-		},
-	}
-
-	info := fetcher.buildUsageInfo(modelsResp, "", "", nil)
-
-	require.NotNil(t, info.FiveHour)
-	require.Nil(t, info.FiveHour.ResetsAt, "ResetsAt should be nil when ResetTime is empty")
-	require.Equal(t, 0, info.FiveHour.RemainingSeconds)
 }
 
 func TestBuildUsageInfo_FullUtilization(t *testing.T) {

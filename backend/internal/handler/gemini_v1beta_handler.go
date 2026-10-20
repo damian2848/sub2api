@@ -294,7 +294,9 @@ func (h *GatewayHandler) GeminiV1BetaGetModel(c *gin.Context) {
 		googleError(c, http.StatusBadGateway, err.Error())
 		return
 	}
-	if shouldFallbackGeminiModel(modelName, res) {
+	// Web model metadata is generated locally from the account's effective
+	// allowlist. Its 404 is authoritative, not an upstream discovery failure.
+	if !account.IsGeminiWeb() && shouldFallbackGeminiModel(modelName, res) {
 		c.JSON(http.StatusOK, gemini.FallbackModel(modelName))
 		return
 	}
@@ -561,6 +563,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		}
 	}
 	fs := NewFailoverState(maxAccountSwitches, hasBoundSession)
+	admissionBudget := newGeminiAdmissionBudget()
 
 	// 单账号分组提前设置 SingleAccountRetry 标记，让 Service 层首次 503 就不设模型限流标记。
 	// 避免单账号分组收到 503 (MODEL_CAPACITY_EXHAUSTED) 时设 29s 限流，导致后续请求连续快速失败。
@@ -570,11 +573,20 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	}
 
 	for {
+		if streamStarted || c.Writer.Written() {
+			return
+		}
+		if err := admissionBudget.err(c); err != nil {
+			h.handleGeminiAdmissionFailure(c, err, fs.LastFailoverErr, cachedContentBinding != nil)
+			return
+		}
 		excludedAccountIDs := fs.FailedAccountIDs
 		if cachedContentExclusions != nil {
 			excludedAccountIDs = mergeAccountIDSets(cachedContentExclusions, fs.FailedAccountIDs)
 		}
-		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, sessionKey, modelName, excludedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
+		selectionCtx, selectionCancel := admissionBudget.context(c)
+		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(selectionCtx, apiKey.GroupID, sessionKey, modelName, excludedAccountIDs, "", int64(0)) // Gemini 不使用会话限制
+		selectionCancel()
 		if err == nil && cachedContentBinding != nil && selection.Account.ID != cachedContentBinding.AccountID {
 			if selection.Acquired && selection.ReleaseFunc != nil {
 				selection.ReleaseFunc()
@@ -582,6 +594,10 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			err = service.ErrNoAvailableAccounts
 		}
 		if err != nil {
+			if budgetErr := admissionBudget.err(c); budgetErr != nil {
+				h.handleGeminiAdmissionFailure(c, budgetErr, fs.LastFailoverErr, cachedContentBinding != nil)
+				return
+			}
 			if failoverClientGone(c) {
 				reqLog.Info("gemini.account_select_aborted_client_disconnected", zap.Error(err))
 				return
@@ -606,28 +622,45 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
 				message := cls.Message
-				if !cls.ModelNotFound {
+				if !cls.ModelNotFound && cls.Code == "" {
 					message = "No available Gemini accounts: " + err.Error()
 				}
 				googleError(c, cls.Status, message)
 				return
 			}
-			action := fs.HandleSelectionExhausted(c.Request.Context())
+			retryCtx, retryCancel := admissionBudget.context(c)
+			action := fs.HandleSelectionExhausted(retryCtx)
+			retryCancel()
 			switch action {
 			case FailoverContinue:
 				ctx := service.WithSingleAccountRetry(c.Request.Context(), true, h.metadataBridgeEnabled())
 				c.Request = c.Request.WithContext(ctx)
 				continue
 			case FailoverCanceled:
-				failoverClientGone(c)
+				h.handleGeminiAdmissionFailure(c, &ConcurrencyError{SlotType: "account", IsTimeout: true}, fs.LastFailoverErr, cachedContentBinding != nil)
 				return
 			default: // FailoverExhausted
 				h.handleGeminiFailoverExhausted(c, fs.LastFailoverErr)
 				return
 			}
 		}
+		queuedAccountID := selection.Account.ID
+		setOpsSelectedAccount(c, selection.Account.ID, selection.Account.Platform)
+		selection, err = acquireGeminiAccount(c, geminiConcurrency, selection, admissionBudget, cachedContentBinding != nil, &streamStarted,
+			func(ctx context.Context, busyAccountID int64) (*service.AccountSelectionResult, error) {
+				// Keep every original eligibility/profit/model exclusion and bypass only
+				// the currently busy account for this immediate alternative probe.
+				excluded := mergeAccountIDSets(excludedAccountIDs, map[int64]struct{}{busyAccountID: {}})
+				return h.gatewayService.SelectAccountWithLoadAwareness(service.WithDeferredGatewayStickyBinding(ctx), apiKey.GroupID, sessionKey, modelName, excluded, "", int64(0))
+			})
+		if err != nil {
+			reqLog.Warn("gemini.account_slot_acquire_failed", zap.Int64("account_id", queuedAccountID), zap.Error(err))
+			h.handleGeminiAdmissionFailure(c, err, fs.LastFailoverErr, cachedContentBinding != nil)
+			return
+		}
 		account := selection.Account
 		setOpsSelectedAccount(c, account.ID, account.Platform)
+		accountReleaseFunc := selection.ReleaseFunc
 
 		// 检测账号切换：如果粘性会话绑定的账号与当前选择的账号不同，清除 thoughtSignature
 		// 注意：Gemini 原生 API 的 thoughtSignature 与具体上游账号强相关；跨账号透传会导致 400。
@@ -653,53 +686,6 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			sessionBoundAccountID = account.ID
 		}
 
-		// 4) account concurrency slot
-		accountReleaseFunc := selection.ReleaseFunc
-		if !selection.Acquired {
-			if selection.WaitPlan == nil {
-				markOpsRoutingCapacityLimited(c)
-				googleError(c, http.StatusServiceUnavailable, "No available Gemini accounts")
-				return
-			}
-			accountWaitCounted := false
-			canWait, err := geminiConcurrency.IncrementAccountWaitCount(c.Request.Context(), account.ID, selection.WaitPlan.MaxWaiting)
-			if err != nil {
-				reqLog.Warn("gemini.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-			} else if !canWait {
-				reqLog.Info("gemini.account_wait_queue_full",
-					zap.Int64("account_id", account.ID),
-					zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
-				)
-				googleError(c, http.StatusTooManyRequests, "Too many pending requests, please retry later")
-				return
-			}
-			if err == nil && canWait {
-				accountWaitCounted = true
-			}
-			defer func() {
-				if accountWaitCounted {
-					geminiConcurrency.DecrementAccountWaitCount(c.Request.Context(), account.ID)
-				}
-			}()
-
-			accountReleaseFunc, err = geminiConcurrency.AcquireAccountSlotWithWaitTimeout(
-				c,
-				account.ID,
-				selection.WaitPlan.MaxConcurrency,
-				selection.WaitPlan.Timeout,
-				stream,
-				&streamStarted,
-			)
-			if err != nil {
-				reqLog.Warn("gemini.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-				googleConcurrencyError(c, err, "account")
-				return
-			}
-			if accountWaitCounted {
-				geminiConcurrency.DecrementAccountWaitCount(c.Request.Context(), account.ID)
-				accountWaitCounted = false
-			}
-		}
 		// 终检与准入后绑定使用选号结果携带的门（见 responses 同名注释）。
 		admissionCtx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
 		latest, vetoed, reason := h.gatewayService.GatewayProfitControlVetoLatest(admissionCtx, account)
@@ -723,9 +709,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		}
 		account = latest
 		selection.Account = latest
-		// 等待路径保持既有 eager 绑定（无门时 helper 直接绑定）；调度器已抢槽
-		// 的直达路径无门时由选号内部绑定，这里只在门下补准入后绑定。
-		if selection.ProfitGateActive() || !selection.Acquired {
+		// 等待、利润门和替代账号探测均在实际准入后绑定。普通已抢槽的直达路径
+		// 仍使用选号内部的 eager 绑定，探测阶段不会写入虚假的账号切换。
+		if selection.ProfitGateActive() || !selection.Acquired || account.ID != queuedAccountID {
 			if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, apiKey.GroupID, sessionKey, account.ID); err != nil {
 				reqLog.Warn("gemini.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			}
@@ -761,7 +747,12 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
-				failoverAction := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
+				if streamStarted || c.Writer.Written() {
+					return
+				}
+				retryCtx, retryCancel := admissionBudget.context(c)
+				failoverAction := fs.HandleFailoverError(retryCtx, h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
+				retryCancel()
 				switch failoverAction {
 				case FailoverContinue:
 					continue
@@ -773,7 +764,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 					h.handleGeminiFailoverExhausted(c, fs.LastFailoverErr)
 					return
 				case FailoverCanceled:
-					failoverClientGone(c)
+					h.handleGeminiAdmissionFailure(c, &ConcurrencyError{SlotType: "account", IsTimeout: true}, failoverErr, cachedContentBinding != nil)
 					return
 				}
 			}

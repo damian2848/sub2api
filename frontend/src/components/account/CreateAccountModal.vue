@@ -905,6 +905,8 @@
         <!-- Gemini Web model restriction (the web account is not an API-key form) -->
         <div v-if="accountCategory === 'gemini-web'" class="mt-4 border-t border-gray-200 pt-4 dark:border-dark-600">
           <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
+          <p class="mb-2 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.modelRestrictionCombinedHint') }}</p>
+          <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.geminiWebDefaultModelsHint') }}</p>
           <div class="mb-4 flex gap-2">
             <button
               type="button"
@@ -939,7 +941,7 @@
             />
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-              <span v-if="allowedModels.length === 0">{{ t('admin.accounts.supportsAllModels') }}</span>
+              <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{ t('admin.accounts.supportsAllModels') }}</span>
             </p>
           </div>
           <div v-else class="space-y-2">
@@ -1721,6 +1723,7 @@
         <!-- Model Restriction Section (Antigravity 已在上层条件排除) -->
         <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
           <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
+          <p v-if="!isOpenAIModelRestrictionDisabled" class="mb-3 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.modelRestrictionCombinedHint') }}</p>
 
           <div
             v-if="isOpenAIModelRestrictionDisabled"
@@ -1797,7 +1800,7 @@
               />
               <p class="text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-                <span v-if="allowedModels.length === 0">{{
+                <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{
                   t('admin.accounts.supportsAllModels')
                 }}</span>
               </p>
@@ -2287,6 +2290,7 @@
         <!-- Model Restriction Section for Bedrock -->
         <div class="border-t border-gray-200 pt-4 dark:border-dark-600">
           <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
+          <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.modelRestrictionCombinedHint') }}</p>
 
           <!-- Mode Toggle -->
           <div class="mb-4 flex gap-2">
@@ -2327,7 +2331,7 @@
             />
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-              <span v-if="allowedModels.length === 0">{{ t('admin.accounts.supportsAllModels') }}</span>
+              <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{ t('admin.accounts.supportsAllModels') }}</span>
             </p>
           </div>
 
@@ -2619,6 +2623,7 @@
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
+        <p v-if="!isOpenAIModelRestrictionDisabled" class="mb-3 text-xs text-gray-500 dark:text-gray-400">{{ t('admin.accounts.modelRestrictionCombinedHint') }}</p>
 
         <div
           v-if="isOpenAIModelRestrictionDisabled"
@@ -2669,7 +2674,7 @@
             />
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-              <span v-if="allowedModels.length === 0">{{
+              <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{
                 t('admin.accounts.supportsAllModels')
               }}</span>
             </p>
@@ -4271,6 +4276,7 @@ import {
   claudeModels,
   getPresetMappingsByPlatform,
   getModelCatalogPlatform,
+  getGeminiWebDefaultModelSettings,
   getModelsByPlatform,
   commonErrorCodes,
   buildModelMappingObject,
@@ -4781,7 +4787,7 @@ const syncPreviewCredentials = computed(() => {
     ? adaptiveBaseUrls.value.chat_completions.trim() || apiKeyBaseUrl.value.trim()
     : apiKeyBaseUrl.value.trim()
   const modelMapping = buildModelMappingObject(
-    modelRestrictionMode.value,
+    'combined',
     allowedModels.value,
     modelMappings.value
   )
@@ -5472,17 +5478,26 @@ const handleSelectGeminiOAuthType = (oauthType: 'code_assist' | 'google_one' | '
   geminiOAuthType.value = oauthType
 }
 
-// Auto-fill related models when switching to whitelist mode or changing platform
+// Tabs only switch the editor view. Initialize model settings when the
+// provider catalog changes, so returning to the whitelist preserves edits.
 watch(
-  [modelRestrictionMode, () => form.platform, accountCategory],
-  ([newMode]) => {
-    if (newMode === 'whitelist') {
-      const catalogPlatform = getModelCatalogPlatform(
-        form.platform,
-        accountCategory.value === 'gemini-web' ? 'gemini_web' : form.type
-      )
-      allowedModels.value = [...getModelsByPlatform(catalogPlatform)]
+  () => getModelCatalogPlatform(
+    form.platform,
+    accountCategory.value === 'gemini-web' ? 'gemini_web' : form.type
+  ),
+  (catalogPlatform, previousCatalog) => {
+    if (catalogPlatform === 'gemini_web') {
+      const defaults = getGeminiWebDefaultModelSettings()
+      allowedModels.value = defaults.allowedModels
+      modelMappings.value = defaults.modelMappings
+      return
     }
+    if (previousCatalog === 'gemini_web') modelMappings.value = []
+    // Preserve each provider's existing initialization policy. In particular,
+    // Grok starts on the mapping tab with no overrides so backend aliases apply.
+    allowedModels.value = modelRestrictionMode.value === 'whitelist'
+      ? [...getModelsByPlatform(catalogPlatform)]
+      : []
   }
 )
 
@@ -6213,7 +6228,7 @@ const handleSubmit = async () => {
     const credentials: Record<string, unknown> = { gemini_web_cookie: geminiWebCookie.value.trim() }
     if (geminiWebAuthUser.value > 0) credentials.auth_user = geminiWebAuthUser.value
     if (geminiWebUserAgent.value.trim()) credentials.user_agent = geminiWebUserAgent.value.trim()
-    const modelMapping = buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value)
+    const modelMapping = buildModelMappingObject('combined', allowedModels.value, modelMappings.value)
     if (modelMapping) credentials.model_mapping = modelMapping
     await createAccountAndFinish('gemini', 'gemini_web' as AccountType, credentials)
     return
@@ -6259,7 +6274,7 @@ const handleSubmit = async () => {
 
     // Model mapping
     const modelMapping = buildModelMappingObject(
-      modelRestrictionMode.value, allowedModels.value, modelMappings.value
+      'combined', allowedModels.value, modelMappings.value
     )
     if (modelMapping) {
       credentials.model_mapping = modelMapping
@@ -6427,7 +6442,7 @@ const handleSubmit = async () => {
 
   // Add model mapping if configured（OpenAI 开启自动透传时不应用）
   if (!isOpenAIModelRestrictionDisabled.value) {
-    const modelMapping = buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value)
+    const modelMapping = buildModelMappingObject('combined', allowedModels.value, modelMappings.value)
     if (modelMapping) {
       credentials.model_mapping = modelMapping
     }
@@ -6594,7 +6609,7 @@ const createAccountAndFinish = async (
     if (!credentials.base_url) {
       credentials.base_url = apiKeyBaseUrl.value.trim() || 'https://api.x.ai/v1'
     }
-    const modelMapping = buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value)
+    const modelMapping = buildModelMappingObject('combined', allowedModels.value, modelMappings.value)
     if (modelMapping) {
       credentials.model_mapping = modelMapping
     } else {
@@ -6660,7 +6675,7 @@ const handleGrokValidateRT = async (refreshTokenInput: string) => {
         const extra = grokOAuth.buildExtraInfo(tokenInfo)
         const accountName = refreshTokens.length > 1 ? `${form.name || tokenInfo.email || 'Grok OAuth Account'} #${i + 1}` : (form.name || tokenInfo.email || 'Grok OAuth Account')
 
-        const modelMapping = buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value)
+        const modelMapping = buildModelMappingObject('combined', allowedModels.value, modelMappings.value)
         if (modelMapping) {
           credentials.model_mapping = modelMapping
         }
@@ -6727,7 +6742,7 @@ const handleGrokImportSSO = async (ssoInput: string) => {
 
   const credentials: Record<string, unknown> = {}
   applyGrokOAuthUpstreamConfig(credentials)
-  const modelMapping = buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value)
+  const modelMapping = buildModelMappingObject('combined', allowedModels.value, modelMappings.value)
   if (modelMapping) {
     credentials.model_mapping = modelMapping
   }
@@ -6834,7 +6849,7 @@ const handleGrokAuthorizePassword = async (emailPasswordInput: string) => {
             : form.name || tokenInfo.email || 'Grok OAuth Account'
 
         const modelMapping = buildModelMappingObject(
-          modelRestrictionMode.value,
+          'combined',
           allowedModels.value,
           modelMappings.value
         )
@@ -6946,7 +6961,7 @@ const handleOpenAIExchange = async (authCode: string) => {
 
     // Add model mapping for OpenAI OAuth accounts（透传模式下不应用）
     if (shouldCreateOpenAI && !isOpenAIModelRestrictionDisabled.value) {
-      const modelMapping = buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value)
+      const modelMapping = buildModelMappingObject('combined', allowedModels.value, modelMappings.value)
       if (modelMapping) {
         credentials.model_mapping = modelMapping
       }
@@ -7001,7 +7016,7 @@ const OPENAI_MOBILE_RT_CLIENT_ID = 'app_LlGpXReQgckcGGUo2JrYvtJK'
 const buildOpenAICodexImportCredentialExtras = (): Record<string, unknown> | null => {
   const credentials: Record<string, unknown> = {}
   if (!isOpenAIModelRestrictionDisabled.value) {
-    const modelMapping = buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value)
+    const modelMapping = buildModelMappingObject('combined', allowedModels.value, modelMappings.value)
     if (modelMapping) {
       credentials.model_mapping = modelMapping
     }
@@ -7281,7 +7296,7 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
 
         // Add model mapping for OpenAI OAuth accounts（透传模式下不应用）
         if (shouldCreateOpenAI && !isOpenAIModelRestrictionDisabled.value) {
-          const modelMapping = buildModelMappingObject(modelRestrictionMode.value, allowedModels.value, modelMappings.value)
+          const modelMapping = buildModelMappingObject('combined', allowedModels.value, modelMappings.value)
           if (modelMapping) {
             credentials.model_mapping = modelMapping
           }

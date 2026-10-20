@@ -62,6 +62,21 @@ func LookupModel(id string) (Model, bool) {
 
 func Models() []Model { return append([]Model(nil), models...) }
 
+// DefaultModelMapping is the public model policy for Gemini Web accounts that
+// have no explicit mapping. Keep this separate from the full protocol catalog:
+// administrators may explicitly enable other supported Web modes.
+func DefaultModelMapping() map[string]string {
+	return map[string]string{
+		"gemini-4-argon":        "gemini-4-argon",
+		"gemini-3.8-flash":      "gemini-3.8-flash",
+		"gemini-3.5-flash-lite": "gemini-3.5-flash-lite",
+		"gemini-3.8-flash-high": "gemini-3.8-flash",
+		"gemini-4-argon-high":   "gemini-4-argon",
+		"gemini-4-argon-low":    "gemini-4-argon",
+		"gemini-4-argon-medium": "gemini-4-argon",
+	}
+}
+
 // responseModel translates known Web protocol IDs into public catalog names.
 // Google rotates these IDs, so an unknown ID is named from the display label
 // sent beside it (payload[42], e.g. "3.5 Flash-Lite"). The label never

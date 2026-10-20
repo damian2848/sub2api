@@ -247,6 +247,10 @@ func (f *ChannelMonitorQuotaFetcher) fetchUsage(ctx context.Context, account *Ac
 	if usage == nil {
 		return quotaErrorSnapshot("usage", "usage service returned no data", now)
 	}
+	// Reading an account cache does not turn its quota snapshot into a new probe.
+	if account.Platform == domain.PlatformAntigravity && usage.UpdatedAt != nil {
+		now = *usage.UpdatedAt
+	}
 	// openai/gemini/antigravity/grok 的失败多走「值通道」（err==nil 但错误
 	// 降级在 UsageInfo 字段里），必须显式识别，否则会被误判为 operational。
 	if failed, credInvalid, msg := usageFailureInfo(usage); failed {
@@ -267,6 +271,10 @@ func (f *ChannelMonitorQuotaFetcher) fetchUsage(ctx context.Context, account *Ac
 	}
 	if snapshot.PlanLevel == "" {
 		snapshot.PlanLevel = usage.SubscriptionTierRaw
+	}
+	if usage.AntigravityQuotaSource == "quota_summary" && len(snapshot.Tiers) == 0 {
+		snapshot.Success = false
+		snapshot.Error = "antigravity quota summary contains no available usage windows"
 	}
 	return snapshot
 }
@@ -289,8 +297,30 @@ func usageQuotaTiers(usage *UsageInfo) []domain.MonitorQuotaTier {
 	// Grok requests/tokens 两个日窗口 + 月度计费窗口。
 	appendQuotaWindowTier(&tiers, "daily", "requests", usage.GrokRequestQuota)
 	appendQuotaWindowTier(&tiers, "daily", "tokens", usage.GrokTokenQuota)
+	// Prefer official grouped windows. Legacy model fractions may only represent
+	// availability, so do not duplicate them beside the authoritative summary.
+	for _, group := range usage.AntigravityQuotaGroups {
+		for _, bucket := range group.Buckets {
+			if bucket.Disabled || bucket.Utilization == nil {
+				continue
+			}
+			label := strings.TrimSpace(group.DisplayName + " / " + bucket.DisplayName)
+			label = strings.Trim(label, " /\t")
+			if label == "" {
+				label = bucket.BucketID
+			}
+			tiers = append(tiers, domain.MonitorQuotaTier{
+				Window: antigravityMonitorWindow(bucket.Window), Label: label,
+				UsedPercent: *bucket.Utilization, ResetAt: bucket.ResetTime,
+			})
+		}
+	}
+	legacyQuotas := usage.AntigravityQuota
+	if len(usage.AntigravityQuotaGroups) > 0 {
+		legacyQuotas = nil
+	}
 	// Antigravity per-model 总量额度，Label = 模型名（按名排序保证输出稳定）。
-	for _, model := range sortedQuotaModelNames(usage.AntigravityQuota) {
+	for _, model := range sortedQuotaModelNames(legacyQuotas) {
 		q := usage.AntigravityQuota[model]
 		if q == nil {
 			continue
@@ -492,13 +522,13 @@ func usageFailureInfo(usage *UsageInfo) (failed, credentialInvalid bool, msg str
 		return false, false, ""
 	}
 	failed = usage.Error != "" || usage.NeedsReauth || usage.IsBanned ||
-		usage.IsForbidden || usage.ErrorCode != ""
+		usage.IsForbidden || usage.ErrorCode != "" || usage.AntigravityQuotaError != ""
 	if !failed {
 		return false, false, ""
 	}
 	credentialInvalid = usage.NeedsReauth || usage.IsBanned || usage.IsForbidden ||
 		usage.ErrorCode == errorCodeUnauthenticated || usage.ErrorCode == errorCodeForbidden
-	msg = firstNonEmpty(usage.Error, usage.ForbiddenReason, usage.ErrorCode, "usage fetch failed")
+	msg = firstNonEmpty(usage.Error, usage.ForbiddenReason, usage.ErrorCode, usage.AntigravityQuotaError, "usage fetch failed")
 	return failed, credentialInvalid, msg
 }
 

@@ -444,7 +444,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					}
 				}
 
-				accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
+				accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithRetryBudget(
 					c,
 					account.ID,
 					selection.WaitPlan.MaxConcurrency,
@@ -455,6 +455,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				if err != nil {
 					reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 					releaseWait()
+					if errors.Is(err, errAntigravityRetryWaitExhausted) && fs.LastFailoverErr != nil {
+						h.handleFailoverExhausted(c, fs.LastFailoverErr, service.PlatformGemini, streamStarted)
+						return
+					}
 					h.handleConcurrencyError(c, err, "account", streamStarted)
 					return
 				}
@@ -794,7 +798,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					}
 				}
 
-				accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(
+				accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithRetryBudget(
 					c,
 					account.ID,
 					selection.WaitPlan.MaxConcurrency,
@@ -805,6 +809,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				if err != nil {
 					reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 					releaseWait()
+					if errors.Is(err, errAntigravityRetryWaitExhausted) && fs.LastFailoverErr != nil {
+						h.handleFailoverExhausted(c, fs.LastFailoverErr, platform, streamStarted)
+						return
+					}
 					h.handleConcurrencyError(c, err, "account", streamStarted)
 					return
 				}

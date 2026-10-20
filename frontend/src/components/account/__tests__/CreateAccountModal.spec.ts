@@ -733,6 +733,8 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     await selectButtonByText(wrapper, 'API Key')
     await wrapper.get('form#create-account-form input[type="text"]').setValue('Mapped account')
     await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
+    wrapper.getComponent(ModelWhitelistSelectorStub).vm.$emit('update:modelValue', ['direct-model'])
+    await flushPromises()
     await selectButtonByText(wrapper, 'admin.accounts.modelMapping')
     await selectButtonByText(wrapper, 'admin.accounts.addMapping')
     await wrapper.get('input[placeholder="admin.accounts.requestModel"]').setValue('public-glm')
@@ -741,9 +743,113 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     await flushPromises()
 
     expect(createAccountMock.mock.calls[0]?.[0]?.credentials?.model_mapping).toEqual({
+      'direct-model': 'direct-model',
       'public-glm': 'glm-5.3'
     })
     expect(syncUpstreamModelsMock).toHaveBeenCalledWith(42)
+  })
+
+  it('creates Gemini Web with the three real models and four aliases from the mapping tab', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Gemini')
+    await selectButtonByText(wrapper, 'Gemini Web')
+    expect(wrapper.getComponent(ModelWhitelistSelectorStub).props('modelValue')).toEqual([
+      'gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.5-flash-lite',
+    ])
+    await selectButtonByText(wrapper, 'admin.accounts.modelMapping')
+    expect(wrapper.findAll('input[placeholder="admin.accounts.requestModel"]')).toHaveLength(4)
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Gemini Web defaults')
+    await wrapper.get('textarea[placeholder^="__Secure-1PSID"]').setValue('__Secure-1PSID=test-cookie')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    expect(createAccountMock.mock.calls[0][0]).toMatchObject({
+      platform: 'gemini', type: 'gemini_web',
+      credentials: { model_mapping: {
+        'gemini-4-argon': 'gemini-4-argon',
+        'gemini-3.8-flash': 'gemini-3.8-flash',
+        'gemini-3.5-flash-lite': 'gemini-3.5-flash-lite',
+        'gemini-3.8-flash-high': 'gemini-3.8-flash',
+        'gemini-4-argon-high': 'gemini-4-argon',
+        'gemini-4-argon-low': 'gemini-4-argon',
+        'gemini-4-argon-medium': 'gemini-4-argon',
+      } },
+    })
+    expect(Object.keys(createAccountMock.mock.calls[0][0].credentials.model_mapping)).toHaveLength(7)
+  })
+
+  it.each(['grok', 'openai'])('preserves empty mapping-tab defaults when creating %s', async (platform) => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Grok')
+    if (platform === 'grok') {
+      await wrapper.get('[data-testid="grok-account-type-api-key"]').trigger('click')
+    } else {
+      // Changing provider while on the mapping tab must not add new implicit
+      // whitelist overrides to the provider's existing default policy.
+      await selectButtonByText(wrapper, 'OpenAI')
+      await selectButtonByText(wrapper, 'API Key')
+    }
+    await selectButtonByText(wrapper, 'admin.accounts.modelWhitelist')
+    expect(wrapper.getComponent(ModelWhitelistSelectorStub).props('modelValue')).toEqual([])
+    await selectButtonByText(wrapper, 'admin.accounts.modelMapping')
+    expect(wrapper.findAll('input[placeholder="admin.accounts.requestModel"]')).toHaveLength(0)
+    await wrapper.get('form#create-account-form input[type="text"]').setValue(`${platform} runtime defaults`)
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    expect(createAccountMock.mock.calls[0][0].platform).toBe(platform)
+    expect(createAccountMock.mock.calls[0][0].credentials).not.toHaveProperty('model_mapping')
+  })
+
+  it('preserves edited whitelist and aliases across tabs and submits both from the whitelist tab', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Gemini')
+    await selectButtonByText(wrapper, 'Gemini Web')
+    wrapper.getComponent(ModelWhitelistSelectorStub).vm.$emit('update:modelValue', ['gemini-3.5-flash-lite'])
+    await flushPromises()
+    await selectButtonByText(wrapper, 'admin.accounts.modelMapping')
+    await wrapper.findAll('input[placeholder="admin.accounts.requestModel"]')[0].setValue('client-fast')
+    await selectButtonByText(wrapper, 'admin.accounts.modelWhitelist')
+    expect(wrapper.getComponent(ModelWhitelistSelectorStub).props('modelValue')).toEqual(['gemini-3.5-flash-lite'])
+    await selectButtonByText(wrapper, 'admin.accounts.modelMapping')
+    expect((wrapper.findAll('input[placeholder="admin.accounts.requestModel"]')[0].element as HTMLInputElement).value).toBe('client-fast')
+    await selectButtonByText(wrapper, 'admin.accounts.modelWhitelist')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Gemini Web custom')
+    await wrapper.get('textarea[placeholder^="__Secure-1PSID"]').setValue('__Secure-1PSID=test-cookie')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock.mock.calls[0]?.[0]?.credentials?.model_mapping).toEqual({
+      'gemini-3.5-flash-lite': 'gemini-3.5-flash-lite',
+      'client-fast': 'gemini-3.8-flash',
+      'gemini-4-argon-high': 'gemini-4-argon',
+      'gemini-4-argon-low': 'gemini-4-argon',
+      'gemini-4-argon-medium': 'gemini-4-argon',
+    })
+  })
+
+  it('keeps both model editors effective when creating OpenAI OAuth from a refresh token', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    wrapper.getComponent(ModelWhitelistSelectorStub).vm.$emit('update:modelValue', ['direct-model'])
+    await flushPromises()
+    await selectButtonByText(wrapper, 'admin.accounts.modelMapping')
+    await selectButtonByText(wrapper, 'admin.accounts.addMapping')
+    await wrapper.get('input[placeholder="admin.accounts.requestModel"]').setValue('client-model')
+    await wrapper.get('input[placeholder="admin.accounts.actualModel"]').setValue('upstream-model')
+    await selectButtonByText(wrapper, 'admin.accounts.modelWhitelist')
+    expect(wrapper.getComponent(ModelWhitelistSelectorStub).props('modelValue')).toEqual(['direct-model'])
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('OAuth combined')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    wrapper.getComponent(OAuthAuthorizationFlowStub).vm.$emit('validate-refresh-token', 'test-refresh')
+    await flushPromises()
+
+    expect(createAccountMock.mock.calls[0]?.[0]?.credentials?.model_mapping).toEqual({
+      'direct-model': 'direct-model', 'client-model': 'upstream-model',
+    })
   })
 
   it('warns when post-create capability metadata remains incomplete', async () => {

@@ -616,6 +616,24 @@ export interface ModelMappingEntry {
   to: string
 }
 
+// New browser-session accounts expose the supported defaults plus explicit
+// client aliases. Return fresh collections so editing one form cannot affect
+// another account's defaults.
+export function getGeminiWebDefaultModelSettings(): {
+  allowedModels: string[]
+  modelMappings: ModelMappingEntry[]
+} {
+  return {
+    allowedModels: ['gemini-4-argon', 'gemini-3.8-flash', 'gemini-3.5-flash-lite'],
+    modelMappings: [
+      { from: 'gemini-3.8-flash-high', to: 'gemini-3.8-flash' },
+      { from: 'gemini-4-argon-high', to: 'gemini-4-argon' },
+      { from: 'gemini-4-argon-low', to: 'gemini-4-argon' },
+      { from: 'gemini-4-argon-medium', to: 'gemini-4-argon' },
+    ],
+  }
+}
+
 export function splitModelMappingObject(
   modelMapping?: Record<string, unknown> | null
 ): { allowedModels: string[]; modelMappings: ModelMappingEntry[] } {

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -48,6 +49,13 @@ func (f *AntigravityQuotaFetcher) CanFetch(account *Account) bool {
 
 // FetchQuota 获取 Antigravity 账户额度信息
 func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Account, proxyURL string) (*QuotaResult, error) {
+	return f.fetchQuotaFromURL(ctx, account, proxyURL, resolveAntigravityForwardBaseURL(account))
+}
+
+// Pin both quota sources to the account's forwarding endpoint. Production and
+// daily can expose different pools; a successful response from the other pool
+// is not a valid fallback for the account's actual traffic.
+func (f *AntigravityQuotaFetcher) fetchQuotaFromURL(ctx context.Context, account *Account, proxyURL, baseURL string) (*QuotaResult, error) {
 	accessToken := account.GetCredential("access_token")
 	projectID := account.GetCredential("project_id")
 
@@ -56,35 +64,73 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 		return nil, fmt.Errorf("create antigravity client failed: %w", err)
 	}
 
-	// 调用 API 获取配额
-	modelsResp, modelsRaw, err := client.FetchAvailableModels(ctx, accessToken, projectID, resolveModelsListReadLimit(f.cfg))
-	if err != nil {
-		// 403 Forbidden: 不报错，返回 is_forbidden 标记
+	// The official client uses retrieveUserQuotaSummary for rolling windows.
+	// Fetch model metadata and subscription info independently: a catalog failure
+	// must not hide a valid summary, and a slow optional call must not serialize
+	// the three upstream requests.
+	var summary *antigravity.RetrieveUserQuotaSummaryResponse
+	var modelsResp *antigravity.FetchAvailableModelsResponse
+	var summaryRaw, modelsRaw map[string]any
+	var summaryErr, modelsErr error
+	var tierRaw, tierNormalized string
+	var loadResp *antigravity.LoadCodeAssistResponse
+	var queries sync.WaitGroup
+	queries.Add(3)
+	go func() {
+		defer queries.Done()
+		summary, summaryRaw, summaryErr = client.RetrieveUserQuotaSummaryFromURL(ctx, baseURL, accessToken, projectID, resolveModelsListReadLimit(f.cfg))
+	}()
+	go func() {
+		defer queries.Done()
+		modelsResp, modelsRaw, modelsErr = client.FetchAvailableModelsFromURL(ctx, baseURL, accessToken, projectID, resolveModelsListReadLimit(f.cfg))
+	}()
+	go func() {
+		defer queries.Done()
+		tierRaw, tierNormalized, loadResp = f.fetchSubscriptionTier(ctx, client, accessToken)
+	}()
+	queries.Wait()
+
+	groups := buildAntigravityQuotaGroups(summary)
+	if len(groups) == 0 && modelsErr != nil {
+		// Preserve existing forbidden/reauth handling when neither quota source
+		// succeeded. Optional catalog errors do not override an official summary.
 		var forbiddenErr *antigravity.ForbiddenError
-		if errors.As(err, &forbiddenErr) {
+		if errors.As(modelsErr, &forbiddenErr) {
 			now := time.Now()
 			fbType := classifyForbiddenType(forbiddenErr.Body)
 			return &QuotaResult{
 				UsageInfo: &UsageInfo{
-					UpdatedAt:       &now,
-					IsForbidden:     true,
-					ForbiddenReason: forbiddenErr.Body,
-					ForbiddenType:   fbType,
-					ValidationURL:   extractValidationURL(forbiddenErr.Body),
-					NeedsVerify:     fbType == forbiddenTypeValidation,
-					IsBanned:        fbType == forbiddenTypeViolation,
-					ErrorCode:       errorCodeForbidden,
+					Source: "active", UpdatedAt: &now,
+					IsForbidden: true, ForbiddenReason: forbiddenErr.Body,
+					ForbiddenType: fbType, ValidationURL: extractValidationURL(forbiddenErr.Body),
+					NeedsVerify: fbType == forbiddenTypeValidation, IsBanned: fbType == forbiddenTypeViolation,
+					ErrorCode: errorCodeForbidden,
 				},
 			}, nil
 		}
-		return nil, err
+		return nil, modelsErr
 	}
-
-	// 调用 LoadCodeAssist 获取订阅等级和 AI Credits 余额（非关键路径，失败不影响主流程）
-	tierRaw, tierNormalized, loadResp := f.fetchSubscriptionTier(ctx, client, accessToken)
 
 	// 转换为 UsageInfo
 	usageInfo := f.buildUsageInfo(modelsResp, tierRaw, tierNormalized, loadResp)
+
+	if len(groups) > 0 {
+		usageInfo.AntigravityQuotaGroups = groups
+		usageInfo.AntigravityQuotaSource = "quota_summary"
+	} else {
+		// A legacy model fraction is not a substitute for a 5h or weekly window.
+		usageInfo.AntigravityQuotaSource = "model_quota"
+		usageInfo.AntigravityQuotaError = "quota_summary_unavailable"
+		if summaryErr != nil {
+			slog.Warn("antigravity quota summary unavailable", "error", summaryErr)
+		}
+	}
+	if modelsRaw == nil {
+		modelsRaw = make(map[string]any)
+	}
+	if summaryRaw != nil {
+		modelsRaw["quotaSummary"] = summaryRaw
+	}
 
 	return &QuotaResult{
 		UsageInfo: usageInfo,
@@ -131,11 +177,16 @@ func normalizeTier(raw string) string {
 func (f *AntigravityQuotaFetcher) buildUsageInfo(modelsResp *antigravity.FetchAvailableModelsResponse, tierRaw, tierNormalized string, loadResp *antigravity.LoadCodeAssistResponse) *UsageInfo {
 	now := time.Now()
 	info := &UsageInfo{
+		Source:                  "active",
 		UpdatedAt:               &now,
 		AntigravityQuota:        make(map[string]*AntigravityModelQuota),
 		AntigravityQuotaDetails: make(map[string]*AntigravityModelDetail),
 		SubscriptionTier:        tierNormalized,
 		SubscriptionTierRaw:     tierRaw,
+	}
+
+	if modelsResp == nil {
+		modelsResp = &antigravity.FetchAvailableModelsResponse{}
 	}
 
 	// 遍历所有模型，填充 AntigravityQuota 和 AntigravityQuotaDetails
@@ -174,24 +225,8 @@ func (f *AntigravityQuotaFetcher) buildUsageInfo(modelsResp *antigravity.FetchAv
 		}
 	}
 
-	// 同时设置 FiveHour 用于兼容展示（取主要模型）
-	priorityModels := []string{"claude-sonnet-4-20250514", "claude-sonnet-4", "gemini-2.5-pro"}
-	for _, modelName := range priorityModels {
-		if modelInfo, ok := modelsResp.Models[modelName]; ok && modelInfo.QuotaInfo != nil {
-			utilization := (1.0 - modelInfo.QuotaInfo.RemainingFraction) * 100
-			progress := &UsageProgress{
-				Utilization: utilization,
-			}
-			if modelInfo.QuotaInfo.ResetTime != "" {
-				if resetTime, err := time.Parse(time.RFC3339, modelInfo.QuotaInfo.ResetTime); err == nil {
-					progress.ResetsAt = &resetTime
-					progress.RemainingSeconds = int(time.Until(resetTime).Seconds())
-				}
-			}
-			info.FiveHour = progress
-			break
-		}
-	}
+	// fetchAvailableModels does not identify the quota period. In particular,
+	// never synthesize FiveHour from a model's remainingFraction/resetTime.
 
 	if loadResp != nil {
 		for _, credit := range loadResp.GetAvailableCredits() {
