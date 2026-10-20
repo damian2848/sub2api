@@ -8,7 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-var errAntigravityRetryWaitExhausted = errors.New("Antigravity retry budget exhausted while waiting for an account")
+var errAntigravityRetryWaitExhausted = errors.New("antigravity retry budget exhausted while waiting for an account")
 
 // Only an existing Antigravity retry deadline limits this queue wait. The
 // original request context is retained so an admitted generation can finish.

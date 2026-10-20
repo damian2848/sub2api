@@ -121,7 +121,9 @@ func TestAntigravityUsageForceBypassesCachedSuccessAndErrors(t *testing.T) {
 				require.Equal(t, int32(0), requests.Load())
 				require.True(t, oldUsage.UpdatedAt.Equal(updatedAt))
 				require.Equal(t, 10, oldUsage.AntigravityQuota["gemini-2.5-pro"].Utilization)
-				require.Zero(t, svc.accountRepo.(*antigravityUsageAccountRepo).clearCalls, "cached failures must not clear account errors")
+				usageRepo, ok := svc.accountRepo.(*antigravityUsageAccountRepo)
+				require.True(t, ok)
+				require.Zero(t, usageRepo.clearCalls, "cached failures must not clear account errors")
 
 				freshUsage, err := query(true)
 				require.NoError(t, err)
@@ -131,7 +133,7 @@ func TestAntigravityUsageForceBypassesCachedSuccessAndErrors(t *testing.T) {
 				require.Equal(t, 50, freshUsage.AntigravityQuota["gemini-2.5-pro"].Utilization)
 				require.True(t, freshUsage.UpdatedAt.After(updatedAt))
 				if cachedError {
-					require.Equal(t, 1, svc.accountRepo.(*antigravityUsageAccountRepo).clearCalls)
+					require.Equal(t, 1, usageRepo.clearCalls)
 				}
 
 				nextUsage, err := query(false)

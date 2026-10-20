@@ -1005,19 +1005,6 @@ func tempUnscheduleEmptyResponse(ctx context.Context, repo AccountRepository, ac
 	}
 }
 
-// sleepAntigravityBackoffWithContext 带 context 取消检查的退避等待
-// 返回 true 表示正常完成等待，false 表示 context 已取消
-func sleepAntigravityBackoffWithContext(ctx context.Context, attempt int) bool {
-	timer := time.NewTimer(antigravityBackoffDelay(attempt))
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-timer.C:
-		return true
-	}
-}
-
 func antigravityBackoffDelay(attempt int) time.Duration {
 	delay := antigravityRetryBaseDelay * time.Duration(1<<uint(attempt-1))
 	if delay > antigravityRetryMaxDelay {

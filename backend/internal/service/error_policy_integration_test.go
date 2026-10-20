@@ -318,12 +318,16 @@ func TestRetryLoop_ErrorPolicy_NilRateLimitService(t *testing.T) {
 	})
 	p.ctx = ctx
 
-	// Should not panic; enters the default retry path (eventually times out)
+	// Should not panic. An ordinary 429 is returned for an account switch
+	// instead of being retried on the same account.
 	result, err := svc.antigravityRetryLoop(p)
 
-	require.Nil(t, result)
-	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.GreaterOrEqual(t, upstream.calls, 1)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.NotNil(t, result.resp)
+	defer func() { _ = result.resp.Body.Close() }()
+	require.Equal(t, http.StatusTooManyRequests, result.resp.StatusCode)
+	require.Equal(t, 1, upstream.calls)
 }
 
 // ---------------------------------------------------------------------------
@@ -362,8 +366,8 @@ func TestRetryLoop_ErrorPolicy_NoPolicy_OriginalBehavior(t *testing.T) {
 	defer func() { _ = result.resp.Body.Close() }()
 
 	require.Equal(t, http.StatusTooManyRequests, result.resp.StatusCode)
-	require.Equal(t, antigravityMaxRetries, upstream.calls, "should exhaust all retries")
-	require.Equal(t, 1, handleErrorCount, "handleError should be called once after retries exhausted")
+	require.Equal(t, 1, upstream.calls, "an ordinary 429 switches accounts instead of retrying the same one")
+	require.Equal(t, 1, handleErrorCount, "handleError records the cooldown once")
 }
 
 // ---------------------------------------------------------------------------
