@@ -17,6 +17,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const (
@@ -28,8 +29,11 @@ const (
 const openAIWSHTTPBridgeToolStateContextKey = "openai_ws_http_bridge_tool_state"
 
 type openAIWSHTTPBridgeToolState struct {
+	AccountID     int64
+	Plaintext     bool
 	ClientMapping apicompat.ResponsesClientToolMapping
 	LoweredTools  json.RawMessage
+	OriginalTools json.RawMessage
 }
 
 func openAIWSHTTPBridgeToolStateFromContext(c *gin.Context) (openAIWSHTTPBridgeToolState, bool) {
@@ -46,6 +50,7 @@ func setOpenAIWSHTTPBridgeToolState(c *gin.Context, state openAIWSHTTPBridgeTool
 		return
 	}
 	state.LoweredTools = append(json.RawMessage(nil), state.LoweredTools...)
+	state.OriginalTools = append(json.RawMessage(nil), state.OriginalTools...)
 	c.Set(openAIWSHTTPBridgeToolStateContextKey, state)
 }
 
@@ -430,6 +435,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	grokCacheIdentity string,
 	turn int,
 	writeClientMessage func([]byte) error,
+	preparedTools ...openAIWSCollabPlaintextPrepared,
 ) (*OpenAIForwardResult, error) {
 	if s == nil {
 		return nil, errors.New("service is nil")
@@ -444,6 +450,24 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		return nil, errors.New("client websocket writer is nil")
 	}
 	responseModelObserver := &upstreamResponseModelObserver{}
+	var prepared openAIWSCollabPlaintextPrepared
+	if account.Platform == PlatformOpenAI {
+		if len(preparedTools) > 0 {
+			prepared = preparedTools[0]
+		} else {
+			session, sessionErr := openAIWSCollabPlaintextSessionForAccount(c, account)
+			if sessionErr != nil {
+				return nil, sessionErr
+			}
+			var prepareErr error
+			prepared, prepareErr = prepareOpenAIWSCollabPlaintextPayload(session, payload, session != nil)
+			if prepareErr != nil {
+				return nil, prepareErr
+			}
+			payload = prepared.payload
+		}
+		payloadBytes = len(payload)
+	}
 
 	body, err := prepareOpenAIWSHTTPBridgeBody(account, payload)
 	if err != nil {
@@ -453,6 +477,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	_, grokExplicitToolsField := openAIWSHTTPBridgeRawField(grokIntentSourceBody, "tools")
 	grokExplicitToolIntent := account.Platform == PlatformGrok && hasGrokResponsesToolIntent(grokIntentSourceBody)
 	var clientToolMapping apicompat.ResponsesClientToolMapping
+	var nextToolState openAIWSHTTPBridgeToolState
 	functionToolUpstream := (account.Platform == PlatformOpenAI && account.Type == AccountTypeAPIKey) || account.Platform == PlatformGrok
 	if functionToolUpstream {
 		if account.Platform == PlatformGrok {
@@ -462,6 +487,32 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 			}
 		}
 		inheritedState, _ := openAIWSHTTPBridgeToolStateFromContext(c)
+		plaintext := account.IsOpenAIResponsesPlaintextCollaborationEnabled()
+		originalTools := inheritedState.OriginalTools
+		if account.Platform == PlatformOpenAI {
+			originalTools = nil
+			if session := openAIWSCollabPlaintextSessionFromContext(c); session != nil {
+				originalTools = session.declaredTools()
+			}
+			if prepared.toolsDeclared {
+				originalTools = prepared.toolsRaw
+			}
+		} else if current, present := openAIWSHTTPBridgeRawField(body, "tools"); present {
+			originalTools = current
+		}
+		accountChanged := inheritedState.AccountID != 0 && (inheritedState.AccountID != account.ID || inheritedState.Plaintext != plaintext)
+		if accountChanged {
+			// Rebuild this attempt from the client declaration, never from the
+			// previous account's already-lowered aliases or response mapping.
+			if _, present := openAIWSHTTPBridgeRawField(body, "tools"); !present && len(originalTools) > 0 {
+				body, err = sjson.SetRawBytes(body, "tools", originalTools)
+				if err != nil {
+					return nil, fmt.Errorf("inherit client tools for replacement account: %w", err)
+				}
+			}
+			inheritedState.ClientMapping = apicompat.ResponsesClientToolMapping{}
+			inheritedState.LoweredTools = nil
+		}
 		inheritedLoweredTools := decodeOpenAIWSHTTPBridgeLoweredTools(inheritedState.LoweredTools)
 		body, clientToolMapping, err = adaptResponsesClientToolsForFunctionUpstreamWithMapping(
 			body,
@@ -484,10 +535,16 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		if currentTools, present := openAIWSHTTPBridgeRawField(body, "tools"); present {
 			loweredTools = currentTools
 		}
-		setOpenAIWSHTTPBridgeToolState(c, openAIWSHTTPBridgeToolState{
+		nextToolState = openAIWSHTTPBridgeToolState{
+			AccountID:     account.ID,
+			Plaintext:     plaintext,
 			ClientMapping: clientToolMapping,
 			LoweredTools:  loweredTools,
-		})
+			OriginalTools: originalTools,
+		}
+		if account.Platform == PlatformGrok {
+			setOpenAIWSHTTPBridgeToolState(c, nextToolState)
+		}
 	}
 	if account.Platform != PlatformGrok && isOpenAIResponsesLiteWebSocketPayload(payload) {
 		liteBody, liteChanged, liteErr := normalizeOpenAIResponsesLitePayloadForAccount(body, account)
@@ -554,6 +611,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 	turnStart := time.Now()
 	rejectedFieldRetryState := newOpenAIResponsesRejectedFieldRetryState(body)
 	var resp *http.Response
+	committed := false
 	for {
 		upstreamReq, buildErr := buildUpstreamRequest(body)
 		if buildErr != nil {
@@ -576,6 +634,16 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 				admissionErr,
 			)
 			return nil, admissionErr
+		}
+		if !committed && account.Platform == PlatformOpenAI {
+			commitOpenAIWSCollabPlaintextPayload(c, account, prepared)
+			if functionToolUpstream {
+				if session := openAIWSCollabPlaintextSessionFromContext(c); session != nil {
+					nextToolState.OriginalTools = session.declaredTools()
+				}
+				setOpenAIWSHTTPBridgeToolState(c, nextToolState)
+			}
+			committed = true
 		}
 		resp, err = s.doOpenAIUpstream(upstreamReq, proxyURL, account)
 		if err != nil {

@@ -126,6 +126,7 @@ const OAuthAuthorizationFlowStub = defineComponent({
     <div>
       <button data-testid="import-codex-session" @click="$emit('import-codex-session', 'session-json')">session</button>
       <button data-testid="import-codex-pat" @click="$emit('import-codex-pat', 'pat-token')">pat</button>
+      <button data-testid="validate-refresh-token" @click="$emit('validate-refresh-token', 'rt-abc')">rt</button>
     </div>
   `,
 })
@@ -246,6 +247,15 @@ function expectWSAcceleration(extra: unknown, enabled: boolean) {
   } else {
     expect(extra).not.toHaveProperty('openai_oauth_ws_sse_acceleration')
   }
+}
+
+async function openPlaintextCodexImportStep() {
+  const wrapper = mountModal()
+  await selectButtonByText(wrapper, 'OpenAI')
+  await wrapper.get('[data-testid="create-openai-plaintext-collaboration-toggle"]').trigger('click')
+  await wrapper.get('form#create-account-form input[type="text"]').setValue('Codex import')
+  await wrapper.get('form#create-account-form').trigger('submit.prevent')
+  return wrapper
 }
 
 describe('CreateAccountModal OpenAI long-context billing', () => {
@@ -768,6 +778,140 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
     expect(wrapper.find('[data-testid="create-openai-flatten-namespaces-toggle"]').exists()).toBe(
       false
     )
+  })
+
+  // plaintext collaboration covers both OpenAI OAuth-based and API Key accounts
+  it('shows the plaintext collaboration toggle for OpenAI OAuth and API Key accounts', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+
+    expect(
+      wrapper.find('[data-testid="create-openai-plaintext-collaboration-toggle"]').exists()
+    ).toBe(true)
+
+    await selectButtonByText(wrapper, 'API Key')
+    expect(
+      wrapper.find('[data-testid="create-openai-plaintext-collaboration-toggle"]').exists()
+    ).toBe(true)
+  })
+
+  it('hides the plaintext collaboration toggle for non-OpenAI platforms', () => {
+    const wrapper = mountModal()
+
+    expect(
+      wrapper.find('[data-testid="create-openai-plaintext-collaboration-toggle"]').exists()
+    ).toBe(false)
+  })
+
+  it('omits openai_responses_plaintext_collaboration from extra by default', async () => {
+    await submitApiKeyAccount('openai')
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    expect(createAccountMock.mock.calls[0]?.[0]?.extra).not.toHaveProperty(
+      'openai_responses_plaintext_collaboration'
+    )
+  })
+
+  it('sends openai_responses_plaintext_collaboration in extra when the toggle is enabled', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('openai account')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-api-key')
+    await wrapper.get('[data-testid="create-openai-plaintext-collaboration-toggle"]').trigger('click')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    expect(
+      createAccountMock.mock.calls[0]?.[0]?.extra?.openai_responses_plaintext_collaboration
+    ).toBe(true)
+  })
+
+  it('merges the plaintext collaboration flag into OAuth refresh-token creation', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await wrapper.get('[data-testid="create-openai-plaintext-collaboration-toggle"]').trigger('click')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('oauth account')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="validate-refresh-token"]').trigger('click')
+    await flushPromises()
+
+    expect(refreshOpenAITokenMock).toHaveBeenCalled()
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    const payload = createAccountMock.mock.calls[0]?.[0]
+    expect(payload?.type).toBe('oauth')
+    expect(payload?.extra?.openai_responses_plaintext_collaboration).toBe(true)
+    // token-derived extra fields still merge through buildOpenAIExtra(oauthExtra)
+    expect(payload?.extra?.email).toBe('user@example.com')
+  })
+
+  it('omits the plaintext collaboration flag on OAuth creation by default', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('oauth account')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="validate-refresh-token"]').trigger('click')
+    await flushPromises()
+
+    expect(createAccountMock).toHaveBeenCalledTimes(1)
+    const payload = createAccountMock.mock.calls[0]?.[0]
+    expect(payload?.extra).not.toHaveProperty('openai_responses_plaintext_collaboration')
+    expect(payload?.extra?.email).toBe('user@example.com')
+  })
+
+  it('warns that plaintext collaboration does not apply when Chat Completions is forced', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+
+    expect(
+      wrapper.find('[data-testid="create-openai-plaintext-collaboration-mode-hint"]').exists()
+    ).toBe(false)
+
+    const modeSelect = wrapper.getComponent('[data-testid="openai-responses-mode-select"]')
+    await modeSelect.vm.$emit('update:modelValue', 'force_chat_completions')
+
+    expect(
+      wrapper.find('[data-testid="create-openai-plaintext-collaboration-mode-hint"]').exists()
+    ).toBe(true)
+  })
+
+  it('carries the plaintext collaboration flag into Codex session import', async () => {
+    const wrapper = await openPlaintextCodexImportStep()
+    await wrapper.get('[data-testid="import-codex-session"]').trigger('click')
+    await flushPromises()
+
+    expect(importCodexSessionMock).toHaveBeenCalledTimes(1)
+    expect(
+      importCodexSessionMock.mock.calls[0]?.[0]?.extra?.openai_responses_plaintext_collaboration
+    ).toBe(true)
+  })
+
+  it('omits the plaintext collaboration flag from Codex session import by default', async () => {
+    const wrapper = await openCodexImportStep()
+    await wrapper.get('[data-testid="import-codex-session"]').trigger('click')
+    await flushPromises()
+
+    expect(importCodexSessionMock).toHaveBeenCalledTimes(1)
+    expect(importCodexSessionMock.mock.calls[0]?.[0]?.extra).not.toHaveProperty(
+      'openai_responses_plaintext_collaboration'
+    )
+  })
+
+  it('carries the plaintext collaboration flag into Codex PAT import', async () => {
+    const wrapper = await openPlaintextCodexImportStep()
+    await wrapper.get('[data-testid="import-codex-pat"]').trigger('click')
+    await flushPromises()
+
+    expect(createOpenAICodexPATMock).toHaveBeenCalledTimes(1)
+    expect(
+      createOpenAICodexPATMock.mock.calls[0]?.[0]?.extra?.openai_responses_plaintext_collaboration
+    ).toBe(true)
   })
 
   it('enables upstream billing probes by default for new OpenAI API key accounts', async () => {
