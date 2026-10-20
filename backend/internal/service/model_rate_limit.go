@@ -143,7 +143,7 @@ func OpenAIImagesEndpointFromContext(ctx context.Context) bool {
 }
 
 func resolveFinalAntigravityModelKey(ctx context.Context, account *Account, requestedModel string) string {
-	modelKey := mapAntigravityModel(account, requestedModel)
+	modelKey := resolveAntigravityMappedModel(ctx, account, requestedModel)
 	if modelKey == "" {
 		return ""
 	}
@@ -163,11 +163,11 @@ func antigravityModelRateLimitKeys(model string) []string {
 	if model == "" {
 		return nil
 	}
-	keys := []string{model}
-	if isAntigravityGeminiModel(model) && !isAntigravityGeminiImageModel(model) && model != antigravityGeminiModelRateLimitKey {
-		keys = append(keys, antigravityGeminiModelRateLimitKey)
-	}
-	return keys
+	// A model-level 429 does not identify the members of a shared quota bucket.
+	// This applies even to QUOTA_EXHAUSTED: Argon can have a separate bucket.
+	// Keep existing explicit family scopes readable, but never infer a new one
+	// from the Gemini model prefix.
+	return []string{model}
 }
 
 func isAntigravityGeminiImageModel(model string) bool {

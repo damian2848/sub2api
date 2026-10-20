@@ -210,6 +210,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 
 	// 在请求上下文中记录 thinking 状态，供 Antigravity 最终模型 key 推导/模型维度限流使用
 	c.Request = c.Request.WithContext(service.WithThinkingEnabled(c.Request.Context(), parsedReq.ThinkingEnabled, h.metadataBridgeEnabled()))
+	c.Request = c.Request.WithContext(service.WithAntigravityThinkingFromRequest(c.Request.Context(), body, "messages"))
 
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
@@ -366,10 +367,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						zap.Error(err),
 					)
 					message := cls.Message
-					if !cls.ModelNotFound {
+					if !cls.ModelNotFound && cls.Code == "" {
 						message = "No available accounts: " + err.Error()
 					}
-					h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
+					h.handleStreamingAwareErrorWithCode(c, cls.Status, cls.ErrType, cls.Code, message, streamStarted)
 					return
 				}
 				action := fs.HandleSelectionExhausted(c.Request.Context())
@@ -502,18 +503,8 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			// 记录 Forward 前已写入字节数，Forward 后若增加则说明 SSE 内容已发，禁止 failover。
 			// Gemini Web 首字前的 SSE 注释 ping 不算内容，扣除后比较。
 			writerSizeBeforeForward := service.GeminiWebPingAdjustedWrittenSize(c)
-			if account.Platform == service.PlatformAntigravity {
-				result, err = h.antigravityGatewayService.ForwardGemini(
-					requestCtx,
-					c,
-					account,
-					reqModel,
-					"generateContent",
-					reqStream,
-					body,
-					hasBoundSession,
-					service.WithForwardGeminiSession(derefGroupID(apiKey.GroupID), sessionKey),
-				)
+			if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
+				result, err = h.antigravityGatewayService.Forward(requestCtx, c, account, body, hasBoundSession)
 			} else {
 				result, err = h.geminiCompatService.Forward(requestCtx, c, account, body)
 			}
@@ -710,10 +701,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						zap.Error(err),
 					)
 					message := cls.Message
-					if !cls.ModelNotFound {
+					if !cls.ModelNotFound && cls.Code == "" {
 						message = "No available accounts: " + err.Error()
 					}
-					h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
+					h.handleStreamingAwareErrorWithCode(c, cls.Status, cls.ErrType, cls.Code, message, streamStarted)
 					return
 				}
 				action := fs.HandleSelectionExhausted(c.Request.Context())
@@ -2230,6 +2221,7 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 	reqLog = reqLog.With(zap.String("model", parsedReq.Model), zap.Bool("stream", parsedReq.Stream))
 	// 在请求上下文中记录 thinking 状态，供 Antigravity 最终模型 key 推导/模型维度限流使用
 	c.Request = c.Request.WithContext(service.WithThinkingEnabled(c.Request.Context(), parsedReq.ThinkingEnabled, h.metadataBridgeEnabled()))
+	c.Request = c.Request.WithContext(service.WithAntigravityThinkingFromRequest(c.Request.Context(), body, "messages"))
 
 	// 验证 model 必填
 	if parsedReq.Model == "" {

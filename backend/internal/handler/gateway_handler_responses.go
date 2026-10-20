@@ -92,6 +92,7 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	}
 	reqLog = reqLog.With(zap.String("model", reqModel), zap.Bool("stream", reqStream))
 
+	c.Request = c.Request.WithContext(service.WithAntigravityThinkingFromRequest(c.Request.Context(), body, "responses"))
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
 	requestCtx := c.Request.Context()
@@ -203,10 +204,14 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
 				message := cls.Message
-				if !cls.ModelNotFound {
+				if !cls.ModelNotFound && cls.Code == "" {
 					message = "No available accounts: " + err.Error()
 				}
-				h.responsesErrorResponse(c, cls.Status, cls.ErrType, message)
+				code := cls.Code
+				if code == "" {
+					code = cls.ErrType
+				}
+				h.responsesErrorResponse(c, cls.Status, code, message)
 				return
 			}
 			action := fs.HandleSelectionExhausted(requestCtx)

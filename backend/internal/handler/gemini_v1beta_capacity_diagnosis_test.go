@@ -88,7 +88,7 @@ func TestGeminiV1BetaModels_ModelScopeCapacityDiagnosis(t *testing.T) {
 				retryAfter, err := strconv.Atoi(recorder.Header().Get("Retry-After"))
 				require.NoError(t, err)
 				require.InDelta(t, 90, retryAfter, 2)
-				require.Contains(t, recorder.Body.String(), "Earliest quota reset", "the real native handler must retain the diagnosis instead of overwriting it with a generic selection error")
+				require.Contains(t, recorder.Body.String(), "Earliest retry time", "the real native handler must retain the diagnosis instead of overwriting it with a generic selection error")
 			} else {
 				require.Empty(t, recorder.Header().Get("Retry-After"))
 			}

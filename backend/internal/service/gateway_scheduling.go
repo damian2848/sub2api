@@ -527,7 +527,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			account, ok := accountByID[accountID]
 			if ok {
 				// 检查账户是否需要清理粘性会话绑定
-				clearSticky := shouldClearStickySession(account, requestedModel)
+				clearSticky := shouldClearStickySessionWithContext(ctx, account, requestedModel)
 				if clearSticky {
 					slog.Debug("sticky.layer1_5_no_routing_clear",
 						"account_id", accountID,
@@ -1895,7 +1895,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 					account, err := s.getSchedulableAccount(ctx, accountID)
 					// 检查账号分组归属和平台匹配（确保粘性会话不会跨分组或跨平台）
 					if err == nil {
-						clearSticky := shouldClearStickySession(account, requestedModel)
+						clearSticky := shouldClearStickySessionWithContext(ctx, account, requestedModel)
 						if clearSticky {
 							_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 						}
@@ -2017,7 +2017,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 				account, err := s.getSchedulableAccount(ctx, accountID)
 				// 检查账号分组归属和平台匹配（确保粘性会话不会跨分组或跨平台）
 				if err == nil {
-					clearSticky := shouldClearStickySession(account, requestedModel)
+					clearSticky := shouldClearStickySessionWithContext(ctx, account, requestedModel)
 					if clearSticky {
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					}
@@ -2167,7 +2167,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 					account, err := s.getSchedulableAccount(ctx, accountID)
 					// 检查账号分组归属和有效性：原生平台直接匹配，antigravity 需要启用混合调度
 					if err == nil {
-						clearSticky := shouldClearStickySession(account, requestedModel)
+						clearSticky := shouldClearStickySessionWithContext(ctx, account, requestedModel)
 						if clearSticky {
 							_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 						}
@@ -2291,7 +2291,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 				account, err := s.getSchedulableAccount(ctx, accountID)
 				// 检查账号分组归属和有效性：原生平台直接匹配，antigravity 需要启用混合调度
 				if err == nil {
-					clearSticky := shouldClearStickySession(account, requestedModel)
+					clearSticky := shouldClearStickySessionWithContext(ctx, account, requestedModel)
 					if clearSticky {
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					}
@@ -2611,7 +2611,7 @@ func (s *GatewayService) isModelSupportedByAccountWithContext(ctx context.Contex
 			return true
 		}
 		// 使用与转发阶段一致的映射逻辑：自定义映射优先 → 默认映射兜底
-		mapped := mapAntigravityModel(account, requestedModel)
+		mapped := resolveAntigravityMappedModel(ctx, account, requestedModel)
 		if mapped == "" {
 			return false
 		}
@@ -2640,7 +2640,7 @@ func (s *GatewayService) isModelSupportedByAccount(account *Account, requestedMo
 		if strings.TrimSpace(requestedModel) == "" {
 			return true
 		}
-		return mapAntigravityModel(account, requestedModel) != ""
+		return resolveAntigravityMappedModel(nil, account, requestedModel) != ""
 	}
 	if account.IsBedrock() {
 		_, ok := ResolveBedrockModelID(account, requestedModel)

@@ -564,13 +564,22 @@ func prefetchedStickyAccountIDFromContext(ctx context.Context, groupID *int64) i
 // and the sticky session binding should be cleared.
 // Delegates to IsSchedulable() for account-level checks, plus model-level rate limiting.
 func shouldClearStickySession(account *Account, requestedModel string) bool {
+	return shouldClearStickySessionWithContext(context.Background(), account, requestedModel)
+}
+
+func shouldClearStickySessionWithContext(ctx context.Context, account *Account, requestedModel string) bool {
 	if account == nil {
 		return false
 	}
 	if !account.IsSchedulable() {
 		return true
 	}
-	if remaining := account.GetRateLimitRemainingTimeWithContext(context.Background(), requestedModel); remaining > 0 {
+	// Only Antigravity needs the request's Gemini thinking variant here. Keep
+	// other providers' existing sticky-session policy unchanged.
+	if account.Platform != PlatformAntigravity || ctx == nil {
+		ctx = context.Background()
+	}
+	if remaining := account.GetRateLimitRemainingTimeWithContext(ctx, requestedModel); remaining > 0 {
 		return true
 	}
 	return false

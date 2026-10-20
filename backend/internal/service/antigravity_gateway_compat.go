@@ -172,6 +172,7 @@ func (s *AntigravityGatewayService) forwardAntigravityCompat(
 ) (forwardResult *ForwardResult, forwardErr error) {
 	defer decorateAntigravityRetryDeadline(c, &forwardErr)
 	beginUpstreamResponseModelObservation(c)
+	ctx = WithAntigravityThinkingFromRequest(ctx, request.claudeBody, "messages")
 	call, err := s.prepareAntigravityCompatCall(ctx, c, account, request)
 	if err != nil {
 		return nil, err

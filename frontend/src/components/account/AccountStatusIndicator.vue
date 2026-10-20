@@ -99,7 +99,7 @@
             >
               <Icon name="exclamationTriangle" size="xs" :stroke-width="2" />
               {{ t('admin.accounts.status.creditsExhausted') }}
-              <span class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at) }}</span>
+              <span class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at, now) }}</span>
             </span>
             <!-- 正在走积分（模型限流但积分可用）-->
             <span
@@ -108,7 +108,7 @@
             >
               <span>⚡</span>
               {{ formatScopeName(item.model) }}
-              <span class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at) }}</span>
+              <span class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at, now) }}</span>
             </span>
             <!-- 普通模型限流 -->
             <span
@@ -117,7 +117,7 @@
             >
               <Icon name="exclamationTriangle" size="xs" :stroke-width="2" />
               {{ formatScopeName(item.model) }}
-              <span class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at) }}</span>
+              <span class="text-[10px] opacity-70">{{ formatCountdown(item.reset_at, now) }}</span>
             </span>
           </template>
           {{
@@ -152,10 +152,12 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import HelpTooltip from '@/components/common/HelpTooltip.vue'
 import Icon from '@/components/icons/Icon.vue'
+import { useSharedNow } from '@/composables/useSharedNow'
 import type { Account } from '@/types'
 import { formatCountdown, formatDateTime, formatDateTimeToMinute, formatCountdownWithSuffix, formatTime } from '@/utils/format'
 
 const { t } = useI18n()
+const now = useSharedNow()
 
 const props = withDefaults(defineProps<{
   account: Account
@@ -185,7 +187,7 @@ const isExcelBPSEnabled = computed(() => {
 // Computed: is rate limited (429)
 const isRateLimited = computed(() => {
   if (!props.account.rate_limit_reset_at) return false
-  return new Date(props.account.rate_limit_reset_at) > new Date()
+  return new Date(props.account.rate_limit_reset_at).getTime() > now.value
 })
 
 type AccountModelStatusItem = {
@@ -200,18 +202,18 @@ const activeModelStatuses = computed<AccountModelStatusItem[]>(() => {
   const modelLimits = extra?.model_rate_limits as
     | Record<string, { rate_limited_at: string; rate_limit_reset_at: string }>
     | undefined
-  const now = new Date()
   const items: AccountModelStatusItem[] = []
 
   if (!modelLimits) return items
+  const currentTime = now.value
 
   // 检查 AICredits key 是否生效（积分是否耗尽）
   const aiCreditsEntry = modelLimits['AICredits']
-  const hasActiveAICredits = aiCreditsEntry && new Date(aiCreditsEntry.rate_limit_reset_at) > now
+  const hasActiveAICredits = aiCreditsEntry && new Date(aiCreditsEntry.rate_limit_reset_at).getTime() > currentTime
   const allowOverages = !!(extra?.allow_overages)
 
   for (const [model, info] of Object.entries(modelLimits)) {
-    if (new Date(info.rate_limit_reset_at) <= now) continue
+    if (!(new Date(info.rate_limit_reset_at).getTime() > currentTime)) continue
 
     if (model === 'AICredits') {
       // AICredits key → 积分已用尽
@@ -277,7 +279,7 @@ const formatScopeName = (scope: string): string => {
 // Computed: is overloaded (529)
 const isOverloaded = computed(() => {
   if (!props.account.overload_until) return false
-  return new Date(props.account.overload_until) > new Date()
+  return new Date(props.account.overload_until).getTime() > now.value
 })
 
 const isRPMPaused = computed(() =>
@@ -300,7 +302,7 @@ const rpmResumeText = computed(() => {
 // Computed: is temp unschedulable
 const isTempUnschedulable = computed(() => {
   if (!props.account.temp_unschedulable_until) return false
-  return new Date(props.account.temp_unschedulable_until) > new Date()
+  return new Date(props.account.temp_unschedulable_until).getTime() > now.value
 })
 
 // Computed: has error status
@@ -320,7 +322,7 @@ const isQuotaExceeded = computed(() => {
 
 // Computed: countdown text for rate limit (429)
 const rateLimitCountdown = computed(() => {
-  return formatCountdown(props.account.rate_limit_reset_at)
+  return formatCountdown(props.account.rate_limit_reset_at, now.value)
 })
 
 const rateLimitResumeText = computed(() => {
@@ -330,7 +332,7 @@ const rateLimitResumeText = computed(() => {
 
 // Computed: countdown text for overload (529)
 const overloadCountdown = computed(() => {
-  return formatCountdownWithSuffix(props.account.overload_until)
+  return formatCountdownWithSuffix(props.account.overload_until, now.value)
 })
 
 const tempUnschedRecoveryText = computed(() => {

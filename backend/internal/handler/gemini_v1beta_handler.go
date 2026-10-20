@@ -393,6 +393,7 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 	if !ok {
 		return
 	}
+	c.Request = c.Request.WithContext(service.WithAntigravityThinkingFromRequest(c.Request.Context(), body, "gemini"))
 
 	// Get subscription (may be nil)
 	subscription, _ := middleware.GetSubscriptionFromContext(c)

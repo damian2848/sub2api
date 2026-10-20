@@ -2748,13 +2748,24 @@ func (r *accountRepository) SetModelRateLimit(ctx context.Context, id int64, sco
 	}
 
 	client := clientFromContext(ctx, r.client)
+	// Antigravity can report a short throttle while another in-flight request
+	// reports a multi-day quota reset. Keep the longer record atomically, rather
+	// than doing a read/compare/write in the service. Values written here use
+	// UTC RFC3339, whose seconds are lexically ordered; malformed old values
+	// remain replaceable. Other providers retain their existing overwrite policy.
 	result, err := client.ExecContext(
 		ctx,
 		`UPDATE accounts SET 
 			extra = jsonb_set(
 				jsonb_set(COALESCE(extra, '{}'::jsonb), '{model_rate_limits}'::text[], COALESCE(extra->'model_rate_limits', '{}'::jsonb), true),
 				ARRAY['model_rate_limits', $1]::text[],
-				$2::jsonb,
+				CASE
+					WHEN platform = 'antigravity'
+						AND (extra #>> ARRAY['model_rate_limits', $1, 'rate_limit_reset_at']) ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$'
+						AND LEFT(extra #>> ARRAY['model_rate_limits', $1, 'rate_limit_reset_at'], 19) >= LEFT($4, 19)
+					THEN extra #> ARRAY['model_rate_limits', $1]
+					ELSE $2::jsonb
+				END,
 				true
 			),
 			updated_at = NOW()
@@ -2762,6 +2773,7 @@ func (r *accountRepository) SetModelRateLimit(ctx context.Context, id int64, sco
 		scope,
 		raw,
 		id,
+		resetAt.UTC().Format(time.RFC3339),
 	)
 	if err != nil {
 		return err

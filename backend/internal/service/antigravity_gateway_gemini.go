@@ -64,6 +64,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 	if len(body) == 0 {
 		return nil, s.writeGoogleError(c, http.StatusBadRequest, "Request body is empty")
 	}
+	ctx = WithAntigravityThinkingFromRequest(ctx, body, "gemini")
 
 	// 解析请求以获取 image_size（用于图片计费）
 	imageInputSize := s.extractImageInputSize(body)

@@ -387,17 +387,21 @@ export function formatCompactNumber(
 /**
  * 格式化倒计时（从现在到目标时间的剩余时间）
  * @param targetDate 目标日期字符串或 Date 对象
- * @returns 倒计时字符串，如 "2h 41m", "3d 5h", "15m"
+ * @param now 当前时间戳；响应式调用方可以传入共享时钟
+ * @returns 倒计时字符串，如 "2h 41m", "3d 5h", "15m", "59s"
  */
-export function formatCountdown(targetDate: string | Date | null | undefined): string | null {
+export function formatCountdown(targetDate: string | Date | null | undefined, now = Date.now()): string | null {
   if (!targetDate) return null
 
-  const now = new Date()
   const target = new Date(targetDate)
-  const diffMs = target.getTime() - now.getTime()
+  const diffMs = target.getTime() - now
 
   // 如果目标时间已过或无效
   if (diffMs <= 0 || isNaN(diffMs)) return null
+
+  if (diffMs < 60_000) {
+    return i18n.global.t('common.time.countdown.seconds', { s: Math.ceil(diffMs / 1000) })
+  }
 
   const diffMins = Math.floor(diffMs / (1000 * 60))
   const diffHours = Math.floor(diffMins / 60)
@@ -423,8 +427,8 @@ export function formatCountdown(targetDate: string | Date | null | undefined): s
  * @param targetDate 目标日期字符串或 Date 对象
  * @returns 完整的倒计时字符串，如 "2h 41m to lift", "2小时41分钟后解除"
  */
-export function formatCountdownWithSuffix(targetDate: string | Date | null | undefined): string | null {
-  const countdown = formatCountdown(targetDate)
+export function formatCountdownWithSuffix(targetDate: string | Date | null | undefined, now = Date.now()): string | null {
+  const countdown = formatCountdown(targetDate, now)
   if (!countdown) return null
   return i18n.global.t('common.time.countdown.withSuffix', { time: countdown })
 }

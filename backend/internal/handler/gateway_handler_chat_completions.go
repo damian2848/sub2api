@@ -97,6 +97,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 	reqLog = reqLog.With(zap.String("model", reqModel), zap.Bool("stream", reqStream))
 
+	c.Request = c.Request.WithContext(service.WithAntigravityThinkingFromRequest(c.Request.Context(), body, "chat_completions"))
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
 	pricingCtx, pricingAt := service.WithGatewayTokenRequestPricing(c.Request.Context())
@@ -207,10 +208,10 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
 				message := cls.Message
-				if !cls.ModelNotFound {
+				if !cls.ModelNotFound && cls.Code == "" {
 					message = "No available accounts: " + err.Error()
 				}
-				h.chatCompletionsErrorResponse(c, cls.Status, cls.ErrType, message)
+				h.chatCompletionsErrorResponseWithCode(c, cls.Status, cls.ErrType, cls.Code, message)
 				return
 			}
 			action := fs.HandleSelectionExhausted(c.Request.Context())
@@ -404,12 +405,15 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 
 // chatCompletionsErrorResponse writes an error in OpenAI Chat Completions format.
 func (h *GatewayHandler) chatCompletionsErrorResponse(c *gin.Context, status int, errType, message string) {
-	c.JSON(status, gin.H{
-		"error": gin.H{
-			"type":    errType,
-			"message": message,
-		},
-	})
+	h.chatCompletionsErrorResponseWithCode(c, status, errType, "", message)
+}
+
+func (h *GatewayHandler) chatCompletionsErrorResponseWithCode(c *gin.Context, status int, errType, code, message string) {
+	errBody := gin.H{"type": errType, "message": message}
+	if code != "" {
+		errBody["code"] = code
+	}
+	c.JSON(status, gin.H{"error": errBody})
 }
 
 // handleCCFailoverExhausted writes a failover-exhausted error in CC format.

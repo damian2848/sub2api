@@ -821,7 +821,7 @@ func TestSetModelRateLimitByModelName_NotConvertToScope(t *testing.T) {
 	require.NotEqual(t, "claude_sonnet", call.modelKey, "should NOT be scope")
 }
 
-func TestSetAntigravityModelRateLimits_GeminiWritesFamilyScope(t *testing.T) {
+func TestSetAntigravityModelRateLimits_GeminiDoesNotInferFamilyScope(t *testing.T) {
 	repo := &stubAntigravityAccountRepo{}
 	svc := &AntigravityGatewayService{}
 	account := &Account{ID: 789, Platform: PlatformAntigravity}
@@ -839,9 +839,8 @@ func TestSetAntigravityModelRateLimits_GeminiWritesFamilyScope(t *testing.T) {
 	)
 
 	require.True(t, success)
-	require.Len(t, repo.modelRateLimitCalls, 2)
+	require.Len(t, repo.modelRateLimitCalls, 1)
 	require.Equal(t, "gemini-3-pro", repo.modelRateLimitCalls[0].modelKey)
-	require.Equal(t, antigravityGeminiModelRateLimitKey, repo.modelRateLimitCalls[1].modelKey)
 }
 
 func TestSetAntigravityModelRateLimits_ImageDoesNotWriteFamilyScope(t *testing.T) {
@@ -1151,8 +1150,8 @@ func (s *stubSchedulerCache) SetAccount(ctx context.Context, account *Account) e
 	return s.setAccountErr
 }
 
-// TestUpdateAccountModelRateLimitInCache_UpdatesExtraAndCallsCache 测试模型限流后更新缓存
-func TestUpdateAccountModelRateLimitInCache_UpdatesExtraAndCallsCache(t *testing.T) {
+// TestUpdateAccountModelRateLimitInCache_UpdatesLocalSnapshotWithoutPublishingStaleAccount 测试模型限流后更新缓存
+func TestUpdateAccountModelRateLimitInCache_UpdatesLocalSnapshotWithoutPublishingStaleAccount(t *testing.T) {
 	cache := &stubSchedulerCache{}
 	snapshotService := &SchedulerSnapshotService{cache: cache}
 	svc := &AntigravityGatewayService{
@@ -1178,9 +1177,8 @@ func TestUpdateAccountModelRateLimitInCache_UpdatesExtraAndCallsCache(t *testing
 	require.NotEmpty(t, modelLimit["rate_limited_at"])
 	require.NotEmpty(t, modelLimit["rate_limit_reset_at"])
 
-	// 验证 cache.SetAccount 被调用
-	require.Len(t, cache.setAccountCalls, 1)
-	require.Equal(t, account.ID, cache.setAccountCalls[0].ID)
+	// Repository owns database-backed cache publication.
+	require.Empty(t, cache.setAccountCalls)
 }
 
 // TestUpdateAccountModelRateLimitInCache_NilSchedulerSnapshot 测试 schedulerSnapshot 为 nil 时不 panic
@@ -1194,8 +1192,8 @@ func TestUpdateAccountModelRateLimitInCache_NilSchedulerSnapshot(t *testing.T) {
 	// 不应 panic
 	svc.updateAccountModelRateLimitInCache(context.Background(), account, "claude-sonnet-4-5", time.Now().Add(30*time.Second))
 
-	// Extra 不应被更新（因为函数提前返回）
-	require.Nil(t, account.Extra)
+	// Request-local state is updated even without a scheduler cache.
+	require.NotNil(t, account.Extra)
 }
 
 // TestUpdateAccountModelRateLimitInCache_PreservesExistingExtra 测试保留已有的 Extra 数据

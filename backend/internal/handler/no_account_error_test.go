@@ -322,6 +322,8 @@ func TestModelCapacityExhausted_ResponseAndRetryAfter(t *testing.T) {
 	require.Equal(t, "gpt-6.1-sol", diag.calls[0].Model)
 	require.Contains(t, cls.Message, "public-sol")
 	require.NotContains(t, cls.Message, "gpt-6.1-sol")
+	require.Contains(t, cls.Message, "Earliest retry time")
+	require.NotContains(t, cls.Message, "quota reset", "a temporary cooldown does not establish when quota resets")
 	require.Contains(t, cls.Message, "availability may recover later")
 	h := &OpenAIGatewayHandler{}
 	h.handleStreamingAwareErrorWithCode(c, cls.Status, cls.ErrType, cls.Code, cls.Message, false, false)
@@ -358,7 +360,7 @@ func TestModelCapacityDiagnosis_GeminiNativeRetryAfter(t *testing.T) {
 			require.Equal(t, tc.wantStatus, recorder.Code)
 			if tc.wantRetryAfter {
 				require.Equal(t, "90", recorder.Header().Get("Retry-After"), "native Google error responses must preserve the cooldown retry hint")
-				require.Contains(t, recorder.Body.String(), "Earliest quota reset")
+				require.Contains(t, recorder.Body.String(), "Earliest retry time")
 			} else {
 				require.Empty(t, recorder.Header().Get("Retry-After"))
 			}

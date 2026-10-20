@@ -48,6 +48,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 	if strings.TrimSpace(claudeReq.Model) == "" {
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "Missing model")
 	}
+	ctx = WithAntigravityThinkingFromRequest(ctx, body, "messages")
 
 	originalModel := claudeReq.Model
 	mappedModel := s.getMappedModelForThinkingLevel(

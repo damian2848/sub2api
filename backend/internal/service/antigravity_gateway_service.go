@@ -245,7 +245,7 @@ func (s *AntigravityGatewayService) handleAntigravityModelRateLimitBeforePolicy(
 	if rateLimitDuration <= 0 {
 		rateLimitDuration = antigravityDefaultRateLimitDuration
 	}
-	resetAt := time.Now().Add(rateLimitDuration)
+	resetAt := antigravityModelCooldownResetAt(respBody, rateLimitDuration)
 	if !s.setAntigravityModelRateLimits(p.ctx, p.accountRepo, p.account, modelName, p.prefix, statusCode, resetAt, false) {
 		return false
 	}
