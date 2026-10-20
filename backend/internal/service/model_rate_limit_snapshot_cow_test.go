@@ -91,6 +91,7 @@ func TestSetAccountModelRateLimitSnapshot_ConcurrentCopiesOfSharedMaster(t *test
 			"session_window_utilization": 0.2,
 		},
 	}
+	master.PrepareSharedSnapshot()
 
 	const workers = 16
 	var wg sync.WaitGroup
@@ -170,6 +171,7 @@ func TestApplyAccountSchedulingThreshold_FableLimitStaysOnOwnSnapshotCopy(t *tes
 			"passive_usage_7d_oi_reset":       float64(now.Add(4 * 24 * time.Hour).Unix()),
 		},
 	}
+	master.PrepareSharedSnapshot()
 
 	const pairs = 8
 	var wg sync.WaitGroup
