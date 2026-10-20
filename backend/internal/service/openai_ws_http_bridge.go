@@ -603,8 +603,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		_ = resp.Body.Close()
 		markOpenAICyberPolicyEvent(c, respBody, resp.StatusCode, nil)
 		if resp.StatusCode == http.StatusBadRequest &&
-			isOpenAIEncryptedContentRejection(respBody) &&
-			openAIEncryptedReasoningRecoverySafe(body, string(respBody)) && !openAIEncryptedRejectionHasOutput(respBody) {
+			extractUpstreamErrorCode(respBody) == openAIWSFallbackReasonInvalidEncryptedContent {
 			s.markOpenAIWSInvalidEncryptedContentLineageFromPayload(
 				c, body, "ingress_ws_http_bridge_invalid_encrypted_lineage_mark", account.ID, turn,
 			)
@@ -861,8 +860,7 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 				if account.Platform == PlatformGrok {
 					statusCode = openAIWSErrorHTTPStatusFromRaw(errCodeRaw, errTypeRaw)
 				}
-				if !wroteDownstream && isOpenAIEncryptedContentRejection(upstreamMessage) &&
-					openAIEncryptedReasoningRecoverySafe(body, string(upstreamMessage)) && !openAIEncryptedRejectionHasOutput(upstreamMessage) {
+				if reason, _ := classifyOpenAIWSErrorEventFromRaw(errCodeRaw, errTypeRaw, errMessage); reason == openAIWSFallbackReasonInvalidEncryptedContent {
 					s.markOpenAIWSInvalidEncryptedContentLineageFromPayload(
 						c, body, "ingress_ws_http_bridge_invalid_encrypted_lineage_mark", account.ID, turn,
 					)

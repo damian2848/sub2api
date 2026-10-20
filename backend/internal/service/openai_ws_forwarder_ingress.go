@@ -1081,16 +1081,10 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		return hooks.BeforePayloadParse(turn, raw, effectiveModel)
 	}
 
-	groupID, enforceGroup := openAITurnAdmissionGroupFromContext(c)
-	apiKeyID := getAPIKeyIDFromContext(c)
-	encryptedContentObserver := s.NewOpenAIEncryptedContentObserver(ctx, &groupID, apiKeyID, account.ID)
 	writeClientMessage := func(message []byte) error {
-		message = restoreCodexToolNamesFromContext(c, message)
-		if err := encryptedContentObserver.Observe(message); err != nil {
-			return err
-		}
 		writeCtx, cancel := newOpenAIWSDownstreamWriteContext(ctx, hooks, s.openAIWSWriteTimeout())
 		defer cancel()
+		message = restoreCodexToolNamesFromContext(c, message)
 		return WriteCapturedWSClient(writeCtx, clientConn, coderws.MessageText, message)
 	}
 
@@ -1139,6 +1133,8 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 	useHTTPBridge := forceHTTPBridge || s.shouldBridgeOpenAIWSHTTP(account, firstPayload.payloadBytes, firstPayload.previousResponseID)
 	turnState := strings.TrimSpace(c.GetHeader(openAIWSTurnStateHeader))
 	stateStore := s.getOpenAIWSStateStore()
+	groupID, enforceGroup := openAITurnAdmissionGroupFromContext(c)
+	apiKeyID := getAPIKeyIDFromContext(c)
 	storeDisabledConnMode := s.openAIWSStoreDisabledConnMode()
 	sessionHash := ""
 	preferredConnID := ""
@@ -1197,10 +1193,6 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 		var bridgeAccountFailoverInput []json.RawMessage
 		bridgeAccountFailoverInputExists := false
 		for turn := 1; ; turn++ {
-			if err := s.ValidateOpenAIEncryptedContentAccount(ctx, &groupID, apiKeyID, account.ID, currentBridgePayload.payloadRaw); err != nil {
-				return err
-			}
-			encryptedContentObserver = s.NewOpenAIEncryptedContentObserver(ctx, &groupID, apiKeyID, account.ID)
 			if turn > 1 && hooks != nil && hooks.BeforeRequest != nil {
 				if err := hooks.BeforeRequest(turn, currentBridgePayload.payloadRaw, currentBridgePayload.originalModel); err != nil {
 					s.invalidateOpenAIWSTurnStateAfterAdmissionFailureForRequest(
@@ -1670,10 +1662,6 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 
 	var rejectedFieldRetryState *openAIResponsesRejectedFieldRetryState
 	sendAndRelay := func(turn int, lease *openAIWSConnLease, payload []byte, payloadBytes int, originalModel string, imageBillingModel string, imageSizeTier string, imageInputSize string, requestedReasoningEffort *string) (*OpenAIForwardResult, error) {
-		if err := s.ValidateOpenAIEncryptedContentAccount(ctx, &groupID, apiKeyID, account.ID, payload); err != nil {
-			return nil, err
-		}
-		encryptedContentObserver = s.NewOpenAIEncryptedContentObserver(ctx, &groupID, apiKeyID, account.ID)
 		responseModelObserver := &upstreamResponseModelObserver{}
 		if lease == nil {
 			return nil, errors.New("upstream websocket lease is nil")
@@ -1821,9 +1809,7 @@ func (s *OpenAIGatewayService) ProxyResponsesWebSocketFromClient(
 				}
 				s.persistOpenAIWSRateLimitSignal(ctx, account, lease.HandshakeHeaders(), upstreamMessage, errCodeRaw, errTypeRaw, errMsgRaw, mappedModel)
 				fallbackReason, _ := classifyOpenAIWSErrorEventFromRaw(errCodeRaw, errTypeRaw, errMsgRaw)
-				if fallbackReason == openAIWSFallbackReasonInvalidEncryptedContent &&
-					!wroteDownstream && !openAIEncryptedRejectionHasOutput(upstreamMessage) &&
-					!strings.Contains(strings.ToLower(errMsgRaw), "amsg_") && openAIHTTPEncryptedInputRecoverable(payload) {
+				if fallbackReason == openAIWSFallbackReasonInvalidEncryptedContent {
 					// 记录被上游拒绝的密文摘要；错误照旧透传，下一轮进场时按摘要预剥离。
 					if digests := collectOpenAIEncryptedContentDigestsRaw(payload); len(digests) > 0 {
 						s.markOpenAIWSInvalidEncryptedContentLineage(groupID, sessionHash, digests)

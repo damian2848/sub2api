@@ -2589,21 +2589,6 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	decision := OpenAIAccountScheduleDecision{}
-	if platform == PlatformOpenAI && requiredImageCapability == "" {
-		owner, err := s.resolveOpenAIEncryptedContentAccount(ctx, groupID, openAIEncryptedContentAffinityFromContext(ctx))
-		if err != nil {
-			return nil, decision, err
-		}
-		if owner > 0 {
-			return s.selectOpenAIEncryptedContentAccount(ctx, OpenAIAccountScheduleRequest{
-				GroupID: groupID, Platform: platform, SessionHash: sessionHash,
-				PreviousResponseID: previousResponseID, PreviousResponseCanMove: previousResponseCanMove,
-				RequestedModel: requestedModel, RequiredTransport: requiredTransport,
-				RequiredCapability: requiredCapability, RequireCompact: requireCompact,
-				ExcludedIDs: excludedIDs, RequirePrivacySet: s.openAIGroupRequiresPrivacySet(ctx, groupID),
-			}, owner)
-		}
-	}
 	preserveGuardianParentBinding := preserveOpenAIGuardianParentBinding(ctx, sessionHash)
 	guardianParentAccountID := int64(0)
 	if strings.TrimSpace(previousResponseID) == "" {

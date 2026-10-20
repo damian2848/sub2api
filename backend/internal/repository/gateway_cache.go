@@ -53,27 +53,6 @@ func (c *gatewayCache) SetSessionAccountID(ctx context.Context, groupID int64, s
 	return c.rdb.Set(ctx, key, accountID, ttl).Err()
 }
 
-var claimSessionAccountIDScript = redis.NewScript(`
-local owner = redis.call('GET', KEYS[1])
-if not owner then
-  redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
-  return ARGV[1]
-end
-if owner == ARGV[1] then
-  redis.call('PEXPIRE', KEYS[1], ARGV[2])
-end
-return owner
-`)
-
-// ClaimSessionAccountID preserves the first owner across gateway processes.
-// A conflicting claimant receives that owner instead of overwriting it.
-func (c *gatewayCache) ClaimSessionAccountID(ctx context.Context, groupID int64, sessionHash string, accountID int64, ttl time.Duration) (int64, error) {
-	if c == nil || c.rdb == nil || accountID <= 0 || ttl <= 0 {
-		return 0, errors.New("invalid session account ownership claim")
-	}
-	return claimSessionAccountIDScript.Run(ctx, c.rdb, []string{buildSessionKey(groupID, sessionHash)}, accountID, ttl.Milliseconds()).Int64()
-}
-
 func (c *gatewayCache) RefreshSessionTTL(ctx context.Context, groupID int64, sessionHash string, ttl time.Duration) error {
 	key := buildSessionKey(groupID, sessionHash)
 	return c.rdb.Expire(ctx, key, ttl).Err()

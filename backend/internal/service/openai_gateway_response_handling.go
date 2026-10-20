@@ -50,7 +50,6 @@ func (s *OpenAIGatewayService) handleStreamingResponse(ctx context.Context, resp
 }
 
 func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, startTime time.Time, originalModel, mappedModel, reasoningEffort string) (*openaiStreamingResult, error) {
-	encryptedObserver := s.NewOpenAIEncryptedContentObserverForRequest(ctx, c, account)
 	observer := upstreamResponseModelObserverFromContext(c)
 	if observer == nil {
 		observer = beginUpstreamResponseModelObservation(c)
@@ -379,14 +378,6 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		clientOutputStarted = true
 		lastDownstreamWriteAt = time.Now()
 	}
-	// Only a clean EOF proves no response.failed follows a bare error; a read
-	// error or timeout may have dropped the frame that reports executed work.
-	recoverBareErrorAtEOF := func() error {
-		if !codexFailureTerminal || !sawBareError || sawResponseFailed {
-			return nil
-		}
-		return newOpenAIHTTPEncryptedFailureRecoverySignal(c, openAIStreamClientOutputStarted(c, clientOutputStarted) || responsesSemanticOutputSeen, bareErrorPayload)
-	}
 	finalizeStream := func() (*openaiStreamingResult, error) {
 		if stageFirstOutput && eventInProgress {
 			// EOF dispatches the final SSE event even without a trailing blank line.
@@ -581,19 +572,6 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					})
 				}
 				outputStarted := openAIStreamClientOutputStarted(c, clientOutputStarted)
-				// A bare error is usually followed by response.failed, which can be
-				// the only frame reporting executed work. Decide on that frame or EOF.
-				if !codexFailureTerminal || eventType != "error" {
-					failureFrames := [][]byte{dataBytes}
-					if codexFailureTerminal && sawBareError {
-						failureFrames = append(failureFrames, bareErrorPayload)
-					}
-					if recoveryErr := newOpenAIHTTPEncryptedFailureRecoverySignal(c, outputStarted || responsesSemanticOutputSeen, failureFrames...); recoveryErr != nil {
-						sawFailedEvent = true
-						streamEarlyErr = recoveryErr
-						return
-					}
-				}
 				if !outputStarted && !cyberHit {
 					if compactErr := newOpenAICompactFallbackSignal(c, dataBytes, failedMessage); compactErr != nil {
 						sawFailedEvent = true
@@ -722,10 +700,6 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 			// Replace model in response if needed.
 			if needModelReplace {
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
-			}
-			if err := encryptedObserver.ObserveEvent(eventType, dataBytes); err != nil {
-				streamEarlyErr = err
-				return
 			}
 			startsClientOutput := forceFlushFailedEvent || openAIStreamDataStartsClientOutput(data, eventType)
 			startsVisibleOutput := openAIStreamDataStartsVisibleOutput(data, eventType)
@@ -879,9 +853,6 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 		if result, err, done := handleScanErr(documentScanner.Err()); done {
 			return result, err
 		}
-		if recoveryErr := recoverBareErrorAtEOF(); recoveryErr != nil {
-			return resultWithUsage(), recoveryErr
-		}
 		return finalizeStream()
 	}
 
@@ -945,9 +916,6 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 					// EOF dispatches the final SSE event even without a trailing blank
 					// line. Do not synthesize extra bytes on the downstream wire.
 					completeGuardedEvent(true)
-				}
-				if recoveryErr := recoverBareErrorAtEOF(); recoveryErr != nil {
-					return resultWithUsage(), recoveryErr
 				}
 				return finalizeStream()
 			}
@@ -1747,9 +1715,6 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 		}
 	}
 
-	if err := s.observeOpenAIEncryptedHTTPBody(ctx, c, account, body); err != nil {
-		return nil, err
-	}
 	if !writeOpenAICompactSSEBridge(c, resp.StatusCode, body) {
 		c.Data(resp.StatusCode, contentType, body)
 	}
@@ -1786,10 +1751,6 @@ func bodyHasSSEFraming(body []byte) bool {
 }
 
 func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Context, account *Account, body []byte, originalModel, mappedModel string) (*openaiNonStreamingResult, error) {
-	ctx := context.Background()
-	if c.Request != nil {
-		ctx = c.Request.Context()
-	}
 	bodyText := string(body)
 	terminalType, terminalPayload, terminalOK := extractOpenAISSETerminalEvent(bodyText)
 	if c.Request != nil {
@@ -1803,9 +1764,6 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		if account != nil && account.IsGrok() && isGrokContentPolicyRejection(http.StatusForbidden, terminalPayload) {
 			_ = s.writeOpenAINonStreamingProtocolError(resp, c, msg)
 			return nil, &grokContentPolicyError{message: msg}
-		}
-		if recoveryErr := newOpenAIHTTPEncryptedRecoverySignal(c, terminalPayload, openAISSEBodyHasSemanticOutput(bodyText)); recoveryErr != nil {
-			return nil, recoveryErr
 		}
 		if compactErr := newOpenAICompactFallbackSignal(c, terminalPayload, msg); compactErr != nil {
 			return nil, compactErr
@@ -1870,9 +1828,6 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		if contentType == "" {
 			contentType = "text/event-stream"
 		}
-	}
-	if err := s.observeOpenAIEncryptedHTTPBody(ctx, c, account, body); err != nil {
-		return nil, err
 	}
 	if !writeOpenAICompactSSEBridge(c, resp.StatusCode, body) {
 		c.Data(resp.StatusCode, contentType, body)
