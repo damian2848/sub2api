@@ -148,9 +148,15 @@ func TestGeminiWebHealthClassification(t *testing.T) {
 		{name: "empty", err: geminiweb.ErrEmptyResponse, want: geminiWebHealthFailure},
 		{name: "Bard 1095", err: &geminiweb.UpstreamRPCError{RPCCode: 8, BardCode: 1095}, want: geminiWebHealthFailure},
 		{name: "wrapped Bard 1095", err: fmt.Errorf("wrapped: %w", &geminiweb.UpstreamRPCError{RPCCode: 8, BardCode: 1095}), want: geminiWebHealthFailure},
+		{name: "RPC without recognized Bard detail", err: &geminiweb.UpstreamRPCError{RPCCode: 8}, want: geminiWebHealthFailure},
+		{name: "wrapped RPC without recognized Bard detail", err: fmt.Errorf("wrapped: %w", &geminiweb.UpstreamRPCError{RPCCode: 8}), want: geminiWebHealthFailure},
+		{name: "unknown Bard code", err: &geminiweb.UpstreamRPCError{RPCCode: 8, BardCode: 123456}, want: geminiWebHealthFailure},
 		{name: "Bard credential", err: &geminiweb.UpstreamRPCError{RPCCode: 8, BardCode: 1016}},
 		{name: "Bard rate limited", err: &geminiweb.UpstreamRPCError{RPCCode: 8, BardCode: 1037}},
-		{name: "other Bard error", err: &geminiweb.UpstreamRPCError{RPCCode: 8, BardCode: 1050}},
+		{name: "Bard rate limited 1013", err: &geminiweb.UpstreamRPCError{RPCCode: 8, BardCode: 1013}},
+		{name: "known Bard 1050", err: &geminiweb.UpstreamRPCError{RPCCode: 8, BardCode: 1050}},
+		{name: "known Bard 1052", err: &geminiweb.UpstreamRPCError{RPCCode: 8, BardCode: 1052}},
+		{name: "known Bard 1060", err: &geminiweb.UpstreamRPCError{RPCCode: 8, BardCode: 1060}},
 		{name: "parameter error", err: &geminiweb.UpstreamHTTPError{StatusCode: 400}},
 		{name: "unsupported model", err: errors.New("unsupported model")},
 		{name: "canceled", err: context.Canceled},
@@ -171,29 +177,34 @@ func TestGeminiWebHealthClassification(t *testing.T) {
 	cancel()
 	require.Equal(t, geminiWebHealthNeutral, geminiWebClassifyHealth(ctx, geminiweb.Result{}, geminiweb.ErrEmptyResponse, geminiweb.CannedReplies{}))
 	require.Equal(t, geminiWebHealthNeutral, geminiWebClassifyHealth(ctx, geminiweb.Result{}, &geminiweb.UpstreamRPCError{RPCCode: 8, BardCode: 1095}, geminiweb.CannedReplies{}))
+	require.Equal(t, geminiWebHealthNeutral, geminiWebClassifyHealth(ctx, geminiweb.Result{}, &geminiweb.UpstreamRPCError{RPCCode: 8}, geminiweb.CannedReplies{}))
 }
 
-func TestGeminiWebHealthBard1095UsesBoundedCooldown(t *testing.T) {
-	now := time.Now()
-	account := &Account{ID: 1095}
-	var tracker geminiWebHealthTracker
-	upstreamErr := &geminiweb.UpstreamRPCError{RPCCode: 8, BardCode: 1095}
-	for i := 1; i <= geminiWebHealthFailureThreshold; i++ {
-		attempt, ok := tracker.begin(account, now)
-		require.True(t, ok)
-		outcome := geminiWebClassifyHealth(context.Background(), geminiweb.Result{}, upstreamErr, geminiweb.CannedReplies{})
-		cooldown := tracker.finish(attempt, outcome, now)
-		if i < geminiWebHealthFailureThreshold {
-			require.True(t, cooldown.until.IsZero())
-		} else {
-			require.Equal(t, now.Add(geminiWebHealthInitialCooldown), cooldown.until)
-		}
+func TestGeminiWebHealthUnknownRPCUsesBoundedCooldown(t *testing.T) {
+	for _, bardCode := range []int{0, 1095, 123456} {
+		t.Run(fmt.Sprintf("BardCode=%d", bardCode), func(t *testing.T) {
+			now := time.Now()
+			account := &Account{ID: 1095}
+			var tracker geminiWebHealthTracker
+			upstreamErr := &geminiweb.UpstreamRPCError{RPCCode: 8, BardCode: bardCode}
+			for i := 1; i <= geminiWebHealthFailureThreshold; i++ {
+				attempt, ok := tracker.begin(account, now)
+				require.True(t, ok)
+				outcome := geminiWebClassifyHealth(context.Background(), geminiweb.Result{}, upstreamErr, geminiweb.CannedReplies{})
+				cooldown := tracker.finish(attempt, outcome, now)
+				if i < geminiWebHealthFailureThreshold {
+					require.True(t, cooldown.until.IsZero())
+				} else {
+					require.Equal(t, now.Add(geminiWebHealthInitialCooldown), cooldown.until)
+				}
+			}
+			_, ok := tracker.begin(account, now)
+			require.False(t, ok, "repeated unknown RPC errors must cool down the account")
+			attempt, ok := tracker.begin(account, now.Add(geminiWebHealthInitialCooldown))
+			require.True(t, ok)
+			require.True(t, attempt.probe, "the bounded cooldown must allow a recovery probe")
+		})
 	}
-	_, ok := tracker.begin(account, now)
-	require.False(t, ok, "repeated 1095 errors must cool down the account")
-	attempt, ok := tracker.begin(account, now.Add(geminiWebHealthInitialCooldown))
-	require.True(t, ok)
-	require.True(t, attempt.probe, "the bounded cooldown must allow a recovery probe")
 }
 
 type geminiWebHealthRepo struct {

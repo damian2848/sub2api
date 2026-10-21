@@ -72,7 +72,13 @@ func parseRPCError(raw json.RawMessage) *UpstreamRPCError {
 			continue
 		}
 		var typeURL string
-		if json.Unmarshal(detail[0], &typeURL) != nil || typeURL != "type.googleapis.com/google.internal.bard.v1.BardErrorInfo" {
+		if json.Unmarshal(detail[0], &typeURL) != nil {
+			continue
+		}
+		switch typeURL {
+		case "type.googleapis.com/assistant.boq.bard.application.BardErrorInfo",
+			"type.googleapis.com/google.internal.bard.v1.BardErrorInfo":
+		default:
 			continue
 		}
 		var info []json.RawMessage

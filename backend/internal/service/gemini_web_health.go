@@ -171,11 +171,18 @@ func geminiWebClassifyHealth(ctx context.Context, result geminiweb.Result, err e
 		return geminiWebHealthFailure
 	}
 	var rpc *geminiweb.UpstreamRPCError
-	if errors.As(err, &rpc) && rpc.BardCode == 1095 {
-		// The cause of 1095 is not established. Preserve the bounded
-		// cooldown it received as an empty response without treating it
-		// as invalid credentials or exhausted account quota.
-		return geminiWebHealthFailure
+	if errors.As(err, &rpc) {
+		switch rpc.BardCode {
+		case 1016, 1037, 1013, 1050, 1052, 1060:
+			// These known Bard errors already had separate handling before
+			// structured RPC parsing; keep their health outcome unchanged.
+			return geminiWebHealthNeutral
+		default:
+			// Unknown RPC failures, including unrecognized detail types,
+			// previously became empty responses. Preserve their bounded
+			// cooldown without assuming invalid credentials or quota loss.
+			return geminiWebHealthFailure
+		}
 	}
 	var upstream *geminiweb.UpstreamHTTPError
 	if errors.As(err, &upstream) && upstream.StatusCode >= http.StatusInternalServerError && upstream.StatusCode <= 599 {

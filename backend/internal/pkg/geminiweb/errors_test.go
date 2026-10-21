@@ -37,7 +37,7 @@ func TestCompleteRetainsUpstreamHTTPStatus(t *testing.T) {
 
 // This is the HTTP-200 failure envelope observed from StreamGenerate. It has
 // no answer payload; the error is in wrb.fr[5], followed by transport frames.
-const bard1095Frame = `[["wrb.fr",null,null,null,null,[8,null,[["type.googleapis.com/google.internal.bard.v1.BardErrorInfo",[1095]]]]]]`
+const bard1095Frame = `[["wrb.fr",null,null,null,null,[8,null,[["type.googleapis.com/assistant.boq.bard.application.BardErrorInfo",[1095]]]]]]`
 
 func TestCompleteRetainsStructuredRPCError(t *testing.T) {
 	for _, tc := range []struct {
@@ -48,6 +48,8 @@ func TestCompleteRetainsStructuredRPCError(t *testing.T) {
 		want error
 	}{
 		{name: "observed 1095", raw: bard1095Frame, rpc: 8, bard: 1095},
+		{name: "legacy Bard type", raw: strings.Replace(bard1095Frame, "assistant.boq.bard.application", "google.internal.bard.v1", 1), rpc: 8, bard: 1095},
+		{name: "unrecognized Bard type namespace", raw: strings.Replace(bard1095Frame, "assistant.boq.bard.application", "unrecognized.namespace", 1), rpc: 8},
 		{name: "error remains terminal", raw: bard1095Frame + "\n" + frameBody("ignored after upstream failure"), rpc: 8, bard: 1095},
 		{name: "credential", raw: strings.Replace(bard1095Frame, "1095", "1016", 1), rpc: 8, bard: 1016, want: ErrInvalidCredential},
 		{name: "rate limit 1037", raw: strings.Replace(bard1095Frame, "1095", "1037", 1), rpc: 8, bard: 1037, want: ErrRateLimited},
@@ -59,7 +61,7 @@ func TestCompleteRetainsStructuredRPCError(t *testing.T) {
 		{name: "RPC only", raw: `[["wrb.fr",null,null,null,null,[13,"private upstream details",null]]]`, rpc: 13},
 		{name: "message is not a Bard code", raw: `[["wrb.fr",null,null,null,null,[8,"private upstream details: BardErrorInfo 1016",null]]]`, rpc: 8},
 		{name: "unrelated detail type", raw: `[["wrb.fr",null,null,null,null,[8,null,[["private upstream details/BardErrorInfo",[1016]]]]]]`, rpc: 8},
-		{name: "unrelated detail field", raw: `[["wrb.fr",null,null,null,null,[8,null,[["type.googleapis.com/google.internal.bard.v1.BardErrorInfo",[1095,1016,1037]]]]]]`, rpc: 8, bard: 1095},
+		{name: "unrelated detail field", raw: `[["wrb.fr",null,null,null,null,[8,null,[["type.googleapis.com/assistant.boq.bard.application.BardErrorInfo",[1095,1016,1037]]]]]]`, rpc: 8, bard: 1095},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := ")]}'\n\n" + fmt.Sprint(len(tc.raw)) + "\n" + tc.raw + "\n[[\"di\",8],[\"af.httprm\",8,\"1016\"]]"
