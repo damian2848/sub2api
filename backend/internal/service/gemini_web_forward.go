@@ -101,6 +101,11 @@ func (s *GeminiMessagesCompatService) callGeminiWebWithCallback(ctx context.Cont
 	if err := s.precheckGeminiWebGenerationQuota(requestCtx, account); err != nil {
 		return geminiweb.Result{}, &geminiWebQuotaPrecheckError{cause: err}
 	}
+	endHistoryRequest, err := beginGeminiWebHistoryRequest(requestCtx, s.accountRepo, account.ID)
+	if err != nil {
+		return geminiweb.Result{}, &geminiWebQuotaPrecheckError{cause: err}
+	}
+	defer endHistoryRequest()
 	cookie = account.GetCredential("gemini_web_cookie")
 	authUser, authUserSet := geminiWebAuthUser(account)
 	cred := geminiweb.Credential{CacheGeneration: account.GetCredential(geminiWebCookieGeneration),

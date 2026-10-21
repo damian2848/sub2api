@@ -218,6 +218,7 @@ func applyGeminiWebQuotaRateLimit(ctx context.Context, repo AccountRepository, a
 	// leave the account schedulable on an exhausted window.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
+	observeGeminiWebHistoryQuota(ctx, repo, account, quota, now)
 	until, exhausted := geminiWebQuotaRateLimitUntil(quota, now)
 	if !exhausted {
 		if geminiWebQuotaAvailable(quota, now) && geminiWebQuotaRateLimitActive(account, now) {

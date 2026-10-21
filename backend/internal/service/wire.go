@@ -212,6 +212,12 @@ func ProvideGeminiWebCookieKeepaliveService(accountRepo AccountRepository, httpU
 	return svc
 }
 
+func ProvideGeminiWebHistoryCleanupService(accountRepo AccountRepository, cfg *config.Config, geminiCompat *GeminiMessagesCompatService) *GeminiWebHistoryCleanupService {
+	svc := NewGeminiWebHistoryCleanupService(accountRepo, geminiCompat)
+	startBackgroundService(cfg, svc)
+	return svc
+}
+
 // ProvideClaudeTokenProvider creates ClaudeTokenProvider with OAuthRefreshAPI injection
 func ProvideClaudeTokenProvider(
 	accountRepo AccountRepository,
@@ -1113,6 +1119,7 @@ var ProviderSet = wire.NewSet(
 	ProvideUpdateService,
 	ProvideTokenRefreshService,
 	ProvideGeminiWebCookieKeepaliveService,
+	ProvideGeminiWebHistoryCleanupService,
 	wire.Bind(new(GrokOAuthReconciler), new(*TokenRefreshService)),
 	ProvideAccountExpiryService,
 	ProvideOpenAICodexVersionSyncService,
