@@ -170,6 +170,13 @@ func geminiWebClassifyHealth(ctx context.Context, result geminiweb.Result, err e
 	if errors.Is(err, geminiweb.ErrEmptyResponse) {
 		return geminiWebHealthFailure
 	}
+	var rpc *geminiweb.UpstreamRPCError
+	if errors.As(err, &rpc) && rpc.BardCode == 1095 {
+		// The cause of 1095 is not established. Preserve the bounded
+		// cooldown it received as an empty response without treating it
+		// as invalid credentials or exhausted account quota.
+		return geminiWebHealthFailure
+	}
 	var upstream *geminiweb.UpstreamHTTPError
 	if errors.As(err, &upstream) && upstream.StatusCode >= http.StatusInternalServerError && upstream.StatusCode <= 599 {
 		return geminiWebHealthFailure
