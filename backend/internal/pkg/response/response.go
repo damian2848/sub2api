@@ -198,6 +198,11 @@ func ParsePagination(c *gin.Context) (page, pageSize int) {
 		}
 	}
 
+	// Clamp the page so (page-1)*pageSize computed by callers cannot overflow int.
+	if page > math.MaxInt/pageSize {
+		page = math.MaxInt / pageSize
+	}
+
 	return page, pageSize
 }
 

@@ -5,6 +5,7 @@ package response
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -689,6 +690,30 @@ func TestParsePagination(t *testing.T) {
 			name:         "limit超过1000_使用默认值",
 			query:        "limit=2000",
 			wantPage:     1,
+			wantPageSize: 20,
+		},
+		{
+			name:         "page为MaxInt_钳制到不溢出的上限",
+			query:        "page=9223372036854775807",
+			wantPage:     math.MaxInt / 20,
+			wantPageSize: 20,
+		},
+		{
+			name:         "page为MaxInt且page_size为1000_钳制到不溢出的上限",
+			query:        "page=9223372036854775807&page_size=1000",
+			wantPage:     math.MaxInt / 1000,
+			wantPageSize: 1000,
+		},
+		{
+			name:         "page恰好在上限_有效",
+			query:        "page=461168601842738790",
+			wantPage:     461168601842738790,
+			wantPageSize: 20,
+		},
+		{
+			name:         "page刚超过上限_钳制",
+			query:        "page=461168601842738791",
+			wantPage:     math.MaxInt / 20,
 			wantPageSize: 20,
 		},
 	}
