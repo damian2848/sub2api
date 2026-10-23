@@ -108,8 +108,8 @@ func TestPaginationParamsOffsetUsesNormalizedLimit(t *testing.T) {
 func TestPaginationParamsOffsetDoesNotOverflow(t *testing.T) {
 	t.Parallel()
 
-	pages := []int{math.MaxInt, math.MaxInt - 1, math.MaxInt / 2, 461168601842738791, math.MaxInt/1000 + 1}
-	pageSizes := []int{1, 2, 3, 20, 21, 999, 1000}
+	pages := []int{math.MinInt, -1, 0, 1, math.MaxInt, math.MaxInt - 1, math.MaxInt / 2, math.MaxInt/20 + 1, math.MaxInt/1000 + 1}
+	pageSizes := []int{math.MinInt, -1, 0, 1, 2, 3, 20, 21, 999, 1000, 1001, math.MaxInt}
 	for _, page := range pages {
 		for _, pageSize := range pageSizes {
 			params := PaginationParams{Page: page, PageSize: pageSize}

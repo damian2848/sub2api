@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -217,6 +219,18 @@ func TestPromptAdminRejectsInvalidEventIDsTimesAndPagination(t *testing.T) {
 		response := promptAdminRequest(t, router, tc.method, tc.path, tc.body)
 		require.Equalf(t, http.StatusBadRequest, response.Code, "%s %s", tc.method, tc.path)
 		require.Contains(t, response.Body.String(), tc.reason)
+	}
+}
+
+func TestPromptAdminRejectsOverflowingPagination(t *testing.T) {
+	router := promptAdminRouter(nil)
+	for _, size := range []int{20, 21, 100} {
+		query := "/admin/prompt-audit/events?page=" + strconv.Itoa(math.MaxInt/size+1) + "&page_size=" + strconv.Itoa(size)
+		t.Run(query, func(t *testing.T) {
+			response := promptAdminRequest(t, router, http.MethodGet, query, nil)
+			require.Equal(t, http.StatusBadRequest, response.Code)
+			require.Contains(t, response.Body.String(), "prompt_audit_invalid_pagination")
+		})
 	}
 }
 
