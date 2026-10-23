@@ -31,7 +31,7 @@ func NewAntigravityTokenRefresher(antigravityOAuthService *AntigravityOAuthServi
 
 // CacheKey 返回用于分布式锁的缓存键
 func (r *AntigravityTokenRefresher) CacheKey(account *Account) string {
-	return AntigravityTokenCacheKey(account)
+	return antigravityTokenRefreshLockKey(account)
 }
 
 // CanRefresh 检查是否可以刷新此账户

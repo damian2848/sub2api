@@ -41,3 +41,9 @@
 前端保留一个既有未使用导入警告，以及构建分块、混合导入、Browserslist 数据和 Node 弃用提示；未进行浏览器人工验证。Gemini 历史手工清理 CLI 的可选数据库测试因未设置 `GEMINI_HISTORY_MANUAL_TEST_DSN` 跳过，其他对应局部回归测试使用本地模拟服务，不访问真实账号。
 
 完整验证结果及构建 SHA-256 记录在上述输出目录的 `validation.json`；上游逐提交追溯与完整性核对分别保存在 `source-manifest.json` 和 `source-integrity.json`。
+
+## 部署前生产补丁保留
+
+生产预检发现运行版本为 `0.2.75+geminiweb-history.1-ant-import.1`，在本地历史部署版本上增加了 Antigravity/PlanLens 管理员导入补丁。将线上保存的 `source-changes.patch`（SHA-256 `1b71b606ba990431024544f6bb5201c69a5de2cc294a92522d51a49702ba5196`）完整应用至本次同步，保留管理员鉴权、审计正文省略、事务修订校验、凭证世代 CAS、后台失败写入 fencing 与调度 outbox/快照同步。
+
+兼容审查进一步将刷新互斥锁固定为账号 ID，访问令牌缓存仍按授权世代隔离，避免旧 worker 重读新授权后与新 worker 并发刷新同一凭证。新增回归覆盖这一并发顺序，以及真实 PostgreSQL 下 JSON 合并、手动禁用/代理变化保护、旧授权拒绝与事务提交/回滚。部署阶段验证和回执单独保存在工作区 `output/deploy-upstream-v0.2.18-20261023/`。

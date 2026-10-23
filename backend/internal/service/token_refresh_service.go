@@ -988,10 +988,9 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 		if isNonRetryableRefreshError(err) {
 			errorMsg := "Token refresh failed (non-retryable): " + logredact.RedactText(err.Error())
 			isGrokOAuth := account.IsGrokOAuth()
-			if !isGrokOAuth {
+			if !isGrokOAuth && account.Platform != PlatformAntigravity {
 				s.notifyAccountSchedulingBlocked(account, time.Time{}, "token_refresh_non_retryable")
 			}
-			s.clearAntigravityForceTokenRefresh(ctx, account, "non_retryable")
 			persistentlyBlocked := false
 			var setErr error
 			if isGrokOAuth {
@@ -1013,6 +1012,11 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 						return errRefreshSkipped
 					}
 				}
+			} else if conditional, ok := s.accountRepo.(antigravityOAuthFailureRepository); ok && account.Platform == PlatformAntigravity && account.Type == AccountTypeOAuth {
+				persistentlyBlocked, setErr = conditional.SetAntigravityOAuthFailureIfCredentialsUnchanged(ctx, account, time.Now(), errorMsg, true)
+				if setErr == nil && !persistentlyBlocked {
+					return errRefreshSkipped
+				}
 			} else {
 				setErr = s.accountRepo.SetError(ctx, account.ID, errorMsg)
 				persistentlyBlocked = setErr == nil
@@ -1027,8 +1031,11 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 						err: fmt.Errorf("failed to conditionally persist Grok OAuth refresh failure: %w", setErr),
 					}
 				}
-			} else if isGrokOAuth && persistentlyBlocked {
+			} else if (isGrokOAuth || account.Platform == PlatformAntigravity) && persistentlyBlocked {
 				s.notifyAccountSchedulingBlocked(account, time.Time{}, "token_refresh_non_retryable")
+			}
+			if persistentlyBlocked {
+				s.clearAntigravityForceTokenRefresh(ctx, account, "non_retryable")
 			}
 			cacheInvalidationFailed := false
 			if account.Type == AccountTypeOAuth && (!isGrokOAuth || persistentlyBlocked) {
@@ -1125,6 +1132,17 @@ func (s *TokenRefreshService) refreshWithRetryWithRateGate(
 		return lastErr
 	}
 
+	if conditional, ok := s.accountRepo.(antigravityOAuthFailureRepository); ok && account.Platform == PlatformAntigravity && account.Type == AccountTypeOAuth {
+		applied, setErr := conditional.SetAntigravityOAuthFailureIfCredentialsUnchanged(ctx, account, until, reason, false)
+		if setErr != nil {
+			return setErr
+		}
+		if !applied {
+			return errRefreshSkipped
+		}
+		s.notifyAccountSchedulingBlocked(account, until, "token_refresh_retry_exhausted")
+		return lastErr
+	}
 	s.notifyAccountSchedulingBlocked(account, until, "token_refresh_retry_exhausted")
 	if setErr := s.accountRepo.SetTempUnschedulable(ctx, account.ID, until, reason); setErr != nil {
 		slog.Warn("token_refresh.set_temp_unschedulable_failed",

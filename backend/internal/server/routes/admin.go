@@ -423,6 +423,8 @@ func registerAccountRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpAu
 			accounts.POST("/:id/openai-reauth", h.Admin.OpenAIOAuthReauth.CreateTask)
 		}
 		accounts.POST("", h.Admin.Account.Create)
+		accounts.POST("/antigravity-planlens-import/prepare", h.Admin.Account.AntigravityPlanlensImportPrepare)
+		accounts.POST("/antigravity-planlens-import/commit", h.Admin.Account.AntigravityPlanlensImportCommit)
 		accounts.POST("/:id/duplicate", h.Admin.Account.Duplicate)
 		accounts.POST("/check-mixed-channel", h.Admin.Account.CheckMixedChannel)
 		accounts.POST("/import/codex-session", h.Admin.Account.ImportCodexSession)
