@@ -438,6 +438,7 @@ type CreateAccountInput struct {
 	ExpiresAt           *int64
 	AutoPauseOnExpired  *bool
 	ProbeEnabled        *bool
+	ProxyMode           string // 受限写入在验权后选择代理。
 	// SkipDefaultGroupBind prevents auto-binding to platform default group when GroupIDs is empty.
 	SkipDefaultGroupBind bool
 	// SkipMixedChannelCheck skips the mixed channel risk check when binding groups.
@@ -471,6 +472,7 @@ type UpdateAccountInput struct {
 	// GroupAllowedModels 按分组 ID 覆盖账号在各分组内可用的模型；nil 表示不改，
 	// 非 nil 时没有列出的分组恢复为不限制。
 	GroupAllowedModels    map[int64][]string
+	ProxyMode             string // 受限写入在验权后选择代理。
 	ExpiresAt             *int64
 	AutoPauseOnExpired    *bool
 	ProbeEnabled          *bool

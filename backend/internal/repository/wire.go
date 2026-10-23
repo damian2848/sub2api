@@ -104,6 +104,7 @@ var ProviderSet = wire.NewSet(
 	NewSettingRepository,
 	NewCodexHarvestNodeRepository,
 	NewCodexHarvestFlowRepository,
+	NewScopedAdminKeyRepository,
 	NewOpsRepository,
 	NewAuditLogRepository,
 	NewPasskeyRepository,

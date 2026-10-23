@@ -137,6 +137,7 @@ docs/*
 !docs/openai-ws-sse-acceleration.md
 !docs/openai-outbound-identity.md
 !docs/openai-2fa-dual-oauth.md
+!docs/admin-api-keys.md
 !docs/PAYMENT.md
 !docs/PAYMENT_CN.md
 !docs/ADMIN_PAYMENT_INTEGRATION_API.md
