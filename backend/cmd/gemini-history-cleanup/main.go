@@ -120,7 +120,7 @@ func run() int {
 		return fatal("database_open_failed")
 	}
 	r.db = db
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	db.SetMaxOpenConns(12)
 	db.SetMaxIdleConns(8)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -139,7 +139,7 @@ func run() int {
 	if err != nil {
 		return fatal("run_lock_failed")
 	}
-	defer lockConn.Close()
+	defer func() { _ = lockConn.Close() }()
 	var locked bool
 	lockCtx, lockCancel := context.WithTimeout(ctx, 5*time.Second)
 	err = lockConn.QueryRowContext(lockCtx, `SELECT pg_try_advisory_lock(hashtextextended('gemini-web-manual-run:' || $1,0))`, cfg.RunID).Scan(&locked)
@@ -290,7 +290,7 @@ func (r *runner) claim(ctx context.Context, id int64) (job, account, error) {
 	if err != nil {
 		return j, a, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err = tx.ExecContext(ctx, accountLock, id); err != nil {
 		return j, a, err
 	}
@@ -488,7 +488,12 @@ func (r *runner) cleanAccount(parent context.Context, id int64) (res result) {
 			return
 		}
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		res.Code = "request_failed"
+		return
+	}
+	transport := defaultTransport.Clone()
 	transport.Proxy = nil
 	if a.proxyURL != "" {
 		proxy, _ := url.Parse(a.proxyURL)

@@ -103,7 +103,8 @@ func validHistoryConversationID(id string) bool {
 		return false
 	}
 	for _, ch := range id[2:] {
-		if !(ch >= 'a' && ch <= 'z') && !(ch >= 'A' && ch <= 'Z') && !(ch >= '0' && ch <= '9') && ch != '_' && ch != '-' {
+		validChar := ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '_' || ch == '-'
+		if !validChar {
 			return false
 		}
 	}

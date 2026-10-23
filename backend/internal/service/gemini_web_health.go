@@ -23,7 +23,7 @@ const (
 	geminiWebHealthCooldownReason   = "Gemini Web repeated upstream failures"
 )
 
-var errGeminiWebHealthCooling = errors.New("Gemini Web account is cooling down or awaiting a recovery probe")
+var errGeminiWebHealthCooling = errors.New("gemini web account is cooling down or awaiting a recovery probe")
 
 type geminiWebHealthOutcome uint8
 

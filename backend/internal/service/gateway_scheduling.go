@@ -2652,7 +2652,7 @@ func (s *GatewayService) isModelSupportedByAccount(account *Account, requestedMo
 		if strings.TrimSpace(requestedModel) == "" {
 			return true
 		}
-		return resolveAntigravityMappedModel(nil, account, requestedModel) != ""
+		return resolveAntigravityMappedModel(context.Background(), account, requestedModel) != ""
 	}
 	if account.IsBedrock() {
 		_, ok := ResolveBedrockModelID(account, requestedModel)

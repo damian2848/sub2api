@@ -104,8 +104,8 @@ func TestHandleUpstreamError_OpenAIHTML403RepeatedNeverEscalates(t *testing.T) {
 	h.requireNoAccountPenalty(t)
 }
 
-func TestHandleUpstreamError_OpenAICloudflare1010DoesNotPenalizeAccount(t *testing.T) {
-	for _, platform := range []string{PlatformOpenAI, PlatformOpenCodeGo} {
+func TestHandleUpstreamError_Cloudflare1010DoesNotPenalizeAccount(t *testing.T) {
+	for _, platform := range []string{PlatformOpenAI, PlatformOpenCodeGo, PlatformAnthropic, PlatformGemini, PlatformAntigravity} {
 		t.Run(platform, func(t *testing.T) {
 			repo := &rateLimitAccountRepoStub{}
 			counter := &countingOpenAI403CounterCache{

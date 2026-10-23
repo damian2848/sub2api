@@ -227,7 +227,7 @@ func TestSchedulerCacheSnapshotMemoSecondReadOnlyFetchesTagsAndLastUsed(t *testi
 	recorder.reset()
 	first := memoRead(t, cache, bucket)
 	require.Equal(t, 1, recorder.countPrefix("zrange "))
-	require.Equal(t, 1, recorder.countPrefix("mget "+schedulerAccountMetaPrefix))
+	require.Equal(t, 1, recorder.countPrefix("mget "+schedulerAccountMetaKey("1")))
 	require.Equal(t, 1, recorder.countPrefix("mget "+schedulerLastUsedKey("1")), "a memo miss reuses the side keys fetched with metadata")
 
 	recorder.reset()

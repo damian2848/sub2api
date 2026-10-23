@@ -1497,11 +1497,3 @@ func (s *AntigravityGatewayService) getDefaultRateLimitDuration() time.Duration 
 	}
 	return defaultDur
 }
-
-// resolveResetTime 根据解析的重置时间或默认时长计算重置时间点
-func (s *AntigravityGatewayService) resolveResetTime(resetAt *int64, defaultDur time.Duration) time.Time {
-	if resetAt != nil {
-		return time.Unix(*resetAt, 0)
-	}
-	return time.Now().Add(defaultDur)
-}

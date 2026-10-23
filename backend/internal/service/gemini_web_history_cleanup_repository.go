@@ -25,8 +25,8 @@ type GeminiWebHistoryCleanupJob struct {
 	LeaseUntil    time.Time
 }
 
-var ErrGeminiWebHistoryMaintenance = errors.New("Gemini Web account history cleanup is in progress; retry shortly")
-var ErrGeminiWebHistoryLeaseLost = errors.New("Gemini Web history cleanup lease lost")
+var ErrGeminiWebHistoryMaintenance = errors.New("gemini web account history cleanup is in progress; retry shortly")
+var ErrGeminiWebHistoryLeaseLost = errors.New("gemini web history cleanup lease lost")
 
 // Implemented by the SQL account repository. All job writes are fenced by the
 // lease token. Request admission and cleanup claims share an account lock.

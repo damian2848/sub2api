@@ -27,7 +27,7 @@ type geminiHistoryTxBeginner interface {
 func (r *accountRepository) beginGeminiHistoryTx(ctx context.Context) (*sql.Tx, error) {
 	db, ok := r.sql.(geminiHistoryTxBeginner)
 	if !ok {
-		return nil, errors.New("Gemini Web history repository requires a transactional SQL connection")
+		return nil, errors.New("gemini web history repository requires a transactional SQL connection")
 	}
 	return db.BeginTx(ctx, nil)
 }

@@ -86,7 +86,7 @@ func TestManualClaimAndFenceIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 	schema := "gemini_manual_test_" + time.Now().UTC().Format("20060102150405000000000")
 	if _, err = db.Exec(`CREATE SCHEMA ` + schema); err != nil {
 		t.Fatal(err)
@@ -99,7 +99,7 @@ func TestManualClaimAndFenceIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { isolated.Close() })
+	t.Cleanup(func() { _ = isolated.Close() })
 	ddl := `CREATE TABLE accounts(id BIGINT PRIMARY KEY,type TEXT,status TEXT,credentials JSONB,proxy_id BIGINT,deleted_at TIMESTAMPTZ);
  CREATE TABLE proxies(id BIGINT PRIMARY KEY,protocol TEXT,host TEXT,port INTEGER,username TEXT,password TEXT,deleted_at TIMESTAMPTZ);`
 	if _, err = isolated.Exec(ddl); err != nil {
