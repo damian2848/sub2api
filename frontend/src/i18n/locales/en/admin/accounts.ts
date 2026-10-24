@@ -1135,6 +1135,25 @@ export default {
         invalidValue: 'Invalid header value (control characters are not allowed; max length 8192)',
         tooManyEntries: 'Too many header override entries (max 64)'
       },
+      grokModelDiagnostics: {
+        title: 'Model catalog diagnostics',
+        configuredModels: 'Local configuration',
+        upstreamModels: 'Upstream catalog',
+        lastSuccess: 'Last success',
+        lastAttempt: 'Latest attempt',
+        fresh: 'Current',
+        stale: 'Historical catalog',
+        unknown: 'Unknown',
+        sourceChanged: 'Source changed',
+        notListed: 'Not found in the current catalog for this account and endpoint',
+        unverifiable: 'Cannot be checked item by item',
+        outOfScope: 'Outside this text catalog',
+        compatibilityNotice: 'Requests are not blocked',
+        configuredFallback: 'No live upstream catalog was returned. The saved configuration was kept and fallback model IDs were not added.',
+        savedConfigOnly: 'Diagnostics reflect the saved configuration. Save your edits, then sync again.',
+        refreshFailed: 'Unable to load the latest status',
+        syncSavedConfig: 'Sync the upstream catalog for the saved configuration'
+      },
       grokCustomBaseUrl: {
         title: 'Custom Upstream URL',
         hint: 'When enabled, account traffic (chat/media/probes) is forwarded to the specified address. OAuth authorization and token refresh are unaffected and stay on the official endpoints.',

@@ -1,18 +1,33 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 
-const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode } = vi.hoisted(() => ({
+const {
+  updateAccountMock,
+  checkMixedChannelRiskMock,
+  getByIdMock,
+  syncUpstreamModelsMock,
+  showWarningMock,
+  showSuccessMock,
+  showErrorMock,
+  authIsSimpleMode
+} = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
   checkMixedChannelRiskMock: vi.fn(),
+  getByIdMock: vi.fn(),
+  syncUpstreamModelsMock: vi.fn(),
+  showWarningMock: vi.fn(),
+  showSuccessMock: vi.fn(),
+  showErrorMock: vi.fn(),
   authIsSimpleMode: { value: true }
 }))
 
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
-    showError: vi.fn(),
-    showSuccess: vi.fn(),
-    showInfo: vi.fn()
+    showError: showErrorMock,
+    showSuccess: showSuccessMock,
+    showInfo: vi.fn(),
+    showWarning: showWarningMock
   })
 }))
 
@@ -29,6 +44,8 @@ vi.mock('@/api/admin', () => ({
     accounts: {
       getManagementCapabilities: vi.fn().mockResolvedValue({ web_search_enabled: false, account_quota_notify_enabled: false }),
       update: updateAccountMock,
+      getById: getByIdMock,
+      syncUpstreamModels: syncUpstreamModelsMock,
       checkMixedChannelRisk: checkMixedChannelRiskMock
     },
     settings: {
@@ -56,6 +73,37 @@ vi.mock('vue-i18n', async () => {
 })
 
 import EditAccountModal from '../EditAccountModal.vue'
+
+const ModelWhitelistSelectorStub = defineComponent({
+  name: 'ModelWhitelistSelector',
+  props: {
+    modelValue: { type: Array, default: () => [] },
+    modelMappings: { type: Array, default: () => [] },
+    platform: { type: String, default: '' },
+    accountId: { type: Number, default: undefined }
+  },
+  emits: ['update:modelValue', 'upstream-synced', 'upstream-sync-finished'],
+  template: '<div data-testid="model-whitelist-selector"><button type="button" data-testid="emit-upstream-sync-finished" @click="$emit(\'upstream-sync-finished\')">finished</button></div>'
+})
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
+function diagnostics(model: string, endpoint = 'https://cli-chat-proxy.grok.com/v1/models') {
+  return {
+    state: 'fresh',
+    endpoint,
+    fetched_at: '2026-10-25T11:00:00.000Z',
+    expires_at: '2099-01-01T00:00:00.000Z',
+    models: [model],
+    mappings: [{ requested: 'friendly', upstream: model, status: 'listed' }]
+  }
+}
 
 const BaseDialogStub = defineComponent({
   name: 'BaseDialog',
@@ -96,8 +144,10 @@ function buildGrokOAuthAccount(
   } as any
 }
 
+const mounted: Array<{ unmount: () => void }> = []
+
 function mountModal(account: any) {
-  return mount(EditAccountModal, {
+  const wrapper = mount(EditAccountModal, {
     props: {
       show: true,
       account,
@@ -111,10 +161,12 @@ function mountModal(account: any) {
         Icon: true,
         ProxySelector: true,
         GroupSelector: true,
-        ModelWhitelistSelector: true
+        ModelWhitelistSelector: ModelWhitelistSelectorStub
       }
     }
   })
+  mounted.push(wrapper)
+  return wrapper
 }
 
 describe('EditAccountModal Grok OAuth upstream config', () => {
@@ -123,6 +175,17 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     updateAccountMock.mockReset()
     checkMixedChannelRiskMock.mockReset()
     checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    getByIdMock.mockReset()
+    getByIdMock.mockResolvedValue({ grok_model_diagnostics: null })
+    syncUpstreamModelsMock.mockReset()
+    syncUpstreamModelsMock.mockResolvedValue({ models: [], discovery_source: 'upstream' })
+    showWarningMock.mockReset()
+    showSuccessMock.mockReset()
+    showErrorMock.mockReset()
+  })
+
+  afterEach(() => {
+    for (const wrapper of mounted.splice(0)) wrapper.unmount()
   })
 
   it('enabling the custom base URL toggle and saving persists base_url', async () => {
@@ -323,5 +386,265 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     expect(
       wrapper.get('[data-testid="grok-client-tool-cache-toggle"]').attributes('aria-checked')
     ).toBe('false')
+  })
+
+  it('keeps an edited base URL when a saved sync finishes', async () => {
+    const account = buildGrokOAuthAccount({ base_url: 'https://my-relay.example.com' })
+    getByIdMock.mockResolvedValue({
+      ...account,
+      grok_model_diagnostics: diagnostics('saved-model', 'https://my-relay.example.com/v1/models')
+    })
+    const wrapper = mountModal(account)
+    await flushPromises()
+
+    const input = wrapper.get('[data-testid="grok-custom-base-url-input"]')
+    await input.setValue('https://draft.example.com')
+    expect(wrapper.text()).toContain('admin.accounts.grokModelDiagnostics.savedConfigOnly')
+    await wrapper.get('[data-testid="emit-upstream-sync-finished"]').trigger('click')
+    await flushPromises()
+
+    expect((input.element as HTMLInputElement).value).toBe('https://draft.example.com')
+    expect(account.credentials.base_url).toBe('https://my-relay.example.com')
+    expect(account.grok_model_diagnostics).toBeUndefined()
+    expect(wrapper.props('account').id).toBe(account.id)
+    expect(wrapper.text()).toContain('saved-model')
+    expect(getByIdMock).toHaveBeenCalledWith(account.id)
+  })
+
+  it('submits the draft mapping and does not append catalog ids after refresh or saved-config sync', async () => {
+    const account = buildGrokOAuthAccount({
+      base_url: 'https://my-relay.example.com',
+      model_mapping: { friendly: 'grok-4.7' }
+    })
+    getByIdMock.mockResolvedValue({
+      ...account,
+      grok_model_diagnostics: diagnostics('catalog-only-model')
+    })
+    syncUpstreamModelsMock.mockResolvedValue({
+      models: ['grok-composer-2.5-fast', 'extra-catalog-id'],
+      discovery_source: 'upstream',
+      warnings: [{ code: 'upstream_model_metadata_incomplete', message: 'incomplete' }]
+    })
+    updateAccountMock.mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    await flushPromises()
+
+    const target = wrapper.get('input[placeholder="admin.accounts.actualModel"]')
+    await target.setValue('grok-4.5')
+    await wrapper.get('[data-testid="grok-diagnostics-sync"]').trigger('click')
+    await flushPromises()
+    const whitelist = wrapper.findAll('button').find((button) => button.text() === 'admin.accounts.modelWhitelist')
+    await whitelist!.trigger('click')
+    await wrapper.get('[data-testid="emit-upstream-sync-finished"]').trigger('click')
+    await flushPromises()
+    await wrapper.findAll('button').find((button) => button.text() === 'admin.accounts.modelMapping')!.trigger('click')
+
+    expect((wrapper.get('input[placeholder="admin.accounts.actualModel"]').element as HTMLInputElement).value).toBe('grok-4.5')
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect(showWarningMock).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsMetadataIncomplete')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await vi.waitFor(() => expect(updateAccountMock).toHaveBeenCalledTimes(1))
+    const payload = updateAccountMock.mock.calls[0]?.[1]
+    expect(payload?.credentials?.model_mapping).toEqual({ friendly: 'grok-4.5' })
+    expect(JSON.stringify(payload)).not.toContain('extra-catalog-id')
+    expect(JSON.stringify(payload)).not.toContain('catalog-only-model')
+  })
+
+  it('keeps the diagnostics panel visible in both whitelist and mapping modes', async () => {
+    const wrapper = mountModal(buildGrokOAuthAccount())
+    await flushPromises()
+    expect(wrapper.find('[data-testid="grok-model-diagnostics"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="grok-diagnostics-sync"]').exists()).toBe(false)
+
+    await wrapper.findAll('button').find((button) => button.text() === 'admin.accounts.modelMapping')!.trigger('click')
+    expect(wrapper.find('[data-testid="grok-model-diagnostics"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="grok-diagnostics-sync"]').exists()).toBe(true)
+
+    await wrapper.findAll('button').find((button) => button.text() === 'admin.accounts.modelWhitelist')!.trigger('click')
+    expect(wrapper.find('[data-testid="grok-model-diagnostics"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="grok-diagnostics-sync"]').exists()).toBe(false)
+  })
+
+  it('does not let a late account response overwrite the current diagnostics', async () => {
+    const accountA = buildGrokOAuthAccount({ base_url: 'https://a.example.com' })
+    const accountB = { ...buildGrokOAuthAccount({ base_url: 'https://b.example.com' }), id: 9, name: 'Grok B' }
+    const first = deferred<any>()
+    const second = deferred<any>()
+    const calls: number[] = []
+    getByIdMock.mockImplementation((id: number) => {
+      calls.push(id)
+      return calls.length === 1 ? first.promise : second.promise
+    })
+    const wrapper = mountModal(accountA)
+    await wrapper.setProps({ account: accountB })
+    first.resolve({ ...accountA, grok_model_diagnostics: diagnostics('late-a-model') })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('late-a-model')
+
+    second.resolve({ ...accountB, grok_model_diagnostics: diagnostics('current-b-model') })
+    await flushPromises()
+    expect(wrapper.text()).toContain('current-b-model')
+    expect(wrapper.text()).not.toContain('late-a-model')
+    expect(wrapper.props('account').id).toBe(accountB.id)
+    expect(accountA.grok_model_diagnostics).toBeUndefined()
+    expect(accountB.grok_model_diagnostics).toBeUndefined()
+  })
+
+  it('drops a response that arrives after the same account is closed and reopened', async () => {
+    const account = buildGrokOAuthAccount()
+    const first = deferred<any>()
+    getByIdMock.mockImplementation(() => first.promise)
+    const wrapper = mountModal(account)
+    await wrapper.setProps({ show: false })
+
+    const reopened = deferred<any>()
+    getByIdMock.mockImplementation(() => reopened.promise)
+    await wrapper.setProps({ show: true })
+    first.resolve({ ...account, grok_model_diagnostics: diagnostics('closed-model') })
+    await flushPromises()
+    expect(wrapper.text()).not.toContain('closed-model')
+
+    reopened.resolve({ ...account, grok_model_diagnostics: diagnostics('reopened-model') })
+    await flushPromises()
+    expect(wrapper.text()).toContain('reopened-model')
+    expect(wrapper.text()).not.toContain('closed-model')
+  })
+
+  it('does not apply a response after the modal unmounts', async () => {
+    const account = buildGrokOAuthAccount()
+    const pending = deferred<any>()
+    getByIdMock.mockImplementation(() => pending.promise)
+    const wrapper = mountModal(account)
+    wrapper.unmount()
+    pending.resolve({ ...account, grok_model_diagnostics: diagnostics('unmounted-model') })
+    await flushPromises()
+
+    getByIdMock.mockResolvedValue({ ...account, grok_model_diagnostics: diagnostics('mounted-model') })
+    const again = mountModal(account)
+    await flushPromises()
+    expect(again.text()).toContain('mounted-model')
+    expect(again.text()).not.toContain('unmounted-model')
+  })
+
+  it('keeps the previous diagnostics and shows a refresh failure', async () => {
+    const account = buildGrokOAuthAccount()
+    getByIdMock
+      .mockResolvedValueOnce({ ...account, grok_model_diagnostics: diagnostics('kept-model') })
+      .mockRejectedValueOnce(new Error('offline'))
+    const wrapper = mountModal(account)
+    await flushPromises()
+    expect(wrapper.text()).toContain('kept-model')
+
+    await wrapper.get('[data-testid="emit-upstream-sync-finished"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('kept-model')
+    expect(wrapper.text()).toContain('admin.accounts.grokModelDiagnostics.refreshFailed')
+  })
+
+  it('shows diagnostics for a Grok API key and skips non-Grok accounts', async () => {
+    const apiKey = {
+      ...buildGrokOAuthAccount(),
+      type: 'apikey',
+      credentials: { api_key: 'xai-test', base_url: 'https://api.x.ai/v1' },
+      credentials_status: { has_api_key: true }
+    }
+    getByIdMock.mockResolvedValue({
+      ...apiKey,
+      grok_model_diagnostics: diagnostics('apikey-model', 'https://api.x.ai/v1/models')
+    })
+    const wrapper = mountModal(apiKey)
+    await flushPromises()
+    expect(wrapper.find('[data-testid="grok-model-diagnostics"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('apikey-model')
+    expect(getByIdMock).toHaveBeenCalledWith(apiKey.id)
+
+    const baseUrl = wrapper.get('input[placeholder="https://api.x.ai/v1"]')
+    await baseUrl.setValue('https://draft-api.example.com')
+    expect(wrapper.text()).toContain('admin.accounts.grokModelDiagnostics.savedConfigOnly')
+    expect((baseUrl.element as HTMLInputElement).value).toBe('https://draft-api.example.com')
+
+    getByIdMock.mockClear()
+    const openai = mountModal({ ...buildGrokOAuthAccount(), platform: 'openai' })
+    await flushPromises()
+    expect(openai.find('[data-testid="grok-model-diagnostics"]').exists()).toBe(false)
+    expect(getByIdMock).not.toHaveBeenCalled()
+  })
+
+  it('sends one saved-config sync from mapping mode and does not toast a live success for fallback', async () => {
+    const account = buildGrokOAuthAccount({ model_mapping: { friendly: 'grok-4.7' } })
+    const pending = deferred<any>()
+    syncUpstreamModelsMock.mockImplementation(() => pending.promise)
+    const wrapper = mountModal(account)
+    await flushPromises()
+
+    const button = wrapper.get('[data-testid="grok-diagnostics-sync"]')
+    await button.trigger('click')
+    await button.trigger('click')
+    expect(syncUpstreamModelsMock).toHaveBeenCalledTimes(1)
+    expect(syncUpstreamModelsMock).toHaveBeenCalledWith(account.id)
+
+    pending.resolve({
+      models: ['composer-2.5'],
+      discovery_source: 'configured_fallback',
+      warnings: [{ code: 'grok_model_catalog_configured_fallback', message: 'fallback' }]
+    })
+    await flushPromises()
+    expect(showWarningMock).toHaveBeenCalledWith('admin.accounts.grokModelDiagnostics.configuredFallback')
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect((wrapper.get('input[placeholder="admin.accounts.actualModel"]').element as HTMLInputElement).value).toBe('grok-4.7')
+    expect(getByIdMock.mock.calls.length).toBeGreaterThan(1)
+  })
+
+  it('does not toast or replace diagnostics when a saved-config sync resolves for a previous account', async () => {
+    const accountA = buildGrokOAuthAccount({ model_mapping: { friendly: 'grok-4.7' } })
+    const accountB = {
+      ...buildGrokOAuthAccount({ model_mapping: { friendly: 'grok-4.5' } }),
+      id: 9,
+      name: 'Grok B'
+    }
+    const pending = deferred<any>()
+    getByIdMock.mockImplementation(async (id: number) => ({
+      grok_model_diagnostics: diagnostics(id === 9 ? 'account-b-model' : 'account-a-model')
+    }))
+    syncUpstreamModelsMock.mockImplementation(() => pending.promise)
+    const wrapper = mountModal(accountA)
+    await flushPromises()
+    await wrapper.get('[data-testid="grok-diagnostics-sync"]').trigger('click')
+    await wrapper.setProps({ account: accountB })
+    await flushPromises()
+    showWarningMock.mockClear()
+    showErrorMock.mockClear()
+    showSuccessMock.mockClear()
+
+    pending.resolve({
+      models: ['composer-2.5'],
+      discovery_source: 'configured_fallback'
+    })
+    await flushPromises()
+    expect(showWarningMock).not.toHaveBeenCalled()
+    expect(showErrorMock).not.toHaveBeenCalled()
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('account-b-model')
+    expect(wrapper.text()).not.toContain('account-a-model')
+  })
+
+  it('reports a sync failure without dropping the previous diagnostics', async () => {
+    const account = buildGrokOAuthAccount({ model_mapping: { friendly: 'grok-4.7' } })
+    getByIdMock.mockResolvedValue({
+      ...account,
+      grok_model_diagnostics: diagnostics('kept-after-sync-error')
+    })
+    syncUpstreamModelsMock.mockRejectedValue({ message: 'boom' })
+    const wrapper = mountModal(account)
+    await flushPromises()
+    const callsBeforeSync = getByIdMock.mock.calls.length
+    await wrapper.get('[data-testid="grok-diagnostics-sync"]').trigger('click')
+    await flushPromises()
+
+    expect(showErrorMock).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsError')
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('kept-after-sync-error')
+    expect(getByIdMock.mock.calls.length).toBeGreaterThan(callsBeforeSync)
+    expect((wrapper.get('input[placeholder="admin.accounts.actualModel"]').element as HTMLInputElement).value).toBe('grok-4.7')
   })
 })

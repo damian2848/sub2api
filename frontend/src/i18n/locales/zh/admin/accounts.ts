@@ -1246,6 +1246,25 @@ export default {
         invalidValue: '请求头值不合法（不允许控制字符，长度不超过 8192）',
         tooManyEntries: '请求头覆写条目过多（最多 64 条）'
       },
+      grokModelDiagnostics: {
+        title: '模型目录诊断',
+        configuredModels: '本地配置',
+        upstreamModels: '上游目录',
+        lastSuccess: '最后成功',
+        lastAttempt: '最近尝试',
+        fresh: '当前有效',
+        stale: '历史目录',
+        unknown: '未知',
+        sourceChanged: '来源已变更',
+        notListed: '未在该账号此端点的当前目录中发现',
+        unverifiable: '无法逐项核验',
+        outOfScope: '不在此文本目录范围内',
+        compatibilityNotice: '请求不会被阻断',
+        configuredFallback: '未获得实时上游目录，已保留现有配置，不会把回退模型追加到表单。',
+        savedConfigOnly: '诊断基于已保存配置，请保存后重新同步',
+        refreshFailed: '无法获取最新状态',
+        syncSavedConfig: '同步已保存配置的上游目录'
+      },
       grokCustomBaseUrl: {
         title: '自定义上游地址',
         hint: '开启后账号流量（对话/媒体/探测）改发指定地址；OAuth 授权与令牌刷新不受影响，仍走官方端点。',

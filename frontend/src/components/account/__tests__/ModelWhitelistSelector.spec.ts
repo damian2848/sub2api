@@ -394,6 +394,111 @@ describe('ModelWhitelistSelector', () => {
     expect(wrapper.emitted('upstream-synced')).toEqual([[]])
   })
 
+  it('does not append configured fallback IDs', async () => {
+    syncUpstreamModels.mockResolvedValue({
+      models: ['composer-2.5'],
+      discovery_source: 'configured_fallback',
+      warnings: [{ code: 'grok_model_catalog_configured_fallback', message: 'fallback' }]
+    })
+    const wrapper = mountSelector({ platform: 'grok', accountId: 46, modelValue: ['grok-4.7'] })
+    const button = wrapper.findAll('button').find(b => b.text() === 'admin.accounts.syncUpstreamModels')!
+    await button.trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    expect(showWarning).toHaveBeenCalledWith('admin.accounts.grokModelDiagnostics.configuredFallback')
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(wrapper.emitted('upstream-sync-finished')).toHaveLength(1)
+  })
+
+  it('still appends a real catalog when capability metadata is incomplete', async () => {
+    syncUpstreamModels.mockResolvedValue({
+      models: ['grok-4.7'],
+      discovery_source: 'upstream',
+      warnings: [{ code: 'upstream_model_metadata_incomplete', message: 'incomplete' }]
+    })
+    const wrapper = mountSelector({ platform: 'grok', accountId: 46, modelValue: ['grok-4'] })
+    const button = wrapper.findAll('button').find(b => b.text() === 'admin.accounts.syncUpstreamModels')!
+    await button.trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['grok-4', 'grok-4.7']]])
+    expect(showWarning).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsMetadataIncomplete')
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(wrapper.emitted('upstream-sync-finished')).toHaveLength(1)
+    expect(wrapper.emitted('upstream-synced')).toBeUndefined()
+  })
+
+  it('keeps appending models when a non-grok sync omits discovery fields', async () => {
+    syncUpstreamModels.mockResolvedValue({ models: ['gpt-6'] })
+    const wrapper = mountSelector({ platform: 'openai', accountId: 46, modelValue: [] })
+    const button = wrapper.findAll('button').find(b => b.text() === 'admin.accounts.syncUpstreamModels')!
+    await button.trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['gpt-6']]])
+    expect(showSuccess).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsSuccess')
+    expect(wrapper.emitted('upstream-sync-finished')).toHaveLength(1)
+    expect(wrapper.emitted('upstream-synced')).toBeUndefined()
+  })
+
+  it('keeps creation preview on the original upstream-synced event only', async () => {
+    syncUpstreamModelsPreview.mockResolvedValue({
+      models: ['grok-4.7'],
+      discovery_source: 'upstream'
+    })
+    const wrapper = mountSelector({
+      syncCredentials: {
+        platform: 'grok',
+        type: 'apikey',
+        base_url: 'https://api.x.ai/v1',
+        api_key: 'xai-test'
+      }
+    })
+    const button = wrapper.findAll('button').find(b => b.text() === 'admin.accounts.syncUpstreamModels')!
+    await button.trigger('click')
+    await flushPromises()
+    expect(syncUpstreamModels).not.toHaveBeenCalled()
+    expect(wrapper.emitted('upstream-synced')).toEqual([[]])
+    expect(wrapper.emitted('upstream-sync-finished')).toBeUndefined()
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['grok-4.7']]])
+  })
+
+  it('does not mark a creation preview synced when the catalog is only a configured fallback', async () => {
+    syncUpstreamModelsPreview.mockResolvedValue({
+      models: ['composer-2.5'],
+      discovery_source: 'configured_fallback',
+      warnings: [{ code: 'grok_model_catalog_configured_fallback', message: 'fallback' }]
+    })
+    const wrapper = mountSelector({
+      syncCredentials: {
+        platform: 'grok',
+        type: 'apikey',
+        api_key: 'xai-test'
+      }
+    })
+    const button = wrapper.findAll('button').find(b => b.text() === 'admin.accounts.syncUpstreamModels')!
+    await button.trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    expect(wrapper.emitted('upstream-synced')).toBeUndefined()
+    expect(wrapper.emitted('upstream-sync-finished')).toBeUndefined()
+    expect(showWarning).toHaveBeenCalledWith('admin.accounts.grokModelDiagnostics.configuredFallback')
+    expect(showSuccess).not.toHaveBeenCalled()
+  })
+
+  it('emits completion when a saved account sync fails so the last attempt can refresh', async () => {
+    syncUpstreamModels.mockRejectedValue({
+      status: 502,
+      message: 'upstream unavailable'
+    })
+    const wrapper = mountSelector({ platform: 'grok', accountId: 46, modelValue: ['grok-4.7'] })
+    const button = wrapper.findAll('button').find(b => b.text() === 'admin.accounts.syncUpstreamModels')!
+    await button.trigger('click')
+    await flushPromises()
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    expect(showError).toHaveBeenCalled()
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(wrapper.emitted('upstream-sync-finished')).toHaveLength(1)
+  })
+
   it('shows the upstream sync button for OpenCode Go create-account credentials', () => {
     const wrapper = mountSelector({
       platform: 'opencode_go',
