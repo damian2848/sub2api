@@ -948,7 +948,10 @@
               {{ t(imagePricingI18nKey(createForm.platform, "independentMultiplier")) }}
             </label>
             <label
-              v-if="createForm.platform === 'composite' || createForm.platform === 'openai'"
+              v-if="
+                createForm.allow_image_generation &&
+                (createForm.platform === 'composite' || createForm.platform === 'openai')
+              "
               class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300"
             >
               <input
@@ -2610,7 +2613,10 @@
               {{ t(imagePricingI18nKey(editForm.platform, "independentMultiplier")) }}
             </label>
             <label
-              v-if="editForm.platform === 'composite' || editForm.platform === 'openai'"
+              v-if="
+                editForm.allow_image_generation &&
+                (editForm.platform === 'composite' || editForm.platform === 'openai')
+              "
               class="flex items-center gap-2 text-sm text-gray-700 dark:text-gray-300"
             >
               <input

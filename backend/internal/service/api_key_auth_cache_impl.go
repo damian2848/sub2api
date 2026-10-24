@@ -14,7 +14,7 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
-const apiKeyAuthSnapshotVersion = 27 // v27: include API key concurrency limit; retain stream_only and user-group denied models
+const apiKeyAuthSnapshotVersion = 28 // v28: group image_count_billing switch; v27: include API key concurrency limit; retain stream_only and user-group denied models
 
 type apiKeyAuthCacheConfig struct {
 	l1Size        int
