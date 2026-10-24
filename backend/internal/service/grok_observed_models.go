@@ -43,7 +43,12 @@ func (s *GrokQuotaService) scheduleGrokObservedModelsSync(account *Account) {
 		ctx, cancel := context.WithTimeout(context.Background(), grokObservedModelsTimeout)
 		defer cancel()
 		if err := s.syncGrokObservedModels(ctx, &acc); err != nil {
-			slog.Debug("grok_observed_models_sync_failed", "account_id", id, "error", err)
+			kind, statusCode := grokObservedModelsSyncLogFields(err)
+			slog.Debug("grok_observed_models_sync_failed",
+				"account_id", id,
+				"error_kind", kind,
+				"status_code", statusCode,
+			)
 		}
 	}()
 }
@@ -241,6 +246,14 @@ func grokCatalogScopeFromRequest(account *Account, req *http.Request) *GrokCatal
 		return nil
 	}
 	return scope
+}
+
+func grokObservedModelsSyncLogFields(err error) (string, int) {
+	var syncErr *UpstreamModelSyncError
+	if errors.As(err, &syncErr) {
+		return string(syncErr.Kind), syncErr.StatusCode
+	}
+	return "transport", 0
 }
 
 func grokCatalogErrorCode(err error) string {

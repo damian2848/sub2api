@@ -816,16 +816,17 @@ func (s *AccountTestService) fetchUpstreamModelListRequest(ctx context.Context, 
 	if account.IsExcelBPSEnabled() && s.openaiGatewayService != nil {
 		response, err := s.openaiGatewayService.FetchOpenAIModelsList(ctx, account)
 		if err != nil {
-			return nil, nil, newUpstreamModelSyncUpstreamError("Excel BPS model discovery failed", err)
+			return nil, nil, nil, newUpstreamModelSyncUpstreamError("Excel BPS model discovery failed", err)
 		}
 		models, _, err := extractUpstreamModelCatalog(response.Body, false)
 		if err != nil {
-			return nil, nil, newUpstreamModelSyncUpstreamError("Invalid Excel BPS model catalog", err)
+			return nil, nil, nil, newUpstreamModelSyncUpstreamError("Invalid Excel BPS model catalog", err)
 		}
-		return models, response.Body, nil
+		return models, response.Body, nil, nil
 	}
 	if account.IsGeminiWeb() {
-		return s.fetchGeminiWebUpstreamModels(ctx, account)
+		models, body, err := s.fetchGeminiWebUpstreamModels(ctx, account)
+		return models, body, nil, err
 	}
 
 	if s.httpUpstream == nil {

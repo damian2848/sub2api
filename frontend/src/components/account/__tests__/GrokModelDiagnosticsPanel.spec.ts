@@ -226,6 +226,60 @@ describe('GrokModelDiagnosticsPanel', () => {
     expect(text).not.toContain('当前有效')
   })
 
+  it.each([
+    '2026-02-29T12:00:00Z',
+    '2026-02-30T12:00:00Z',
+    '2026-10-25T24:00:00Z',
+    '2026-10-25T12:60:00Z',
+    '2026-10-25T12:00:60Z',
+    '2026-10-25T12:00:00+24:00',
+    '2026-10-25T12:00:00+08:60'
+  ])('does not present an impossible catalog time %s as a successful observation', (invalid) => {
+    vi.useFakeTimers()
+    vi.setSystemTime(START)
+    const normalized = formatDateTime(invalid)
+    const wrapper = track(mountPanel({
+      diagnostics: freshDiagnostics({
+        state: 'fresh',
+        fetched_at: invalid,
+        expires_at: invalid,
+        mappings: [
+          { requested: 'composer-2.5', upstream: 'grok-composer-2.5-fast', status: 'not_listed' }
+        ]
+      })
+    }))
+    const text = wrapper.text()
+    expect(text).toContain('未知')
+    expect(text).not.toContain(invalid)
+    if (normalized) expect(text).not.toContain(normalized)
+    expect(text).not.toContain(NOT_LISTED_ZH)
+    expect(text).not.toContain('当前有效')
+    expect(text).not.toContain('历史目录')
+    expect(text).not.toContain('来源已变更')
+  })
+
+  it('keeps a real leap day, numeric offset, and fractional second as the last success', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(START)
+    const leapDay = '2024-02-29T23:30:00.5+08:00'
+    const expiresAt = '2026-10-25T20:00:00.123+08:00'
+    const wrapper = track(mountPanel({
+      diagnostics: freshDiagnostics({
+        state: 'fresh',
+        fetched_at: leapDay,
+        expires_at: expiresAt,
+        mappings: [
+          { requested: 'composer-2.5', upstream: 'grok-composer-2.5-fast', status: 'not_listed' }
+        ]
+      })
+    }))
+    const text = wrapper.text()
+    expect(text).toContain('当前有效')
+    expect(text).toContain(formatDateTime(leapDay))
+    expect(text).toContain(NOT_LISTED_ZH)
+    expect(text).not.toContain('未知')
+  })
+
   it('does not present a future fetched_at echo as a successful observation', () => {
     vi.useFakeTimers()
     vi.setSystemTime(START)

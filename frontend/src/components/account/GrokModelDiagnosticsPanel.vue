@@ -119,7 +119,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 const nowMs = ref(Date.now())
-const RFC3339_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
+const RFC3339_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/
 let timer: ReturnType<typeof setInterval> | undefined
 
 onMounted(() => {
@@ -132,11 +132,35 @@ onBeforeUnmount(() => {
   if (timer !== undefined) clearInterval(timer)
 })
 
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0
+    return leap ? 29 : 28
+  }
+  return [31, 0, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] ?? 0
+}
+
 function parseCatalogTime(value: string | undefined): number | null {
   if (!value) return null
-  const trimmed = value.trim()
-  if (!RFC3339_RE.test(trimmed)) return null
-  const parsed = Date.parse(trimmed)
+  const match = RFC3339_RE.exec(value.trim())
+  if (!match) return null
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6])
+  const offsetHour = match[7] === undefined ? 0 : Number(match[7])
+  const offsetMinute = match[8] === undefined ? 0 : Number(match[8])
+  if (
+    month < 1 || month > 12 ||
+    day < 1 || day > daysInMonth(year, month) ||
+    hour > 23 || minute > 59 || second > 59 ||
+    offsetHour > 23 || offsetMinute > 59
+  ) {
+    return null
+  }
+  const parsed = Date.parse(match[0])
   return Number.isFinite(parsed) ? parsed : null
 }
 
