@@ -239,6 +239,7 @@ func TestGrokCatalogPersistCancelStopsImmediately(t *testing.T) {
 	t.Run("already canceled", func(t *testing.T) {
 		t.Parallel()
 		repo := newGrokCatalogMemoryRepo(grokCatalogPersistAccount())
+		repo.writesWithoutContextCheck = true
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
@@ -248,11 +249,13 @@ func TestGrokCatalogPersistCancelStopsImmediately(t *testing.T) {
 		require.ErrorIs(t, err, context.Canceled)
 		require.Zero(t, repo.getCalls)
 		require.Zero(t, repo.casCalls)
+		require.Equal(t, []string{"kept"}, parseGrokObservedModels(repo.account.Extra).Models)
 	})
 
 	t.Run("canceled between attempts", func(t *testing.T) {
 		t.Parallel()
 		repo := newGrokCatalogMemoryRepo(grokCatalogPersistAccount())
+		repo.writesWithoutContextCheck = true
 		repo.conflictsRemaining = 3
 		ctx, cancel := context.WithCancel(context.Background())
 		repo.afterCAS = func() { cancel() }
@@ -445,15 +448,16 @@ func (r *grokCatalogMismatchedIDRepo) GetByID(ctx context.Context, id int64) (*A
 // grokCatalogMemoryRepo is the thread-safe account fixture shared with later catalog persistence tests.
 type grokCatalogMemoryRepo struct {
 	AccountRepository
-	mu                 sync.Mutex
-	account            *Account
-	deleted            bool
-	getCalls           int
-	casCalls           int
-	updateExtraCalls   int
-	conflictsRemaining int
-	onConflict         func(*Account)
-	afterCAS           func()
+	mu                        sync.Mutex
+	account                   *Account
+	deleted                   bool
+	getCalls                  int
+	casCalls                  int
+	updateExtraCalls          int
+	conflictsRemaining        int
+	writesWithoutContextCheck bool
+	onConflict                func(*Account)
+	afterCAS                  func()
 }
 
 func newGrokCatalogMemoryRepo(account *Account) *grokCatalogMemoryRepo {
@@ -461,8 +465,10 @@ func newGrokCatalogMemoryRepo(account *Account) *grokCatalogMemoryRepo {
 }
 
 func (r *grokCatalogMemoryRepo) GetByID(ctx context.Context, id int64) (*Account, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if !r.writesWithoutContextCheck {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -493,8 +499,10 @@ func (r *grokCatalogMemoryRepo) UpdateExtra(ctx context.Context, id int64, updat
 }
 
 func (r *grokCatalogMemoryRepo) CompareAndSwapGrokObservedModels(ctx context.Context, id int64, expected, next json.RawMessage) (bool, error) {
-	if err := ctx.Err(); err != nil {
-		return false, err
+	if !r.writesWithoutContextCheck {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 	}
 	expectedJSON, err := normalizeGrokCatalogMemoryJSON(expected)
 	if err != nil {

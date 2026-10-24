@@ -155,6 +155,45 @@ func TestGrokCatalogCASUsesTransactionClientAndSkipsCache(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestGrokCatalogCASAppliesOnCallerTransactionNotBaseClient(t *testing.T) {
+	t.Parallel()
+
+	nextJSON := jsonRaw(`{"models":["grok-4.7"]}`)
+	baseDB, baseMock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = baseDB.Close() })
+	baseClient := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, baseDB)))
+	t.Cleanup(func() { _ = baseClient.Close() })
+
+	txDB, txMock, err := sqlmock.New()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = txDB.Close() })
+	txClient := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, txDB)))
+	t.Cleanup(func() { _ = txClient.Close() })
+	txMock.ExpectBegin()
+	tx, err := txClient.Tx(context.Background())
+	require.NoError(t, err)
+	txMock.ExpectExec(regexp.QuoteMeta(grokCatalogCASQuery)).
+		WithArgs(int64(25), "null", string(nextJSON)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	exec := &recordingSQLExecutor{err: errors.New("must use transaction client")}
+	cache := &grokCatalogCacheSpy{}
+	repo := newAccountRepositoryWithSQL(baseClient, exec, cache)
+
+	applied, err := repo.CompareAndSwapGrokObservedModels(dbent.NewTxContext(context.Background(), tx), 25, nil, nextJSON)
+
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.Empty(t, exec.execQueries)
+	require.Zero(t, cache.setAccounts)
+	require.Zero(t, cache.bucketOps)
+	require.NoError(t, baseMock.ExpectationsWereMet())
+	txMock.ExpectRollback()
+	require.NoError(t, tx.Rollback())
+	require.NoError(t, txMock.ExpectationsWereMet())
+}
+
 func TestGrokCatalogCASRefreshesSingleAccountOutsideTransaction(t *testing.T) {
 	t.Parallel()
 
