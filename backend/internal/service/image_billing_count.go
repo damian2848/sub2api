@@ -2,14 +2,11 @@ package service
 
 // resolveBillableImageCount 决定一次图片请求按几张计费。
 //
-// 优先使用上游实际返回的图片张数；流式解析、兼容上游未返回 data 等情况下
-// 拿不到实际张数时，回退到客户端请求的 n，避免 n>1 的请求被按 0 张或 1 张漏计。
-func resolveBillableImageCount(reported, requested int) int {
+// 官方多图响应没有 n 字段，只以响应体 data/output 中实际返回的图片为准。
+// 解析不到张数时按单张兜底，避免已成功出图的请求完全漏计。
+func resolveBillableImageCount(reported int) int {
 	if reported > 0 {
 		return reported
-	}
-	if requested > 0 {
-		return requested
 	}
 	return 1
 }
