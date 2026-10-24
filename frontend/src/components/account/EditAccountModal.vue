@@ -361,9 +361,17 @@
               @sync="syncGrokDiagnostics"
             />
 
+            <ModelWhitelistSelector
+              v-show="modelRestrictionMode === 'whitelist'"
+              v-model="allowedModels"
+              :model-mappings="modelMappings"
+              :platform="account?.platform || 'anthropic'"
+              :account-id="account?.id"
+              @upstream-sync-finished="refreshGrokDiagnostics"
+            />
+
             <!-- Whitelist Mode -->
             <div v-if="modelRestrictionMode === 'whitelist'">
-              <ModelWhitelistSelector v-model="allowedModels" :model-mappings="modelMappings" :platform="account?.platform || 'anthropic'" :account-id="account?.id" @upstream-sync-finished="refreshGrokDiagnostics" />
               <p class="text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
                 <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{
@@ -917,9 +925,17 @@
             @sync="syncGrokDiagnostics"
           />
 
+          <ModelWhitelistSelector
+            v-show="modelRestrictionMode === 'whitelist'"
+            v-model="allowedModels"
+            :model-mappings="modelMappings"
+            :platform="account?.platform || 'anthropic'"
+            :account-id="account?.id"
+            @upstream-sync-finished="refreshGrokDiagnostics"
+          />
+
           <!-- Whitelist Mode -->
           <div v-if="modelRestrictionMode === 'whitelist'">
-            <ModelWhitelistSelector v-model="allowedModels" :model-mappings="modelMappings" :platform="account?.platform || 'anthropic'" :account-id="account?.id" @upstream-sync-finished="refreshGrokDiagnostics" />
             <p class="text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
               <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{

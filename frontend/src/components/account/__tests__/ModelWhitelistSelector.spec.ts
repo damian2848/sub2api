@@ -69,6 +69,16 @@ vi.mock('@/composables/useClipboard', () => ({
 
 import ModelWhitelistSelector from '../ModelWhitelistSelector.vue'
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done
+    reject = fail
+  })
+  return { promise, resolve, reject }
+}
+
 function mountSelector(props: Record<string, unknown> = {}) {
   return mount(ModelWhitelistSelector, {
     props: {
@@ -82,6 +92,10 @@ function mountSelector(props: Record<string, unknown> = {}) {
       }
     }
   })
+}
+
+function syncButton(wrapper: ReturnType<typeof mountSelector>) {
+  return wrapper.get('[data-testid="sync-upstream-models"]')
 }
 
 function findModelRow(wrapper: ReturnType<typeof mountSelector>, modelId: string) {
@@ -658,5 +672,75 @@ describe('ModelWhitelistSelector', () => {
     release({ success: true, answer: '21' })
     await flushPromises()
     expect(wrapper.findAll('[data-testid="model-iq-test-status"]')).toHaveLength(0)
+  })
+
+  it('does not apply an older account sync to the current draft or clear its loading', async () => {
+    const first = deferred<any>()
+    const second = deferred<any>()
+    syncUpstreamModels.mockImplementation((id: number) => (id === 1 ? first.promise : second.promise))
+    const wrapper = mountSelector({ platform: 'grok', accountId: 1, modelValue: ['a-local'] })
+    await syncButton(wrapper).trigger('click')
+    expect((syncButton(wrapper).element as HTMLButtonElement).disabled).toBe(true)
+
+    await wrapper.setProps({ accountId: 2, modelValue: ['b-local'] })
+    expect((syncButton(wrapper).element as HTMLButtonElement).disabled).toBe(false)
+    await syncButton(wrapper).trigger('click')
+    expect(syncUpstreamModels).toHaveBeenNthCalledWith(1, 1)
+    expect(syncUpstreamModels).toHaveBeenNthCalledWith(2, 2)
+    expect((syncButton(wrapper).element as HTMLButtonElement).disabled).toBe(true)
+
+    first.resolve({ models: ['a-private-catalog'], discovery_source: 'upstream' })
+    await flushPromises()
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(showWarning).not.toHaveBeenCalled()
+    expect(showError).not.toHaveBeenCalled()
+    expect(wrapper.emitted('upstream-sync-finished')).toBeUndefined()
+    expect((syncButton(wrapper).element as HTMLButtonElement).disabled).toBe(true)
+
+    second.resolve({ models: ['b-catalog'], discovery_source: 'upstream' })
+    await flushPromises()
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['b-local', 'b-catalog']]])
+    expect(showSuccess).toHaveBeenCalledTimes(1)
+    expect(wrapper.emitted('upstream-sync-finished')).toHaveLength(1)
+    expect((syncButton(wrapper).element as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('does not toast or finish an older account sync that fails during a newer sync', async () => {
+    const first = deferred<any>()
+    const second = deferred<any>()
+    syncUpstreamModels.mockImplementation((id: number) => (id === 1 ? first.promise : second.promise))
+    const wrapper = mountSelector({ platform: 'grok', accountId: 1, modelValue: ['a-local'] })
+    await syncButton(wrapper).trigger('click')
+    await wrapper.setProps({ accountId: 2, modelValue: ['b-local'] })
+    await syncButton(wrapper).trigger('click')
+
+    first.reject({ message: 'old account failure' })
+    await flushPromises()
+    expect(showError).not.toHaveBeenCalled()
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    expect(wrapper.emitted('upstream-sync-finished')).toBeUndefined()
+    expect((syncButton(wrapper).element as HTMLButtonElement).disabled).toBe(true)
+
+    second.reject({ message: 'current failure' })
+    await flushPromises()
+    expect(showError).toHaveBeenCalledTimes(1)
+    expect(wrapper.emitted('upstream-sync-finished')).toHaveLength(1)
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    expect((syncButton(wrapper).element as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('does not toast when a saved sync fails after the selector is destroyed', async () => {
+    const pending = deferred<any>()
+    syncUpstreamModels.mockReturnValue(pending.promise)
+    const wrapper = mountSelector({ platform: 'grok', accountId: 46, modelValue: ['grok-4.7'] })
+    await syncButton(wrapper).trigger('click')
+    wrapper.unmount()
+    pending.reject({ message: 'old account failure' })
+    await flushPromises()
+    expect(showError).not.toHaveBeenCalled()
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(showWarning).not.toHaveBeenCalled()
   })
 })

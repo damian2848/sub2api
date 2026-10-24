@@ -59,7 +59,11 @@ vi.mock('@/api/admin', () => ({
 }))
 
 vi.mock('@/api/admin/accounts', () => ({
-  getAntigravityDefaultModelMapping: vi.fn()
+  getAntigravityDefaultModelMapping: vi.fn(),
+  accountsAPI: {
+    syncUpstreamModels: syncUpstreamModelsMock,
+    syncUpstreamModelsPreview: vi.fn()
+  }
 }))
 
 vi.mock('vue-i18n', async () => {
@@ -164,6 +168,30 @@ function mountModal(account: any) {
         ProxySelector: true,
         GroupSelector: true,
         ModelWhitelistSelector: ModelWhitelistSelectorStub
+      }
+    }
+  })
+  mounted.push(wrapper)
+  return wrapper
+}
+
+function mountLiveSelectorModal(account: any) {
+  const wrapper = mount(EditAccountModal, {
+    props: {
+      show: true,
+      account,
+      proxies: [],
+      groups: []
+    },
+    global: {
+      stubs: {
+        BaseDialog: BaseDialogStub,
+        Select: true,
+        Icon: true,
+        ProxySelector: true,
+        GroupSelector: true,
+        ModelWhitelistSelector: false,
+        ModelIcon: true
       }
     }
   })
@@ -715,5 +743,95 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     await expectSyncRecovered(wrapper, selectorGet, 'after-sync-model')
     expect(showErrorMock).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsError')
     expect(showSuccessMock).not.toHaveBeenCalled()
+  })
+
+  it('does not append an older account sync result to the current whitelist or toast its success', async () => {
+    const pending = deferred<any>()
+    syncUpstreamModelsMock.mockReturnValue(pending.promise)
+    const accountA = buildGrokOAuthAccount({ model_mapping: { 'a-local': 'a-local' } })
+    const accountB = { ...buildGrokOAuthAccount({ model_mapping: { 'b-local': 'b-local' } }), id: 9 }
+    const wrapper = mountLiveSelectorModal(accountA)
+    await flushPromises()
+    await wrapper.get('[data-testid="sync-upstream-models"]').trigger('click')
+    await wrapper.setProps({ account: accountB })
+    await flushPromises()
+    const getsAfterSwitch = getByIdMock.mock.calls.length
+    showSuccessMock.mockClear()
+    showWarningMock.mockClear()
+    showErrorMock.mockClear()
+
+    pending.resolve({ models: ['a-private-catalog'], discovery_source: 'upstream' })
+    await flushPromises()
+
+    const selector = wrapper.findComponent({ name: 'ModelWhitelistSelector' })
+    expect(selector.props('modelValue')).toEqual(['b-local'])
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect(showWarningMock).not.toHaveBeenCalled()
+    expect(showErrorMock).not.toHaveBeenCalled()
+    expect(getByIdMock.mock.calls.length).toBe(getsAfterSwitch)
+  })
+
+  async function editMappingDuringLiveWhitelistSync() {
+    const pending = deferred<any>()
+    syncUpstreamModelsMock.mockReturnValue(pending.promise)
+    getByIdMock.mockResolvedValue({ grok_model_diagnostics: diagnostics('before-sync') })
+    const account = buildGrokOAuthAccount({
+      model_mapping: { friendly: 'grok-4.7', 'keep-local': 'keep-local' }
+    })
+    const wrapper = mountLiveSelectorModal(account)
+    await flushPromises()
+    const getsAfterOpen = getByIdMock.mock.calls.length
+    await wrapper.get('[data-testid="sync-upstream-models"]').trigger('click')
+    await wrapper.findAll('button').find((button) => button.text() === 'admin.accounts.modelMapping')!.trigger('click')
+    const draft = wrapper.get('input[placeholder="admin.accounts.actualModel"]')
+    await draft.setValue('grok-4.5')
+    return { wrapper, pending, getsAfterOpen, draft }
+  }
+
+  it('refreshes persisted diagnostics after a whitelist sync when switching to mapping without changing the mapping draft', async () => {
+    const { wrapper, pending, getsAfterOpen, draft } = await editMappingDuringLiveWhitelistSync()
+    getByIdMock.mockResolvedValue({ grok_model_diagnostics: diagnostics('after-selector-sync') })
+    pending.resolve({ models: ['new-catalog-id'], discovery_source: 'upstream' })
+    await flushPromises()
+
+    expect(getByIdMock.mock.calls.length).toBe(getsAfterOpen + 1)
+    expect(wrapper.text()).toContain('after-selector-sync')
+    expect(wrapper.text()).not.toContain('before-sync')
+    expect((draft.element as HTMLInputElement).value).toBe('grok-4.5')
+    expect(JSON.stringify(wrapper.props('account').credentials.model_mapping)).not.toContain('new-catalog-id')
+  })
+
+  it('refreshes persisted diagnostics when a whitelist sync fails after switching to mapping', async () => {
+    const { wrapper, pending, getsAfterOpen, draft } = await editMappingDuringLiveWhitelistSync()
+    getByIdMock.mockResolvedValue({ grok_model_diagnostics: diagnostics('persisted-failure') })
+    pending.reject({ message: 'selector failed' })
+    await flushPromises()
+
+    expect(getByIdMock.mock.calls.length).toBe(getsAfterOpen + 1)
+    expect(wrapper.text()).toContain('persisted-failure')
+    expect(wrapper.text()).not.toContain('before-sync')
+    expect(showErrorMock).toHaveBeenCalled()
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect((draft.element as HTMLInputElement).value).toBe('grok-4.5')
+  })
+
+  it('does not toast a selector error after the editor is closed and reopened', async () => {
+    const pending = deferred<any>()
+    syncUpstreamModelsMock.mockReturnValue(pending.promise)
+    const wrapper = mountLiveSelectorModal(buildGrokOAuthAccount())
+    await flushPromises()
+    await wrapper.get('[data-testid="sync-upstream-models"]').trigger('click')
+    await wrapper.setProps({ show: false })
+    await wrapper.setProps({ show: true })
+    await flushPromises()
+    showErrorMock.mockClear()
+    showSuccessMock.mockClear()
+    showWarningMock.mockClear()
+
+    pending.reject({ message: 'old account failure' })
+    await flushPromises()
+    expect(showErrorMock).not.toHaveBeenCalled()
+    expect(showSuccessMock).not.toHaveBeenCalled()
+    expect(showWarningMock).not.toHaveBeenCalled()
   })
 })
