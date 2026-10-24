@@ -409,6 +409,100 @@ func TestGrokResponseAuditConvertedAggregateKeepsNonGrokTerminalOnly(t *testing.
 	})
 }
 
+func TestGrokResponseAuditAggregatePriorStateStaysBounded(t *testing.T) {
+	const repeats = 48
+	overlong := strings.Repeat("界", upstreamResponseModelMaxLength+50)
+	late := "grok-late-distinct"
+	wantModel := string([]rune(overlong)[:upstreamResponseModelMaxLength])
+	grok := grokAuditAPIKeyAccount(89301)
+	other := &Account{ID: 89302, Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+
+	t.Run("repeated-declarations", func(t *testing.T) {
+		terminal, prior := grokAuditReadBufferedPriors(t, grok, grokAuditPriorModelSSE(repeats, overlong, late, overlong))
+		require.Equal(t, wantModel, prior.observer.first)
+		require.LessOrEqual(t, len([]rune(prior.observer.first)), upstreamResponseModelMaxLength)
+		require.Empty(t, prior.observer.terminal)
+		require.True(t, prior.observer.conflict)
+		observer := &upstreamResponseModelObserver{}
+		prior.apply(observer)
+		observer.Observe(terminal, true)
+		require.Equal(t, wantModel, observer.Model())
+		require.True(t, observer.Conflict())
+	})
+
+	t.Run("overlong-model", func(t *testing.T) {
+		_, prior := grokAuditReadBufferedPriors(t, grok, grokAuditPriorModelSSE(1, overlong, "", ""))
+		require.Equal(t, wantModel, prior.observer.first)
+		require.LessOrEqual(t, len([]rune(prior.observer.first)), upstreamResponseModelMaxLength)
+		require.False(t, prior.observer.conflict)
+	})
+
+	t.Run("overlong-shared-prefix", func(t *testing.T) {
+		diverged := wantModel + strings.Repeat("外", 50)
+		_, prior := grokAuditReadBufferedPriors(t, grok, grokAuditPriorModelSSE(repeats, overlong, diverged, ""))
+		require.Equal(t, wantModel, prior.observer.first)
+		require.LessOrEqual(t, len([]rune(prior.observer.first)), upstreamResponseModelMaxLength)
+		require.False(t, prior.observer.conflict)
+	})
+
+	t.Run("non-grok-skips-collection", func(t *testing.T) {
+		terminal, prior := grokAuditReadBufferedPriors(t, other, grokAuditPriorModelSSE(repeats, "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.4"))
+		require.False(t, prior.enabled)
+		require.Empty(t, prior.observer.first)
+		require.False(t, prior.observer.conflict)
+		observer := &upstreamResponseModelObserver{}
+		prior.apply(observer)
+		observer.Observe(terminal, true)
+		require.Equal(t, "gpt-5.4", observer.Model())
+		require.False(t, observer.Conflict())
+	})
+
+	t.Run("entries", func(t *testing.T) {
+		sse := grokAuditPriorModelSSE(repeats, overlong, late, overlong)
+		for i, entry := range []string{"chat-bridge", "messages"} {
+			t.Run(entry, func(t *testing.T) {
+				result, client := grokAuditRunConvertedAggregate(t, entry, 89310+int64(i), sse)
+				require.False(t, result.Stream)
+				require.Equal(t, wantModel, result.UpstreamResponseModel)
+				require.True(t, result.UpstreamResponseModelConflict)
+				require.Equal(t, "grok-4.7", gjson.Get(client, "model").String())
+				require.NotContains(t, client, late)
+				require.NotContains(t, client, wantModel)
+			})
+		}
+	})
+}
+
+func grokAuditReadBufferedPriors(t *testing.T, account *Account, sse string) (string, openAICompatPriorModelAudit) {
+	t.Helper()
+	c, _ := grokAuditContext("/v1/messages")
+	resp := grokAuditHTTPResponse("text/event-stream", sse)
+	response, _, _, prior, err := (&OpenAIGatewayService{}).readOpenAICompatBufferedTerminal(resp, c, account, "openai messages buffered", "req-bound")
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	return response.Model, prior
+}
+
+func grokAuditPriorModelSSE(repeats int, repeated, late, terminal string) string {
+	var b strings.Builder
+	for i := 0; i < repeats; i++ {
+		if repeated == "" {
+			break
+		}
+		fmt.Fprintf(&b, "data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_audit\",\"model\":%q,\"output\":[]}}\n\n", repeated)
+	}
+	if late != "" {
+		fmt.Fprintf(&b, "data: {\"type\":\"response.in_progress\",\"response\":{\"id\":\"resp_audit\",\"model\":%q,\"output\":[]}}\n\n", late)
+	}
+	b.WriteString("data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")
+	completed := `{"id":"resp_audit","object":"response","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":2,"output_tokens":1}}`
+	if terminal != "" {
+		completed = fmt.Sprintf(`{"id":"resp_audit","object":"response","model":%q,"status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":2,"output_tokens":1}}`, terminal)
+	}
+	b.WriteString("data: {\"type\":\"response.completed\",\"response\":" + completed + "}\n\n")
+	return b.String()
+}
+
 func grokAuditRunConvertedAggregate(t *testing.T, entry string, id int64, sse string) (*OpenAIForwardResult, string) {
 	t.Helper()
 	switch entry {
