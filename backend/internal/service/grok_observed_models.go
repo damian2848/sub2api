@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -20,11 +19,7 @@ const (
 	grokObservedModelsTimeout  = 15 * time.Second
 )
 
-type grokObservedModelsSnapshot struct {
-	Models    []string `json:"models"`
-	FetchedAt string   `json:"fetched_at"`
-	Source    string   `json:"source,omitempty"`
-}
+type grokObservedModelsSnapshot = GrokObservedModelsSnapshot
 
 var grokObservedModelsFlight sync.Map // accountID -> *singleflight-ish in-flight
 
@@ -127,7 +122,10 @@ func (s *GrokQuotaService) syncGrokObservedModels(ctx context.Context, account *
 	if resp.StatusCode >= 400 {
 		return nil
 	}
-	ids := extractGrokModelIDsFromModelsBody(body)
+	ids, err := extractGrokModelIDsFromModelsBody(body)
+	if err != nil {
+		return err
+	}
 	if len(ids) == 0 {
 		return nil
 	}
@@ -149,30 +147,8 @@ func (s *GrokQuotaService) syncGrokObservedModels(ctx context.Context, account *
 	})
 }
 
-func extractGrokModelIDsFromModelsBody(body []byte) []string {
-	data := gjson.GetBytes(body, "data")
-	if !data.IsArray() {
-		// Some gateways return a bare array.
-		data = gjson.ParseBytes(body)
-	}
-	seen := make(map[string]struct{})
-	var out []string
-	data.ForEach(func(_, v gjson.Result) bool {
-		id := strings.TrimSpace(v.Get("id").String())
-		if id == "" {
-			id = strings.TrimSpace(v.String())
-		}
-		if id == "" {
-			return true
-		}
-		if _, ok := seen[id]; ok {
-			return true
-		}
-		seen[id] = struct{}{}
-		out = append(out, id)
-		return true
-	})
-	return out
+func extractGrokModelIDsFromModelsBody(body []byte) ([]string, error) {
+	return parseGrokCatalogModelIDs(body)
 }
 
 func parseGrokObservedModels(extra map[string]any) *grokObservedModelsSnapshot {
@@ -191,7 +167,7 @@ func parseGrokObservedModels(extra map[string]any) *grokObservedModelsSnapshot {
 	if err := json.Unmarshal(b, &snap); err != nil {
 		return nil
 	}
-	if len(snap.Models) == 0 {
+	if len(snap.Models) == 0 && snap.LastAttempt == nil {
 		return nil
 	}
 	return &snap
