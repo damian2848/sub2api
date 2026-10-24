@@ -15,6 +15,7 @@ var observerAccountRoutes = map[string]struct{}{
 	"DELETE /api/v1/admin/scheduled-test-plans/:id":                  {},
 	"GET /api/v1/admin/scheduled-test-plans/:id/results":             {},
 	"GET /api/v1/admin/scheduled-test-plans/:id/results/:resultID":   {},
+	"GET /api/v1/admin/accounts/family-groups":                       {},
 	"GET /api/v1/admin/accounts/management-capabilities":             {},
 	"GET /api/v1/admin/accounts":                                     {},
 	"GET /api/v1/admin/accounts/upstream-billing-rates":              {},

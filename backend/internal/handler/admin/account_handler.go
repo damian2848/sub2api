@@ -200,6 +200,7 @@ type BulkUpdateAccountsRequest struct {
 }
 
 type BulkUpdateAccountFilters struct {
+	FamilyGroup string `json:"family_group"`
 	Platform    string `json:"platform"`
 	Type        string `json:"type"`
 	Status      string `json:"status"`
@@ -693,6 +694,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 	status := c.Query("status")
 	search := c.Query("search")
 	privacyMode := strings.TrimSpace(c.Query("privacy_mode"))
+	c.Request = c.Request.WithContext(service.WithAccountFamilyGroupFilter(c.Request.Context(), c.Query("family_group")))
 	sortBy := c.DefaultQuery("sort_by", "name")
 	sortOrder := c.DefaultQuery("sort_order", "asc")
 	// 标准化和验证 search 参数
@@ -2534,6 +2536,7 @@ func toServiceBulkUpdateAccountFilters(filters *BulkUpdateAccountFilters) *servi
 		Group:       filters.Group,
 		Search:      filters.Search,
 		PrivacyMode: filters.PrivacyMode,
+		FamilyGroup: filters.FamilyGroup,
 	}
 }
 

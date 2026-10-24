@@ -8,6 +8,7 @@
             v-model:searchQuery="params.search"
             :filters="params"
             :groups="groups"
+            :family-groups="familyGroups"
             @update:filters="(newFilters) => Object.assign(params, newFilters)"
             @change="debouncedReload"
             @update:searchQuery="debouncedReload"
@@ -250,6 +251,12 @@
               >
                 {{ accountDisplayEmail(row) }}
               </span>
+              <button
+                v-if="row.extra?.family_group" type="button" data-testid="family-group-badge"
+                class="mt-1 max-w-[200px] self-start truncate rounded-full bg-violet-50 px-2 py-0.5 text-xs text-violet-700 hover:bg-violet-100 dark:bg-violet-900/30 dark:text-violet-300"
+                :title="t('admin.accounts.familyGroupFilter', { name: row.extra.family_group })"
+                @click="params.family_group = row.extra.family_group; clearSelection(); reload()"
+              >{{ t('admin.accounts.familyGroup') }} · {{ row.extra.family_group }}</button>
               <ExcelBPS403Badge :account="row" :groups="accountGroupsForRow(row)" :global-bps-enabled="appStore.cachedPublicSettings?.excel_bps_enabled !== false" />
             </div>
           </template>
@@ -572,6 +579,14 @@ const loadConcurrencyUpgradeState = async () => {
 
 const proxies = ref<AccountProxy[]>([])
 const groups = ref<AdminGroup[]>([])
+const familyGroups = ref<import('@/api/admin/accounts').AccountFamilyGroup[]>([])
+const loadFamilyGroups = async () => {
+  try {
+    familyGroups.value = await adminAPI.accounts.listFamilyGroups()
+  } catch {
+    // Keep the last options available during a transient refresh failure.
+  }
+}
 const groupsByID = computed(() => new Map(groups.value.map(group => [group.id, group])))
 const accountGroupsForRow = (account: Pick<AccountListItem, 'group_ids'>): AdminGroup[] => {
   const groupIDs = account.group_ids ?? []
@@ -595,6 +610,7 @@ type AccountBulkEditTarget =
         status?: string
         group?: string
         search?: string
+        family_group?: string
         privacy_mode?: string
         sort_by?: string
         sort_order?: AccountSortOrder
@@ -1154,6 +1170,7 @@ const {
   initialParams: {
     ...loadInitialAccountFilterValues(),
     type: '',
+    family_group: '',
     privacy_mode: '',
     group: '',
     search: '',
@@ -1242,7 +1259,7 @@ const reload = async () => {
   hasPendingListSync.value = false
   resetAutoRefreshCache()
   pendingTodayStatsRefresh.value = false
-  await Promise.all([baseReload(), loadConcurrencyUpgradeState()])
+  await Promise.all([baseReload(), loadConcurrencyUpgradeState(), loadFamilyGroups()])
   await refreshTodayStatsBatch()
 }
 
@@ -1254,6 +1271,7 @@ const buildUpstreamBillingRateFilters = () => {
     status: typeof rawParams.status === 'string' ? rawParams.status : '',
     group: typeof rawParams.group === 'string' ? rawParams.group : '',
     search: typeof rawParams.search === 'string' ? rawParams.search : '',
+    family_group: typeof rawParams.family_group === 'string' ? rawParams.family_group : '',
     privacy_mode: typeof rawParams.privacy_mode === 'string' ? rawParams.privacy_mode : '',
     sort_by: sortState.sort_by,
     sort_order: sortState.sort_order
@@ -1551,6 +1569,7 @@ const refreshAccountsIncrementally = async () => {
         platform?: string
         type?: string
         status?: string
+        family_group?: string
         privacy_mode?: string
         group?: string
         search?: string
@@ -2157,6 +2176,7 @@ const buildBulkEditFilterSnapshot = () => {
     status: typeof rawParams.status === 'string' ? rawParams.status : '',
     group: typeof rawParams.group === 'string' ? rawParams.group : '',
     search: typeof rawParams.search === 'string' ? rawParams.search : '',
+    family_group: typeof rawParams.family_group === 'string' ? rawParams.family_group : '',
     privacy_mode: typeof rawParams.privacy_mode === 'string' ? rawParams.privacy_mode : '',
     sort_by: typeof rawParams.sort_by === 'string' ? rawParams.sort_by : '',
     sort_order: sortOrder
@@ -2233,6 +2253,7 @@ const buildAccountQueryFilters = () => ({
   type: params.type || '',
   status: params.status || '',
   group: params.group || '',
+  family_group: params.family_group || '',
   privacy_mode: params.privacy_mode || '',
   search: params.search || '',
   sort_by: sortState.sort_by,
@@ -2269,6 +2290,8 @@ const accountMatchesCurrentFilters = (account: Account) => {
       return false
     }
   }
+  const family = account.extra?.family_group || ''
+  if (filters.family_group && (filters.family_group === '__unset__' ? family !== '' : family !== filters.family_group)) return false
   const privacyMode = typeof account.extra?.privacy_mode === 'string' ? account.extra.privacy_mode : ''
   if (filters.privacy_mode) {
     if (filters.privacy_mode === ACCOUNT_PRIVACY_MODE_UNSET_QUERY_VALUE) {
@@ -2355,6 +2378,7 @@ const handleProbeUpstreamBilling = async (account: Account) => {
   }
 }
 const handleAccountUpdated = (updatedAccount: Account) => {
+  void loadFamilyGroups()
   patchAccountInList(updatedAccount)
   enterAutoRefreshSilentWindow()
 }
@@ -2632,6 +2656,7 @@ const handleClickOutside = (event: MouseEvent) => {
 }
 
 onMounted(async () => {
+  void loadFamilyGroups()
   if (typeof window !== 'undefined') {
     desktopViewportMediaQuery = window.matchMedia(desktopViewportQuery)
     isDesktopViewport.value = desktopViewportMediaQuery.matches

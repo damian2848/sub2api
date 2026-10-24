@@ -1323,7 +1323,7 @@ func (r *accountRepository) accountListFilteredQuery(platform, accountType, stat
 }
 
 func (r *accountRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, *pagination.PaginationResult, error) {
-	q := observerAccountQuery(ctx, r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode))
+	q := filterAccountFamilyGroup(ctx, observerAccountQuery(ctx, r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode)))
 	// Clone before Count so interceptor-appended predicates (SoftDeleteMixin's
 	// deleted_at IS NULL) don't accumulate on the shared builder and pollute the
 	// subsequent list query. Same pattern used in group_repo/promo_code_repo/user_repo
@@ -1353,7 +1353,7 @@ func (r *accountRepository) ListWithFilters(ctx context.Context, params paginati
 }
 
 func (r *accountRepository) ListAllWithFilters(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, error) {
-	accounts, err := observerAccountQuery(ctx, r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode)).All(ctx)
+	accounts, err := filterAccountFamilyGroup(ctx, observerAccountQuery(ctx, r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode))).All(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -56,6 +56,7 @@
           data-tour="account-form-name"
         />
       </div>
+      <AccountFamilyGroupInput v-model="familyGroup" />
       <div>
         <label class="input-label">{{ t('admin.accounts.notes') }}</label>
         <textarea
@@ -4292,6 +4293,7 @@
 </template>
 
 <script setup lang="ts">
+import AccountFamilyGroupInput from './AccountFamilyGroupInput.vue'
 import OpenAIRequestTimezoneField from '@/components/account/OpenAIRequestTimezoneField.vue'
 import { DEFAULT_ACCOUNT_COST_MULTIPLIER, isValidAccountCostMultiplier } from '@/utils/accountCost'
 
@@ -4444,6 +4446,7 @@ const oauthStepTitle = computed(() => {
 
 // Platform-specific hints for API Key type
 // 上游ID：直接上游声明请求标识的响应头名，留空不记录。
+const familyGroup = ref('')
 const costMultiplier = ref(DEFAULT_ACCOUNT_COST_MULTIPLIER)
 const upstreamRequestIdHeader = ref('')
 const withAccountExtraSettings = (extra?: Record<string, unknown>): Record<string, unknown> => {
@@ -4451,7 +4454,7 @@ const withAccountExtraSettings = (extra?: Record<string, unknown>): Record<strin
     throw new Error(t('admin.accounts.costMultiplierInvalid'))
   }
   const name = upstreamRequestIdHeader.value.trim()
-  return { ...(extra || {}), cost_multiplier: costMultiplier.value, ...(name ? { upstream_request_id_header: name } : {}) }
+  return { ...(extra || {}), ...(familyGroup.value.trim() ? { family_group: familyGroup.value.trim() } : {}), cost_multiplier: costMultiplier.value, ...(name ? { upstream_request_id_header: name } : {}) }
 }
 
 const baseUrlHint = computed(() => {
@@ -5888,6 +5891,7 @@ const resetForm = () => {
   form.name = ''
   openAIRequestTimezone.value = 'Asia/Singapore'
   form.notes = ''
+  familyGroup.value = ''
   form.platform = 'anthropic'
   form.type = 'oauth'
   form.credentials = {}
@@ -6799,6 +6803,7 @@ const handleGrokImportSSO = async (ssoInput: string) => {
   try {
     const result = await adminAPI.grok.createFromSSO({
       sso_tokens: ssoTokens,
+      extra: withAccountExtraSettings(),
       name: form.name || undefined,
       notes: form.notes || undefined,
       proxy_id: form.proxy_id,

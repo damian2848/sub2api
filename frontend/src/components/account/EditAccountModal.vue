@@ -15,6 +15,7 @@
         <label class="input-label">{{ t('common.name') }}</label>
         <input v-model="form.name" type="text" required class="input" data-tour="edit-account-form-name" />
       </div>
+      <AccountFamilyGroupInput v-model="familyGroup" />
       <div>
         <label class="input-label">{{ t('admin.accounts.notes') }}</label>
         <textarea
@@ -3619,6 +3620,7 @@
 </template>
 
 <script setup lang="ts">
+import AccountFamilyGroupInput from './AccountFamilyGroupInput.vue'
 import OpenAIRequestTimezoneField from '@/components/account/OpenAIRequestTimezoneField.vue'
 import ExcelBPSCredentialStatus from './ExcelBPSCredentialStatus.vue'
 import { DEFAULT_ACCOUNT_COST_MULTIPLIER, isValidAccountCostMultiplier, readAccountCostMultiplier } from '@/utils/accountCost'
@@ -4691,6 +4693,7 @@ const mixedChannelWarningMessageText = computed(() => {
   return mixedChannelWarningRawMessage.value
 })
 
+const familyGroup = ref('')
 const costMultiplier = ref(DEFAULT_ACCOUNT_COST_MULTIPLIER)
 const costMultiplierAutoSync = ref(true)
 
@@ -4821,6 +4824,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   form.status = (newAccount.status === 'active' || newAccount.status === 'inactive' || newAccount.status === 'error')
     ? newAccount.status
     : 'active'
+  familyGroup.value = newAccount.extra?.family_group || ''
   form.group_ids = newAccount.group_ids || []
   groupAllowedModels.value = groupAllowedModelsFromAccount(newAccount)
   form.expires_at = newAccount.expires_at ?? null
@@ -6853,6 +6857,11 @@ const handleSubmit = async () => {
       costExtra.cost_multiplier_auto_sync = costMultiplierAutoSync.value
     } else {
       delete costExtra.cost_multiplier_auto_sync
+    }
+    if (familyGroup.value.trim() !== (props.account.extra?.family_group || '')) {
+      costExtra.family_group = familyGroup.value.trim()
+    } else {
+      delete costExtra.family_group
     }
     updatePayload.extra = costExtra
 

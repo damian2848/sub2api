@@ -44,6 +44,13 @@ export default {
         "OPENAI_EXCEL_AUTH_REQUIRED": "Excel 授权等待后台自动处理，可在凭据运维查看进度。",
         "OPENAI_EXCEL_AUTH_UNAVAILABLE": "暂时无法读取 Excel 授权状态，请稍后重试。"
       },
+      familyGroup: '家庭组',
+      familyGroupPlaceholder: '输入或选择家庭组名称，例如：家庭 A',
+      familyGroupHint: '相同名称的账号属于同一家庭组；留空表示不加入或移出家庭组。',
+      familyGroupChange: '设置家庭组（留空移出）',
+      allFamilyGroups: '全部家庭组',
+      noFamilyGroup: '未加入家庭组',
+      familyGroupFilter: '查看家庭组「{name}」的账号',
       title: '账号管理',
       description: '管理 AI 平台账号和 Cookie',
       createAccount: '添加账号',

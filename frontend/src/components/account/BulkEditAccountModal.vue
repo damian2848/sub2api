@@ -31,6 +31,14 @@
         </p>
       </div>
 
+      <div class="space-y-3 rounded-lg border border-gray-200 p-3 dark:border-dark-600">
+        <label class="flex items-center gap-2 text-sm">
+          <input v-model="enableFamilyGroup" type="checkbox" data-testid="enable-family-group" class="rounded border-gray-300 text-primary-600" />
+          {{ t('admin.accounts.familyGroupChange') }}
+        </label>
+        <AccountFamilyGroupInput v-if="enableFamilyGroup" v-model="familyGroup" />
+      </div>
+
       <!-- Excel / BPS protocol (ChatGPT OAuth only) -->
       <div v-if="allOpenAIOAuthOnly && globalBpsEnabled" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
@@ -1646,6 +1654,7 @@
 </template>
 
 <script setup lang="ts">
+import AccountFamilyGroupInput from './AccountFamilyGroupInput.vue'
 import { DEFAULT_ACCOUNT_COST_MULTIPLIER, isValidAccountCostMultiplier } from '@/utils/accountCost'
 
 import { ref, watch, computed } from 'vue'
@@ -1840,6 +1849,8 @@ interface ModelMapping {
 }
 
 // State - field enable flags
+const enableFamilyGroup = ref(false)
+const familyGroup = ref('')
 const enableBaseUrl = ref(false)
 const enableModelRestriction = ref(false)
 const enableOpenAIModelAliases = ref(false)
@@ -2181,6 +2192,10 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     return updates.extra as Record<string, unknown>
   }
 
+  if (enableFamilyGroup.value) {
+    ensureExtra().family_group = familyGroup.value.trim()
+  }
+
   if (enableProxy.value) {
     // 后端期望 proxy_id: 0 表示清除代理，而不是 null
     updates.proxy_id = proxyId.value === null ? 0 : proxyId.value
@@ -2478,6 +2493,7 @@ const handleSubmit = async () => {
   }
 
   const hasAnyFieldEnabled =
+    enableFamilyGroup.value ||
     enableBaseUrl.value ||
     (enableExcelBPS.value && allOpenAIOAuthOnly.value) ||
     enableOpenAIPassthrough.value ||
@@ -2652,6 +2668,8 @@ watch(
   (newShow) => {
     if (!newShow) {
       // Reset all enable flags
+      enableFamilyGroup.value = false
+      familyGroup.value = ''
       enableBaseUrl.value = false
       enableModelRestriction.value = false
       enableOpenAIModelAliases.value = false

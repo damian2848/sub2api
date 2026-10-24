@@ -17,7 +17,7 @@ vi.mock('vue-i18n', async () => {
 })
 
 const defaultFilters = () => ({
-  platform: '', type: '', status: '', privacy_mode: '', group: '',
+  platform: '', type: '', status: '', privacy_mode: '', group: '', family_group: '',
   search: 'existing search', lite: '1', sort_by: 'priority', sort_order: 'asc'
 })
 
@@ -26,6 +26,7 @@ function mountFilters(filters: Record<string, unknown> = defaultFilters()) {
     attachTo: document.body,
     props: {
       searchQuery: 'existing search', filters,
+      familyGroups: [{ name: '家庭 A', account_count: 3 }],
       groups: [{ id: 42, name: 'A very long group name' } as AdminGroup]
     },
     global: { stubs: { Teleport: true } }
@@ -39,12 +40,12 @@ afterEach(() => {
 })
 
 describe('AccountTableFilters', () => {
-  it('shows all five filters immediately and preserves selections on external updates', async () => {
+  it('shows all six filters immediately and preserves selections on external updates', async () => {
     const filters = { ...defaultFilters(), type: 'bedrock', privacy_mode: '__unset__', group: 'ungrouped' }
     const wrapper = mountFilters(filters)
     const selects = wrapper.findAllComponents(Select)
 
-    expect(selects).toHaveLength(5)
+    expect(selects).toHaveLength(6)
     expect(selects.every(select => select.isVisible())).toBe(true)
     expect(wrapper.find('button[aria-controls]').exists()).toBe(false)
     expect(wrapper.props('filters')).toEqual(filters)
@@ -66,7 +67,8 @@ describe('AccountTableFilters', () => {
       ['status', ['', 'active', 'inactive', 'error', 'rate_limited', 'temp_unschedulable', 'unschedulable']],
       ['type', ['', 'oauth', 'setup-token', 'apikey', 'bedrock', 'gemini_web']],
       ['privacy_mode', ['', '__unset__', 'training_off', 'training_set_cf_blocked', 'training_set_failed']],
-      ['group', ['', 'ungrouped', '42']]
+      ['group', ['', 'ungrouped', '42']],
+      ['family_group', ['', '__unset__', '家庭 A']]
     ] as const
     let changes = 0
     for (const [index, [key, values]] of expectedOptions.entries()) {
@@ -102,7 +104,7 @@ describe('AccountTableFilters', () => {
     wrapper.unmount()
   })
 
-  it('uses shrinkable, wrapping controls for all five filters', () => {
+  it('uses shrinkable, wrapping controls for all six filters', () => {
     const wrapper = mountFilters()
     expect(wrapper.classes()).toEqual(expect.arrayContaining(['min-w-0', 'grid-cols-2', 'sm:flex-wrap']))
     for (const select of wrapper.findAllComponents(Select)) {

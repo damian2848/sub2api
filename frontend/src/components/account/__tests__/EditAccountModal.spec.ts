@@ -3313,3 +3313,27 @@ describe('EditAccountModal temp-unschedulable rule scope', () => {
     wrapper.unmount()
   })
 })
+
+
+describe('account family membership', () => {
+  it.each(['家庭 B', ''])('loads the current family and persists changes: %s', async (name) => {
+    const account = { ...buildAccount(), extra: { family_group: '家庭 A' } }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="family-group-input"]').element.value).toBe('家庭 A')
+    await wrapper.get('[data-testid="family-group-input"]').setValue(name)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.family_group).toBe(name)
+  })
+
+  it('omits unchanged family metadata from unrelated edits', async () => {
+    const account = { ...buildAccount(), extra: { family_group: '家庭 A' } }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock).toHaveBeenCalled()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('family_group')
+  })
+})

@@ -12,19 +12,22 @@
     <Select :model-value="filters.type" :aria-label="t('admin.accounts.allTypes')" class="min-w-0 w-full sm:w-36" :options="tOpts" @update:model-value="updateType" @change="$emit('change')" />
     <Select :model-value="filters.privacy_mode" :aria-label="t('admin.accounts.allPrivacyModes')" class="min-w-0 w-full sm:w-36" :options="privacyOpts" @update:model-value="updatePrivacyMode" @change="$emit('change')" />
     <Select :model-value="filters.group" :aria-label="t('admin.accounts.allGroups')" class="min-w-0 w-full sm:w-36" :options="gOpts" @update:model-value="updateGroup" @change="$emit('change')" />
+    <Select :model-value="filters.family_group || ''" :aria-label="t('admin.accounts.allFamilyGroups')" class="min-w-0 w-full sm:w-36" :options="familyOpts" @update:model-value="updateFamilyGroup" @change="$emit('change')" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed } from 'vue'; import { useI18n } from 'vue-i18n'; import Select from '@/components/common/Select.vue'; import SearchInput from '@/components/common/SearchInput.vue'
 import type { AdminGroup } from '@/types'
+import type { AccountFamilyGroup } from '@/api/admin/accounts'
 import { CONCRETE_PLATFORM_OPTIONS } from '@/constants/platforms'
-const props = defineProps<{ searchQuery: string; filters: Record<string, any>; groups?: AdminGroup[] }>()
+const props = defineProps<{ searchQuery: string; filters: Record<string, any>; groups?: AdminGroup[]; familyGroups?: AccountFamilyGroup[] }>()
 const emit = defineEmits(['update:searchQuery', 'update:filters', 'change']); const { t } = useI18n()
 const updatePlatform = (value: string | number | boolean | null) => { emit('update:filters', { ...props.filters, platform: value }) }
 const updateType = (value: string | number | boolean | null) => { emit('update:filters', { ...props.filters, type: value }) }
 const updateStatus = (value: string | number | boolean | null) => { emit('update:filters', { ...props.filters, status: value }) }
 const updatePrivacyMode = (value: string | number | boolean | null) => { emit('update:filters', { ...props.filters, privacy_mode: value }) }
+const updateFamilyGroup = (value: string | number | boolean | null) => { emit('update:filters', { ...props.filters, family_group: value }) }
 const updateGroup = (value: string | number | boolean | null) => { emit('update:filters', { ...props.filters, group: value }) }
 const pOpts = computed(() => [{ value: '', label: t('admin.accounts.allPlatforms') }, ...CONCRETE_PLATFORM_OPTIONS])
 const tOpts = computed(() => [{ value: '', label: t('admin.accounts.allTypes') }, { value: 'oauth', label: t('admin.accounts.oauthType') }, { value: 'setup-token', label: t('admin.accounts.setupToken') }, { value: 'apikey', label: t('admin.accounts.apiKey') }, { value: 'bedrock', label: 'AWS Bedrock' }, { value: 'gemini_web', label: 'Gemini Web Cookie' }])
@@ -41,4 +44,16 @@ const gOpts = computed(() => [
   { value: 'ungrouped', label: t('admin.accounts.ungroupedGroup') },
   ...(props.groups || []).map(g => ({ value: String(g.id), label: g.name }))
 ])
+const familyOpts = computed(() => {
+  const groups = (props.familyGroups || []).map(group => ({ value: group.name, label: `${group.name} (${group.account_count})` }))
+  const selected = props.filters.family_group
+  if (selected && selected !== '__unset__' && !groups.some(group => group.value === selected)) {
+    groups.push({ value: selected, label: selected })
+  }
+  return [
+    { value: '', label: t('admin.accounts.allFamilyGroups') },
+    { value: '__unset__', label: t('admin.accounts.noFamilyGroup') },
+    ...groups
+  ]
+})
 </script>

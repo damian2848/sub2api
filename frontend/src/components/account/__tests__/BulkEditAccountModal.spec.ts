@@ -1777,3 +1777,17 @@ describe('bulk BPS defaults integration', () => {
     wrapper.unmount()
   })
 })
+
+
+describe('family group membership', () => {
+  it.each(['家庭 A', ''])('assigns or removes selected accounts using an explicit extra update: %s', async (name) => {
+    vi.mocked(adminAPI.accounts.bulkUpdate).mockResolvedValue({ success: 2, failed: 0 } as any)
+    const wrapper = mountModal()
+    await wrapper.get('[data-testid="enable-family-group"]').setValue(true)
+    await wrapper.get('[data-testid="family-group-input"]').setValue(name ? `  ${name}  ` : '')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenLastCalledWith([1, 2], { extra: { family_group: name } })
+    wrapper.unmount()
+  })
+})

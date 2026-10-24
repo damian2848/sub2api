@@ -684,6 +684,7 @@ func (h *AccountHandler) resolveExportAccounts(ctx context.Context, ids []int64,
 	accountType := c.Query("type")
 	status := c.Query("status")
 	privacyMode := strings.TrimSpace(c.Query("privacy_mode"))
+	ctx = service.WithAccountFamilyGroupFilter(ctx, c.Query("family_group"))
 	search := strings.TrimSpace(c.Query("search"))
 	sortBy := c.DefaultQuery("sort_by", "name")
 	sortOrder := c.DefaultQuery("sort_order", "asc")

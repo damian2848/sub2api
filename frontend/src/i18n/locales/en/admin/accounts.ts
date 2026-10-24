@@ -44,6 +44,13 @@ export default {
         "OPENAI_EXCEL_AUTH_REQUIRED": "Excel authorization is waiting for the automatic worker. View progress in Credential Operations.",
         "OPENAI_EXCEL_AUTH_UNAVAILABLE": "Excel authorization status is unavailable. Please retry later."
       },
+      familyGroup: 'Family group',
+      familyGroupPlaceholder: 'Enter or select a family name, e.g. Family A',
+      familyGroupHint: 'Accounts with the same name belong to one family. Leave empty to remove membership.',
+      familyGroupChange: 'Set family group (empty to remove)',
+      allFamilyGroups: 'All family groups',
+      noFamilyGroup: 'No family group',
+      familyGroupFilter: 'Show accounts in family “{name}”',
       title: 'Account Management',
       description: 'Manage AI platform accounts and credentials',
       createAccount: 'Create Account',
