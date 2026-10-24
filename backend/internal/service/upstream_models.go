@@ -53,10 +53,11 @@ type UpstreamModelMetadataSnapshot struct {
 }
 
 type UpstreamModelCatalog struct {
-	Models          []string                         `json:"models"`
-	Metadata        map[string]UpstreamModelMetadata `json:"metadata,omitempty"`
-	Warnings        []UpstreamModelSyncWarning       `json:"warnings,omitempty"`
-	DiscoverySource string                           `json:"discovery_source,omitempty"`
+	Models               []string                         `json:"models"`
+	Metadata             map[string]UpstreamModelMetadata `json:"metadata,omitempty"`
+	Warnings             []UpstreamModelSyncWarning       `json:"warnings,omitempty"`
+	DiscoverySource      string                           `json:"discovery_source,omitempty"`
+	GrokModelDiagnostics *GrokModelDiagnostics            `json:"grok_model_diagnostics,omitempty"`
 }
 
 // upstreamModelListFetchResult is the live model list plus an optional Grok
