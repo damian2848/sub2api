@@ -43,6 +43,117 @@ func TestGrokModelDiagnosticsFreshExplicitMapping(t *testing.T) {
 	require.Equal(t, snapshotBefore, cloneGrokDiagnosticValue(t, snapshot))
 }
 
+func TestGrokModelDiagnosticsBareAliasDoesNotInventDefaultGeneration(t *testing.T) {
+	now := time.Date(2026, 10, 25, 7, 0, 0, 0, time.UTC)
+	scope := grokDiagnosticOfficialScope(t)
+	aliases := map[string]string{
+		"grok":             "grok",
+		"grok-latest":      "grok-latest",
+		"Grok":             "Grok",
+		"GROK-LATEST":      "GROK-LATEST",
+		"xai/grok":         "xai/grok",
+		"x-ai/Grok-Latest": "x-ai/Grok-Latest",
+	}
+
+	t.Run("catalog has only the responses default", func(t *testing.T) {
+		diag := evaluateGrokDiagnosticMapping(t, scope, []string{"grok-4.5"}, aliases, now)
+		for requested, target := range aliases {
+			item := diagnosticByRequested(diag.Mappings)[requested]
+			require.Equal(t, "unverifiable", item.Status, requested)
+			require.Equal(t, target, item.Upstream, requested)
+			require.NotEqual(t, "grok-4.5", item.Upstream, requested)
+			require.NotEqual(t, "grok-4.6", item.Upstream, requested)
+		}
+	})
+
+	t.Run("catalog has only the builtin text default", func(t *testing.T) {
+		diag := evaluateGrokDiagnosticMapping(t, scope, []string{"grok-4.6"}, aliases, now)
+		for requested, target := range aliases {
+			item := diagnosticByRequested(diag.Mappings)[requested]
+			require.Equal(t, "unverifiable", item.Status, requested)
+			require.Equal(t, target, item.Upstream, requested)
+		}
+	})
+
+	t.Run("both generations still have no single forward target", func(t *testing.T) {
+		diag := evaluateGrokDiagnosticMapping(t, scope, []string{"grok-4.5", "grok-4.6"}, aliases, now)
+		for requested := range aliases {
+			item := diagnosticByRequested(diag.Mappings)[requested]
+			require.Equal(t, "unverifiable", item.Status, requested)
+			require.NotEqual(t, "listed", item.Status, requested)
+			require.NotEqual(t, "not_listed", item.Status, requested)
+		}
+	})
+
+	t.Run("literal catalog grok is not grok-4.6", func(t *testing.T) {
+		diag := evaluateGrokDiagnosticMapping(t, scope, []string{"grok"}, map[string]string{
+			"pinned":   "grok-4.6",
+			"friendly": "grok",
+		}, now)
+		got := diagnosticByRequested(diag.Mappings)
+		require.Equal(t, GrokModelDiagnosticItem{Requested: "pinned", Upstream: "grok-4.6", Status: "not_listed"}, got["pinned"])
+		require.Equal(t, GrokModelDiagnosticItem{Requested: "friendly", Upstream: "grok", Status: "unverifiable"}, got["friendly"])
+	})
+
+	t.Run("concrete aliases stay comparable", func(t *testing.T) {
+		diag := evaluateGrokDiagnosticMapping(t, scope, []string{"grok-4.5", "grok-4.7"}, map[string]string{
+			"pinned":   "grok-4.5",
+			"latest":   "grok-4.7-latest",
+			"composer": "composer-2.5",
+		}, now)
+		got := diagnosticByRequested(diag.Mappings)
+		require.Equal(t, GrokModelDiagnosticItem{Requested: "pinned", Upstream: "grok-4.5", Status: "listed"}, got["pinned"])
+		require.Equal(t, GrokModelDiagnosticItem{Requested: "latest", Upstream: "grok-4.7", Status: "listed"}, got["latest"])
+		require.Equal(t, GrokModelDiagnosticItem{Requested: "composer", Upstream: "grok-composer-2.5-fast", Status: "not_listed"}, got["composer"])
+	})
+}
+
+func TestGrokModelDiagnosticsCustomIDKeepsCase(t *testing.T) {
+	scope, err := NewGrokCatalogScope(25, AccountTypeAPIKey, "https://relay.example.com/v1/models")
+	require.NoError(t, err)
+	now := time.Date(2026, 10, 25, 7, 0, 0, 0, time.UTC)
+
+	t.Run("different case is not a catalog match", func(t *testing.T) {
+		diag := evaluateGrokDiagnosticMapping(t, scope, []string{"custom-a", "other-id"}, map[string]string{
+			"mixed": "Custom-A",
+			"other": "Other-ID",
+		}, now)
+		got := diagnosticByRequested(diag.Mappings)
+		require.Equal(t, GrokModelDiagnosticItem{Requested: "mixed", Upstream: "Custom-A", Status: "unverifiable"}, got["mixed"])
+		require.NotEqual(t, "listed", got["mixed"].Status)
+		require.NotEqual(t, "custom-a", got["mixed"].Upstream)
+		require.Equal(t, GrokModelDiagnosticItem{Requested: "other", Upstream: "Other-ID", Status: "unverifiable"}, got["other"])
+	})
+
+	t.Run("same case matches", func(t *testing.T) {
+		diag := evaluateGrokDiagnosticMapping(t, scope, []string{"Custom-A", "custom-a"}, map[string]string{
+			"mixed": "Custom-A",
+			"lower": "custom-a",
+		}, now)
+		got := diagnosticByRequested(diag.Mappings)
+		require.Equal(t, GrokModelDiagnosticItem{Requested: "mixed", Upstream: "Custom-A", Status: "listed"}, got["mixed"])
+		require.Equal(t, GrokModelDiagnosticItem{Requested: "lower", Upstream: "custom-a", Status: "listed"}, got["lower"])
+	})
+}
+
+func evaluateGrokDiagnosticMapping(t *testing.T, scope *GrokCatalogScope, models []string, targets map[string]string, now time.Time) *GrokModelDiagnostics {
+	t.Helper()
+	mapping := make(map[string]any, len(targets))
+	for key, target := range targets {
+		mapping[key] = target
+	}
+	account := &Account{
+		ID: scope.AccountID, Platform: PlatformGrok, Type: scope.AccountType,
+		Credentials: map[string]any{"model_mapping": mapping},
+	}
+	snapshot := &GrokObservedModelsSnapshot{
+		Models:    append([]string{}, models...),
+		FetchedAt: now.Add(-time.Hour).UTC().Format(time.RFC3339Nano),
+		Scope:     scope,
+	}
+	return EvaluateGrokModelDiagnostics(account, scope, snapshot, now)
+}
+
 func TestGrokModelDiagnosticsExplicitComposerTargetInCatalogIsListed(t *testing.T) {
 	account := grokDiagnosticExplicitAccount()
 	account.Credentials["model_mapping"] = map[string]any{"composer-2.5": "grok-4.7"}

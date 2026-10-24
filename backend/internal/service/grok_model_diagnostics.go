@@ -153,11 +153,11 @@ func grokModelDiagnosticState(current *GrokCatalogScope, snapshot *GrokObservedM
 func grokDiagnosticCatalogSet(models []string) map[string]struct{} {
 	set := make(map[string]struct{}, len(models))
 	for _, model := range models {
-		canonical := grokDiagnosticCanonical(model)
-		if canonical == "" {
+		observed := grokDiagnosticObservedID(model)
+		if observed == "" {
 			continue
 		}
-		set[canonical] = struct{}{}
+		set[observed] = struct{}{}
 	}
 	return set
 }
@@ -195,11 +195,19 @@ func grokDiagnosticItem(requested, target, state string, catalog map[string]stru
 		return item
 	}
 	if grokDiagnosticIndependentCapability(trimmed) {
-		item.Upstream = grokDiagnosticCanonical(trimmed)
+		item.Upstream = grokDiagnosticObservedID(trimmed)
 		item.Status = grokModelDiagnosticStatusOutOfScope
 		return item
 	}
-	canonical := grokDiagnosticCanonical(trimmed)
+	// Responses rewrites bare grok / grok-latest to grok-4.5. Chat, Messages,
+	// and the websocket bridge keep the literal alias. Neither generation is
+	// a catalog fact, so do not compare grok-4.5 or grok-4.6.
+	if grokDiagnosticBareAlias(trimmed) {
+		item.Upstream = trimmed
+		item.Status = grokModelDiagnosticStatusUnverifiable
+		return item
+	}
+	canonical := grokDiagnosticObservedID(trimmed)
 	item.Upstream = canonical
 	_, inCatalog := catalog[canonical]
 	switch {
@@ -213,14 +221,22 @@ func grokDiagnosticItem(requested, target, state string, catalog map[string]stru
 	return item
 }
 
-// grokDiagnosticCanonical uses the text alias table only. Runtime audit treats
-// some -build responses as the same model; a catalog check must not.
-func grokDiagnosticCanonical(model string) string {
+// grokDiagnosticObservedID uses the text alias table only. Runtime audit treats
+// some -build responses as the same model; a catalog check must not. Bare
+// grok / grok-latest and unknown IDs stay as written: the alias table's
+// fallback generation is not unique across forwards, and case is not evidence
+// that a custom id is listed.
+func grokDiagnosticObservedID(model string) string {
 	trimmed := strings.TrimSpace(model)
-	if trimmed == "" {
-		return ""
+	if trimmed == "" || grokDiagnosticBareAlias(trimmed) {
+		return trimmed
 	}
-	return strings.ToLower(strings.TrimSpace(xai.ResolveGrokTextResponsesModelID(trimmed)))
+	return strings.TrimSpace(xai.ResolveGrokTextResponsesModelID(trimmed))
+}
+
+func grokDiagnosticBareAlias(model string) bool {
+	normalized := strings.ToLower(xai.StripGrokProviderPrefix(strings.TrimSpace(model)))
+	return normalized == "grok" || normalized == "grok-latest"
 }
 
 func grokDiagnosticIndependentCapability(model string) bool {
