@@ -4217,6 +4217,7 @@ const diagnosticsLoading = ref(false)
 const diagnosticsRefreshFailed = ref(false)
 const grokDiagnosticsSyncing = ref(false)
 let diagnosticsGeneration = 0
+let grokDiagnosticsSyncVersion = 0
 const GROK_API_KEY_DEFAULT_BASE_URL = 'https://api.x.ai/v1'
 
 function normalizedGrokMapping(value: unknown): Record<string, string> {
@@ -4262,6 +4263,7 @@ const grokDiagnosticsDirty = computed(() => {
 
 const resetGrokDiagnostics = () => {
   diagnosticsGeneration += 1
+  grokDiagnosticsSyncVersion += 1
   grokDiagnostics.value = null
   diagnosticsLoading.value = false
   diagnosticsRefreshFailed.value = false
@@ -4288,11 +4290,11 @@ const refreshGrokDiagnostics = async () => {
 const syncGrokDiagnostics = async () => {
   const id = props.account?.id
   if (!props.show || props.account?.platform !== 'grok' || !id || grokDiagnosticsSyncing.value) return
-  const generation = diagnosticsGeneration
+  const syncVersion = grokDiagnosticsSyncVersion
   grokDiagnosticsSyncing.value = true
   try {
     const result = await adminAPI.accounts.syncUpstreamModels(id)
-    if (generation !== diagnosticsGeneration || !props.show || props.account?.id !== id) return
+    if (syncVersion !== grokDiagnosticsSyncVersion || !props.show || props.account?.id !== id) return
     const warnings = result.warnings ?? []
     if (result.discovery_source === 'configured_fallback') {
       appStore.showWarning(t('admin.accounts.grokModelDiagnostics.configuredFallback'))
@@ -4305,11 +4307,11 @@ const syncGrokDiagnostics = async () => {
       appStore.showWarning(t('admin.accounts.syncUpstreamModelsMetadataPartial'))
     }
   } catch (error) {
-    if (generation !== diagnosticsGeneration || !props.show || props.account?.id !== id) return
+    if (syncVersion !== grokDiagnosticsSyncVersion || !props.show || props.account?.id !== id) return
     const message = extractApiErrorMessage(error, t('admin.accounts.syncUpstreamModelsFailed'))
     appStore.showError(t('admin.accounts.syncUpstreamModelsError', { message }))
   } finally {
-    if (generation === diagnosticsGeneration && props.show && props.account?.id === id) {
+    if (syncVersion === grokDiagnosticsSyncVersion && props.show && props.account?.id === id) {
       grokDiagnosticsSyncing.value = false
       await refreshGrokDiagnostics()
     }

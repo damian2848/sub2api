@@ -88,10 +88,12 @@ const ModelWhitelistSelectorStub = defineComponent({
 
 function deferred<T>() {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((done, fail) => {
     resolve = done
+    reject = fail
   })
-  return { promise, resolve }
+  return { promise, resolve, reject }
 }
 
 function diagnostics(model: string, endpoint = 'https://cli-chat-proxy.grok.com/v1/models') {
@@ -646,5 +648,72 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     expect(wrapper.text()).toContain('kept-after-sync-error')
     expect(getByIdMock.mock.calls.length).toBeGreaterThan(callsBeforeSync)
     expect((wrapper.get('input[placeholder="admin.accounts.actualModel"]').element as HTMLInputElement).value).toBe('grok-4.7')
+  })
+
+  async function startOverlappedSavedConfigSync(post: ReturnType<typeof deferred<any>>) {
+    const account = buildGrokOAuthAccount({ model_mapping: { friendly: 'grok-4.7' } })
+    const selectorGet = deferred<any>()
+    let gets = 0
+    getByIdMock.mockImplementation(() => {
+      gets += 1
+      if (gets === 1) {
+        return Promise.resolve({ ...account, grok_model_diagnostics: diagnostics('initial-model') })
+      }
+      if (gets === 2) return selectorGet.promise
+      return Promise.resolve({ ...account, grok_model_diagnostics: diagnostics('after-sync-model') })
+    })
+    syncUpstreamModelsMock.mockImplementation(() => post.promise)
+
+    const wrapper = mountModal(account)
+    await flushPromises()
+    await wrapper.findAll('button').find((button) => button.text() === 'admin.accounts.modelMapping')!.trigger('click')
+    const draft = wrapper.get('input[placeholder="admin.accounts.actualModel"]')
+    await draft.setValue('grok-4.5')
+    await wrapper.get('[data-testid="grok-diagnostics-sync"]').trigger('click')
+    expect(syncUpstreamModelsMock).toHaveBeenCalledTimes(1)
+
+    await wrapper.findAll('button').find((button) => button.text() === 'admin.accounts.modelWhitelist')!.trigger('click')
+    await wrapper.get('[data-testid="emit-upstream-sync-finished"]').trigger('click')
+    return { wrapper, selectorGet }
+  }
+
+  async function expectSyncRecovered(
+    wrapper: ReturnType<typeof mountModal>,
+    selectorGet: ReturnType<typeof deferred<any>>,
+    settledModel: string
+  ) {
+    selectorGet.resolve({ ...wrapper.props('account'), grok_model_diagnostics: diagnostics('selector-model') })
+    await flushPromises()
+    await wrapper.findAll('button').find((button) => button.text() === 'admin.accounts.modelMapping')!.trigger('click')
+
+    const button = wrapper.get('[data-testid="grok-diagnostics-sync"]')
+    expect((button.element as HTMLButtonElement).disabled).toBe(false)
+    expect(wrapper.text()).toContain(settledModel)
+    expect(wrapper.text()).not.toContain('selector-model')
+    expect((wrapper.get('input[placeholder="admin.accounts.actualModel"]').element as HTMLInputElement).value).toBe('grok-4.5')
+    expect(JSON.stringify(wrapper.props('account').credentials.model_mapping)).not.toContain('extra-catalog-id')
+
+    syncUpstreamModelsMock.mockResolvedValue({ models: [], discovery_source: 'upstream' })
+    await button.trigger('click')
+    expect(syncUpstreamModelsMock).toHaveBeenCalledTimes(2)
+  }
+
+  it('re-enables saved-config sync when a same-account selector refresh overlaps the request', async () => {
+    const post = deferred<any>()
+    const { wrapper, selectorGet } = await startOverlappedSavedConfigSync(post)
+    post.resolve({
+      models: ['extra-catalog-id'],
+      discovery_source: 'upstream'
+    })
+    await expectSyncRecovered(wrapper, selectorGet, 'after-sync-model')
+  })
+
+  it('re-enables saved-config sync when a same-account selector refresh overlaps a failed request', async () => {
+    const post = deferred<any>()
+    const { wrapper, selectorGet } = await startOverlappedSavedConfigSync(post)
+    post.reject({ message: 'boom' })
+    await expectSyncRecovered(wrapper, selectorGet, 'after-sync-model')
+    expect(showErrorMock).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsError')
+    expect(showSuccessMock).not.toHaveBeenCalled()
   })
 })
