@@ -308,6 +308,135 @@ func TestGrokResponseAuditConvertedStreamingConflict(t *testing.T) {
 	})
 }
 
+func TestGrokResponseAuditConvertedAggregateConflict(t *testing.T) {
+	sse := grokAuditResponsesSSE("grok-4.5", "grok-4.7-build")
+	for i, entry := range []string{"chat-bridge", "messages"} {
+		t.Run(entry, func(t *testing.T) {
+			result, client := grokAuditRunConvertedAggregate(t, entry, 89001+int64(i), sse)
+			require.False(t, result.Stream)
+			require.Equal(t, "grok-4.7", result.Model)
+			require.Equal(t, "grok-4.7", result.UpstreamModel)
+			require.Equal(t, "grok-4.7-build", result.UpstreamResponseModel)
+			require.True(t, result.UpstreamResponseModelConflict)
+			requireObservedMismatch(t, result, false, false)
+			require.True(t, gjson.Valid(client), "aggregate client should receive JSON, got %s", client)
+			require.Equal(t, "grok-4.7", gjson.Get(client, "model").String())
+			require.NotContains(t, client, "grok-4.7-build")
+			require.NotContains(t, client, "grok-4.5")
+		})
+	}
+}
+
+func TestGrokResponseAuditConvertedAggregateModelBoundaries(t *testing.T) {
+	cases := []struct {
+		name, created, completed, wantModel string
+		conflict, mismatchNil, mismatch     bool
+	}{
+		{name: "same", created: "grok-4.7-build", completed: "grok-4.7-build", wantModel: "grok-4.7-build"},
+		{name: "missing", mismatchNil: true},
+		{name: "created-without-terminal-model", created: "grok-4.5", wantModel: "grok-4.5", mismatch: true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			sse := grokAuditResponsesSSE(tt.created, tt.completed)
+			for i, entry := range []string{"chat-bridge", "messages"} {
+				t.Run(entry, func(t *testing.T) {
+					result, client := grokAuditRunConvertedAggregate(t, entry, 89100+int64(i), sse)
+					require.False(t, result.Stream)
+					require.Equal(t, tt.wantModel, result.UpstreamResponseModel)
+					require.Equal(t, tt.conflict, result.UpstreamResponseModelConflict)
+					requireObservedMismatch(t, result, tt.mismatchNil, tt.mismatch)
+					require.True(t, gjson.Valid(client), "aggregate client should receive JSON, got %s", client)
+					require.Equal(t, "grok-4.7", gjson.Get(client, "model").String())
+					if tt.wantModel != "" && tt.wantModel != "grok-4.7" {
+						require.NotContains(t, client, tt.wantModel)
+					}
+					if tt.created != "" && tt.created != tt.wantModel && tt.created != "grok-4.7" {
+						require.NotContains(t, client, tt.created)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestGrokResponseAuditConvertedAggregateKeepsNonGrokTerminalOnly(t *testing.T) {
+	sse := grokAuditResponsesSSE("gpt-5.4-mini", "gpt-5.4")
+	t.Run("chat", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		body := []byte(`{"model":"gpt-5.4","messages":[{"role":"user","content":"hi"}],"stream":false}`)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(string(body)))
+		c.Request.Header.Set("Content-Type", "application/json")
+		upstream := &httpUpstreamRecorder{resp: grokAuditHTTPResponse("text/event-stream", sse)}
+		account := &Account{
+			ID:          89201,
+			Name:        "openai-oauth",
+			Platform:    PlatformOpenAI,
+			Type:        AccountTypeOAuth,
+			Concurrency: 1,
+			Credentials: map[string]any{
+				"access_token":       "oauth-token",
+				"chatgpt_account_id": "chatgpt-acc",
+			},
+		}
+		result, err := (&OpenAIGatewayService{httpUpstream: upstream}).ForwardAsChatCompletions(context.Background(), c, account, body, "", "gpt-5.4")
+		require.NoError(t, err)
+		require.False(t, result.Stream)
+		require.Equal(t, "gpt-5.4", result.UpstreamResponseModel)
+		require.False(t, result.UpstreamResponseModelConflict)
+		require.Equal(t, result.Model, gjson.Get(rec.Body.String(), "model").String())
+		require.NotContains(t, rec.Body.String(), "gpt-5.4-mini")
+	})
+	t.Run("messages", func(t *testing.T) {
+		gin.SetMode(gin.TestMode)
+		rec := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(rec)
+		body := []byte(`{"model":"gpt-5.4","max_tokens":32,"messages":[{"role":"user","content":"hi"}],"stream":false}`)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(string(body)))
+		c.Request.Header.Set("Content-Type", "application/json")
+		upstream := &httpUpstreamRecorder{resp: grokAuditHTTPResponse("text/event-stream", sse)}
+		result, err := (&OpenAIGatewayService{cfg: rawChatCompletionsTestConfig(), httpUpstream: upstream}).ForwardAsAnthropic(
+			context.Background(), c, rawChatCompletionsTestAccount(), body, "", "",
+		)
+		require.NoError(t, err)
+		require.False(t, result.Stream)
+		require.Equal(t, "gpt-5.4", result.UpstreamResponseModel)
+		require.False(t, result.UpstreamResponseModelConflict)
+		require.Equal(t, result.Model, gjson.Get(rec.Body.String(), "model").String())
+		require.NotContains(t, rec.Body.String(), "gpt-5.4-mini")
+	})
+}
+
+func grokAuditRunConvertedAggregate(t *testing.T, entry string, id int64, sse string) (*OpenAIForwardResult, string) {
+	t.Helper()
+	switch entry {
+	case "chat-bridge":
+		c, rec := grokAuditContext("/v1/chat/completions")
+		account := healthyGrokOAuthGatewayTestAccount(id, "access-token")
+		upstream := &httpUpstreamRecorder{resp: grokAuditHTTPResponse("text/event-stream", sse)}
+		request := []byte(`{"model":"grok-4.7","messages":[{"role":"user","content":"hi"}],"stream":false,"prompt_cache_key":"stable-session"}`)
+		result, err := grokAuditOAuthService(upstream, account).ForwardAsChatCompletions(context.Background(), c, account, request, "", "")
+		require.NoError(t, err)
+		require.Equal(t, grokChatResponsesEndpoint, result.UpstreamEndpoint)
+		require.Contains(t, upstream.lastReq.URL.String(), "/responses")
+		return result, rec.Body.String()
+	case "messages":
+		c, rec := grokAuditContext("/v1/messages")
+		account := healthyGrokOAuthGatewayTestAccount(id, "access-token")
+		upstream := &httpUpstreamRecorder{resp: grokAuditHTTPResponse("text/event-stream", sse)}
+		request := []byte(`{"model":"grok-4.7","max_tokens":32,"stream":false,"messages":[{"role":"user","content":"hi"}]}`)
+		result, err := grokAuditOAuthService(upstream, account).ForwardAsAnthropic(context.Background(), c, account, request, "", "")
+		require.NoError(t, err)
+		require.Contains(t, upstream.lastReq.URL.String(), "/responses")
+		return result, rec.Body.String()
+	default:
+		t.Fatalf("unknown aggregate entry %s", entry)
+		return nil, ""
+	}
+}
+
 func grokAuditSwapWriter(c *gin.Context) *httptest.ResponseRecorder {
 	next, rec := grokAuditContext("/v1/responses")
 	c.Writer = next.Writer
