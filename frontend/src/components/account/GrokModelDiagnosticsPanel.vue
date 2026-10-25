@@ -28,7 +28,7 @@
         data-testid="grok-diagnostics-sync"
         class="btn btn-secondary btn-sm"
         :title="t('admin.accounts.grokModelDiagnostics.syncSavedConfig')"
-        :aria-label="t('admin.accounts.grokModelDiagnostics.syncSavedConfig')"
+        :aria-label="`${t('admin.accounts.grokModelDiagnostics.syncCatalog')} — ${t('admin.accounts.grokModelDiagnostics.syncSavedConfig')}`"
         :disabled="syncing || loading"
         @click="requestSync"
       >

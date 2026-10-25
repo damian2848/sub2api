@@ -496,12 +496,29 @@ describe('GrokModelDiagnosticsPanel', () => {
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
-  it('emits sync for a saved-config refresh and ignores clicks while syncing', async () => {
-    const wrapper = track(mountPanel({ diagnostics: freshDiagnostics(), canSync: true }))
+  it.each([
+    {
+      locale: 'zh' as const,
+      visibleLabel: zhAccounts.accounts.grokModelDiagnostics.syncCatalog,
+      savedConfig: zhAccounts.accounts.grokModelDiagnostics.syncSavedConfig
+    },
+    {
+      locale: 'en' as const,
+      visibleLabel: enAccounts.accounts.grokModelDiagnostics.syncCatalog,
+      savedConfig: enAccounts.accounts.grokModelDiagnostics.syncSavedConfig
+    }
+  ])('keeps sync accessible name containing the $locale visible label and saved-config title', async ({
+    locale: nextLocale,
+    visibleLabel,
+    savedConfig
+  }) => {
+    const wrapper = track(mountPanel({ diagnostics: freshDiagnostics(), canSync: true }, nextLocale))
     const button = wrapper.get('[data-testid="grok-diagnostics-sync"]')
-    expect(button.text()).toContain('同步目录')
-    expect(button.attributes('aria-label')).toBe('同步已保存配置的上游目录')
-    expect(button.attributes('title')).toBe('同步已保存配置的上游目录')
+    const accessibleName = button.attributes('aria-label') ?? ''
+    expect(button.text()).toContain(visibleLabel)
+    expect(accessibleName).toContain(visibleLabel)
+    expect(accessibleName).toContain(savedConfig)
+    expect(button.attributes('title')).toBe(savedConfig)
     await button.trigger('click')
     expect(wrapper.emitted('sync')).toEqual([[]])
 

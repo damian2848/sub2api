@@ -491,7 +491,7 @@
                   @click="removeModelMapping(index)"
                   :aria-label="account.platform === 'grok' ? t('admin.accounts.grokModelDiagnostics.removeMappingAria', { index: index + 1 }) : undefined"
                   :class="account.platform === 'grok'
-                    ? 'rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-primary-500 dark:hover:bg-dark-700'
+                    ? 'rounded-lg p-1.5 text-gray-500 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-gray-400 dark:hover:bg-dark-700'
                     : 'rounded-lg p-2 text-red-500 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20'"
                 >
                   <Icon v-if="account.platform === 'grok'" name="trash" size="sm" aria-hidden="true" />
@@ -1095,7 +1095,7 @@
                   @click="removeModelMapping(index)"
                   :aria-label="account.platform === 'grok' ? t('admin.accounts.grokModelDiagnostics.removeMappingAria', { index: index + 1 }) : undefined"
                   :class="account.platform === 'grok'
-                    ? 'rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-primary-500 dark:hover:bg-dark-700'
+                    ? 'rounded-lg p-1.5 text-gray-500 hover:bg-gray-100 focus-visible:ring-2 focus-visible:ring-primary-500 dark:text-gray-400 dark:hover:bg-dark-700'
                     : 'rounded-lg p-2 text-red-500 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20'"
                 >
                   <Icon v-if="account.platform === 'grok'" name="trash" size="sm" aria-hidden="true" />
