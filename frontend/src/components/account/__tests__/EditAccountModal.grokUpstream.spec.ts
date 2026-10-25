@@ -27,7 +27,8 @@ const {
   showWarningMock,
   showSuccessMock,
   showErrorMock,
-  authIsSimpleMode
+  authIsSimpleMode,
+  translateMock
 } = vi.hoisted(() => ({
   updateAccountMock: vi.fn(),
   checkMixedChannelRiskMock: vi.fn(),
@@ -36,7 +37,15 @@ const {
   showWarningMock: vi.fn(),
   showSuccessMock: vi.fn(),
   showErrorMock: vi.fn(),
-  authIsSimpleMode: { value: true }
+  authIsSimpleMode: { value: true },
+  translateMock: vi.fn((key: string, params?: Record<string, unknown>) => {
+    if (!params) return key
+    let text = key
+    for (const [name, value] of Object.entries(params)) {
+      text = text.split(`{${name}}`).join(value == null ? '' : String(value))
+    }
+    return text
+  })
 }))
 
 vi.mock('@/stores/app', () => ({
@@ -88,7 +97,7 @@ vi.mock('vue-i18n', async () => {
   return {
     ...actual,
     useI18n: () => ({
-      t: (key: string) => key
+      t: translateMock
     })
   }
 })
@@ -239,6 +248,7 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     showWarningMock.mockReset()
     showSuccessMock.mockReset()
     showErrorMock.mockReset()
+    translateMock.mockClear()
   })
 
   afterEach(() => {
@@ -1230,4 +1240,229 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     expect(wrapper.get('[data-testid="grok-diagnostics-details-toggle"]').attributes('aria-expanded')).toBe('false')
     expect((wrapper.get('[data-testid="grok-diagnostics-sync"]').element as HTMLButtonElement).disabled).toBe(false)
   })
+
+  it.each(['oauth', 'apikey'])('keeps the redesigned editor scoped to Grok %s', async type => {
+    const account = { ...buildGrokOAuthAccount({ model_mapping: { friendly: 'grok-4.7' } }), type }
+    const wrapper = mountLiveSelectorModal(account)
+    await flushPromises()
+    expect(wrapper.find('[data-testid="grok-model-settings"]').exists()).toBe(true)
+    const editor = wrapper.get('[data-testid="grok-model-mapping-editor"]')
+    expect(editor.text()).toContain('admin.accounts.grokModelDiagnostics.requestColumn')
+    expect(editor.text()).toContain('admin.accounts.grokModelDiagnostics.targetColumn')
+    const from = editor.get('input[placeholder="admin.accounts.requestModel"]')
+    const to = editor.get('input[placeholder="admin.accounts.actualModel"]')
+    expect(from.attributes('aria-label')).toBeTruthy()
+    expect(to.attributes('aria-label')).toBeTruthy()
+    expect(from.attributes('maxlength')).toBeUndefined()
+    expect(to.attributes('maxlength')).toBeUndefined()
+    expect(translateMock).toHaveBeenCalledWith('admin.accounts.grokModelDiagnostics.mappingFromAria', { index: 1 })
+    expect(translateMock).toHaveBeenCalledWith('admin.accounts.grokModelDiagnostics.mappingTargetAria', { index: 1 })
+    expect(translateMock).toHaveBeenCalledWith('admin.accounts.grokModelDiagnostics.removeMappingAria', { index: 1 })
+    await wrapper.get('[data-testid="grok-model-mapping-add"]').trigger('click')
+    expect(wrapper.findAll('[data-testid="grok-model-mapping-row"]')).toHaveLength(2)
+    expect(translateMock).toHaveBeenCalledWith('admin.accounts.grokModelDiagnostics.mappingFromAria', { index: 2 })
+  })
+
+  it.each(['oauth', 'apikey'])('leaves non-grok %s model controls unchanged', async type => {
+    getByIdMock.mockClear()
+    const wrapper = mountLiveSelectorModal({
+      ...buildGrokOAuthAccount({ model_mapping: { friendly: 'grok-4.7' } }),
+      platform: 'openai',
+      type
+    })
+    await flushPromises()
+    for (const id of [
+      'grok-model-settings',
+      'grok-model-mode-tabs',
+      'grok-model-mapping-editor',
+      'grok-model-mapping-row',
+      'grok-model-mapping-add',
+      'grok-model-diagnostics'
+    ]) {
+      expect(wrapper.find(`[data-testid="${id}"]`).exists()).toBe(false)
+    }
+    expect(wrapper.text()).not.toContain('admin.accounts.grokModelDiagnostics.requestColumn')
+    expect(wrapper.text()).not.toContain('admin.accounts.grokModelDiagnostics.targetColumn')
+    expect(wrapper.text()).toContain('admin.accounts.mapRequestModels')
+    const from = wrapper.get('input[placeholder="admin.accounts.requestModel"]')
+    const to = wrapper.get('input[placeholder="admin.accounts.actualModel"]')
+    expect(from.attributes('aria-label')).toBeUndefined()
+    expect(to.attributes('aria-label')).toBeUndefined()
+    const remove = from.element.parentElement?.querySelector('button')
+    expect(remove?.getAttribute('aria-label')).toBeNull()
+    const mode = wrapper.findAll('button').find(button => button.text().includes('admin.accounts.modelMapping'))
+    expect(mode?.attributes('aria-pressed')).toBeUndefined()
+    expect(mode?.classes()).toContain('flex-1')
+    const add = wrapper.findAll('button').find(button =>
+      button.text().includes('admin.accounts.addMapping') && button.classes().includes('border-dashed')
+    )
+    expect(add).toBeTruthy()
+    expect(add?.classes()).toEqual(expect.arrayContaining(['w-full', 'border-dashed']))
+    expect(wrapper.find('[data-testid="sync-upstream-models"]').exists()).toBe(true)
+    expect(getByIdMock).not.toHaveBeenCalled()
+    const before = wrapper.findAll('input[placeholder="admin.accounts.requestModel"]').length
+    await add?.trigger('click')
+    expect(wrapper.findAll('input[placeholder="admin.accounts.requestModel"]')).toHaveLength(before + 1)
+  })
+
+  it.each(['oauth', 'apikey'])(
+    'saves Grok %s mapping edits, deletions, presets and full long ids',
+    async type => {
+      const longTarget = `grok-${'upstream'.repeat(12)}-target`
+      const account = {
+        ...buildGrokOAuthAccount({
+          model_mapping: { friendly: 'grok-4.7', 'drop-me': 'grok-4.6' }
+        }),
+        type,
+        ...(type === 'apikey' ? { credentials_status: { has_api_key: true } } : {})
+      }
+      updateAccountMock.mockResolvedValue(account)
+      const wrapper = mountLiveSelectorModal(account)
+      await flushPromises()
+      const rows = () => wrapper.findAll('[data-testid="grok-model-mapping-row"]')
+      expect(rows()).toHaveLength(2)
+      const friendly = rows().find(row =>
+        (row.get('input[placeholder="admin.accounts.requestModel"]').element as HTMLInputElement).value === 'friendly'
+      )
+      expect(friendly).toBeTruthy()
+      const target = friendly!.get('input[placeholder="admin.accounts.actualModel"]')
+      await target.setValue(longTarget)
+      expect((target.element as HTMLInputElement).value).toBe(longTarget)
+      const drop = rows().find(row =>
+        (row.get('input[placeholder="admin.accounts.requestModel"]').element as HTMLInputElement).value === 'drop-me'
+      )
+      await drop!.get('button').trigger('click')
+      expect(rows()).toHaveLength(1)
+      expect((rows()[0].get('input[placeholder="admin.accounts.actualModel"]').element as HTMLInputElement).value).toBe(longTarget)
+      const preset = wrapper.findAll('button').find(button => button.text() === '+ Grok Latest')
+      expect(preset).toBeTruthy()
+      await preset!.trigger('click')
+      expect(rows()).toHaveLength(2)
+
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await vi.waitFor(() => expect(updateAccountMock).toHaveBeenCalledTimes(1))
+      expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.model_mapping).toEqual({
+        friendly: longTarget,
+        'grok-latest': 'grok-4.5'
+      })
+      expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.grok_model_diagnostics).toBeUndefined()
+    }
+  )
+
+  it('edits and deletes duplicate Grok mapping rows without reusing their values as keys', async () => {
+    const wrapper = mountLiveSelectorModal(buildGrokOAuthAccount({ model_mapping: { friendly: 'grok-4.7' } }))
+    await flushPromises()
+    await wrapper.get('[data-testid="grok-model-mapping-add"]').trigger('click')
+    await wrapper.get('[data-testid="grok-model-mapping-add"]').trigger('click')
+    const rows = () => wrapper.findAll('[data-testid="grok-model-mapping-row"]')
+    expect(rows()).toHaveLength(3)
+    const firstAdded = rows()[1].element
+    const secondAdded = rows()[2].element
+    await rows()[1].get('input[placeholder="admin.accounts.requestModel"]').setValue('same-request')
+    await rows()[1].get('input[placeholder="admin.accounts.actualModel"]').setValue('same-target')
+    await rows()[2].get('input[placeholder="admin.accounts.requestModel"]').setValue('same-request')
+    await rows()[2].get('input[placeholder="admin.accounts.actualModel"]').setValue('same-target')
+    expect(rows()[1].element).toBe(firstAdded)
+    expect(rows()[2].element).toBe(secondAdded)
+    await rows()[1].get('input[placeholder="admin.accounts.actualModel"]').setValue('only-first')
+    expect((rows()[2].get('input[placeholder="admin.accounts.actualModel"]').element as HTMLInputElement).value).toBe('same-target')
+    expect((rows()[2].get('input[placeholder="admin.accounts.requestModel"]').element as HTMLInputElement).value).toBe('same-request')
+    await rows()[1].get('button').trigger('click')
+    expect(rows()).toHaveLength(2)
+    expect(rows()[1].element).toBe(secondAdded)
+    expect((rows()[1].get('input[placeholder="admin.accounts.actualModel"]').element as HTMLInputElement).value).toBe('same-target')
+  })
+
+  it.each(['oauth', 'apikey'])(
+    'keeps Grok %s diagnostics between the mode tabs and the active editor',
+    async type => {
+      const account = { ...buildGrokOAuthAccount({ model_mapping: { friendly: 'grok-4.7' } }), type }
+      const wrapper = mountLiveSelectorModal(account)
+      await flushPromises()
+      const settings = wrapper.get('[data-testid="grok-model-settings"]')
+      const tabs = settings.get('[data-testid="grok-model-mode-tabs"]')
+      const panel = settings.get('[data-testid="grok-model-diagnostics"]')
+      const editor = settings.get('[data-testid="grok-model-mapping-editor"]')
+      expect(tabs.element.compareDocumentPosition(panel.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING
+      )
+      expect(panel.element.compareDocumentPosition(editor.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING
+      )
+      const mapping = tabs.findAll('button').find(button => button.text().includes('admin.accounts.modelMapping'))
+      const whitelist = tabs.findAll('button').find(button => button.text().includes('admin.accounts.modelWhitelist'))
+      expect(mapping?.attributes('aria-pressed')).toBe('true')
+      expect(whitelist?.attributes('aria-pressed')).toBe('false')
+      expect(wrapper.findAll('[data-testid="grok-diagnostics-sync"]')).toHaveLength(1)
+      expect(wrapper.find('[data-testid="sync-upstream-models"]').exists()).toBe(false)
+
+      await editor.get('input[placeholder="admin.accounts.actualModel"]').setValue('grok-edited')
+      const dirty = settings.get('[data-testid="grok-diagnostics-dirty"]')
+      expect(wrapper.findAll('[data-testid="grok-diagnostics-dirty"]')).toHaveLength(1)
+      expect(panel.element.contains(dirty.element)).toBe(true)
+      expect(dirty.element.compareDocumentPosition(editor.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING
+      )
+
+      await whitelist!.trigger('click')
+      expect(settings.get('[data-testid="grok-model-diagnostics"]').exists()).toBe(true)
+      expect(settings.find('[data-testid="grok-model-mapping-editor"]').exists()).toBe(false)
+      expect(wrapper.findAll('[data-testid="grok-diagnostics-sync"]')).toHaveLength(1)
+      expect(wrapper.find('[data-testid="sync-upstream-models"]').exists()).toBe(false)
+      expect(whitelist?.attributes('aria-pressed')).toBe('true')
+      expect(mapping?.attributes('aria-pressed')).toBe('false')
+      const fill = settings.findAll('button').find(button => button.text().includes('admin.accounts.fillRelatedModels'))
+      expect(fill).toBeTruthy()
+      expect(panel.element.compareDocumentPosition(fill!.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(
+        Node.DOCUMENT_POSITION_FOLLOWING
+      )
+    }
+  )
+
+  it.each(['oauth', 'apikey'])(
+    'keeps Grok %s whitelist fill, clear and custom models with saved mapping priority',
+    async type => {
+      const custom = `manual-${'m'.repeat(80)}`
+      const account = {
+        ...buildGrokOAuthAccount({
+          model_mapping: { 'listed-model': 'listed-model', friendly: 'grok-4.7' }
+        }),
+        type,
+        ...(type === 'apikey' ? { credentials_status: { has_api_key: true } } : {})
+      }
+      updateAccountMock.mockResolvedValue(account)
+      const wrapper = mountLiveSelectorModal(account)
+      await flushPromises()
+      expect(wrapper.find('[data-testid="grok-model-mapping-editor"]').exists()).toBe(false)
+      const selector = wrapper.getComponent({ name: 'ModelWhitelistSelector' })
+      expect(selector.props('modelValue')).toEqual(['listed-model'])
+
+      await wrapper.findAll('button').find(button => button.text().includes('admin.accounts.fillRelatedModels'))!.trigger('click')
+      const filled = selector.props('modelValue') as string[]
+      expect(filled).toContain('listed-model')
+      expect(filled.length).toBeGreaterThan(1)
+
+      await wrapper.findAll('button').find(button => button.text().includes('admin.accounts.clearAllModels'))!.trigger('click')
+      expect(selector.props('modelValue')).toEqual([])
+
+      await wrapper.get('input[placeholder="admin.accounts.enterCustomModelName"]').setValue(custom)
+      await wrapper.findAll('button').find(button => button.text() === 'admin.accounts.addModel')!.trigger('click')
+      expect(selector.props('modelValue')).toEqual([custom])
+
+      const tabs = wrapper.get('[data-testid="grok-model-mode-tabs"]')
+      await tabs.findAll('button').find(button => button.text().includes('admin.accounts.modelMapping'))!.trigger('click')
+      const editor = wrapper.get('[data-testid="grok-model-mapping-editor"]')
+      expect((editor.get('input[placeholder="admin.accounts.requestModel"]').element as HTMLInputElement).value).toBe('friendly')
+      await editor.get('input[placeholder="admin.accounts.actualModel"]').setValue('grok-4.7-kept')
+      expect(wrapper.find('[data-testid="grok-model-diagnostics"]').exists()).toBe(true)
+      expect(wrapper.findAll('[data-testid="grok-diagnostics-sync"]')).toHaveLength(1)
+
+      await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+      await vi.waitFor(() => expect(updateAccountMock).toHaveBeenCalledTimes(1))
+      expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.model_mapping).toEqual({
+        [custom]: custom,
+        friendly: 'grok-4.7-kept'
+      })
+    }
+  )
 })
