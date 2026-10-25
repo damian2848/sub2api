@@ -674,6 +674,70 @@ describe('ModelWhitelistSelector', () => {
     expect(wrapper.findAll('[data-testid="model-iq-test-status"]')).toHaveLength(0)
   })
 
+  it('can hide only the built-in trigger while retaining its public sync action', async () => {
+    syncUpstreamModels.mockResolvedValue({ models: ['grok-4.7'], discovery_source: 'upstream' })
+    const wrapper = mountSelector({ platform: 'grok', accountId: 46, showSyncButton: false })
+    expect(wrapper.find('[data-testid="sync-upstream-models"]').exists()).toBe(false)
+    await wrapper.vm.syncUpstreamModels()
+    await flushPromises()
+    expect(syncUpstreamModels).toHaveBeenCalledTimes(1)
+    expect(syncUpstreamModels).toHaveBeenCalledWith(46)
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['grok-4.7']]])
+    expect(wrapper.emitted('upstream-sync-finished')).toEqual([[]])
+    wrapper.unmount()
+  })
+
+  it('keeps the public busy flag on the newer sync when an older account sync settles', async () => {
+    const first = deferred<any>()
+    const second = deferred<any>()
+    syncUpstreamModels.mockImplementation((id: number) => (id === 1 ? first.promise : second.promise))
+    const wrapper = mountSelector({ platform: 'grok', accountId: 1, modelValue: ['a-local'], showSyncButton: false })
+
+    const firstSync = wrapper.vm.syncUpstreamModels()
+    expect(wrapper.vm.isSyncingUpstream).toBe(true)
+
+    await wrapper.setProps({ accountId: 2, modelValue: ['b-local'] })
+    expect(wrapper.vm.isSyncingUpstream).toBe(false)
+    const secondSync = wrapper.vm.syncUpstreamModels()
+    expect(wrapper.vm.isSyncingUpstream).toBe(true)
+
+    first.resolve({ models: ['a-private-catalog'], discovery_source: 'upstream' })
+    await firstSync
+    await flushPromises()
+    expect(wrapper.vm.isSyncingUpstream).toBe(true)
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    expect(wrapper.emitted('upstream-sync-finished')).toBeUndefined()
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(showWarning).not.toHaveBeenCalled()
+    expect(showError).not.toHaveBeenCalled()
+
+    second.resolve({ models: ['b-catalog'], discovery_source: 'upstream' })
+    await secondSync
+    await flushPromises()
+    expect(wrapper.vm.isSyncingUpstream).toBe(false)
+    expect(wrapper.emitted('update:modelValue')).toEqual([[['b-local', 'b-catalog']]])
+    expect(wrapper.emitted('upstream-sync-finished')).toEqual([[]])
+    expect(showSuccess).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('still withholds configured fallback ids when the built-in trigger is hidden', async () => {
+    syncUpstreamModels.mockResolvedValue({
+      models: ['composer-2.5'],
+      discovery_source: 'configured_fallback',
+      warnings: [{ code: 'grok_model_catalog_configured_fallback', message: 'fallback' }]
+    })
+    const wrapper = mountSelector({ platform: 'grok', accountId: 46, modelValue: ['grok-4.7'], showSyncButton: false })
+    await wrapper.vm.syncUpstreamModels()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="sync-upstream-models"]').exists()).toBe(false)
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+    expect(showWarning).toHaveBeenCalledWith('admin.accounts.grokModelDiagnostics.configuredFallback')
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(wrapper.emitted('upstream-sync-finished')).toEqual([[]])
+    wrapper.unmount()
+  })
+
   it('does not apply an older account sync to the current draft or clear its loading', async () => {
     const first = deferred<any>()
     const second = deferred<any>()

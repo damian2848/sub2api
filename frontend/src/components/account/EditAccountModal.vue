@@ -352,21 +352,24 @@
 
             <GrokModelDiagnosticsPanel
               v-if="account.platform === 'grok'"
+              :key="'grok-diagnostics-' + account.id"
               :diagnostics="grokDiagnostics"
               :loading="diagnosticsLoading"
               :dirty="grokDiagnosticsDirty"
               :refresh-failed="diagnosticsRefreshFailed"
-              :can-sync="modelRestrictionMode === 'mapping'"
-              :syncing="grokDiagnosticsSyncing"
-              @sync="syncGrokDiagnostics"
+              :can-sync="Boolean(account.id)"
+              :syncing="isGrokCatalogSyncing"
+              @sync="requestGrokCatalogSync"
             />
 
             <ModelWhitelistSelector
+              ref="grokApiKeyWhitelistRef"
               v-show="modelRestrictionMode === 'whitelist'"
               v-model="allowedModels"
               :model-mappings="modelMappings"
               :platform="account?.platform || 'anthropic'"
               :account-id="account?.id"
+              :show-sync-button="account.platform !== 'grok' || !account.id"
               @upstream-sync-finished="refreshGrokDiagnostics"
             />
 
@@ -916,21 +919,24 @@
 
           <GrokModelDiagnosticsPanel
             v-if="account.platform === 'grok'"
+            :key="'grok-diagnostics-' + account.id"
             :diagnostics="grokDiagnostics"
             :loading="diagnosticsLoading"
             :dirty="grokDiagnosticsDirty"
             :refresh-failed="diagnosticsRefreshFailed"
-            :can-sync="modelRestrictionMode === 'mapping'"
-            :syncing="grokDiagnosticsSyncing"
-            @sync="syncGrokDiagnostics"
+            :can-sync="Boolean(account.id)"
+            :syncing="isGrokCatalogSyncing"
+            @sync="requestGrokCatalogSync"
           />
 
           <ModelWhitelistSelector
+            ref="grokOAuthWhitelistRef"
             v-show="modelRestrictionMode === 'whitelist'"
             v-model="allowedModels"
             :model-mappings="modelMappings"
             :platform="account?.platform || 'anthropic'"
             :account-id="account?.id"
+            :show-sync-button="account.platform !== 'grok' || !account.id"
             @upstream-sync-finished="refreshGrokDiagnostics"
           />
 
@@ -4332,6 +4338,25 @@ const syncGrokDiagnostics = async () => {
       await refreshGrokDiagnostics()
     }
   }
+}
+
+const grokApiKeyWhitelistRef = ref<InstanceType<typeof ModelWhitelistSelector> | null>(null)
+const grokOAuthWhitelistRef = ref<InstanceType<typeof ModelWhitelistSelector> | null>(null)
+const activeGrokWhitelist = computed(() => props.account?.type === 'oauth'
+  ? grokOAuthWhitelistRef.value : grokApiKeyWhitelistRef.value)
+const isGrokCatalogSyncing = computed(() => grokDiagnosticsSyncing.value
+  || Boolean(activeGrokWhitelist.value?.isSyncingUpstream))
+const requestGrokCatalogSync = async () => {
+  if (!props.show || props.account?.platform !== 'grok' || !props.account.id
+      || diagnosticsLoading.value || isGrokCatalogSyncing.value) return
+  const mode = modelRestrictionMode.value
+  const selector = activeGrokWhitelist.value
+  if (mode === 'whitelist') {
+    if (!selector) return
+    await selector.syncUpstreamModels()
+    return
+  }
+  await syncGrokDiagnostics()
 }
 
 watch(
