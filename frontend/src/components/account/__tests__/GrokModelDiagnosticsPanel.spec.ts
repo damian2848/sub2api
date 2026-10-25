@@ -686,6 +686,56 @@ describe('GrokModelDiagnosticsPanel', () => {
     expect(attempt).not.toContain('上游请求失败')
   })
 
+  it.each(['__proto__', 'constructor', 'toString'] as const)(
+    'treats inherited attempt status %s as unknown without showing it',
+    async (status) => {
+      const wrapper = track(mountPanel({
+        diagnostics: freshDiagnostics({
+          last_attempt: {
+            started_at: '2026-10-25T11:50:00.000Z',
+            finished_at: '2026-10-25T11:50:02.000Z',
+            status,
+            error_code: 'http_error'
+          }
+        })
+      }))
+      expect(wrapper.get('[data-testid="grok-diagnostics-state"]').text()).toContain('当前有效')
+      await openDetails(wrapper)
+      const attempt = wrapper.get('[data-testid="grok-diagnostics-last-attempt"]').text()
+      expect(attempt).toContain('状态未知')
+      expect(attempt).not.toContain(status)
+      expect(attempt).not.toContain('http_error')
+      expect(attempt).not.toContain('上游请求失败')
+      expect(attempt).not.toContain('[object Object]')
+    }
+  )
+
+  it.each(['__proto__', 'constructor', 'toString'] as const)(
+    'treats inherited error code %s as unavailable without showing it',
+    async (code) => {
+      const wrapper = track(mountPanel({
+        diagnostics: freshDiagnostics({
+          last_attempt: {
+            started_at: '2026-10-25T11:50:00.000Z',
+            finished_at: '2026-10-25T11:50:02.000Z',
+            status: 'failed',
+            error_code: code
+          }
+        })
+      }))
+      expect(wrapper.get('[data-testid="grok-diagnostics-state"]').text()).toContain('同步失败')
+      expect(wrapper.text()).toContain('同步未成功，请稍后重试')
+      expect(wrapper.text()).not.toContain(code)
+      expect(wrapper.text()).not.toContain('[object Object]')
+      await openDetails(wrapper)
+      const attempt = wrapper.get('[data-testid="grok-diagnostics-last-attempt"]').text()
+      expect(attempt).toContain('同步失败')
+      expect(attempt).toContain('同步未成功，请稍后重试')
+      expect(attempt).not.toContain(code)
+      expect(attempt).not.toContain('failed')
+    }
+  )
+
   it('shows a fresh snapshot gap as the previous catalog when the latest attempt fell back', async () => {
     const attemptFinished = '2026-10-25T11:40:00.000Z'
     const wrapper = track(mountPanel({

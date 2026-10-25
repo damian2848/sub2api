@@ -260,6 +260,12 @@ const ERROR_LABEL_KEYS: Record<string, string> = {
   too_large: 'admin.accounts.grokModelDiagnostics.errorTooLarge',
   persistence: 'admin.accounts.grokModelDiagnostics.errorPersistence'
 }
+
+function ownedLabelKey(table: Record<string, string>, value: string | undefined): string | undefined {
+  if (!value || !Object.prototype.hasOwnProperty.call(table, value)) return undefined
+  return table[value]
+}
+
 let timer: ReturnType<typeof setInterval> | undefined
 
 onMounted(() => {
@@ -377,14 +383,13 @@ const stateClass = computed(() => {
 const attemptLabel = computed(() => {
   const status = props.diagnostics?.last_attempt?.status
   if (!status) return ''
-  return t(ATTEMPT_LABEL_KEYS[status] ?? 'admin.accounts.grokModelDiagnostics.attemptUnknown')
+  return t(ownedLabelKey(ATTEMPT_LABEL_KEYS, status) ?? 'admin.accounts.grokModelDiagnostics.attemptUnknown')
 })
 
 const attemptErrorLabel = computed(() => {
   const attempt = props.diagnostics?.last_attempt
   if (!attempt || attempt.status !== 'failed') return ''
-  const key = attempt.error_code ? ERROR_LABEL_KEYS[attempt.error_code] : undefined
-  return t(key ?? 'admin.accounts.grokModelDiagnostics.attemptUnavailable')
+  return t(ownedLabelKey(ERROR_LABEL_KEYS, attempt.error_code) ?? 'admin.accounts.grokModelDiagnostics.attemptUnavailable')
 })
 
 const attemptDetail = computed(() => {
