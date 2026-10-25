@@ -7,7 +7,7 @@ import zhCommon from '@/i18n/locales/zh/common'
 const originalI18nT = i18n.global.t.bind(i18n.global)
 
 function installCatalogClock() {
-  ;(i18n.global as { t: (key: string, params?: Record<string, unknown>) => string }).t = (key, params) => {
+  (i18n.global as { t: (key: string, params?: Record<string, unknown>) => string }).t = (key, params) => {
     let current: unknown = zhCommon
     for (const segment of key.split('.')) {
       if (!current || typeof current !== 'object') return key

@@ -429,10 +429,11 @@ const syncUpstreamModels = async () => {
     const message = extractApiErrorMessage(error, t('admin.accounts.syncUpstreamModelsFailed'))
     appStore.showError(t('admin.accounts.syncUpstreamModelsError', { message }))
   } finally {
-    if (!isCurrentSync()) return
-    isSyncingUpstream.value = false
-    if (accountId) {
-      emit('upstream-sync-finished')
+    if (isCurrentSync()) {
+      isSyncingUpstream.value = false
+      if (accountId) {
+        emit('upstream-sync-finished')
+      }
     }
   }
 }

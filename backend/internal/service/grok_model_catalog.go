@@ -77,13 +77,8 @@ func NewGrokCatalogScope(accountID int64, accountType, modelsURL string) (*GrokC
 }
 
 func grokCatalogFingerprint(canonicalURL string, accountID int64, accountType string) string {
-	var b strings.Builder
-	b.WriteString(canonicalURL)
-	b.WriteByte('\n')
-	b.WriteString(strconv.FormatInt(accountID, 10))
-	b.WriteByte('\n')
-	b.WriteString(accountType)
-	sum := sha256.Sum256([]byte(b.String()))
+	payload := canonicalURL + "\n" + strconv.FormatInt(accountID, 10) + "\n" + accountType
+	sum := sha256.Sum256([]byte(payload))
 	return hex.EncodeToString(sum[:])
 }
 
