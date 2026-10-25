@@ -1,6 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
 import { flushPromises, mount } from '@vue/test-utils'
+import { i18n } from '@/i18n'
+import zhCommon from '@/i18n/locales/zh/common'
+
+const originalI18nT = i18n.global.t.bind(i18n.global)
+
+function installCatalogClock() {
+  ;(i18n.global as { t: (key: string, params?: Record<string, unknown>) => string }).t = (key, params) => {
+    let current: unknown = zhCommon
+    for (const segment of key.split('.')) {
+      if (!current || typeof current !== 'object') return key
+      current = (current as Record<string, unknown>)[segment]
+    }
+    return typeof current === 'string'
+      ? current.replace(/\{(\w+)\}/g, (token, name) => String(params?.[name] ?? token))
+      : key
+  }
+}
 
 const {
   updateAccountMock,
@@ -199,8 +216,17 @@ function mountLiveSelectorModal(account: any) {
   return wrapper
 }
 
+async function openDiagnosticsDetails(wrapper: ReturnType<typeof mountModal>) {
+  const button = wrapper.find('[data-testid="grok-diagnostics-details-toggle"]')
+  if (button.exists() && button.attributes('aria-expanded') === 'false') {
+    await button.trigger('click')
+    await flushPromises()
+  }
+}
+
 describe('EditAccountModal Grok OAuth upstream config', () => {
   beforeEach(() => {
+    installCatalogClock()
     authIsSimpleMode.value = true
     updateAccountMock.mockReset()
     checkMixedChannelRiskMock.mockReset()
@@ -216,6 +242,7 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
 
   afterEach(() => {
     for (const wrapper of mounted.splice(0)) wrapper.unmount()
+    ;(i18n.global as { t: typeof originalI18nT }).t = originalI18nT
   })
 
   it('enabling the custom base URL toggle and saving persists base_url', async () => {
@@ -429,7 +456,7 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
 
     const input = wrapper.get('[data-testid="grok-custom-base-url-input"]')
     await input.setValue('https://draft.example.com')
-    expect(wrapper.text()).toContain('admin.accounts.grokModelDiagnostics.savedConfigOnly')
+    expect(wrapper.text()).toContain('admin.accounts.grokModelDiagnostics.savedConfigHint')
     await wrapper.get('[data-testid="emit-upstream-sync-finished"]').trigger('click')
     await flushPromises()
 
@@ -437,6 +464,7 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     expect(account.credentials.base_url).toBe('https://my-relay.example.com')
     expect(account.grok_model_diagnostics).toBeUndefined()
     expect(wrapper.props('account').id).toBe(account.id)
+    await openDiagnosticsDetails(wrapper)
     expect(wrapper.text()).toContain('saved-model')
     expect(getByIdMock).toHaveBeenCalledWith(account.id)
   })
@@ -509,10 +537,12 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     await wrapper.setProps({ account: accountB })
     first.resolve({ ...accountA, grok_model_diagnostics: diagnostics('late-a-model') })
     await flushPromises()
+    await openDiagnosticsDetails(wrapper)
     expect(wrapper.text()).not.toContain('late-a-model')
 
     second.resolve({ ...accountB, grok_model_diagnostics: diagnostics('current-b-model') })
     await flushPromises()
+    await openDiagnosticsDetails(wrapper)
     expect(wrapper.text()).toContain('current-b-model')
     expect(wrapper.text()).not.toContain('late-a-model')
     expect(wrapper.props('account').id).toBe(accountB.id)
@@ -532,10 +562,12 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     await wrapper.setProps({ show: true })
     first.resolve({ ...account, grok_model_diagnostics: diagnostics('closed-model') })
     await flushPromises()
+    await openDiagnosticsDetails(wrapper)
     expect(wrapper.text()).not.toContain('closed-model')
 
     reopened.resolve({ ...account, grok_model_diagnostics: diagnostics('reopened-model') })
     await flushPromises()
+    await openDiagnosticsDetails(wrapper)
     expect(wrapper.text()).toContain('reopened-model')
     expect(wrapper.text()).not.toContain('closed-model')
   })
@@ -552,6 +584,7 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     getByIdMock.mockResolvedValue({ ...account, grok_model_diagnostics: diagnostics('mounted-model') })
     const again = mountModal(account)
     await flushPromises()
+    await openDiagnosticsDetails(again)
     expect(again.text()).toContain('mounted-model')
     expect(again.text()).not.toContain('unmounted-model')
   })
@@ -563,10 +596,12 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
       .mockRejectedValueOnce(new Error('offline'))
     const wrapper = mountModal(account)
     await flushPromises()
+    await openDiagnosticsDetails(wrapper)
     expect(wrapper.text()).toContain('kept-model')
 
     await wrapper.get('[data-testid="emit-upstream-sync-finished"]').trigger('click')
     await flushPromises()
+    await openDiagnosticsDetails(wrapper)
     expect(wrapper.text()).toContain('kept-model')
     expect(wrapper.text()).toContain('admin.accounts.grokModelDiagnostics.refreshFailed')
   })
@@ -585,12 +620,13 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     const wrapper = mountModal(apiKey)
     await flushPromises()
     expect(wrapper.find('[data-testid="grok-model-diagnostics"]').exists()).toBe(true)
+    await openDiagnosticsDetails(wrapper)
     expect(wrapper.text()).toContain('apikey-model')
     expect(getByIdMock).toHaveBeenCalledWith(apiKey.id)
 
     const baseUrl = wrapper.get('input[placeholder="https://api.x.ai/v1"]')
     await baseUrl.setValue('https://draft-api.example.com')
-    expect(wrapper.text()).toContain('admin.accounts.grokModelDiagnostics.savedConfigOnly')
+    expect(wrapper.text()).toContain('admin.accounts.grokModelDiagnostics.savedConfigHint')
     expect((baseUrl.element as HTMLInputElement).value).toBe('https://draft-api.example.com')
 
     getByIdMock.mockClear()
@@ -654,6 +690,7 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     expect(showWarningMock).not.toHaveBeenCalled()
     expect(showErrorMock).not.toHaveBeenCalled()
     expect(showSuccessMock).not.toHaveBeenCalled()
+    await openDiagnosticsDetails(wrapper)
     expect(wrapper.text()).toContain('account-b-model')
     expect(wrapper.text()).not.toContain('account-a-model')
   })
@@ -673,6 +710,7 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
 
     expect(showErrorMock).toHaveBeenCalledWith('admin.accounts.syncUpstreamModelsError')
     expect(showSuccessMock).not.toHaveBeenCalled()
+    await openDiagnosticsDetails(wrapper)
     expect(wrapper.text()).toContain('kept-after-sync-error')
     expect(getByIdMock.mock.calls.length).toBeGreaterThan(callsBeforeSync)
     expect((wrapper.get('input[placeholder="admin.accounts.actualModel"]').element as HTMLInputElement).value).toBe('grok-4.7')
@@ -716,6 +754,7 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
 
     const button = wrapper.get('[data-testid="grok-diagnostics-sync"]')
     expect((button.element as HTMLButtonElement).disabled).toBe(false)
+    await openDiagnosticsDetails(wrapper)
     expect(wrapper.text()).toContain(settledModel)
     expect(wrapper.text()).not.toContain('selector-model')
     expect((wrapper.get('input[placeholder="admin.accounts.actualModel"]').element as HTMLInputElement).value).toBe('grok-4.5')
@@ -795,6 +834,7 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     await flushPromises()
 
     expect(getByIdMock.mock.calls.length).toBe(getsAfterOpen + 1)
+    await openDiagnosticsDetails(wrapper)
     expect(wrapper.text()).toContain('after-selector-sync')
     expect(wrapper.text()).not.toContain('before-sync')
     expect((draft.element as HTMLInputElement).value).toBe('grok-4.5')
@@ -808,6 +848,7 @@ describe('EditAccountModal Grok OAuth upstream config', () => {
     await flushPromises()
 
     expect(getByIdMock.mock.calls.length).toBe(getsAfterOpen + 1)
+    await openDiagnosticsDetails(wrapper)
     expect(wrapper.text()).toContain('persisted-failure')
     expect(wrapper.text()).not.toContain('before-sync')
     expect(showErrorMock).toHaveBeenCalled()
