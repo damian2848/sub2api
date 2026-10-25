@@ -64,6 +64,15 @@ func (s *GeminiMessagesCompatService) ForwardAsChatCompletions(
 		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
 	anthropicReq.Stream = clientStream
+	// The Responses bridge applies its own minimum output budget. Gemini accepts
+	// smaller budgets, so restore the caller's limit after the protocol pivot.
+	limit := ccReq.MaxTokens
+	if ccReq.MaxCompletionTokens != nil {
+		limit = ccReq.MaxCompletionTokens
+	}
+	if limit != nil && *limit > 0 {
+		anthropicReq.MaxTokens = *limit
+	}
 
 	claudeBody, err := json.Marshal(anthropicReq)
 	if err != nil {

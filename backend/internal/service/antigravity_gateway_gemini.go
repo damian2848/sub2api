@@ -151,7 +151,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 	// 包装请求
 	wrappedBody, err := s.wrapV1InternalRequest(projectID, mappedModel, injectedBody)
 	if err != nil {
-		return nil, s.writeGoogleError(c, http.StatusInternalServerError, "Failed to build upstream request")
+		return nil, s.writeGoogleError(c, http.StatusBadRequest, err.Error())
 	}
 
 	// Antigravity 上游只支持流式请求，统一使用 streamGenerateContent

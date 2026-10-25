@@ -42,6 +42,58 @@ func (s *geminiCompatHTTPUpstreamStub) DoWithTLS(req *http.Request, proxyURL str
 	return s.Do(req, proxyURL, accountID, accountConcurrency)
 }
 
+func TestGeminiChatPreservesGenerationConstraints(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tier := range []string{"high", "medium", "low"} {
+		for _, tc := range []struct {
+			name   string
+			fields string
+			limit  float64
+			mode   string
+			named  bool
+		}{
+			{"max_tokens", `"max_tokens":8`, 8, "", false},
+			{"max_completion_tokens", `"max_tokens":8,"max_completion_tokens":13`, 13, "", false},
+			{"named", `"max_tokens":256,"tool_choice":{"type":"function","function":{"name":"emit_code"}}`, 256, "ANY", true},
+			{"none", `"max_tokens":256,"tool_choice":"none"`, 256, "NONE", false},
+			{"required", `"max_tokens":256,"tool_choice":"required"`, 256, "ANY", false},
+		} {
+			t.Run(tier+"/"+tc.name, func(t *testing.T) {
+				upstream := &geminiCompatHTTPUpstreamStub{response: &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"candidates":[{"content":{"parts":[{"text":"ping"}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":8,"totalTokenCount":28}}`)),
+				}}
+				svc := &GeminiMessagesCompatService{httpUpstream: upstream, cfg: &config.Config{}}
+				account := &Account{ID: 101, Platform: PlatformGemini, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "test-key", "base_url": "https://generativelanguage.googleapis.com"}, Concurrency: 1}
+				model := "gemini-4-argon-" + tier
+				body := []byte(fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"emit_code","parameters":{"type":"object","properties":{"code":{"type":"string"}}}}}],%s}`, model, tc.fields))
+				rec := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(rec)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+				_, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body)
+				require.NoError(t, err)
+				require.Equal(t, 1, upstream.calls)
+				var sent map[string]any
+				require.NoError(t, json.NewDecoder(upstream.lastReq.Body).Decode(&sent))
+				require.Equal(t, tc.limit, sent["generationConfig"].(map[string]any)["maxOutputTokens"])
+				if tc.mode != "" {
+					config, ok := sent["toolConfig"].(map[string]any)
+					require.True(t, ok, "tool_choice must survive the Claude protocol pivot")
+					calling := config["functionCallingConfig"].(map[string]any)
+					require.Equal(t, tc.mode, calling["mode"])
+					if tc.named {
+						require.Equal(t, []any{"emit_code"}, calling["allowedFunctionNames"])
+					}
+				}
+				var response map[string]any
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				require.Equal(t, "length", response["choices"].([]any)[0].(map[string]any)["finish_reason"])
+			})
+		}
+	}
+}
+
 func TestGeminiForwardAsChatCompletions_OAuthRoutesToGeminiAndReturnsChatFormat(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

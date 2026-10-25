@@ -908,6 +908,19 @@ urlFallbackLoop:
 		}
 	}
 
+	if err := s.checkArgonFunctionResponse(resp, p.body); err != nil {
+		logger.LegacyPrintf("service.antigravity_gateway", "%s function calling policy rejected upstream response: %v", p.prefix, err)
+		body, _ := json.Marshal(map[string]any{"error": map[string]any{
+			"code": http.StatusBadGateway, "status": "UNAVAILABLE", "message": err.Error(),
+		}})
+		resp.StatusCode = http.StatusBadGateway
+		resp.Header = resp.Header.Clone()
+		resp.Header.Set("Content-Type", "application/json")
+		resp.Header.Del("Content-Length")
+		resp.ContentLength = int64(len(body))
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+	}
+
 	if resp != nil && resp.StatusCode < 400 && usedBaseURL != "" {
 		antigravity.DefaultURLAvailability.MarkSuccess(usedBaseURL)
 	}

@@ -3491,6 +3491,27 @@ func convertClaudeMessagesToGeminiGenerateContent(body []byte) ([]byte, error) {
 	if tools := convertClaudeToolsToGeminiTools(req["tools"]); tools != nil {
 		out["tools"] = tools
 	}
+	if choice, ok := req["tool_choice"].(map[string]any); ok {
+		calling := map[string]any{}
+		switch choice["type"] {
+		case "auto":
+			calling["mode"] = "AUTO"
+		case "none":
+			calling["mode"] = "NONE"
+		case "any":
+			calling["mode"] = "ANY"
+		case "tool":
+			name, _ := choice["name"].(string)
+			if strings.TrimSpace(name) == "" {
+				return nil, fmt.Errorf("tool_choice name is required")
+			}
+			calling["mode"] = "ANY"
+			calling["allowedFunctionNames"] = []string{name}
+		default:
+			return nil, fmt.Errorf("unsupported tool_choice type %v", choice["type"])
+		}
+		out["toolConfig"] = map[string]any{"functionCallingConfig": calling}
+	}
 
 	generationConfig := convertClaudeGenerationConfig(req)
 	if generationConfig != nil {
