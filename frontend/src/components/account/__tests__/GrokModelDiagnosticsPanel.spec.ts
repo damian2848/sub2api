@@ -340,8 +340,11 @@ describe('GrokModelDiagnosticsPanel', () => {
     if (normalized) expect(text).not.toContain(normalized)
     expect(text).not.toContain(NOT_LISTED_ZH)
     expect(text).not.toContain('当前有效')
-    expect(text).not.toContain('历史目录')
+    expect(wrapper.get('[data-testid="grok-diagnostics-state"]').text()).not.toContain('历史目录')
     expect(text).not.toContain('来源已变更')
+    const details = wrapper.get('[data-testid="grok-diagnostics-details"]')
+    expect(details.get('dt').text()).toBe('历史目录来源')
+    expect(details.findAll('h4')[0].text()).toBe('历史目录')
   })
 
   it('keeps a real leap day, numeric offset, and fractional second as the last success', async () => {
@@ -390,6 +393,10 @@ describe('GrokModelDiagnosticsPanel', () => {
     expect(text).not.toContain(NOT_LISTED_ZH)
     expect(text).not.toContain('当前有效')
     expect(text).toContain('grok-4.7')
+    expect(wrapper.get('[data-testid="grok-diagnostics-state"]').text()).not.toContain('历史目录')
+    const details = wrapper.get('[data-testid="grok-diagnostics-details"]')
+    expect(details.get('dt').text()).toBe('历史目录来源')
+    expect(details.findAll('h4')[0].text()).toBe('历史目录')
   })
 
   it('treats listed rows in a stale catalog as history rather than a current result', async () => {
@@ -736,6 +743,10 @@ describe('GrokModelDiagnosticsPanel', () => {
     expect(wrapper.text()).toContain('configured-only')
     expect(wrapper.text()).not.toContain(NOT_LISTED_ZH)
     expect(wrapper.text()).toContain('历史记录，需重新同步后核验')
+    expect(wrapper.get('[data-testid="grok-diagnostics-state"]').text()).toContain('未知')
+    const details = wrapper.get('[data-testid="grok-diagnostics-details"]')
+    expect(details.get('dt').text()).toBe('历史目录来源')
+    expect(details.findAll('h4')[0].text()).toBe('历史目录')
   })
 
   it.each([
@@ -793,6 +804,10 @@ describe('GrokModelDiagnosticsPanel', () => {
     expect(wrapper.text()).toContain('grok-4.7')
     expect(wrapper.text()).not.toContain(NOT_LISTED_ZH)
     expect(wrapper.text()).toContain('历史记录，需重新同步后核验')
+    expect(wrapper.get('[data-testid="grok-diagnostics-state"]').text()).not.toContain('历史目录')
+    const details = wrapper.get('[data-testid="grok-diagnostics-details"]')
+    expect(details.get('dt').text()).toBe('历史目录来源')
+    expect(details.findAll('h4')[0].text()).toBe('历史目录')
   })
 
   it('keeps refresh failure, the unsaved hint, and trusted gaps together', () => {

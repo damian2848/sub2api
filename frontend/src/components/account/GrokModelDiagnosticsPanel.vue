@@ -137,7 +137,7 @@
         <dl class="space-y-3 text-xs">
           <div>
             <dt class="text-gray-500 dark:text-dark-400">
-              {{ effectiveState === 'stale' || effectiveState === 'source_changed'
+              {{ effectiveState !== 'fresh'
                 ? t('admin.accounts.grokModelDiagnostics.historicalSource')
                 : t('admin.accounts.grokModelDiagnostics.source') }}
             </dt>
@@ -164,7 +164,7 @@
 
         <div class="mt-4">
           <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100">
-            {{ effectiveState === 'stale' || effectiveState === 'source_changed'
+            {{ effectiveState !== 'fresh'
               ? t('admin.accounts.grokModelDiagnostics.historicalModels')
               : t('admin.accounts.grokModelDiagnostics.upstreamModels') }}
           </h4>
