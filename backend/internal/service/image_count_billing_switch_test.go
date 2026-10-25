@@ -184,3 +184,41 @@ func TestGroupService_ImageCountBillingValidation(t *testing.T) {
 		require.False(t, updated.ImageCountBilling)
 	})
 }
+
+// 渠道按次定价只配置按上下文分档（无尺寸档）时，尺寸档未命中，必须用 token
+// 上下文匹配档位；漏传 Tokens 会让档位永不命中而按 $0 结算。与开关无关。
+func TestCalculateRecordUsageCost_ChannelPerRequestContextTierUsesTokens(t *testing.T) {
+	for _, switchOn := range []bool{false, true} {
+		groupID := int64(905)
+		model := "gemini-3-pro-image"
+		resolver := newOpenAITokenImageChannelPricingResolverForTest(t, groupID, model)
+		cached, ok := resolver.channelService.cache.Load().(*channelCache)
+		require.True(t, ok)
+		maxTokens := 1000
+		cached.pricingByGroupModel[channelModelKey{groupID: groupID, model: model}] = &ChannelModelPricing{
+			BillingMode: BillingModePerRequest,
+			Intervals: []PricingInterval{
+				{MinTokens: 0, MaxTokens: &maxTokens, PerRequestPrice: f64p(0.1)},
+				{MinTokens: 1000, PerRequestPrice: f64p(0.3)},
+			},
+		}
+		group := &Group{
+			ID:                   groupID,
+			Platform:             PlatformComposite,
+			Status:               StatusActive,
+			Hydrated:             true,
+			AllowImageGeneration: true,
+			ImageCountBilling:    switchOn,
+		}
+		apiKey := &APIKey{ID: 5, GroupID: &groupID, Group: group}
+		svc := &GatewayService{billingService: resolver.billingService, resolver: resolver}
+
+		cost := svc.calculateRecordUsageCost(context.Background(), &ForwardResult{
+			Model: model, ImageCount: 2, ImageSize: "1K", ImageEndpoint: true,
+			Usage: ClaudeUsage{InputTokens: 5000, OutputTokens: 100},
+		}, apiKey, model, 1, 1, time.Time{})
+
+		require.NotNil(t, cost)
+		require.InDelta(t, 0.6, cost.TotalCost, 1e-12, "switch=%v: 应按上下文档 0.3 × 2 张结算", switchOn)
+	}
+}

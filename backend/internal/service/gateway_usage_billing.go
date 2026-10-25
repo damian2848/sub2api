@@ -1243,15 +1243,22 @@ func (s *GatewayService) calculateImageCost(
 		return s.billingService.CalculateImageCost(billingModel, sizeTier, result.ImageCount, groupConfig, multiplier)
 	}
 	if resolved != nil && resolved.Source == PricingSourceChannel {
+		tokens := UsageTokens{
+			InputTokens:       result.Usage.InputTokens,
+			OutputTokens:      result.Usage.OutputTokens,
+			ImageOutputTokens: result.Usage.ImageOutputTokens,
+		}
 		switch {
 		case resolved.Mode == BillingModePerRequest || resolved.Mode == BillingModeImage:
-			// 按次/图片模式只按请求张数结算，与 OpenAI 流水线口径一致。
+			// 按次/图片模式按请求张数结算。Tokens 不参与计价，但尺寸档未命中时
+			// calculatePerRequestCost 要用它匹配按上下文分档的单价，不能省略。
 			gid := apiKey.Group.ID
 			cost, err := s.billingService.CalculateCostUnified(CostInput{
 				Ctx:             ctx,
 				Model:           billingModel,
 				GroupID:         &gid,
 				Group:           apiKey.Group,
+				Tokens:          tokens,
 				RequestCount:    result.ImageCount,
 				SizeTier:        sizeTier,
 				ReasoningEffort: optionalStringValue(result.ReasoningEffort),
@@ -1266,11 +1273,6 @@ func (s *GatewayService) calculateImageCost(
 			return cost
 		case !forcePerImage:
 			// token 模式且开关未强制按张：保持原 token 计费。
-			tokens := UsageTokens{
-				InputTokens:       result.Usage.InputTokens,
-				OutputTokens:      result.Usage.OutputTokens,
-				ImageOutputTokens: result.Usage.ImageOutputTokens,
-			}
 			gid := apiKey.Group.ID
 			cost, err := s.billingService.CalculateCostUnified(CostInput{
 				Ctx:             ctx,
