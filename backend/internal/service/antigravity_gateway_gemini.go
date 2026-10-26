@@ -127,18 +127,18 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 		proxyURL = account.Proxy.URL()
 	}
 
+	// Normalize enum wire values before map-based transformations can round numbers.
+	if cleanedBody, err := cleanGeminiRequest(body); err == nil {
+		body = cleanedBody
+		logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Cleaned request schema in forwarded request for account %s", account.Name)
+	} else {
+		logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Failed to clean schema: %v", err)
+	}
+
 	// Antigravity 上游要求必须包含身份提示词，注入到请求中
 	injectedBody, err := injectIdentityPatchToGeminiRequest(body)
 	if err != nil {
 		return nil, s.writeGoogleError(c, http.StatusBadRequest, "Invalid request body")
-	}
-
-	// 清理 Schema
-	if cleanedBody, err := cleanGeminiRequest(injectedBody); err == nil {
-		injectedBody = cleanedBody
-		logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Cleaned request schema in forwarded request for account %s", account.Name)
-	} else {
-		logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Failed to clean schema: %v", err)
 	}
 
 	// Antigravity v1internal rejects built-in + functionDeclarations mixes (#6464).
@@ -487,7 +487,7 @@ handleSuccess:
 
 // cleanGeminiRequest 清理 Gemini 请求体中的 Schema
 func cleanGeminiRequest(body []byte) ([]byte, error) {
-	var payload map[string]any
+	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, err
 	}
@@ -495,7 +495,8 @@ func cleanGeminiRequest(body []byte) ([]byte, error) {
 	modified := false
 
 	// 1. 清理 Tools
-	if tools, ok := payload["tools"].([]any); ok && len(tools) > 0 {
+	var tools []any
+	if json.Unmarshal(payload["tools"], &tools) == nil && len(tools) > 0 {
 		for _, t := range tools {
 			toolMap, ok := t.(map[string]any)
 			if !ok {
@@ -528,6 +529,47 @@ func cleanGeminiRequest(body []byte) ([]byte, error) {
 				}
 			}
 		}
+		if modified {
+			encoded, err := json.Marshal(tools)
+			if err != nil {
+				return nil, err
+			}
+			payload["tools"] = encoded
+		}
+	}
+
+	// responseSchema uses Google's Schema protobuf, whose enum field is repeated
+	// string even for INTEGER/NUMBER/BOOLEAN schemas. Preserve the declared type
+	// and every other constraint; the tool cleaner would change them to STRING.
+	// responseJsonSchema is a different wire format and must retain typed enums.
+	for _, configKey := range []string{"generationConfig", "generation_config"} {
+		var generation map[string]json.RawMessage
+		if json.Unmarshal(payload[configKey], &generation) != nil {
+			continue
+		}
+		configModified := false
+		for _, schemaKey := range []string{"responseSchema", "response_schema"} {
+			var schema map[string]any
+			decoder := json.NewDecoder(bytes.NewReader(generation[schemaKey]))
+			decoder.UseNumber()
+			if decoder.Decode(&schema) != nil || !normalizeGeminiResponseSchemaEnums(schema) {
+				continue
+			}
+			encoded, err := json.Marshal(schema)
+			if err != nil {
+				return nil, err
+			}
+			generation[schemaKey] = encoded
+			configModified = true
+		}
+		if configModified {
+			encoded, err := json.Marshal(generation)
+			if err != nil {
+				return nil, err
+			}
+			payload[configKey] = encoded
+			modified = true
+		}
 	}
 
 	if !modified {
@@ -535,6 +577,42 @@ func cleanGeminiRequest(body []byte) ([]byte, error) {
 	}
 
 	return json.Marshal(payload)
+}
+
+// Visit schema nodes only, so properties named "enum" and JSON instance values
+// in defaults/examples are not mistaken for schema keywords.
+func normalizeGeminiResponseSchemaEnums(schema map[string]any) bool {
+	modified := false
+	if values, ok := schema["enum"].([]any); ok {
+		for i, value := range values {
+			switch value.(type) {
+			case json.Number, bool:
+				encoded, err := json.Marshal(value)
+				if err == nil {
+					values[i] = string(encoded)
+					modified = true
+				}
+			}
+		}
+	}
+	if properties, ok := schema["properties"].(map[string]any); ok {
+		for _, value := range properties {
+			if child, ok := value.(map[string]any); ok && normalizeGeminiResponseSchemaEnums(child) {
+				modified = true
+			}
+		}
+	}
+	if items, ok := schema["items"].(map[string]any); ok && normalizeGeminiResponseSchemaEnums(items) {
+		modified = true
+	}
+	if variants, ok := schema["anyOf"].([]any); ok {
+		for _, value := range variants {
+			if child, ok := value.(map[string]any); ok && normalizeGeminiResponseSchemaEnums(child) {
+				modified = true
+			}
+		}
+	}
+	return modified
 }
 
 // filterEmptyPartsFromGeminiRequest 过滤掉 parts 为空的消息

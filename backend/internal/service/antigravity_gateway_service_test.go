@@ -21,6 +21,47 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestCleanGeminiRequestResponseSchemaEnums(t *testing.T) {
+	for _, configKey := range []string{"generationConfig", "generation_config"} {
+		for _, schemaKey := range []string{"responseSchema", "response_schema"} {
+			t.Run(configKey+"/"+schemaKey, func(t *testing.T) {
+				schema := `{"type":"OBJECT","required":["flag"],"propertyOrdering":["flag"],"properties":{
+					"flag":{"type":"INTEGER","enum":[0,1],"minimum":0,"maximum":1},
+					"large":{"type":"INTEGER","enum":[9007199254740993]},
+					"rows":{"type":"ARRAY","items":{"type":"OBJECT","properties":{
+						"enum":{"type":"BOOLEAN","enum":[true,false]},
+						"ratio":{"type":"NUMBER","enum":[0.25,0.5]}}}},
+					"choice":{"anyOf":[{"type":"INTEGER","enum":[0,1]},{"type":"STRING","enum":["unknown"]}]},
+					"nullable":{"type":"STRING","nullable":true,"enum":["yes",null]},
+					"label":{"type":"STRING","enum":["0","1"]}}}`
+				wantSchema := `{"type":"OBJECT","required":["flag"],"propertyOrdering":["flag"],"properties":{
+					"flag":{"type":"INTEGER","enum":["0","1"],"minimum":0,"maximum":1},
+					"large":{"type":"INTEGER","enum":["9007199254740993"]},
+					"rows":{"type":"ARRAY","items":{"type":"OBJECT","properties":{
+						"enum":{"type":"BOOLEAN","enum":["true","false"]},
+						"ratio":{"type":"NUMBER","enum":["0.25","0.5"]}}}},
+					"choice":{"anyOf":[{"type":"INTEGER","enum":["0","1"]},{"type":"STRING","enum":["unknown"]}]},
+					"nullable":{"type":"STRING","nullable":true,"enum":["yes",null]},
+					"label":{"type":"STRING","enum":["0","1"]}}}`
+				body := []byte(fmt.Sprintf(`{"contents":[{"parts":[{"text":"enum: [0,1]"}]}],%q:{"maxOutputTokens":8,"temperature":0.125,%q:%s}}`, configKey, schemaKey, schema))
+				got, err := cleanGeminiRequest(body)
+				require.NoError(t, err)
+				want := fmt.Sprintf(`{"contents":[{"parts":[{"text":"enum: [0,1]"}]}],%q:{"maxOutputTokens":8,"temperature":0.125,%q:%s}}`, configKey, schemaKey, wantSchema)
+				require.JSONEq(t, want, string(got), "only enum wire values change; schema types and constraints survive")
+			})
+		}
+	}
+	for _, body := range []string{
+		`{"contents":[],"generationConfig":{"responseJsonSchema":{"type":"integer","enum":[0,1]}}}`,
+		`{"contents":[],"generationConfig":{"responseSchema":{"type":"STRING","enum":["0","1"]}}}`,
+		`{"contents":[],"generationConfig":{"responseSchema":{"type":"INTEGER","enum":[]}}}`,
+	} {
+		got, err := cleanGeminiRequest([]byte(body))
+		require.NoError(t, err)
+		require.Equal(t, body, string(got), "already compatible requests and JSON Schema retain their original encoding")
+	}
+}
+
 func TestArgonFunctionPolicy(t *testing.T) {
 	svc := newAntigravityTestService(&config.Config{})
 	for _, tier := range []string{"high", "medium", "low"} {
@@ -408,6 +449,10 @@ func TestAntigravityGatewayService_ForwardGemini_UsesConfiguredProjectFallback(t
 		"contents": []map[string]any{
 			{"role": "user", "parts": []map[string]any{{"text": "hello"}}},
 		},
+		"generationConfig": map[string]any{
+			"responseMimeType": "application/json",
+			"responseSchema":   map[string]any{"type": "INTEGER", "enum": []int64{0, 1, 9007199254740993}},
+		},
 	})
 	require.NoError(t, err)
 	c.Request = httptest.NewRequest(http.MethodPost, "/antigravity/v1beta/models/gemini-2.5-flash:streamGenerateContent", bytes.NewReader(body))
@@ -452,6 +497,7 @@ func TestAntigravityGatewayService_ForwardGemini_UsesConfiguredProjectFallback(t
 	var wrapped map[string]any
 	require.NoError(t, json.Unmarshal(upstream.requestBodies[0], &wrapped))
 	require.Equal(t, "configured-project", wrapped["project"])
+	require.JSONEq(t, `{"type":"INTEGER","enum":["0","1","9007199254740993"]}`, gjson.GetBytes(upstream.requestBodies[0], "request.generationConfig.responseSchema").Raw)
 }
 
 func TestAntigravityGatewayService_ForwardGemini_ImageUsesDefaultMappingAndOAuth(t *testing.T) {
