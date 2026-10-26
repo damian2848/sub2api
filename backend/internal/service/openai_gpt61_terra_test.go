@@ -3,7 +3,9 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -53,14 +55,15 @@ func TestGPT61TerraIdentityAndEffort(t *testing.T) {
 	for _, model := range []string{"gpt-6.1-sol", "gpt-5.6-terra", "gpt-6.1-terra-pro", "gpt-6.1-terra-ultra", "gpt-6.1-terra-minimal"} {
 		require.False(t, openai.IsGPT61TerraModelSpelling(model))
 	}
+	// Codex publishes a separate scale from the API model page.
 	descriptor := newConfiguredCodexModelDescriptor("gpt-6.1-terra")
-	require.Equal(t, "medium", *descriptor.DefaultReasoningLevel)
+	require.Equal(t, "low", *descriptor.DefaultReasoningLevel)
 	var efforts []string
 	for _, level := range descriptor.SupportedReasoningLevels {
 		efforts = append(efforts, level.Effort)
 	}
-	require.Equal(t, []string{"none", "low", "medium", "high", "xhigh", "max"}, efforts)
-	require.Empty(t, descriptor.officialMetadata)
+	require.Equal(t, []string{"low", "medium", "high", "xhigh", "max", "ultra"}, efforts)
+	require.Equal(t, openai.CodexGPT61TerraMetadata, []byte(descriptor.officialMetadata))
 	converted, err := apicompat.AnthropicToResponses(&apicompat.AnthropicRequest{Model: "gpt-6.1-terra"})
 	require.NoError(t, err)
 	require.Equal(t, "medium", converted.Reasoning.Effort)
@@ -139,4 +142,70 @@ func TestGPT61TerraChatFallbackRejectsTools(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestGPT61TerraOfflineCodexCatalog(t *testing.T) {
+	body, err := BuildCodexModelsManifest([]string{"gpt-6.1-terra"})
+	require.NoError(t, err)
+	models := decodeCodexManifestModels(t, body)
+	require.Len(t, models, 1)
+	m := models[0]
+	require.Equal(t, "gpt-6.1-terra", m["slug"])
+	require.Equal(t, "GPT-6.1 Terra", m["display_name"])
+	require.Equal(t, "low", m["default_reasoning_level"])
+	require.Equal(t, []string{"low", "medium", "high", "xhigh", "max", "ultra"}, effortsFromManifestModel(t, m))
+	require.EqualValues(t, 500000, m["context_window"])
+	require.EqualValues(t, 872000, m["max_context_window"])
+	require.Equal(t, "xhigh", m["multi_agent_reasoning_effort"])
+	require.Equal(t, "v2", m["multi_agent_version"])
+	require.Equal(t, []any{map[string]any{"id": "priority", "name": "Fast", "description": "1.5x speed"}}, m["service_tiers"])
+	messages, ok := m["model_messages"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, openai.CodexBaseInstructionsForModel("gpt-6.1-terra"), messages["instructions_template"])
+	require.NotEmpty(t, messages["persistent_instructions"])
+}
+
+func TestGPT61TerraBaseInstructionsUseOfficialTemplate(t *testing.T) {
+	var descriptor struct {
+		ModelMessages struct {
+			InstructionsTemplate string `json:"instructions_template"`
+		} `json:"model_messages"`
+	}
+	require.NoError(t, json.Unmarshal(openai.CodexGPT61TerraMetadata, &descriptor))
+	require.NotEmpty(t, descriptor.ModelMessages.InstructionsTemplate)
+	for _, model := range []string{"gpt-6.1-terra", "openai/GPT-6.1-Terra-high", "gpt-6.1-terra-openai-compact"} {
+		require.Equal(t, descriptor.ModelMessages.InstructionsTemplate, openai.CodexBaseInstructionsForModel(model), model)
+	}
+	require.NotEqual(t, openai.CodexBaseInstructionsForModel("gpt-5.5"), openai.CodexBaseInstructionsForModel("gpt-6.1-terra"))
+	require.NotEqual(t, openai.CodexBaseInstructionsForModel("gpt-6.1-sol"), openai.CodexBaseInstructionsForModel("gpt-6.1-terra"))
+}
+
+func TestGPT61TerraCodexCapabilitiesFollowRoute(t *testing.T) {
+	for _, tc := range []struct {
+		accountType, base string
+		toolMode, lite    string
+	}{
+		{AccountTypeAPIKey, "https://api.openai.com", "null", "false"},
+		{AccountTypeOAuth, "https://chatgpt.com", `"code_mode_only"`, "true"},
+	} {
+		account := &Account{Platform: PlatformOpenAI, Type: tc.accountType, Credentials: map[string]any{"base_url": tc.base}}
+		caps := accountCodexToolCapabilities(account, "gpt-6.1-terra")
+		require.JSONEq(t, tc.toolMode, string(caps["tool_mode"]), tc.accountType)
+		require.JSONEq(t, tc.lite, string(caps["use_responses_lite"]), tc.accountType)
+		require.JSONEq(t, "true", string(caps["supports_search_tool"]), tc.accountType)
+		require.False(t, bytes.Contains(caps["service_tiers"], []byte("ultrafast")), tc.accountType)
+	}
+
+	apiKey := &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"base_url": "https://api.openai.com"}}
+	body, err := completeAPIKeyCodexModelsManifestMetadata([]byte(`{"models":[{"slug":"gpt-6.1-terra"}]}`), true, apiKey)
+	require.NoError(t, err)
+	models := decodeCodexManifestModels(t, body)
+	require.Len(t, models, 1)
+	require.Equal(t, false, models[0]["use_responses_lite"])
+	require.Equal(t, "low", models[0]["default_reasoning_level"])
+	require.EqualValues(t, 500000, models[0]["context_window"])
+
+	adjusted, err := adjustAPIKeyCodexModelsManifest([]byte(`{"models":[{"slug":"gpt-6.1-terra","use_responses_lite":true}]}`), apiKey)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"models":[{"slug":"gpt-6.1-terra","use_responses_lite":false}]}`, string(adjusted))
 }
