@@ -138,6 +138,7 @@ docs/*
 !docs/openai-outbound-identity.md
 !docs/openai-2fa-dual-oauth.md
 !docs/admin-api-keys.md
+!docs/mcp.md
 !docs/PAYMENT.md
 !docs/PAYMENT_CN.md
 !docs/ADMIN_PAYMENT_INTEGRATION_API.md

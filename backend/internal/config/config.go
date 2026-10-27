@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net/netip"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -73,6 +74,7 @@ type Config struct {
 	Server                  ServerConfig                  `mapstructure:"server"`
 	Log                     LogConfig                     `mapstructure:"log"`
 	CORS                    CORSConfig                    `mapstructure:"cors"`
+	MCP                     MCPConfig                     `mapstructure:"mcp"`
 	Security                SecurityConfig                `mapstructure:"security"`
 	Billing                 BillingConfig                 `mapstructure:"billing"`
 	Turnstile               TurnstileConfig               `mapstructure:"turnstile"`
@@ -118,6 +120,50 @@ type Config struct {
 // SimpleModeConfig controls startup behavior in simple mode.
 type SimpleModeConfig struct {
 	AutoCreateDefaultGroups bool `mapstructure:"auto_create_default_groups" yaml:"auto_create_default_groups"`
+}
+
+// MCPConfig fixes the public resource URL used by OAuth discovery and tokens.
+type MCPConfig struct {
+	PublicURL string `mapstructure:"public_url"`
+}
+
+// Validate normalizes the configured resource URL without trusting request headers.
+// An empty URL leaves selection of the trusted frontend URL to the MCP handler.
+func (c *MCPConfig) Validate() error {
+	raw := strings.TrimSpace(c.PublicURL)
+	if raw == "" {
+		c.PublicURL = ""
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("mcp.public_url invalid: %w", err)
+	}
+	if !u.IsAbs() || u.Hostname() == "" || !httpguts.ValidHostHeader(u.Host) || strings.ContainsAny(u.Host, "*%") {
+		return fmt.Errorf("mcp.public_url must be an absolute URL with a valid host")
+	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "#") {
+		return fmt.Errorf("mcp.public_url must not include userinfo, query, or fragment")
+	}
+	if u.Path != "/api/v1/mcp" || u.EscapedPath() != "/api/v1/mcp" {
+		return fmt.Errorf("mcp.public_url must have the exact path /api/v1/mcp without a trailing slash")
+	}
+	if port := u.Port(); port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("mcp.public_url must have a valid port")
+		}
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	host := u.Hostname()
+	addr, _ := netip.ParseAddr(host)
+	localDevelopment := host == "localhost" || addr.IsLoopback()
+	if u.Scheme != "https" && (u.Scheme != "http" || !localDevelopment) {
+		return fmt.Errorf("mcp.public_url must use HTTPS (HTTP is allowed only for localhost or loopback IPs)")
+	}
+	c.PublicURL = u.String()
+	return nil
 }
 
 // PluginConfig 控制管理员手动上传的本地进程插件。
@@ -2324,6 +2370,7 @@ func setDefaults() {
 	// CORS
 	viper.SetDefault("cors.allowed_origins", []string{})
 	viper.SetDefault("cors.allow_credentials", true)
+	viper.SetDefault("mcp.public_url", "")
 
 	// WebAuthn / Passkeys are opt-in because every deployment must explicitly
 	// declare its relying-party domain and trusted browser origins.
@@ -3145,6 +3192,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("gemini.oauth.client_id and gemini.oauth.client_secret must be both set or both empty")
 	}
 
+	if err := c.MCP.Validate(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.Server.FrontendURL) != "" {
 		if err := ValidateAbsoluteHTTPURL(c.Server.FrontendURL); err != nil {
 			return fmt.Errorf("server.frontend_url invalid: %w", err)

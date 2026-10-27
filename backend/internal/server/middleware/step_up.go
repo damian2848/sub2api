@@ -101,6 +101,11 @@ func enforceStepUp(c *gin.Context, grantChecker stepUpGrantChecker, userReader s
 		return true
 	}
 
+	if c.GetString("auth_method") == "mcp_oauth" {
+		AbortWithError(c, 403, "STEP_UP_MCP_OAUTH_FORBIDDEN",
+			"MCP OAuth credentials cannot perform this operation; use a two-factor verified browser session")
+		return false
+	}
 	if c.GetString("auth_method") == service.AuditAuthMethodAdminAPIKey {
 		AbortWithError(c, 403, "STEP_UP_ADMIN_API_KEY_FORBIDDEN",
 			"Admin API key cannot access this endpoint; a two-factor verified admin session is required")

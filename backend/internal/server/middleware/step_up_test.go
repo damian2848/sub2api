@@ -63,6 +63,16 @@ func TestEnforceStepUpRejectsAdminAPIKey(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "STEP_UP_ADMIN_API_KEY_FORBIDDEN")
 }
 
+func TestEnforceStepUpRejectsMCPOAuthEvenWithUserGrant(t *testing.T) {
+	c, rec := newStepUpTestContext(t)
+	c.Set("auth_method", "mcp_oauth")
+	c.Set(string(ContextKeyUser), AuthSubject{UserID: 1})
+	ok := enforceStepUp(c, stubStepUpGrantChecker{granted: true}, stubStepUpUserReader{user: &service.User{TotpEnabled: true}}, stepUpEnabled)
+	require.False(t, ok)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Contains(t, rec.Body.String(), "STEP_UP_MCP_OAUTH_FORBIDDEN")
+}
+
 func TestEnforceStepUpRequiresAuthSubject(t *testing.T) {
 	c, rec := newStepUpTestContext(t)
 
