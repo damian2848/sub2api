@@ -587,7 +587,8 @@ func openAILongContextBillingGate(account *Account) *bool {
 // 官方模型价卡的长上下文附加费。
 //
 // GPT-6.1 Sol（IsGPT61SolModelSpelling）在 OpenAI OAuth、Setup Token 和 API Key
-// 账号上都不收取该附加费。其它模型保持原价卡阶梯，不因账号类型被一并豁免。
+// 账号上都不收取该附加费。GPT-6.1 Terra 只在订阅凭据（OAuth / Setup Token）上
+// 豁免，API Key 仍使用 API 价卡（上游 v0.2.20）。其它模型保持原价卡阶梯。
 // 该标志只关闭官方模型长上下文阶梯（DisableModelLongContextPricing），
 // 分组自定义区间价格不受影响。
 //
@@ -601,7 +602,10 @@ func openAIGPT61SolLongContextExempt(account *Account, result *OpenAIForwardResu
 	if model == "" {
 		model = result.Model
 	}
-	return openai.IsGPT61SolModelSpelling(model)
+	if openai.IsGPT61SolModelSpelling(model) {
+		return true
+	}
+	return openai.IsGPT61TerraModelSpelling(model) && account.IsOpenAIOAuthLike()
 }
 
 // openAIAccountSkipsGPT61SolLongContext 限定豁免凭据：OpenAI 的 OAuth、
