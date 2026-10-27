@@ -47,12 +47,12 @@ func TestGPT61TerraIdentityAndEffort(t *testing.T) {
 		require.Equal(t, "gpt-6.1-terra", chatConverted.Model)
 		require.Equal(t, effort, chatConverted.Reasoning.Effort)
 		require.Len(t, chatConverted.Tools, 1)
-		require.NoError(t, validateGPT61SolCompatRequest([]byte(`{"reasoning":{"effort":"`+effort+`"}}`), model))
+		require.NoError(t, validateGPT61CompatRequest([]byte(`{"reasoning":{"effort":"`+effort+`"}}`), model))
 	}
 	for _, model := range []string{"gpt-6.1-terra", "gpt-6.1-terra-openai-compact", "openai/gpt_6.1_terra"} {
 		require.Equal(t, "gpt-6.1-terra", normalizeKnownOpenAICodexModel(model))
 	}
-	for _, model := range []string{"gpt-6.1-sol", "gpt-5.6-terra", "gpt-6.1-terra-pro", "gpt-6.1-terra-ultra", "gpt-6.1-terra-minimal"} {
+	for _, model := range []string{"gpt-6.1-sol", "gpt-5.6-terra", "gpt-6.1-terra-pro", "gpt-6.1-terra-ultra", "gpt-6.1-terra-preview"} {
 		require.False(t, openai.IsGPT61TerraModelSpelling(model))
 	}
 	// Codex publishes a separate scale from the API model page.
@@ -144,6 +144,26 @@ func TestGPT61TerraChatFallbackRejectsTools(t *testing.T) {
 	}
 }
 
+func TestGPT61TerraRejectsMinimalEffort(t *testing.T) {
+	require.True(t, openai.IsGPT61TerraModelSpelling("openai/GPT-6.1-Terra-minimal"))
+	require.Equal(t, "gpt-6.1-terra", normalizeKnownOpenAICodexModel("gpt-6.1-terra-minimal"))
+	for _, body := range []string{
+		`{"reasoning":{"effort":"minimal"}}`,
+		`{"reasoning_effort":"MINIMAL"}`,
+		`{"output_config":{"effort":"minimal"}}`,
+		`{"model":"gpt-6.1-terra-minimal"}`,
+	} {
+		require.ErrorContains(t, validateGPT61CompatRequest([]byte(body), "gpt-6.1-terra"), "gpt-6.1-terra does not support reasoning effort", body)
+	}
+	for _, body := range []string{`{"model":"gpt-6.1-terra-none"}`, `{"thinking":{"type":"disabled"}}`, `{"reasoning":{"effort":"none"}}`} {
+		require.NoError(t, validateGPT61CompatRequest([]byte(body), "gpt-6.1-terra"), body)
+	}
+	_, err := apicompat.ChatCompletionsToResponses(&apicompat.ChatCompletionsRequest{Model: "gpt-6.1-terra", ReasoningEffort: "minimal"})
+	require.ErrorContains(t, err, "gpt-6.1-terra does not support reasoning effort")
+	// Sol keeps its stricter scale.
+	require.Error(t, validateGPT61CompatRequest([]byte(`{"reasoning":{"effort":"none"}}`), "gpt-6.1-sol"))
+}
+
 func TestGPT61TerraOfflineCodexCatalog(t *testing.T) {
 	body, err := BuildCodexModelsManifest([]string{"gpt-6.1-terra"})
 	require.NoError(t, err)
@@ -208,4 +228,13 @@ func TestGPT61TerraCodexCapabilitiesFollowRoute(t *testing.T) {
 	adjusted, err := adjustAPIKeyCodexModelsManifest([]byte(`{"models":[{"slug":"gpt-6.1-terra","use_responses_lite":true}]}`), apiKey)
 	require.NoError(t, err)
 	require.JSONEq(t, `{"models":[{"slug":"gpt-6.1-terra","use_responses_lite":false}]}`, string(adjusted))
+}
+
+func TestGPT61TerraCompatPromptCacheKey(t *testing.T) {
+	for _, model := range []string{"gpt-6.1-terra", "openai/GPT-6.1-Terra-max", "gpt-6.1-terra-none"} {
+		require.True(t, shouldAutoInjectPromptCacheKeyForCompat(model), model)
+	}
+	require.False(t, shouldAutoInjectPromptCacheKeyForCompat("gpt-6.1-terra-preview"))
+	req := &apicompat.ChatCompletionsRequest{Model: "gpt-6.1-terra", Messages: []apicompat.ChatMessage{{Role: "user", Content: json.RawMessage(`"hi"`)}}}
+	require.NotEqual(t, deriveCompatPromptCacheKey(req, "gpt-6.1-terra"), deriveCompatPromptCacheKey(req, "gpt-6.1-sol"))
 }
