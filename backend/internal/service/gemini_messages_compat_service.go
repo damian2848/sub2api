@@ -1466,9 +1466,9 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		if isGeminiCachedContentNotFound(resp.StatusCode, respBody) {
 			return nil, s.writeGeminiCachedContentNotFound(c, account, resp, respBody, requestID, isOAuth)
 		}
-		// 上游网关的限流 / 不可用只针对其持有缓存的账号：不改本账号状态，交由绑定请求的耗尽处理透传。
+		// 上游网关的限流 / 不可用只针对其持有缓存的账号：不改本账号状态，按池模式配置同账号重试，用尽后透传。
 		if isGeminiBoundCacheUpstreamPassthrough(ctx, account, resp.StatusCode) {
-			return nil, &UpstreamFailoverError{StatusCode: resp.StatusCode, ResponseBody: respBody, BoundUpstreamPassthrough: true}
+			return nil, s.boundCacheUpstreamPassthroughError(c, account, resp.StatusCode, respBody, requestID)
 		}
 		// Best-effort fallback for OAuth tokens missing AI Studio scopes when calling countTokens.
 		// This avoids Gemini SDKs failing hard during preflight token counting.
@@ -1786,6 +1786,36 @@ func (s *GeminiMessagesCompatService) skippedErrorPolicyFailoverError(c *gin.Con
 		StatusCode:             statusCode,
 		ResponseBody:           respBody,
 		RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(statusCode),
+	}
+}
+
+// boundCacheUpstreamPassthroughError 构造绑定显式缓存的请求在上游网关账号上收到 429 / 5xx 时的 failover 错误。
+// 缓存只存在于该账号，handler 不换号；池模式账号对 pool_mode_retry_status_codes 内的状态码按 pool_mode_retry_count
+// 同账号重试，用尽或不可重试时原样回写上游响应。故障在上游网关持有缓存的账号上，与本账号健康无关，
+// 因此可重试的错误标为请求级瞬时故障：重试用尽也不临时封禁本账号。可重试时每次尝试登记一条 retry 事件，
+// 重试成功的请求在 ops 记为恢复。
+func (s *GeminiMessagesCompatService) boundCacheUpstreamPassthroughError(c *gin.Context, account *Account, statusCode int, respBody []byte, upstreamRequestID string) *UpstreamFailoverError {
+	retryable := account.IsPoolMode() && account.IsPoolModeRetryableStatus(statusCode)
+	if retryable {
+		appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
+			ProxyID:            opsUpstreamProxyID(account),
+			ProxyName:          opsUpstreamProxyName(account),
+			Platform:           account.Platform,
+			AccountID:          account.ID,
+			AccountName:        account.Name,
+			UpstreamStatusCode: statusCode,
+			UpstreamRequestID:  upstreamRequestID,
+			Kind:               "retry",
+			Message:            sanitizeUpstreamErrorMessage(strings.TrimSpace(extractUpstreamErrorMessage(respBody))),
+			Detail:             s.upstreamErrorDetail(respBody),
+		})
+	}
+	return &UpstreamFailoverError{
+		StatusCode:               statusCode,
+		ResponseBody:             respBody,
+		BoundUpstreamPassthrough: true,
+		RetryableOnSameAccount:   retryable,
+		RequestScopedTransient:   retryable,
 	}
 }
 
