@@ -6,6 +6,7 @@ import tokenGuard from './tokenGuard'
 import pelicanTests from './pelicanTests'
 import tokenGuardV2 from './tokenGuardV2'
 import adminAccessKeys from './adminAccessKeys'
+import mcp from './mcp'
 import landing from './landing'
 import common from './common'
 import dashboard from './dashboard'
@@ -31,6 +32,7 @@ export default {
   tokenGuardV2,
   requestTiming,
   adminAccessKeys,
+  mcp,
   ...landing,
   ...common,
   ...dashboard,
