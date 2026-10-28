@@ -300,6 +300,8 @@ export interface PublicSettings {
   usage_show_cache_rate?: boolean
   /** 是否向终端用户展示单条缓存率。缺失时按关闭处理。 */
   usage_show_cache_rate_to_users?: boolean
+  /** True when the deployment configures MCP_PUBLIC_URL; MCP is disabled otherwise. */
+  mcp_enabled?: boolean
 }
 
 export interface AuthResponse {

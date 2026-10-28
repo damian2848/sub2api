@@ -23,6 +23,7 @@ export default {
   readWrite: '允许修改',
   readOnlyHint: '只开放查询工具，适合分析用量、查看状态。',
   readWriteHint: '允许创建、修改和删除范围内的资源，包括 API 密钥和计费权益。请只授权给你信任的应用。',
+  adminWriteHint: '平台管理的修改权限始终需要你已开启两步验证（TOTP），并在授权时完成验证。',
   empty: '尚未授权任何应用。请在 AI 客户端中使用上方服务地址发起连接。',
   loading: '正在加载已授权应用…',
   loadFailed: '加载已授权应用失败，请重试。',

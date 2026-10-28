@@ -23,6 +23,7 @@ export default {
   readWrite: 'Allow changes',
   readOnlyHint: 'Expose query tools only, for analyzing usage and checking status.',
   readWriteHint: 'Allow creating, updating and deleting resources within this scope, including API keys and billing entitlements. Only approve this for an application you trust.',
+  adminWriteHint: 'Platform write access always requires two-factor authentication (TOTP) to be enabled and verified when you approve.',
   empty: 'No authorized applications yet. Start a connection from your AI client using the server URL above.',
   loading: 'Loading authorized applications…',
   loadFailed: 'Failed to load authorized applications. Please try again.',

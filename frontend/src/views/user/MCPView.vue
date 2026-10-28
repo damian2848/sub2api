@@ -4,7 +4,7 @@
       <section class="card p-5 sm:p-6" aria-labelledby="mcp-connection-title" :aria-busy="connectionLoading">
         <div class="flex items-start gap-3">
           <div class="rounded-xl bg-primary-50 p-3 text-primary-600 dark:bg-primary-900/20 dark:text-primary-400">
-            <Icon name="cube" size="lg" />
+            <Icon name="mcp" size="lg" />
           </div>
           <div>
             <h2 id="mcp-connection-title" class="text-lg font-semibold text-gray-900 dark:text-white">{{ t('mcp.connectionTitle') }}</h2>

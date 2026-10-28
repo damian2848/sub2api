@@ -154,6 +154,19 @@ describe('MCP OAuth consent', () => {
     expect(assign).toHaveBeenCalledWith(redirectURL)
   })
 
+  it('explains that administrator write access always needs two-factor verification', async () => {
+    auth.isAdmin = true
+    const wrapper = render()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="admin-write-hint"]').exists()).toBe(false)
+    await wrapper.get('#mcp-consent-permissions').setValue('false')
+    expect(wrapper.find('[data-testid="admin-write-hint"]').exists()).toBe(false)
+    await wrapper.get('#mcp-consent-scope').setValue('admin')
+    expect(wrapper.get('[data-testid="admin-write-hint"]').text()).toBe('mcp.adminWriteHint')
+    await wrapper.get('#mcp-consent-permissions').setValue('true')
+    expect(wrapper.find('[data-testid="admin-write-hint"]').exists()).toBe(false)
+  })
+
   it('cancels admin step-up without granting access', async () => {
     auth.isAdmin = true
     authorize.mockRejectedValue({ reason: 'STEP_UP_REQUIRED' })

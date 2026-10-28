@@ -139,8 +139,6 @@ docs/*
 !docs/openai-2fa-dual-oauth.md
 !docs/admin-api-keys.md
 !docs/mcp.md
-!docs/mcp-oauth-connections.png
-!docs/mcp-oauth-consent.png
 !docs/PAYMENT.md
 !docs/PAYMENT_CN.md
 !docs/ADMIN_PAYMENT_INTEGRATION_API.md
