@@ -102,7 +102,7 @@ func TestGeminiNativeModelsMergesNativeUpstream(t *testing.T) {
 		expectedNative string
 	}{
 		{"native", 200, `{"models":[{"name":"models/gemini-native","inputTokenLimit":123}],"nextPageToken":"next"}`, "models/gemini-native"},
-		{"scope fallback", 403, `{"error":"insufficient authentication scopes"}`, "models/gemini-2.5-pro"},
+		{"scope fallback", 403, `{"error":"insufficient authentication scopes"}`, "models/gemini-3.5-flash"},
 		{"upstream error", 429, `{"error":"rate limited"}`, ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
