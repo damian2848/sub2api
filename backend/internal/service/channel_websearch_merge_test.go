@@ -32,7 +32,8 @@ func TestMergeWebSearchEmulationDimensions_RequestValueWins(t *testing.T) {
 	}
 	merged := mergeWebSearchEmulationDimensions(existing, incoming)
 
-	dims := merged[featureKeyWebSearchEmulation].(map[string]any)
+	dims, ok := merged[featureKeyWebSearchEmulation].(map[string]any)
+	require.True(t, ok)
 	require.Equal(t, false, dims["openai"])
 }
 
@@ -52,7 +53,9 @@ func TestMergeWebSearchEmulationDimensions_KeyAbsentInheritsWholeKey(t *testing.
 	// The inherited value must be a copy: mutating the result must not modify
 	// the previous configuration.
 	dims["openai"] = false
-	require.Equal(t, true, existing[featureKeyWebSearchEmulation].(map[string]any)["openai"])
+	existingDims, ok := existing[featureKeyWebSearchEmulation].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, true, existingDims["openai"])
 }
 
 func TestMergeWebSearchEmulationDimensions_KeyAbsentWithoutExistingIsNoop(t *testing.T) {
@@ -93,7 +96,8 @@ func TestChannelService_ApplyUpdateInputMergesWebSearchEmulationDimensions(t *te
 		},
 	}))
 
-	dims := channel.FeaturesConfig[featureKeyWebSearchEmulation].(map[string]any)
+	dims, ok := channel.FeaturesConfig[featureKeyWebSearchEmulation].(map[string]any)
+	require.True(t, ok)
 	require.Equal(t, false, dims["anthropic"])
 	require.Equal(t, true, dims["openai"])
 	require.Equal(t, true, dims["command_code"])
@@ -120,6 +124,7 @@ func TestChannelService_ApplyUpdateInputInheritsWebSearchEmulationWhenKeyAbsent(
 	require.Equal(t, true, dims["command_code"])
 
 	// Other keys keep the historical whole-block replacement semantics.
-	bedrock := channel.FeaturesConfig["bedrock_cc_compat"].(map[string]any)
+	bedrock, ok := channel.FeaturesConfig["bedrock_cc_compat"].(map[string]any)
+	require.True(t, ok)
 	require.Equal(t, false, bedrock["anthropic"])
 }
