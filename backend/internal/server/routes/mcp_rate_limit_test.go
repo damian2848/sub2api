@@ -40,7 +40,7 @@ func newMCPRateLimitEndpoint(t *testing.T, role string, rpm int) (*gin.Engine, s
 	h.APIKey = handler.NewAPIKeyHandler(service.NewAPIKeyService(&mcpRouteAPIKeyRepo{}, nil, nil, nil, nil, nil, nil))
 	router := gin.New()
 	RegisterMCPRoutes(router.Group("/api/v1"), h, middleware.AuditLogMiddleware(mcpRouteNext),
-		middleware.StepUpAuthMiddleware(mcpRouteNext), settings, middleware.NewPanelRateLimiter(rdb, settings), nil)
+		middleware.StepUpAuthMiddleware(mcpRouteNext), settings, middleware.NewPanelRateLimiter(rdb, settings), nil, rdb)
 	return router, token, mr
 }
 
@@ -74,9 +74,8 @@ func TestMCPToolCallsConsumeGlobalBudgetOnce(t *testing.T) {
 			for i := 0; i < 2; i++ {
 				w := mcpRateLimitRPC(t, endpoint, token, "tools/call", params)
 				require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-				var result mcpRouteToolResult
-				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
-				require.Equal(t, tc.status, result.Result.StructuredContent.HTTPStatus, w.Body.String())
+				result := decodeMCPRouteToolResult(t, w.Body.Bytes())
+				require.Equal(t, tc.status, result.Result.Payload.HTTPStatus, w.Body.String())
 			}
 			count, err := mr.Get("rate_limit:panel:global:user:7")
 			require.NoError(t, err)
@@ -107,9 +106,8 @@ func TestMCPDispatchRetainsHeavyRateLimit(t *testing.T) {
 	for _, status := range []int{http.StatusBadRequest, http.StatusTooManyRequests} {
 		w := mcpRateLimitRPC(t, endpoint, token, "tools/call", params)
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-		var result mcpRouteToolResult
-		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
-		require.Equal(t, status, result.Result.StructuredContent.HTTPStatus, w.Body.String())
+		result := decodeMCPRouteToolResult(t, w.Body.Bytes())
+		require.Equal(t, status, result.Result.Payload.HTTPStatus, w.Body.String())
 	}
 	count, err := mr.Get("rate_limit:panel:global:user:7")
 	require.NoError(t, err)

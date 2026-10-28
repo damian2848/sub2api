@@ -51,7 +51,7 @@ func TestMCPToolCatalogTargetsRegisteredManagementRoutes(t *testing.T) {
 	// duplicate Gin paths or panic while building its permission-filtered servers.
 	mcpRouter := gin.New()
 	require.NotPanics(t, func() {
-		RegisterMCPRoutes(mcpRouter.Group("/api/v1"), h, middleware.AuditLogMiddleware(mcpRouteNext), middleware.StepUpAuthMiddleware(mcpRouteNext), nil, nil, nil)
+		RegisterMCPRoutes(mcpRouter.Group("/api/v1"), h, middleware.AuditLogMiddleware(mcpRouteNext), middleware.StepUpAuthMiddleware(mcpRouteNext), nil, nil, nil, nil)
 	})
 	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {
 		w := httptest.NewRecorder()
@@ -78,15 +78,37 @@ func newMCPRouteTestEndpoint(h *handler.Handlers, principal *service.MCPPrincipa
 	return outer
 }
 
+type mcpRouteToolPayload struct {
+	HTTPStatus int             `json:"http_status"`
+	Result     json.RawMessage `json:"result"`
+}
+
 type mcpRouteToolResult struct {
 	Result struct {
-		IsError           bool `json:"isError"`
-		StructuredContent struct {
-			HTTPStatus int             `json:"http_status"`
-			Result     json.RawMessage `json:"result"`
-		} `json:"structuredContent"`
+		IsError bool `json:"isError"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		StructuredContent json.RawMessage `json:"structuredContent"`
+		// Payload is decoded from the single text block that carries the result.
+		Payload mcpRouteToolPayload `json:"-"`
 	} `json:"result"`
 	Error json.RawMessage `json:"error"`
+}
+
+// decodeMCPRouteToolResult requires exactly one JSON text block, so results are
+// never duplicated into structuredContent.
+func decodeMCPRouteToolResult(t *testing.T, raw []byte) mcpRouteToolResult {
+	t.Helper()
+	var result mcpRouteToolResult
+	require.NoError(t, json.Unmarshal(raw, &result), string(raw))
+	require.Empty(t, result.Error, string(raw))
+	require.Empty(t, result.Result.StructuredContent, string(raw))
+	require.Len(t, result.Result.Content, 1, string(raw))
+	require.Equal(t, "text", result.Result.Content[0].Type)
+	require.NoError(t, json.Unmarshal([]byte(result.Result.Content[0].Text), &result.Result.Payload), string(raw))
+	return result
 }
 
 func callMCPRouteTool(t *testing.T, endpoint http.Handler, name string, args map[string]any) mcpRouteToolResult {
@@ -104,10 +126,7 @@ func callMCPRouteTool(t *testing.T, endpoint http.Handler, name string, args map
 	w := httptest.NewRecorder()
 	endpoint.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	var result mcpRouteToolResult
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result), w.Body.String())
-	require.Empty(t, result.Error, w.Body.String())
-	return result
+	return decodeMCPRouteToolResult(t, w.Body.Bytes())
 }
 
 type mcpRouteAPIKeyRepo struct{ service.APIKeyRepository }
@@ -134,15 +153,15 @@ func TestMCPDispatchRetainsRealAPIKeyOwnershipAndAudit(t *testing.T) {
 		})
 		result := callMCPRouteTool(t, newMCPRouteTestEndpoint(h, principal, nil, audit), "user_get_api_key", map[string]any{"id": 9})
 		require.Equal(t, 1, auditCalls)
-		require.NotContains(t, string(result.Result.StructuredContent.Result), "must-not-leak")
+		require.NotContains(t, string(result.Result.Payload.Result), "must-not-leak")
 		if userID == 7 {
 			require.False(t, result.Result.IsError)
-			require.Equal(t, http.StatusOK, result.Result.StructuredContent.HTTPStatus)
-			require.Contains(t, string(result.Result.StructuredContent.Result), "owner-key")
+			require.Equal(t, http.StatusOK, result.Result.Payload.HTTPStatus)
+			require.Contains(t, string(result.Result.Payload.Result), "owner-key")
 		} else {
 			require.True(t, result.Result.IsError)
-			require.Equal(t, http.StatusNotFound, result.Result.StructuredContent.HTTPStatus)
-			require.NotContains(t, string(result.Result.StructuredContent.Result), "owner-key")
+			require.Equal(t, http.StatusNotFound, result.Result.Payload.HTTPStatus)
+			require.NotContains(t, string(result.Result.Payload.Result), "owner-key")
 		}
 	}
 }
@@ -179,12 +198,12 @@ func TestMCPDispatchRetainsBackendModeAndAdminCompliance(t *testing.T) {
 	user := &service.MCPPrincipal{GrantID: "user", UserID: 7, Role: service.RoleUser, Scope: service.MCPScopeUser, ReadOnly: true}
 	result := callMCPRouteTool(t, newMCPRouteTestEndpoint(h, user, settings, middleware.AuditLogMiddleware(mcpRouteNext)), "user_get_profile", map[string]any{})
 	require.True(t, result.Result.IsError)
-	require.Equal(t, http.StatusForbidden, result.Result.StructuredContent.HTTPStatus)
-	require.Contains(t, string(result.Result.StructuredContent.Result), "Backend mode is active")
+	require.Equal(t, http.StatusForbidden, result.Result.Payload.HTTPStatus)
+	require.Contains(t, string(result.Result.Payload.Result), "Backend mode is active")
 
 	admin := &service.MCPPrincipal{GrantID: "admin", UserID: 8, Role: service.RoleAdmin, Scope: service.MCPScopeAdmin, ReadOnly: true}
 	result = callMCPRouteTool(t, newMCPRouteTestEndpoint(h, admin, settings, middleware.AuditLogMiddleware(mcpRouteNext)), "admin_get_dashboard", map[string]any{})
 	require.True(t, result.Result.IsError)
-	require.Equal(t, http.StatusLocked, result.Result.StructuredContent.HTTPStatus)
-	require.Contains(t, string(result.Result.StructuredContent.Result), "ADMIN_COMPLIANCE_ACK_REQUIRED")
+	require.Equal(t, http.StatusLocked, result.Result.Payload.HTTPStatus)
+	require.Contains(t, string(result.Result.Payload.Result), "ADMIN_COMPLIANCE_ACK_REQUIRED")
 }

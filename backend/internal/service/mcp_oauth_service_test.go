@@ -7,6 +7,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"sync"
@@ -22,11 +24,25 @@ type mcpOAuthMemoryRepo struct {
 	grants      map[string]*MCPOAuthGrant
 	codes       map[string]*MCPOAuthCode
 	credentials map[string]*MCPOAuthCredential
+	touches     int
 }
 
-func (r *mcpOAuthMemoryRepo) CreateClient(_ context.Context, client *MCPOAuthClient) error {
+func (r *mcpOAuthMemoryRepo) CreateClient(_ context.Context, client *MCPOAuthClient, pendingLimit int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	pending := 0
+	for id := range r.clients {
+		authorized := false
+		for _, grant := range r.grants {
+			authorized = authorized || grant.ClientID == id
+		}
+		if !authorized {
+			pending++
+		}
+	}
+	if pending >= pendingLimit {
+		return ErrMCPOAuthClientLimit
+	}
 	r.clients[client.ClientID] = client
 	return nil
 }
@@ -140,6 +156,7 @@ func (r *mcpOAuthMemoryRepo) TouchGrant(_ context.Context, id string, now time.T
 		return ErrMCPOAuthNotFound
 	}
 	grant.LastUsedAt = &now
+	r.touches++
 	return nil
 }
 
@@ -165,6 +182,17 @@ func (r *mcpOAuthMemoryRepo) RevokeGrant(_ context.Context, userID int64, id str
 	}
 	if grant.RevokedAt == nil {
 		grant.RevokedAt = &now
+	}
+	return nil
+}
+
+func (r *mcpOAuthMemoryRepo) RevokeUserGrants(_ context.Context, userID int64, now time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, grant := range r.grants {
+		if grant.UserID == userID && grant.RevokedAt == nil {
+			grant.RevokedAt = &now
+		}
 	}
 	return nil
 }
@@ -549,4 +577,81 @@ func TestMCPOAuthConcurrentCodeExchangeAllowsAtMostOneIssuance(t *testing.T) {
 	}
 	require.Equal(t, 1, successes)
 	require.Len(t, f.r.credentials, 2, "only one credential pair may be persisted")
+}
+
+func TestMCPOAuthRegistrationRejectsDisguisedClientNames(t *testing.T) {
+	f := newMCPOAuthFixture(t)
+	for _, name := range []string{"Claude\u202eedualC", "Clau\u200bde", "Claude\x07", "Claude\u2028Desktop", "Claude\ue000", strings.Repeat("x", 101)} {
+		_, err := f.s.Register(context.Background(), MCPOAuthRegisterInput{ClientName: name, RedirectURIs: []string{"https://client.example/cb"}})
+		requireMCPOAuthError(t, err, "invalid_client_metadata")
+	}
+	client, err := f.s.Register(context.Background(), MCPOAuthRegisterInput{ClientName: "  桌面助手 · Desktop (beta) ✨  ", RedirectURIs: []string{"https://client.example/cb"}})
+	require.NoError(t, err)
+	require.Equal(t, "桌面助手 · Desktop (beta) ✨", client.ClientName)
+}
+
+func TestMCPOAuthRegistrationStopsAtPendingClientLimit(t *testing.T) {
+	f := newMCPOAuthFixture(t)
+	f.code(t, "", nil) // An authorized client does not count as pending.
+	for i := 0; i < MCPOAuthPendingClientLimit; i++ {
+		f.r.clients[fmt.Sprintf("pending-%d", i)] = &MCPOAuthClient{}
+	}
+	_, err := f.s.Register(context.Background(), MCPOAuthRegisterInput{RedirectURIs: []string{"https://client.example/cb"}})
+	require.ErrorIs(t, err, ErrMCPOAuthClientLimit)
+	require.Len(t, f.r.clients, MCPOAuthPendingClientLimit+1)
+}
+
+func TestMCPOAuthAuthenticateThrottlesLastUsedWrites(t *testing.T) {
+	f := newMCPOAuthFixture(t)
+	tokens := f.tokens(t)
+	for i := 0; i < 3; i++ {
+		_, err := f.s.Authenticate(context.Background(), tokens.AccessToken)
+		require.NoError(t, err)
+	}
+	require.Equal(t, 1, f.r.touches)
+	for _, grant := range f.r.grants {
+		stale := time.Now().Add(-MCPOAuthTouchInterval - time.Second)
+		grant.LastUsedAt = &stale
+	}
+	_, err := f.s.Authenticate(context.Background(), tokens.AccessToken)
+	require.NoError(t, err)
+	require.Equal(t, 2, f.r.touches)
+}
+
+func TestMCPOAuthRevokeAllGrantsEndsEveryFamily(t *testing.T) {
+	f := newMCPOAuthFixture(t)
+	first, second := f.tokens(t), f.tokens(t)
+	require.NoError(t, f.s.RevokeAllGrants(context.Background(), 7))
+	for _, tokens := range []*MCPOAuthTokenResponse{first, second} {
+		_, err := f.s.Authenticate(context.Background(), tokens.AccessToken)
+		require.ErrorIs(t, err, ErrMCPOAuthInvalidToken)
+		_, err = f.s.Token(context.Background(), MCPOAuthTokenInput{GrantType: "refresh_token", ClientID: f.client.ClientID, RefreshToken: tokens.RefreshToken}, mcpTestResource)
+		requireMCPOAuthError(t, err, "invalid_grant")
+	}
+	grants, err := f.s.ListGrants(context.Background(), 7)
+	require.NoError(t, err)
+	require.Len(t, grants, 2)
+	for _, grant := range grants {
+		require.NotNil(t, grant.RevokedAt)
+	}
+}
+
+type mcpGrantRevokerStub struct {
+	userIDs []int64
+	err     error
+}
+
+func (r *mcpGrantRevokerStub) RevokeAllGrants(_ context.Context, userID int64) error {
+	r.userIDs = append(r.userIDs, userID)
+	return r.err
+}
+
+func TestRevokeAllUserTokensAlsoRevokesMCPGrants(t *testing.T) {
+	revoker := &mcpGrantRevokerStub{}
+	auth := &AuthService{userRepo: &mcpOAuthUserRepo{user: &User{ID: 7, Status: StatusActive}}}
+	auth.SetMCPGrantRevoker(revoker)
+	require.NoError(t, auth.RevokeAllUserTokens(context.Background(), 7))
+	require.Equal(t, []int64{7}, revoker.userIDs)
+	revoker.err = errors.New("database unavailable")
+	require.ErrorIs(t, auth.RevokeAllUserTokens(context.Background(), 7), revoker.err)
 }

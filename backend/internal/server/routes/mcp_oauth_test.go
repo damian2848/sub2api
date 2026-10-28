@@ -35,7 +35,7 @@ type mcpOAuthRouteRepo struct {
 	credentials map[string]*service.MCPOAuthCredential
 }
 
-func (r *mcpOAuthRouteRepo) CreateClient(_ context.Context, client *service.MCPOAuthClient) error {
+func (r *mcpOAuthRouteRepo) CreateClient(_ context.Context, client *service.MCPOAuthClient, _ int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.clients[client.ClientID] = client
@@ -180,6 +180,17 @@ func (r *mcpOAuthRouteRepo) RevokeGrant(_ context.Context, userID int64, id stri
 	return nil
 }
 
+func (r *mcpOAuthRouteRepo) RevokeUserGrants(_ context.Context, userID int64, now time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, item := range r.grants {
+		if item.UserID == userID && item.RevokedAt == nil {
+			item.RevokedAt = &now
+		}
+	}
+	return nil
+}
+
 type mcpOAuthRouteUsers struct {
 	service.UserRepository
 	user *service.User
@@ -191,6 +202,10 @@ func (r *mcpOAuthRouteUsers) GetByID(_ context.Context, id int64) (*service.User
 	}
 	copy := *r.user
 	return &copy, nil
+}
+
+func (r *mcpOAuthRouteUsers) GetUserAvatar(context.Context, int64) (*service.UserAvatar, error) {
+	return nil, nil
 }
 
 func newMCPRouteOAuthService(role string) (*service.MCPOAuthService, *mcpOAuthRouteRepo, *mcpOAuthRouteUsers) {
@@ -227,6 +242,12 @@ func issueMCPRouteOAuthToken(t *testing.T, oauth *service.MCPOAuthService, resou
 	return tokens.AccessToken
 }
 
+type mcpOAuthRouteStepUpCache struct{ service.TotpCache }
+
+func (mcpOAuthRouteStepUpCache) HasStepUpGrant(_ context.Context, _ int64, session string) (bool, error) {
+	return session == "browser-session", nil
+}
+
 type mcpOAuthHTTPFixture struct {
 	server   *httptest.Server
 	router   *gin.Engine
@@ -250,8 +271,11 @@ func newMCPOAuthHTTPFixture(t *testing.T, role string) *mcpOAuthHTTPFixture {
 	cfg.JWT.Secret = "test-jwt-secret-at-least-thirty-two-bytes"
 	settings := service.NewSettingService(&mcpRouteSettingsRepo{values: map[string]string{service.SettingKeyStepUpEnabled: "false"}}, cfg)
 	oauth, repo, users := newMCPRouteOAuthService(role)
+	// Administrator write grants always pass the real step-up gate.
+	users.user.TotpEnabled = true
+	totp := service.NewTotpService(users, nil, mcpOAuthRouteStepUpCache{}, settings, nil, nil)
 	h := mcpRouteHandlers()
-	h.MCPOAuth = handler.NewMCPOAuthHandler(oauth, nil, nil, settings, cfg)
+	h.MCPOAuth = handler.NewMCPOAuthHandler(oauth, totp, service.NewUserService(users, nil, nil, nil), settings, cfg)
 	h.APIKey = handler.NewAPIKeyHandler(service.NewAPIKeyService(&mcpRouteAPIKeyRepo{}, nil, nil, nil, nil, nil, nil))
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
@@ -269,7 +293,7 @@ func newMCPOAuthHTTPFixture(t *testing.T, role string) *mcpOAuthHTTPFixture {
 	v1 := router.Group("/api/v1")
 	RegisterUserRoutes(v1, h, browserAuth, middleware.AuditLogMiddleware(mcpRouteNext), settings, nil)
 	RegisterMCPOAuthRoutes(router, v1, h, rdb)
-	RegisterMCPRoutes(v1, h, middleware.AuditLogMiddleware(mcpRouteNext), middleware.StepUpAuthMiddleware(mcpRouteNext), settings, nil, nil)
+	RegisterMCPRoutes(v1, h, middleware.AuditLogMiddleware(mcpRouteNext), middleware.StepUpAuthMiddleware(mcpRouteNext), settings, nil, nil, rdb)
 	server.Start()
 	t.Cleanup(server.Close)
 	return &mcpOAuthHTTPFixture{server: server, router: router, resource: cfg.MCP.PublicURL, cfg: cfg, settings: settings, handlers: h, oauth: oauth, repo: repo, users: users}
@@ -406,9 +430,8 @@ func TestMCPOAuthHTTPFlowDiscoveryConsentRefreshAndRevocation(t *testing.T) {
 	require.NotContains(t, string(tools.body), "admin_get_dashboard")
 	call := f.rpc(t, tokens.AccessToken, "tools/call", map[string]any{"name": "user_get_api_key", "arguments": map[string]any{"id": 9}})
 	require.Equal(t, http.StatusOK, call.status, string(call.body))
-	var result mcpRouteToolResult
-	require.NoError(t, json.Unmarshal(call.body, &result))
-	require.Equal(t, http.StatusOK, result.Result.StructuredContent.HTTPStatus)
+	result := decodeMCPRouteToolResult(t, call.body)
+	require.Equal(t, http.StatusOK, result.Result.Payload.HTTPStatus)
 	require.Contains(t, string(call.body), "owner-key")
 	require.NotContains(t, string(call.body), "must-not-leak")
 	refresh := f.form(t, "/api/v1/mcp/oauth/token", url.Values{"grant_type": {"refresh_token"}, "client_id": {client.ClientID}, "refresh_token": {tokens.RefreshToken}})

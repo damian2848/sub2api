@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -322,4 +323,86 @@ func TestMCPResultLimitAndCancellation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("HTTP cancellation did not reach dispatcher")
 	}
+}
+
+func TestMCPRejectsJSONRPCBatchesBeforeDispatch(t *testing.T) {
+	calls := 0
+	r, _ := newTestEndpoint(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	call := `{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"user_get_profile","arguments":{}}}`
+	list := `{"jsonrpc":"2.0","id":%d,"method":"tools/list"}`
+	batch := "[" + strings.Join([]string{fmt.Sprintf(call, 1), fmt.Sprintf(list, 2), fmt.Sprintf(call, 3)}, ",") + "]"
+	for _, tc := range []struct{ name, body, version string }{
+		// Without a protocol header the SDK assumes 2025-03-26, which allows batches.
+		{"legacy batch", batch, ""},
+		{"current batch", batch, "2025-06-18"},
+		{"whitespace batch", " \r\n\t" + batch, ""},
+		{"scalar", `"tools/list"`, ""},
+		{"empty", " ", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "http://platform.example/api/v1/mcp", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer admin")
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			if tc.version != "" {
+				req.Header.Set("MCP-Protocol-Version", tc.version)
+			}
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+			require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+			require.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+		})
+	}
+	require.Zero(t, calls)
+	// A single request without the protocol header is still served.
+	req := httptest.NewRequest("POST", "http://platform.example/api/v1/mcp", strings.NewReader(fmt.Sprintf(call, 1)))
+	req.Header.Set("Authorization", "Bearer admin")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, 1, calls)
+}
+
+func TestMCPToolResultIsReturnedOnceAndBoundedAfterEncoding(t *testing.T) {
+	payload := `{"data":{"name":"ok"}}`
+	r, _ := newTestEndpoint(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(payload))
+	}))
+	_, result := rpc(t, r, "reader", "tools/call", map[string]any{"name": "user_get_profile", "arguments": map[string]any{}})
+	toolResult := rpcObject(t, result["result"])
+	require.NotContains(t, toolResult, "structuredContent", "results must not be duplicated")
+	content, ok := toolResult["content"].([]any)
+	require.True(t, ok)
+	require.Len(t, content, 1)
+	require.JSONEq(t, `{"http_status":200,"result":{"data":{"name":"ok"}}}`, rpcObject(t, content[0])["text"].(string))
+
+	// Under the capture limit as received, but HTML escaping expands it 6x.
+	payload = `{"data":"` + strings.Repeat("<", maxResultBytes/3) + `"}`
+	_, result = rpc(t, r, "reader", "tools/call", map[string]any{"name": "user_get_profile", "arguments": map[string]any{}})
+	toolResult = rpcObject(t, result["result"])
+	require.Equal(t, true, toolResult["isError"])
+	encoded, _ := json.Marshal(toolResult)
+	require.Less(t, len(encoded), 1<<10)
+}
+
+func TestMCPRedactsEveryAuthoritativeCredentialKey(t *testing.T) {
+	data := map[string]any{"name": "visible"}
+	nested := map[string]any{}
+	for _, key := range service.SensitiveCredentialKeys {
+		data[key] = "canary-" + key
+		nested[strings.ToUpper(key)] = "canary-upper-" + key
+	}
+	data["credentials"] = map[string]any{"nested": nested}
+	data["items"] = []any{nested}
+	value := map[string]any{"data": data}
+	redactResult(value, false, "")
+	encoded, err := json.Marshal(value)
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "canary")
+	require.Contains(t, string(encoded), "visible")
 }

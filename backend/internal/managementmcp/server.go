@@ -64,15 +64,20 @@ func NewHandler(dispatcher http.Handler) http.Handler {
 			http.Error(w, "This stateless MCP endpoint only supports POST", http.StatusMethodNotAllowed)
 			return
 		}
-		if r.Method == http.MethodPost {
-			// Bound the JSON-RPC envelope before the SDK allocates for it.
-			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
-			if err != nil {
-				http.Error(w, "MCP request body exceeds the limit or cannot be read", http.StatusRequestEntityTooLarge)
-				return
-			}
-			r.Body = io.NopCloser(bytes.NewReader(body))
+		// Bound the JSON-RPC envelope before the SDK allocates for it.
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
+		if err != nil {
+			http.Error(w, "MCP request body exceeds the limit or cannot be read", http.StatusRequestEntityTooLarge)
+			return
 		}
+		// Accept exactly one JSON-RPC object per HTTP request. Without this, the
+		// SDK accepts 2025-03-26 batches and buffers every result in JSON
+		// response mode, so one request could fan out into thousands of calls.
+		if trimmed := bytes.TrimLeft(body, " \t\r\n"); len(trimmed) == 0 || trimmed[0] != '{' {
+			http.Error(w, "MCP requests must contain a single JSON-RPC object; batches are not supported", http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		transport.ServeHTTP(noStoreResponse{w}, r)
 	})
 }
@@ -151,13 +156,17 @@ func executeTool(ctx context.Context, dispatcher http.Handler, spec ToolSpec, ar
 		return toolError(fmt.Sprintf("Management API returned HTTP %d without a JSON result", response.status))
 	}
 	redactResult(result, spec.RevealCreatedKey && response.status >= 200 && response.status < 300, "")
-	out := map[string]any{"http_status": response.status, "result": result}
-	encoded, err := json.Marshal(out)
+	encoded, err := json.Marshal(map[string]any{"http_status": response.status, "result": result})
 	if err != nil {
 		return toolError("Cannot encode management result")
 	}
+	// Re-encoding can expand escaped characters, so bound the final payload.
+	// The result is returned once, as text: tools declare no output schema.
+	if len(encoded) > maxResultBytes {
+		return toolError("Result exceeds 2 MiB; narrow the query or reduce page_size")
+	}
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: string(encoded)}}, StructuredContent: out,
+		Content: []mcp.Content{&mcp.TextContent{Text: string(encoded)}},
 		IsError: response.status < 200 || response.status >= 300,
 	}
 }
@@ -184,18 +193,30 @@ func (w noStoreResponse) Flush() {
 }
 func (w noStoreResponse) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// redactedResultKeys derives from the authoritative credential table so new
+// upstream secret kinds are removed from tool results without a second list.
+var redactedResultKeys = func() map[string]struct{} {
+	keys := map[string]struct{}{}
+	for _, key := range append([]string{
+		"credentials", "password_hash", "session_token", "client_secret", "secret",
+		"totp_secret", "totp_secret_encrypted",
+	}, service.SensitiveCredentialKeys...) {
+		keys[strings.ToLower(key)] = struct{}{}
+	}
+	return keys
+}()
+
 func redactResult(value any, revealCreatedKey bool, path string) {
 	switch v := value.(type) {
 	case map[string]any:
 		for key, child := range v {
 			childPath := path + "/" + key
-			switch strings.ToLower(key) {
-			case "key":
-				if !revealCreatedKey || childPath != "/data/key" {
-					delete(v, key)
-					continue
-				}
-			case "credentials", "password", "password_hash", "api_key", "access_token", "refresh_token", "id_token", "session_token", "session_key", "client_secret", "secret", "totp_secret", "totp_secret_encrypted":
+			lower := strings.ToLower(key)
+			if lower == "key" && (!revealCreatedKey || childPath != "/data/key") {
+				delete(v, key)
+				continue
+			}
+			if _, sensitive := redactedResultKeys[lower]; sensitive {
 				delete(v, key)
 				continue
 			}

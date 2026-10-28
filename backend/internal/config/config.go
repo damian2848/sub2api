@@ -123,12 +123,16 @@ type SimpleModeConfig struct {
 }
 
 // MCPConfig fixes the public resource URL used by OAuth discovery and tokens.
+// Setting it is also the explicit opt-in that enables MCP.
 type MCPConfig struct {
 	PublicURL string `mapstructure:"public_url"`
 }
 
+// Enabled reports whether the operator opted in to the management MCP endpoint.
+func (c MCPConfig) Enabled() bool { return strings.TrimSpace(c.PublicURL) != "" }
+
 // Validate normalizes the configured resource URL without trusting request headers.
-// An empty URL leaves selection of the trusted frontend URL to the MCP handler.
+// An empty URL keeps MCP and its OAuth endpoints disabled.
 func (c *MCPConfig) Validate() error {
 	raw := strings.TrimSpace(c.PublicURL)
 	if raw == "" {

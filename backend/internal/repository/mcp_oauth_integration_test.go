@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
 
@@ -200,4 +201,68 @@ func TestMCPOAuthIntegrationConcurrentCodeExchange(t *testing.T) {
 		GrantType: "refresh_token", ClientID: f.input.ClientID, RefreshToken: issued.RefreshToken,
 	}, mcpIntegrationResource)
 	requireMCPIntegrationInvalidGrant(t, err)
+}
+
+func TestMCPOAuthIntegrationAccountChangesRevokeGrantsPersistently(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	f := newMCPOAuthIntegrationFixture(t, ctx)
+	users := NewUserRepository(integrationEntClient, integrationDB)
+	user, err := users.GetByID(ctx, f.userID)
+	require.NoError(t, err)
+	user.Role = service.RoleAdmin
+	require.NoError(t, users.Update(ctx, user, service.UserUpdateFields{Role: true}))
+	now := time.Now().UTC()
+	adminGrant := &service.MCPOAuthGrant{
+		ID: "admin-" + strings.Repeat("g", 20), ClientID: f.input.ClientID, UserID: f.userID, TokenVersion: 1,
+		Resource: mcpIntegrationResource, Scope: service.MCPScopeAdmin, ReadOnly: true, CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}
+	require.NoError(t, f.repo.CreateAuthorization(ctx, adminGrant, &service.MCPOAuthCode{
+		Hash: mcpIntegrationDigest(adminGrant.ID), GrantID: adminGrant.ID, ClientID: f.input.ClientID, RedirectURI: f.input.RedirectURI,
+		Resource: mcpIntegrationResource, CodeChallenge: strings.Repeat("c", 43), ExpiresAt: now.Add(time.Minute),
+	}, service.MCPOAuthGrantLimit))
+
+	requireRevoked := func(id string, revoked bool) {
+		t.Helper()
+		grant, err := f.repo.GetGrant(ctx, id)
+		require.NoError(t, err)
+		require.Equal(t, revoked, grant.RevokedAt != nil, id)
+	}
+	// Demotion revokes administrator grants only; personal access remains.
+	user.Role = service.RoleUser
+	require.NoError(t, users.Update(ctx, user, service.UserUpdateFields{Role: true}))
+	requireRevoked(adminGrant.ID, true)
+	requireRevoked(f.grantID, false)
+
+	// Disabling revokes everything, and re-enabling must not revive it.
+	user.Status = service.StatusDisabled
+	require.NoError(t, users.Update(ctx, user, service.UserUpdateFields{Status: true}))
+	user.Status = service.StatusActive
+	require.NoError(t, users.Update(ctx, user, service.UserUpdateFields{Status: true}))
+	requireRevoked(f.grantID, true)
+	_, err = f.oauth.Token(ctx, f.input, mcpIntegrationResource)
+	requireMCPIntegrationInvalidGrant(t, err)
+}
+
+func TestMCPOAuthIntegrationRegistrationStopsAtPendingLimit(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	repo := NewMCPOAuthRepository(integrationDB)
+	var pending int
+	require.NoError(t, integrationDB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM mcp_oauth_clients c WHERE c.created_at>=$1 AND NOT EXISTS (SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id=c.client_id)`,
+		time.Now().Add(-service.MCPOAuthPendingClientLifetime)).Scan(&pending))
+	ids := []string{"mcp_client_pending_limit_a", "mcp_client_pending_limit_b"}
+	t.Cleanup(func() {
+		_, err := integrationDB.ExecContext(context.Background(), `DELETE FROM mcp_oauth_clients WHERE client_id=ANY($1)`, pq.Array(ids))
+		require.NoError(t, err)
+	})
+	newClient := func(id string) *service.MCPOAuthClient {
+		return &service.MCPOAuthClient{ClientID: id, ClientName: "Pending", RedirectURIs: []string{"https://client.example/cb"},
+			GrantTypes: []string{"authorization_code"}, ClientIDIssuedAt: time.Now().Unix()}
+	}
+	require.NoError(t, repo.CreateClient(ctx, newClient(ids[0]), pending+1))
+	require.ErrorIs(t, repo.CreateClient(ctx, newClient(ids[1]), pending+1), service.ErrMCPOAuthClientLimit)
+	_, err := repo.GetClient(ctx, ids[1])
+	require.ErrorIs(t, err, service.ErrMCPOAuthNotFound)
 }

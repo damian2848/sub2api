@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -24,6 +25,12 @@ const (
 	MCPOAuthAccessLifetime = 10 * time.Minute
 	MCPOAuthCodeLifetime   = 5 * time.Minute
 	MCPOAuthGrantLifetime  = 30 * 24 * time.Hour
+	// Registration is unauthenticated: clients that never obtain a grant expire
+	// quickly, and the number awaiting authorization is capped globally.
+	MCPOAuthPendingClientLifetime = 24 * time.Hour
+	MCPOAuthPendingClientLimit    = 1000
+	// last_used_at is advisory; writing it once per interval keeps requests read-only.
+	MCPOAuthTouchInterval = time.Minute
 )
 
 var (
@@ -31,6 +38,7 @@ var (
 	ErrMCPOAuthNotFound      = errors.New("MCP OAuth record not found")
 	ErrMCPOAuthGrantLimit    = infraerrors.Conflict("MCP_GRANT_LIMIT", "Revoke an existing MCP authorization before authorizing another client (maximum 20 active authorizations)")
 	ErrMCPOAuthGrantNotFound = infraerrors.NotFound("MCP_GRANT_NOT_FOUND", "MCP authorization not found")
+	ErrMCPOAuthClientLimit   = errors.New("too many MCP OAuth clients are awaiting authorization")
 )
 
 type MCPOAuthError struct {
@@ -149,7 +157,9 @@ type MCPOAuthCredential struct {
 }
 
 type MCPOAuthRepository interface {
-	CreateClient(context.Context, *MCPOAuthClient) error
+	// CreateClient returns ErrMCPOAuthClientLimit when the given number of
+	// recently registered clients without any grant already exists.
+	CreateClient(context.Context, *MCPOAuthClient, int) error
 	GetClient(context.Context, string) (*MCPOAuthClient, error)
 	CreateAuthorization(context.Context, *MCPOAuthGrant, *MCPOAuthCode, int) error
 	GetCode(context.Context, string) (*MCPOAuthCode, error)
@@ -162,6 +172,7 @@ type MCPOAuthRepository interface {
 	TouchGrant(context.Context, string, time.Time) error
 	ListGrants(context.Context, int64) ([]*MCPOAuthGrant, error)
 	RevokeGrant(context.Context, int64, string, time.Time) error
+	RevokeUserGrants(context.Context, int64, time.Time) error
 }
 
 type MCPOAuthService struct {
@@ -178,8 +189,8 @@ func (s *MCPOAuthService) Register(ctx context.Context, input MCPOAuthRegisterIn
 	if input.ClientName == "" {
 		input.ClientName = "MCP client"
 	}
-	if !utf8.ValidString(input.ClientName) || utf8.RuneCountInString(input.ClientName) > 100 {
-		return nil, mcpOAuthError("invalid_client_metadata", "client_name must contain at most 100 characters")
+	if !validMCPClientName(input.ClientName) {
+		return nil, mcpOAuthError("invalid_client_metadata", "client_name must contain at most 100 printable characters")
 	}
 	if input.TokenEndpointAuthMethod != "" && input.TokenEndpointAuthMethod != "none" {
 		return nil, mcpOAuthError("invalid_client_metadata", "Only public clients using token_endpoint_auth_method=none are supported")
@@ -220,10 +231,24 @@ func (s *MCPOAuthService) Register(ctx context.Context, input MCPOAuthRegisterIn
 		GrantTypes: append([]string(nil), grants...), ResponseTypes: []string{"code"},
 		TokenEndpointAuthMethod: "none", ClientIDIssuedAt: time.Now().UTC().Unix(),
 	}
-	if err := s.repo.CreateClient(ctx, client); err != nil {
+	if err := s.repo.CreateClient(ctx, client, MCPOAuthPendingClientLimit); err != nil {
 		return nil, err
 	}
 	return client, nil
+}
+
+func validMCPClientName(name string) bool {
+	if !utf8.ValidString(name) || utf8.RuneCountInString(name) > 100 {
+		return false
+	}
+	for _, r := range name {
+		// Bidi overrides, zero-width and control characters can make the consent
+		// page show a self-reported name that looks like a different client.
+		if unicode.In(r, unicode.Cc, unicode.Cf, unicode.Co, unicode.Zl, unicode.Zp) {
+			return false
+		}
+	}
+	return true
 }
 
 func validMCPRedirectURI(raw string) bool {
@@ -529,11 +554,13 @@ func (s *MCPOAuthService) Authenticate(ctx context.Context, raw string) (*MCPPri
 	if err != nil {
 		return nil, err
 	}
-	if err := s.repo.TouchGrant(ctx, grant.ID, now); err != nil {
-		if errors.Is(err, ErrMCPOAuthNotFound) {
-			return nil, ErrMCPOAuthInvalidToken
+	if grant.LastUsedAt == nil || !now.Before(grant.LastUsedAt.Add(MCPOAuthTouchInterval)) {
+		if err := s.repo.TouchGrant(ctx, grant.ID, now); err != nil {
+			if errors.Is(err, ErrMCPOAuthNotFound) {
+				return nil, ErrMCPOAuthInvalidToken
+			}
+			return nil, err
 		}
-		return nil, err
 	}
 	return &MCPPrincipal{GrantID: grant.ID, UserID: user.ID, Role: user.Role, Scope: grant.Scope,
 		ReadOnly: grant.ReadOnly, Concurrency: user.Concurrency, Email: user.Email, Resource: grant.Resource}, nil
@@ -560,6 +587,12 @@ func (s *MCPOAuthService) RevokeGrant(ctx context.Context, userID int64, id stri
 		return ErrMCPOAuthGrantNotFound
 	}
 	return err
+}
+
+// RevokeAllGrants persistently revokes every MCP authorization of the user,
+// including refresh families, e.g. when all browser sessions are revoked.
+func (s *MCPOAuthService) RevokeAllGrants(ctx context.Context, userID int64) error {
+	return s.repo.RevokeUserGrants(ctx, userID, time.Now().UTC())
 }
 
 func (s *MCPOAuthService) RevokeToken(ctx context.Context, clientID, raw string) error {

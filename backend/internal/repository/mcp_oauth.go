@@ -17,7 +17,7 @@ func NewMCPOAuthRepository(db *sql.DB) service.MCPOAuthRepository {
 	return &mcpOAuthRepository{db: db}
 }
 
-func (r *mcpOAuthRepository) CreateClient(ctx context.Context, client *service.MCPOAuthClient) error {
+func (r *mcpOAuthRepository) CreateClient(ctx context.Context, client *service.MCPOAuthClient, pendingLimit int) error {
 	redirects, err := json.Marshal(client.RedirectURIs)
 	if err != nil {
 		return err
@@ -26,19 +26,25 @@ func (r *mcpOAuthRepository) CreateClient(ctx context.Context, client *service.M
 	if err != nil {
 		return err
 	}
-	// Registration also performs bounded retention work. Active authorizations
-	// protect their client registration; used refresh hashes remain for the
-	// entire grant lifetime so replay detection is never shortened by cleanup.
+	// Registration is unauthenticated, so it performs bounded retention work and
+	// caps clients awaiting authorization. Active authorizations protect their
+	// client registration; used refresh hashes remain for the entire grant
+	// lifetime so replay detection is never shortened by cleanup.
 	now := time.Unix(client.ClientIDIssuedAt, 0).UTC()
+	pendingSince := now.Add(-service.MCPOAuthPendingClientLifetime)
 	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Serialize registrations so concurrent requests cannot overshoot the cap.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('mcp_oauth_client_registration'))`); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM mcp_oauth_grants WHERE id IN (SELECT id FROM mcp_oauth_grants WHERE expires_at<$1 ORDER BY expires_at LIMIT 100 FOR UPDATE SKIP LOCKED)`, now.Add(-7*24*time.Hour)); err != nil {
 		return err
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT c.client_id FROM mcp_oauth_clients c WHERE c.created_at<$1 AND NOT EXISTS (SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id=c.client_id) ORDER BY c.created_at LIMIT 100 FOR UPDATE SKIP LOCKED`, now.Add(-90*24*time.Hour))
+	rows, err := tx.QueryContext(ctx, `SELECT c.client_id FROM mcp_oauth_clients c WHERE c.created_at<$1 AND NOT EXISTS (SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id=c.client_id) ORDER BY c.created_at LIMIT 100 FOR UPDATE SKIP LOCKED`, pendingSince)
 	if err != nil {
 		return err
 	}
@@ -65,6 +71,17 @@ func (r *mcpOAuthRepository) CreateClient(ctx context.Context, client *service.M
 		if _, err := tx.ExecContext(ctx, `DELETE FROM mcp_oauth_clients c WHERE c.client_id=ANY($1) AND NOT EXISTS (SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id=c.client_id)`, pq.Array(staleClientIDs)); err != nil {
 			return err
 		}
+	}
+	var pending int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM mcp_oauth_clients c WHERE c.created_at>=$1 AND NOT EXISTS (SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id=c.client_id)`, pendingSince).Scan(&pending); err != nil {
+		return err
+	}
+	if pending >= pendingLimit {
+		// Keep the retention work so capacity recovers as registrations expire.
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		return service.ErrMCPOAuthClientLimit
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO mcp_oauth_clients (client_id,client_name,redirect_uris,grant_types,created_at) VALUES ($1,$2,$3,$4,$5)`, client.ClientID, client.ClientName, string(redirects), string(grants), now); err != nil {
 		return err
@@ -245,6 +262,21 @@ func (r *mcpOAuthRepository) TouchGrant(ctx context.Context, id string, at time.
 
 func (r *mcpOAuthRepository) RevokeGrant(ctx context.Context, userID int64, id string, at time.Time) error {
 	return mcpOAuthResult(r.db.ExecContext(ctx, `UPDATE mcp_oauth_grants SET revoked_at=COALESCE(revoked_at,$3) WHERE id=$1 AND user_id=$2`, id, userID, at))
+}
+
+func (r *mcpOAuthRepository) RevokeUserGrants(ctx context.Context, userID int64, at time.Time) error {
+	return revokeMCPGrants(ctx, r.db, userID, false, at)
+}
+
+// revokeMCPGrants persists revocation instead of relying on per-request user
+// checks, so restoring an account or role cannot revive earlier grants.
+func revokeMCPGrants(ctx context.Context, exec sqlExecutor, userID int64, adminOnly bool, at time.Time) error {
+	query := `UPDATE mcp_oauth_grants SET revoked_at=$2 WHERE user_id=$1 AND revoked_at IS NULL`
+	if adminOnly {
+		query += ` AND scope='admin'`
+	}
+	_, err := exec.ExecContext(ctx, query, userID, at)
+	return err
 }
 
 func mcpOAuthSQLError(err error) error {

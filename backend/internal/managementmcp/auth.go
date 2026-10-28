@@ -13,7 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const AuthMethod = "mcp_oauth"
+const AuthMethod = service.AuditAuthMethodMCPOAuth
 
 type TokenAuthenticator interface {
 	Authenticate(context.Context, string) (*service.MCPPrincipal, error)

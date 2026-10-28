@@ -28,6 +28,12 @@ type handlerMCPRepo struct {
 	client        *service.MCPOAuthClient
 	reads, writes int
 	grant         *service.MCPOAuthGrant
+	createErr     error
+}
+
+func (r *handlerMCPRepo) CreateClient(context.Context, *service.MCPOAuthClient, int) error {
+	r.writes++
+	return r.createErr
 }
 
 func (r *handlerMCPRepo) GetClient(_ context.Context, id string) (*service.MCPOAuthClient, error) {
@@ -124,23 +130,18 @@ func TestMCPOAuthHandlerResourceURLTrustedConfiguration(t *testing.T) {
 	for _, tt := range []struct{ name, public, frontend, stored, want string }{
 		{"explicit API origin", handlerMCPResource, "https://platform.example.com", "", handlerMCPResource},
 		{"normalize explicit", "  https://API.EXAMPLE.COM/api/v1/mcp  ", "", "", handlerMCPResource},
-		{"frontend fallback uses origin", "", "https://platform.example.com/console/", "", "https://platform.example.com/api/v1/mcp"},
-		{"stored frontend wins", "", "https://configured.example.com", "https://stored.example.com/ui", "https://stored.example.com/api/v1/mcp"},
 		{"explicit resource wins", handlerMCPResource, "", "https://stored.example.com", handlerMCPResource},
-		{"loopback development", "", "http://127.0.0.1:8080", "", "http://127.0.0.1:8080/api/v1/mcp"},
+		{"loopback development", "http://127.0.0.1:8080/api/v1/mcp", "", "", "http://127.0.0.1:8080/api/v1/mcp"},
 		{"missing configuration", "", "", "", ""},
+		// A configured frontend must not implicitly enable MCP after an upgrade.
+		{"configured frontend stays disabled", "", "https://platform.example.com", "", ""},
+		{"stored frontend stays disabled", "", "", "https://stored.example.com", ""},
 		{"insecure public URL", "http://api.example.com/api/v1/mcp", "", "", ""},
 		{"wrong resource path", "https://api.example.com/mcp", "", "", ""},
+		{"sub-path deployment", "https://example.com/sub2api/api/v1/mcp", "", "", ""},
 		{"resource userinfo", "https://user:password@api.example.com/api/v1/mcp", "", "", ""},
 		{"resource query", handlerMCPResource + "?q=1", "", "", ""},
 		{"resource fragment", handlerMCPResource + "#x", "", "", ""},
-		{"relative frontend", "", "/console", "", ""},
-		{"frontend credentials", "", "https://user:password@platform.example.com", "", ""},
-		{"frontend query", "", "https://platform.example.com?q=1", "", ""},
-		{"frontend fragment", "", "https://platform.example.com#fragment", "", ""},
-		{"frontend empty query", "", "https://platform.example.com?", "", ""},
-		{"frontend empty fragment", "", "https://platform.example.com#", "", ""},
-		{"insecure frontend", "", "http://platform.example.com", "", ""},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &config.Config{MCP: config.MCPConfig{PublicURL: tt.public}}
@@ -268,6 +269,8 @@ func TestMCPOAuthHandlerJSONValidation(t *testing.T) {
 		{"oversized browser", "application/json", `{"authorization":{"state":"` + strings.Repeat("x", 17<<10) + `"}}`, true, false},
 		{"registration extension metadata", "application/json", `{"client_name":"example","client_uri":"https://client.example.com"}`, false, true},
 		{"oversized registration", "application/json", `{"client_name":"` + strings.Repeat("x", 17<<10) + `"}`, false, false},
+		{"registration above 4 KiB", "application/json", `{"client_name":"x","client_uri":"` + strings.Repeat("x", 4<<10) + `"}`, false, false},
+		{"browser body above registration limit", "application/json", `{"authorization":{"state":"` + strings.Repeat("x", 8<<10) + `"}}`, true, true},
 		{"malformed registration", "application/json", `{`, false, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -375,7 +378,7 @@ func TestMCPOAuthHandlerAdminDecisionGatesBeforePersistence(t *testing.T) {
 		{name: "no recent grant", role: service.RoleAdmin, totp: true, status: 403, marker: "STEP_UP_REQUIRED"},
 		{name: "step-up unavailable", role: service.RoleAdmin, totp: true, cacheErr: errors.New("cache unavailable"), status: 503, marker: "STEP_UP_UNAVAILABLE"},
 		{name: "admin API key", role: service.RoleAdmin, authMethod: service.AuditAuthMethodAdminAPIKey, totp: true, granted: true, status: 403, marker: "STEP_UP_ADMIN_API_KEY_FORBIDDEN"},
-		{name: "MCP credential", role: service.RoleAdmin, authMethod: "mcp_oauth", totp: true, granted: true, status: 403, marker: "STEP_UP_MCP_OAUTH_FORBIDDEN"},
+		{name: "MCP credential", role: service.RoleAdmin, authMethod: service.AuditAuthMethodMCPOAuth, totp: true, granted: true, status: 403, marker: "STEP_UP_MCP_OAUTH_FORBIDDEN"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			h, repo, users, cache := newHandlerMCPFixture(t)
@@ -393,6 +396,48 @@ func TestMCPOAuthHandlerAdminDecisionGatesBeforePersistence(t *testing.T) {
 			require.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
 		})
 	}
+}
+
+func TestMCPOAuthHandlerAdminWriteAlwaysRequiresStepUp(t *testing.T) {
+	for _, tt := range []struct {
+		name           string
+		readOnly       *bool
+		totp, granted  bool
+		status, writes int
+		marker         string
+	}{
+		{name: "write without TOTP", readOnly: boolPtr(false), status: 403, marker: "STEP_UP_TOTP_NOT_ENABLED"},
+		{name: "write without recent verification", readOnly: boolPtr(false), totp: true, status: 403, marker: "STEP_UP_REQUIRED"},
+		{name: "verified write", readOnly: boolPtr(false), totp: true, granted: true, status: 200, writes: 1},
+		{name: "read-only follows the switch", readOnly: boolPtr(true), status: 200, writes: 1},
+		{name: "default read-only follows the switch", status: 200, writes: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h, repo, users, cache := newHandlerMCPFixture(t)
+			// Global step-up is disabled; write grants still need verification.
+			h.settings = service.NewSettingService(&handlerMCPSettings{values: map[string]string{service.SettingKeyStepUpEnabled: "false"}}, h.cfg)
+			users.user.TotpEnabled = tt.totp
+			cache.granted = tt.granted
+			input := service.MCPOAuthConsentInput{Authorization: handlerMCPAuthorization(), Approved: true, Scope: service.MCPScopeAdmin, ReadOnly: tt.readOnly}
+			c, rec := handlerMCPContext(t, http.MethodPost, "/user/mcp/authorize", handlerMCPBody(t, input), "application/json")
+			handlerMCPSubject(c, service.RoleAdmin)
+			h.Decide(c)
+			require.Equal(t, tt.status, rec.Code, rec.Body.String())
+			require.Contains(t, rec.Body.String(), tt.marker)
+			require.Equal(t, tt.writes, repo.writes)
+		})
+	}
+}
+
+func TestMCPOAuthHandlerRegistrationCapacityIsTemporary(t *testing.T) {
+	h, repo, _, _ := newHandlerMCPFixture(t)
+	repo.createErr = service.ErrMCPOAuthClientLimit
+	c, rec := handlerMCPContext(t, http.MethodPost, "/api/v1/mcp/oauth/register", `{"redirect_uris":["https://client.example.com/cb"]}`, "application/json")
+	h.Register(c)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, "temporarily_unavailable", handlerMCPJSON(t, rec)["error"])
+	require.NotEmpty(t, rec.Header().Get("Retry-After"))
+	require.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
 }
 
 func TestMCPOAuthHandlerAdminApprovalUsesBrowserSession(t *testing.T) {

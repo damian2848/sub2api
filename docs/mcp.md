@@ -4,7 +4,7 @@
 
 ## 部署
 
-配置稳定、可信的公开 MCP 地址，例如：
+MCP 默认关闭。只有显式配置稳定、可信的公开 MCP 地址后，才会开放 MCP 资源端点、OAuth 发现及客户端注册接口，侧栏也才会显示 **MCP 接入**。例如：
 
 ```sh
 MCP_PUBLIC_URL=https://api.example.com/api/v1/mcp
@@ -17,7 +17,7 @@ mcp:
   public_url: https://api.example.com/api/v1/mcp
 ```
 
-地址必须以 `/api/v1/mcp` 结束，不带尾斜杠、查询参数或片段。生产环境使用 HTTPS；本机开发允许 localhost 或回环 IP 的 HTTP 地址。未显式配置时，可使用平台已配置的前端 URL 的 origin 加 `/api/v1/mcp`；服务不会从请求 Host 或转发头推断 OAuth issuer。没有可信公开地址时，OAuth 接口会返回配置错误。
+地址必须是站点根路径下的 `/api/v1/mcp`，不带尾斜杠、查询参数或片段；OAuth 发现端点同样位于站点根路径，因此不支持挂在子路径（如 `https://example.com/sub2api/`）下部署。生产环境使用 HTTPS；本机开发允许 localhost 或回环 IP 的 HTTP 地址。服务不会从前端 URL、请求 Host 或转发头推断该地址；未配置时 MCP 及其 OAuth 接口均返回 503。清空该配置即可关闭 MCP，已签发的令牌随之无法使用。
 
 同域部署只需上述 MCP 地址。前后端分域时，另外配置平台前端 URL（管理设置或 `SERVER_FRONTEND_URL`），用于定位浏览器授权页。反向代理需转发 `/api/v1/mcp`、`/api/v1/mcp/oauth/*` 及下列 `/.well-known/*` 发现端点，保留 Authorization、Accept 和 MCP 协议请求头。浏览器客户端访问 MCP 资源仍需符合平台的 CORS/Origin 白名单。
 
@@ -44,7 +44,7 @@ mcp:
 
 ## 授权与撤销
 
-默认授权为**个人范围、只读**。管理员可以在明确同意时选择管理员范围；启用平台敏感操作二次验证时，授予管理员范围同样需要 step-up。
+默认授权为**个人范围、只读**。管理员可以在明确同意时选择管理员范围；启用平台敏感操作二次验证时，授予管理员范围同样需要 step-up。授予**管理员范围的读写**权限时，无论是否启用该开关，都必须已开启 TOTP 并完成一次 step-up 验证。
 
 - **个人范围**：只操作当前用户的数据，即使授权人是管理员也不会开放管理工具。
 - **管理员范围**：仅管理员可授予，可使用目录内管理工具及自己的个人工具。
@@ -55,7 +55,7 @@ OAuth scope 为 `mcp`，实际工具权限由浏览器中确认的授权范围�
 
 授权码有效期 5 分钟且只能兑换一次。访问令牌有效期最多 10 分钟；授权及刷新令牌最长 30 天，刷新令牌每次使用都会轮换。重复使用授权码或已消费的刷新令牌会撤销该授权。服务端仅保存凭证摘要。
 
-登录平台后，侧栏 **MCP 接入**（`/settings/mcp`）可查看并撤销已授权应用。每用户最多 20 个有效授权。撤销、密码或登录标识变更、用户停用都会阻止后续调用及刷新；管理员失去角色后，其管理员授权也失效。页面不显示访问或刷新令牌，MCP 工具无法自行授予新授权。
+登录平台后，侧栏 **MCP 接入**（`/settings/mcp`）可查看并撤销已授权应用。每用户最多 20 个有效授权。撤销、密码或登录标识变更、用户停用都会阻止后续调用及刷新；管理员失去角色后，其管理员授权也失效。“撤销全部会话”会同时撤销该用户的全部 MCP 授权。停用用户会持久撤销其全部授权，取消管理员角色会持久撤销其管理员授权，之后重新启用或重新授予角色也不会恢复旧授权。页面不显示访问或刷新令牌，MCP 工具无法自行授予新授权。
 
 ## 工具目录
 
@@ -78,7 +78,7 @@ OAuth scope 为 `mcp`，实际工具权限由浏览器中确认的授权范围�
 
 工具只开放明确列出的字段；不提供任意 HTTP 请求、任意 URL、密码/角色修改、身份绑定、上游凭证管理、备份恢复或支付工具。普通查询和修改结果会去除 API Key、上游令牌等凭证。`user_create_api_key` 的创建结果包含新 API Key，便于配置应用；不要将该结果公开分享。
 
-现有业务权限、资源归属、平台模式限制、管理合规确认、限流和操作审计继续生效。模型返回的建议不会绕过这些规则。
+现有业务权限、资源归属、平台模式限制、管理合规确认、限流和操作审计继续生效。模型返回的建议不会绕过这些规则。MCP 的每次工具调用（包括只读查询）都会写入操作审计，认证方式为 `mcp_oauth`，并附带 `mcp_grant_id` 和 `mcp_tool`。
 
 ## 参数示例
 
@@ -149,7 +149,7 @@ OAuth scope 为 `mcp`，实际工具权限由浏览器中确认的授权范围�
 | `POST /api/v1/mcp/oauth/token` | 授权码兑换与刷新，表单编码 |
 | `POST /api/v1/mcp/oauth/revoke` | RFC 7009 撤销，表单编码 |
 
-未认证 MCP 请求返回 401，`WWW-Authenticate` 提供 `resource_metadata` 和 `scope="mcp"`。客户端只支持 `token_endpoint_auth_method=none`、`response_type=code`、S256 PKCE，以及授权码/刷新两种 grant type。回调 URI 必须与注册值精确匹配，使用 HTTPS 或本机 HTTP；不支持通配符。当前不提供远程 client metadata URL 自动抓取。
+未认证 MCP 请求返回 401，`WWW-Authenticate` 提供 `resource_metadata` 和 `scope="mcp"`。客户端只支持 `token_endpoint_auth_method=none`、`response_type=code`、S256 PKCE，以及授权码/刷新两种 grant type。回调 URI 必须与注册值精确匹配，使用 HTTPS 或本机 HTTP；不支持通配符。当前不提供远程 client metadata URL 自动抓取。注册请求体不超过 4 KiB；`client_name` 最多 100 个字符，且不得包含控制字符、双向文本控制符或零宽字符等不可见字符。
 
 授权请求和授权码兑换必须携带精确匹配 MCP 地址的 `resource`。刷新可省略 `resource`，此时沿用原授权；传入不同资源会被拒绝。`state` 会原样返回客户端。授权码与客户端、回调、资源和 PKCE 绑定；客户端应安全保管 verifier 和刷新令牌。
 
@@ -160,12 +160,12 @@ curl 'https://api.example.com/.well-known/oauth-protected-resource/api/v1/mcp'
 curl 'https://api.example.com/.well-known/oauth-authorization-server'
 ```
 
-服务使用官方 Go MCP SDK 的无状态 Streamable HTTP 模式，POST 返回 JSON；GET 事件流和 DELETE 会话操作返回 405。每次 HTTP 请求重新校验授权，响应禁止缓存。业务 API 失败以工具结果 `isError: true` 返回，原 HTTP 状态位于 `structuredContent.http_status`。工具执行限制 30 秒并传递客户端断开取消；写操作超时后应查询状态再决定是否重试。
+服务使用官方 Go MCP SDK 的无状态 Streamable HTTP 模式，POST 返回 JSON；GET 事件流和 DELETE 会话操作返回 405。每个 HTTP 请求只能包含一个 JSON-RPC 对象，JSON-RPC 批量请求（包括未声明 `MCP-Protocol-Version` 的旧版本请求）一律返回 400。每次 HTTP 请求重新校验授权，响应禁止缓存。工具结果以单个文本块返回 JSON `{"http_status": …, "result": …}`，不再重复写入 `structuredContent`；编码后超过 2 MiB 的结果会被拒绝，请缩小查询范围或分页大小。业务 API 失败以工具结果 `isError: true` 返回，原 HTTP 状态位于 `http_status`。工具执行限制 30 秒并传递客户端断开取消；写操作超时后应查询状态再决定是否重试。
 
-MCP 协议请求使用独立入口限流桶；每个实际工具调用只消耗一次管理面全局额度，聚合统计仍受 Heavy 限流。动态注册、兑换和撤销接口有独立 IP 限流，Redis 不可用时拒绝请求。
+`/api/v1/mcp` 在认证前先按客户端 IP 限流（每分钟 600 次），认证后再使用独立的按用户入口限流桶；每个实际工具调用只消耗一次管理面全局额度，聚合统计仍受 Heavy 限流。授权的最近使用时间每分钟最多写入一次。动态注册、兑换和撤销接口有独立 IP 限流。上述 IP 限流把同一 IPv6 /64 网段视为一个客户端，Redis 不可用时拒绝请求。
 
 ## 开发
 
 工具目录位于 `backend/internal/managementmcp/catalog.go`。新增工具应绑定已有管理路由，使用封闭参数 schema，并覆盖权限、资源归属、参数边界及凭证脱敏测试。
 
-OAuth 存储由 `249_mcp_oauth.sql` 创建。注册时有界清理过期 7 天以上的授权，以及 90 天前注册且无授权关联的客户端。浏览器使用 JWT 保护的 `/api/v1/user/mcp/config` 获取服务端配置的连接地址、`/api/v1/user/mcp/authorize` 预览/决定授权，以及 `/api/v1/user/mcp/grants` 列表、撤销接口。客户端协议端点返回标准 OAuth JSON，浏览器接口沿用平台响应格式。
+OAuth 存储由 `249_mcp_oauth.sql` 创建。注册时有界清理过期 7 天以上的授权，以及 24 小时前注册且从未获得授权的客户端。24 小时内注册但尚未获得授权的客户端全站最多 1000 个，达到上限后注册返回 503 `temporarily_unavailable`，待旧注册过期后自动恢复。浏览器使用 JWT 保护的 `/api/v1/user/mcp/config` 获取服务端配置的连接地址、`/api/v1/user/mcp/authorize` 预览/决定授权，以及 `/api/v1/user/mcp/grants` 列表、撤销接口。客户端协议端点返回标准 OAuth JSON，浏览器接口沿用平台响应格式。

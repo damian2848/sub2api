@@ -33,21 +33,13 @@ func NewMCPOAuthHandler(oauth *service.MCPOAuthService, totp *service.TotpServic
 func (h *MCPOAuthHandler) Service() *service.MCPOAuthService { return h.oauth }
 
 // ResourceURL is anchored to operator configuration, never the request Host or
-// forwarded headers. A separate API origin can override the frontend fallback.
-func (h *MCPOAuthHandler) ResourceURL(ctx context.Context) (string, error) {
-	var raw string
-	if h.cfg != nil {
-		raw = h.cfg.MCP.PublicURL
+// forwarded headers. MCP stays disabled until MCP_PUBLIC_URL is set explicitly,
+// so upgrading never exposes client registration or management tools.
+func (h *MCPOAuthHandler) ResourceURL(_ context.Context) (string, error) {
+	if h.cfg == nil || !h.cfg.MCP.Enabled() {
+		return "", errors.New("MCP is disabled; set MCP_PUBLIC_URL to enable it")
 	}
-	if strings.TrimSpace(raw) == "" {
-		frontend := h.frontendURL(ctx)
-		u, err := url.Parse(frontend)
-		if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.Contains(frontend, "#") {
-			return "", errors.New("configure MCP_PUBLIC_URL or the platform frontend URL to enable MCP OAuth")
-		}
-		raw = u.Scheme + "://" + u.Host + "/api/v1/mcp"
-	}
-	configured := config.MCPConfig{PublicURL: raw}
+	configured := config.MCPConfig{PublicURL: h.cfg.MCP.PublicURL}
 	if err := configured.Validate(); err != nil || configured.PublicURL == "" {
 		return "", errors.New("MCP public URL is not configured correctly")
 	}
@@ -130,6 +122,11 @@ func (h *MCPOAuthHandler) Register(c *gin.Context) {
 		return
 	}
 	client, err := h.oauth.Register(c.Request.Context(), input)
+	if errors.Is(err, service.ErrMCPOAuthClientLimit) {
+		c.Header("Retry-After", "3600")
+		mcpOAuthErrorResponse(c, http.StatusServiceUnavailable, "temporarily_unavailable", "Too many clients are awaiting authorization; retry later")
+		return
+	}
 	if mcpOAuthHandleError(c, err, true) {
 		return
 	}
@@ -229,7 +226,15 @@ func (h *MCPOAuthHandler) Decide(c *gin.Context) {
 			response.Forbidden(c, "Only administrators can authorize admin MCP access")
 			return
 		}
-		if !middleware.EnforceStepUp(c, h.totp, h.users, h.settings) {
+		// Administrator write grants outlive browser sessions, so they always
+		// need a fresh TOTP verification even when the global switch is off.
+		var verified bool
+		if input.ReadOnly != nil && !*input.ReadOnly {
+			verified = middleware.EnforceStepUpAlways(c, h.totp, h.users)
+		} else {
+			verified = middleware.EnforceStepUp(c, h.totp, h.users, h.settings)
+		}
+		if !verified {
 			return
 		}
 	}
@@ -327,7 +332,12 @@ func mcpOAuthHandleError(c *gin.Context, err error, protocol bool) bool {
 func mcpOAuthReadJSON(c *gin.Context, out any, browser bool) bool {
 	mediaType, _, _ := mime.ParseMediaType(c.GetHeader("Content-Type"))
 	if mediaType == "application/json" {
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 16<<10)
+		// Unauthenticated registrations are persisted, so they get a tighter bound.
+		limit := int64(4 << 10)
+		if browser {
+			limit = 16 << 10
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
 		decoder := json.NewDecoder(c.Request.Body)
 		if browser {
 			decoder.DisallowUnknownFields()
