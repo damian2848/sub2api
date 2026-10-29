@@ -76,11 +76,14 @@ func TestGeminiChatPreservesGenerationConstraints(t *testing.T) {
 				require.Equal(t, 1, upstream.calls)
 				var sent map[string]any
 				require.NoError(t, json.NewDecoder(upstream.lastReq.Body).Decode(&sent))
-				require.Equal(t, tc.limit, sent["generationConfig"].(map[string]any)["maxOutputTokens"])
+				generationConfig, ok := sent["generationConfig"].(map[string]any)
+				require.True(t, ok)
+				require.Equal(t, tc.limit, generationConfig["maxOutputTokens"])
 				if tc.mode != "" {
 					config, ok := sent["toolConfig"].(map[string]any)
 					require.True(t, ok, "tool_choice must survive the Claude protocol pivot")
-					calling := config["functionCallingConfig"].(map[string]any)
+					calling, ok := config["functionCallingConfig"].(map[string]any)
+					require.True(t, ok)
 					require.Equal(t, tc.mode, calling["mode"])
 					if tc.named {
 						require.Equal(t, []any{"emit_code"}, calling["allowedFunctionNames"])
@@ -88,7 +91,12 @@ func TestGeminiChatPreservesGenerationConstraints(t *testing.T) {
 				}
 				var response map[string]any
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
-				require.Equal(t, "length", response["choices"].([]any)[0].(map[string]any)["finish_reason"])
+				choices, ok := response["choices"].([]any)
+				require.True(t, ok)
+				require.NotEmpty(t, choices)
+				choice, ok := choices[0].(map[string]any)
+				require.True(t, ok)
+				require.Equal(t, "length", choice["finish_reason"])
 			})
 		}
 	}

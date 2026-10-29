@@ -44,7 +44,7 @@ func (r *accountRepository) ListAccountFamilyGroups(ctx context.Context) ([]serv
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	groups := make([]service.AccountFamilyGroup, 0)
 	for rows.Next() {
 		var group service.AccountFamilyGroup
