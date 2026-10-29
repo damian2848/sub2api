@@ -44,6 +44,7 @@ func (h *AccountHandler) GetUpstreamBillingRates(c *gin.Context) {
 		search = search[:100]
 	}
 	privacyMode := strings.TrimSpace(c.Query("privacy_mode"))
+	c.Request = c.Request.WithContext(service.WithAccountFamilyGroupFilter(c.Request.Context(), c.Query("family_group")))
 	sortBy := c.DefaultQuery("sort_by", "name")
 	sortOrder := c.DefaultQuery("sort_order", "asc")
 

@@ -1,7 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
 import AccountStatusIndicator from '../AccountStatusIndicator.vue'
 import type { Account } from '@/types'
+
+enableAutoUnmount(afterEach)
 
 vi.mock('vue-i18n', async () => {
   const actual = await vi.importActual<typeof import('vue-i18n')>('vue-i18n')

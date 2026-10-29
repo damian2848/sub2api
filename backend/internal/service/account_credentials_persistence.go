@@ -39,6 +39,26 @@ func persistAccountCredentials(ctx context.Context, repo AccountRepository, acco
 			return nil
 		}
 	}
+	if account.Platform == PlatformAntigravity && account.Type == AccountTypeOAuth {
+		if updater, ok := any(repo).(interface {
+			UpdateAntigravityCredentialsIfGeneration(context.Context, int64, string, map[string]any) (bool, error)
+		}); ok {
+			applied, err := updater.UpdateAntigravityCredentialsIfGeneration(ctx, account.ID, account.GetCredential(antigravityOAuthGeneration), credentials)
+			if err != nil {
+				return err
+			}
+			if applied {
+				account.Credentials = shallowCopyMap(credentials)
+			} else {
+				current, err := repo.GetByID(ctx, account.ID)
+				if err != nil {
+					return err
+				}
+				*account = *current
+			}
+			return nil
+		}
+	}
 	account.Credentials = shallowCopyMap(credentials)
 	if updater, ok := any(repo).(accountCredentialsUpdater); ok {
 		return updater.UpdateCredentials(ctx, account.ID, account.Credentials)

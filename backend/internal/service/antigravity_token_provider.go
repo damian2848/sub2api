@@ -121,9 +121,10 @@ func (p *AntigravityTokenProvider) GetAccessToken(ctx context.Context, account *
 		}
 	} else if needsRefresh && p.tokenCache != nil {
 		// Backward-compatible test path when refreshAPI is not injected.
-		locked, err := p.tokenCache.AcquireRefreshLock(ctx, cacheKey, 30*time.Second)
+		lockKey := antigravityTokenRefreshLockKey(account)
+		locked, err := p.tokenCache.AcquireRefreshLock(ctx, lockKey, 30*time.Second)
 		if err == nil && locked {
-			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, cacheKey) }()
+			defer func() { _ = p.tokenCache.ReleaseRefreshLock(ctx, lockKey) }()
 		}
 	}
 
@@ -198,7 +199,17 @@ func (p *AntigravityTokenProvider) markTempUnschedulable(account *Account, refre
 	until := now.Add(tokenRefreshTempUnschedDuration)
 	reason := "token refresh failed on request path: " + refreshErr.Error()
 	bgCtx := context.Background()
-	if err := p.accountRepo.SetTempUnschedulable(bgCtx, account.ID, until, reason); err != nil {
+	var persistErr error
+	if conditional, ok := p.accountRepo.(antigravityOAuthFailureRepository); ok {
+		applied, err := conditional.SetAntigravityOAuthFailureIfCredentialsUnchanged(bgCtx, account, until, reason, false)
+		if err == nil && !applied {
+			return
+		}
+		persistErr = err
+	} else {
+		persistErr = p.accountRepo.SetTempUnschedulable(bgCtx, account.ID, until, reason)
+	}
+	if err := persistErr; err != nil {
 		slog.Warn("antigravity_token_provider.set_temp_unschedulable_failed",
 			"account_id", account.ID,
 			"error", err,
@@ -231,5 +242,16 @@ func (p *AntigravityTokenProvider) markBackfillAttempted(accountID int64) {
 }
 
 func AntigravityTokenCacheKey(account *Account) string {
+	key := antigravityTokenRefreshLockKey(account)
+	if generation := account.GetCredential(antigravityOAuthGeneration); generation != "" {
+		key += ":" + generation
+	}
+	return key
+}
+
+// A worker may reread a newer authorization after taking the refresh lock.
+// Keep that lock stable across generations so both workers serialize refreshes
+// of the same durable account; only access-token cache entries vary by generation.
+func antigravityTokenRefreshLockKey(account *Account) string {
 	return "ag:account:" + strconv.FormatInt(account.ID, 10)
 }

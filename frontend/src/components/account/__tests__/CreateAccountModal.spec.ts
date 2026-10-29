@@ -259,6 +259,18 @@ async function openPlaintextCodexImportStep() {
 }
 
 describe('CreateAccountModal OpenAI long-context billing', () => {
+  it('creates an account in the entered family and trims its name', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('Family member')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('test-key')
+    await wrapper.get('[data-testid="family-group-input"]').setValue('  家庭 A  ')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(createAccountMock.mock.calls[0]?.[0]?.extra?.family_group).toBe('家庭 A')
+  })
+
   it('offers WS SSE acceleration for OpenAI OAuth even while WS mode is off', async () => {
     const wrapper = mountModal()
     expect(wrapper.find('[data-testid="create-openai-ws-sse-acceleration"]').exists()).toBe(false)

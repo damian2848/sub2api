@@ -2730,6 +2730,8 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 // directly.  It deliberately uses the same Cookie transport as normal gateway
 // requests instead of trying to construct an AI Studio API request.
 func (s *AccountTestService) testGeminiWebAccountConnection(c *gin.Context, account *Account, modelID, prompt string) error {
+	requestCtx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
+	defer cancel()
 	modelID = account.GetMappedModel(modelID)
 	if _, ok := geminiweb.LookupModel(modelID); !ok {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported Gemini Web model: %s", modelID))
@@ -2746,6 +2748,11 @@ func (s *AccountTestService) testGeminiWebAccountConnection(c *gin.Context, acco
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
 	c.Writer.Flush()
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: modelID})
+	endHistoryRequest, admissionErr := beginGeminiWebHistoryRequest(requestCtx, s.accountRepo, account.ID)
+	if admissionErr != nil {
+		return s.sendErrorAndEnd(c, "Gemini Web account is temporarily unavailable for testing during history maintenance")
+	}
+	defer endHistoryRequest()
 
 	cookie := account.GetCredential("gemini_web_cookie")
 	cred := geminiweb.Credential{CacheGeneration: account.GetCredential(geminiWebCookieGeneration),
@@ -2758,7 +2765,7 @@ func (s *AccountTestService) testGeminiWebAccountConnection(c *gin.Context, acco
 	if account.ProxyID != nil && account.Proxy != nil {
 		proxyURL = account.Proxy.URL()
 	}
-	result, err := geminiweb.NewClient().Complete(c.Request.Context(), cred, geminiweb.Request{Model: modelID, Prompt: prompt}, func(req *http.Request) (*http.Response, error) {
+	result, err := geminiweb.NewClient().Complete(requestCtx, cred, geminiweb.Request{Model: modelID, Prompt: prompt}, func(req *http.Request) (*http.Response, error) {
 		return s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, s.tlsFPProfileService.ResolveTLSProfile(account))
 	})
 	if result.UpdatedCookie != "" && result.UpdatedCookie != cookie {

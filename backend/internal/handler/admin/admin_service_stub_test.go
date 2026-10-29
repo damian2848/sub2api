@@ -57,6 +57,7 @@ type stubAdminService struct {
 		groupIDs  []int64
 	}
 	lastListAccounts struct {
+		familyGroup string
 		platform    string
 		accountType string
 		status      string
@@ -443,6 +444,7 @@ func (s *stubAdminService) BatchSetGroupUserDeniedModels(_ context.Context, grou
 }
 
 func (s *stubAdminService) ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string) ([]service.Account, int64, error) {
+	s.lastListAccounts.familyGroup = service.AccountFamilyGroupFilter(ctx)
 	s.lastListAccounts.platform = platform
 	s.lastListAccounts.accountType = accountType
 	s.lastListAccounts.status = status
@@ -864,3 +866,7 @@ func (s *stubAdminService) CreateShadow(ctx context.Context, parentID int64, opt
 
 // Ensure stub implements interface.
 var _ service.AdminService = (*stubAdminService)(nil)
+
+func (s *stubAdminService) ListAccountFamilyGroups(context.Context) ([]service.AccountFamilyGroup, error) {
+	return []service.AccountFamilyGroup{}, nil
+}

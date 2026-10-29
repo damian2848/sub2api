@@ -148,7 +148,7 @@ func classifyNoAccountError(
 	if result.AllModelAccountsRateLimited() {
 		fallback.Code = "model_capacity_exhausted"
 		fallback.RetryAt = result.EarliestRateLimitResetAt
-		fallback.Message = fmt.Sprintf("Accounts supporting model %q are currently rate-limited. Earliest quota reset is %s; availability may recover later.", displayModel, fallback.RetryAt.UTC().Format(time.RFC3339))
+		fallback.Message = fmt.Sprintf("Accounts supporting model %q are currently rate-limited. Earliest retry time is %s; availability may recover later.", displayModel, fallback.RetryAt.UTC().Format(time.RFC3339))
 		return fallback
 	}
 	if result.HasAccountsInPool && !result.HasModelSupport {

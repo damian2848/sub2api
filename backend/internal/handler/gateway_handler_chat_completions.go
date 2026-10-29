@@ -97,6 +97,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 	reqLog = reqLog.With(zap.String("model", reqModel), zap.Bool("stream", reqStream))
 
+	c.Request = c.Request.WithContext(service.WithAntigravityThinkingFromRequest(c.Request.Context(), body, "chat_completions"))
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
 	pricingCtx, pricingAt := service.WithGatewayTokenRequestPricing(c.Request.Context())
@@ -116,6 +117,10 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 	if apiKey.Group != nil {
 		requireAPIKeyQueueCapability(c, service.APIKeyQueueCapabilityForbiddenWhenClaudeCodeOnly)
+	}
+	if geminiImageGenerationRejected(c, apiKey, nil, reqModel, channelMapping.MappedModel) {
+		h.chatCompletionsErrorResponse(c, http.StatusBadRequest, "invalid_request_error", service.ImageGenerationPermissionMessage())
+		return
 	}
 
 	if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIChat, reqModel, body); decision != nil && !decision.AllowNextStage {
@@ -190,14 +195,43 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		fs = NewFailoverState(h.maxAccountSwitchesGemini, false)
 	}
 
+	admissionBudget := newGeminiAdmissionBudget()
+	admissionRejected := false
+	handleAdmissionFailure := func(err error) {
+		if failoverClientGone(c) {
+			return
+		}
+		if fs.LastFailoverErr != nil {
+			h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
+		} else if errors.Is(err, errGeminiAccountCannotWait) {
+			markOpsRoutingCapacityLimited(c)
+			h.chatCompletionsErrorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
+		} else {
+			h.handleConcurrencyError(c, err, "account", streamStarted)
+		}
+	}
 	for {
 		if failoverClientGone(c) {
 			return
 		}
-		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(c.Request.Context(), apiKey.GroupID, selectionSessionHash, reqModel, fs.FailedAccountIDs, "", int64(0))
+		if err := admissionBudget.err(c); err != nil {
+			handleAdmissionFailure(err)
+			return
+		}
+		selectionCtx, selectionCancel := admissionBudget.context(c)
+		selection, err := h.gatewayService.SelectAccountWithLoadAwareness(selectionCtx, apiKey.GroupID, selectionSessionHash, reqModel, fs.FailedAccountIDs, "", int64(0))
+		selectionCancel()
 		if err != nil {
+			if budgetErr := admissionBudget.err(c); budgetErr != nil {
+				handleAdmissionFailure(budgetErr)
+				return
+			}
 			if failoverClientGone(c) {
 				reqLog.Info("gateway.cc.account_select_aborted_client_disconnected", zap.Error(err))
+				return
+			}
+			if admissionRejected && fs.LastFailoverErr == nil {
+				handleAdmissionFailure(errGeminiAccountCannotWait)
 				return
 			}
 			if len(fs.FailedAccountIDs) == 0 {
@@ -207,18 +241,20 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
 				message := cls.Message
-				if !cls.ModelNotFound {
+				if !cls.ModelNotFound && cls.Code == "" {
 					message = "No available accounts: " + err.Error()
 				}
-				h.chatCompletionsErrorResponse(c, cls.Status, cls.ErrType, message)
+				h.chatCompletionsErrorResponseWithCode(c, cls.Status, cls.ErrType, cls.Code, message)
 				return
 			}
-			action := fs.HandleSelectionExhausted(c.Request.Context())
+			retryCtx, retryCancel := admissionBudget.context(c)
+			action := fs.HandleSelectionExhausted(retryCtx)
+			retryCancel()
 			switch action {
 			case FailoverContinue:
 				continue
 			case FailoverCanceled:
-				failoverClientGone(c)
+				handleAdmissionFailure(&ConcurrencyError{SlotType: "account", IsTimeout: true})
 				return
 			default:
 				if fs.LastFailoverErr != nil {
@@ -234,7 +270,23 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 
 		// 4. Acquire account concurrency slot
 		accountReleaseFunc := selection.ReleaseFunc
-		if !selection.Acquired {
+		queuedAccountID := account.ID
+		geminiWebAdmission := account.IsGeminiWeb() || !admissionBudget.deadline.IsZero()
+		if geminiWebAdmission {
+			selection, err = acquireGeminiAccount(c, h.concurrencyHelper, selection, admissionBudget, false, &streamStarted,
+				func(ctx context.Context, busyAccountID int64) (*service.AccountSelectionResult, error) {
+					excluded := mergeAccountIDSets(fs.FailedAccountIDs, map[int64]struct{}{busyAccountID: {}})
+					return h.gatewayService.SelectAccountWithLoadAwareness(service.WithDeferredGatewayStickyBinding(ctx), apiKey.GroupID, selectionSessionHash, reqModel, excluded, "", int64(0))
+				})
+			if err != nil {
+				reqLog.Warn("gateway.cc.account_slot_acquire_failed", zap.Int64("account_id", queuedAccountID), zap.Error(err))
+				handleAdmissionFailure(err)
+				return
+			}
+			account = selection.Account
+			accountReleaseFunc = selection.ReleaseFunc
+			setOpsSelectedAccount(c, account.ID, account.Platform)
+		} else if !selection.Acquired {
 			if selection.WaitPlan == nil {
 				markOpsRoutingCapacityLimited(c)
 				h.chatCompletionsErrorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
@@ -258,6 +310,13 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				return
 			}
 		}
+		if err := h.revalidateGeminiWebAdmission(c, selection, admissionBudget, apiKey.GroupID, reqModel); err != nil {
+			reqLog.Info("gateway.cc.account_admission_rejected", zap.Int64("account_id", account.ID), zap.Error(err))
+			admissionRejected = true
+			fs.FailedAccountIDs[account.ID] = struct{}{}
+			continue
+		}
+		account = selection.Account
 		// 终检与准入后绑定使用选号结果携带的门（见 responses 同名注释）。
 		admissionCtx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
 		latest, vetoed, reason := h.gatewayService.GatewayProfitControlVetoLatest(admissionCtx, account)
@@ -275,7 +334,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		}
 		account = latest
 		selection.Account = latest
-		if selection.ProfitGateActive() {
+		if selection.ProfitGateActive() || (geminiWebAdmission && (!selection.Acquired || account.ID != queuedAccountID)) {
 			if err := h.gatewayService.BindStickySessionAfterProfitAdmission(admissionCtx, apiKey.GroupID, selectionSessionHash, account.ID); err != nil {
 				reqLog.Warn("gateway.cc.bind_sticky_session_after_profit_admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 			}
@@ -297,6 +356,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		if channelMapping.Mapped {
 			forwardBody = h.gatewayService.ReplaceModelInBody(body, channelMapping.MappedModel)
 		}
+		resumeAdmission := admissionBudget.pauseForForward()
 		var result *service.ForwardResult
 		setActualUpstreamEndpoint(c, "")
 		if account.Platform == service.PlatformGemini {
@@ -322,8 +382,47 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 			result, err = h.gatewayService.ForwardAsChatCompletions(c.Request.Context(), c, account, forwardBody, parsedReq)
 		}
 
+		resumeAdmission(err)
 		if accountReleaseFunc != nil {
 			accountReleaseFunc()
+		}
+
+		// 提交 usage 记录。成功路径与"流中断但 Forward 已观测到 usage 的部分结果"
+		// 错误路径共用；failover 错误恒定 result=nil，不会重复计费。
+		submitForwardUsage := func(result *service.ForwardResult) {
+			userAgent := c.GetHeader("User-Agent")
+			clientIP := ip.GetClientIP(c)
+			requestPayloadHash := service.HashUsageRequestPayload(body)
+			inboundEndpoint := GetInboundEndpoint(c)
+			upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
+
+			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
+			sessionID := service.ExtractClientSessionID(c)
+			stampForwardRequestedReasoningEffort(result, service.RequestedReasoningEffortFromContext(c.Request.Context()))
+			h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
+				if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
+					Result:             result,
+					QuotaPlatform:      quotaPlatform,
+					APIKey:             apiKey,
+					User:               apiKey.User,
+					Account:            account,
+					Subscription:       subscription,
+					PricingAt:          pricingAt,
+					InboundEndpoint:    inboundEndpoint,
+					UpstreamEndpoint:   upstreamEndpoint,
+					UserAgent:          userAgent,
+					IPAddress:          clientIP,
+					RequestPayloadHash: requestPayloadHash,
+					APIKeyService:      h.apiKeyService,
+					SessionID:          sessionID,
+					ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, reqModel, result.UpstreamModel),
+				}); err != nil {
+					reqLog.Error("gateway.cc.record_usage_failed",
+						zap.Int64("account_id", account.ID),
+						zap.Error(err),
+					)
+				}
+			})
 		}
 
 		if err != nil {
@@ -338,7 +437,14 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				if c.Writer.Written() {
 					streamStarted = true
 				}
-				action := fs.HandleFailoverError(c.Request.Context(), h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
+				if isGeminiWebAdmissionRejection(failoverErr) {
+					admissionRejected = true
+					fs.FailedAccountIDs[account.ID] = struct{}{}
+					continue
+				}
+				retryCtx, retryCancel := admissionBudget.context(c)
+				action := fs.HandleFailoverError(retryCtx, h.gatewayService, account.ID, account.Platform, account.GetPoolModeRetryCount(), failoverErr)
+				retryCancel()
 				switch action {
 				case FailoverContinue:
 					continue
@@ -346,7 +452,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 					h.handleCCFailoverExhausted(c, fs.LastFailoverErr, streamStarted)
 					return
 				case FailoverCanceled:
-					failoverClientGone(c)
+					handleAdmissionFailure(&ConcurrencyError{SlotType: "account", IsTimeout: true})
 					return
 				}
 			}
@@ -361,55 +467,29 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				zap.Bool("upstream_error_response_already_written", upstreamErrorAlreadyCommunicated),
 				zap.Error(err),
 			)
+			if result != nil {
+				submitForwardUsage(result)
+			}
 			return
 		}
 
 		// 6. Record usage
-		userAgent := c.GetHeader("User-Agent")
-		clientIP := ip.GetClientIP(c)
-		requestPayloadHash := service.HashUsageRequestPayload(body)
-		inboundEndpoint := GetInboundEndpoint(c)
-		upstreamEndpoint := GetUpstreamEndpoint(c, account.Platform)
-
-		quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
-		sessionID := service.ExtractClientSessionID(c)
-		stampForwardRequestedReasoningEffort(result, service.RequestedReasoningEffortFromContext(c.Request.Context()))
-		h.submitUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
-			if err := h.gatewayService.RecordUsage(ctx, &service.RecordUsageInput{
-				Result:             result,
-				QuotaPlatform:      quotaPlatform,
-				APIKey:             apiKey,
-				User:               apiKey.User,
-				Account:            account,
-				Subscription:       subscription,
-				PricingAt:          pricingAt,
-				InboundEndpoint:    inboundEndpoint,
-				UpstreamEndpoint:   upstreamEndpoint,
-				UserAgent:          userAgent,
-				IPAddress:          clientIP,
-				RequestPayloadHash: requestPayloadHash,
-				APIKeyService:      h.apiKeyService,
-				SessionID:          sessionID,
-				ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, reqModel, result.UpstreamModel),
-			}); err != nil {
-				reqLog.Error("gateway.cc.record_usage_failed",
-					zap.Int64("account_id", account.ID),
-					zap.Error(err),
-				)
-			}
-		})
+		submitForwardUsage(result)
 		return
 	}
 }
 
 // chatCompletionsErrorResponse writes an error in OpenAI Chat Completions format.
 func (h *GatewayHandler) chatCompletionsErrorResponse(c *gin.Context, status int, errType, message string) {
-	c.JSON(status, gin.H{
-		"error": gin.H{
-			"type":    errType,
-			"message": message,
-		},
-	})
+	h.chatCompletionsErrorResponseWithCode(c, status, errType, "", message)
+}
+
+func (h *GatewayHandler) chatCompletionsErrorResponseWithCode(c *gin.Context, status int, errType, code, message string) {
+	errBody := gin.H{"type": errType, "message": message}
+	if code != "" {
+		errBody["code"] = code
+	}
+	c.JSON(status, gin.H{"error": errBody})
 }
 
 // handleCCFailoverExhausted writes a failover-exhausted error in CC format.

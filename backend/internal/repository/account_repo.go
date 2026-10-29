@@ -26,6 +26,7 @@ import (
 	dbgroup "github.com/Wei-Shaw/sub2api/ent/group"
 	dbpredicate "github.com/Wei-Shaw/sub2api/ent/predicate"
 	dbproxy "github.com/Wei-Shaw/sub2api/ent/proxy"
+	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -1322,7 +1323,7 @@ func (r *accountRepository) accountListFilteredQuery(platform, accountType, stat
 }
 
 func (r *accountRepository) ListWithFilters(ctx context.Context, params pagination.PaginationParams, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, *pagination.PaginationResult, error) {
-	q := observerAccountQuery(ctx, r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode))
+	q := filterAccountFamilyGroup(ctx, observerAccountQuery(ctx, r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode)))
 	// Clone before Count so interceptor-appended predicates (SoftDeleteMixin's
 	// deleted_at IS NULL) don't accumulate on the shared builder and pollute the
 	// subsequent list query. Same pattern used in group_repo/promo_code_repo/user_repo
@@ -1352,7 +1353,7 @@ func (r *accountRepository) ListWithFilters(ctx context.Context, params paginati
 }
 
 func (r *accountRepository) ListAllWithFilters(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) ([]service.Account, error) {
-	accounts, err := observerAccountQuery(ctx, r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode)).All(ctx)
+	accounts, err := filterAccountFamilyGroup(ctx, observerAccountQuery(ctx, r.accountListFilteredQuery(platform, accountType, status, search, groupID, privacyMode))).All(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -2612,8 +2613,8 @@ func (r *accountRepository) SetRateLimited(ctx context.Context, id int64, resetA
 	return nil
 }
 
-// SetRateLimitedIfLater atomically extends an account-level rate limit. Grok
-// requests may finish concurrently, so an older response must not overwrite a
+// SetRateLimitedIfLater atomically extends an account-level rate limit.
+// Requests may finish concurrently, so an older response must not overwrite a
 // later reset boundary observed by another request or instance.
 func (r *accountRepository) SetRateLimitedIfLater(ctx context.Context, id int64, resetAt time.Time) error {
 	now := time.Now()
@@ -2644,15 +2645,23 @@ func (r *accountRepository) SetRateLimitedIfLater(ctx context.Context, id int64,
 	return nil
 }
 
-// ClearRateLimitIfObserved clears exactly the Grok rate-limit generation seen
+// ClearRateLimitIfObserved clears exactly the Grok or Gemini Web limit seen
 // by a successful request. Matching both timestamps prevents a stale success
 // from erasing a later clear/re-arm generation with an equal or shorter reset.
 func (r *accountRepository) ClearRateLimitIfObserved(ctx context.Context, id int64, observedLimitedAt, observedResetAt time.Time) (bool, error) {
 	updated, err := r.client.Account.Update().
 		Where(
 			dbaccount.IDEQ(id),
-			dbaccount.PlatformEQ(service.PlatformGrok),
-			dbaccount.TypeEQ(service.AccountTypeOAuth),
+			dbaccount.Or(
+				dbaccount.And(
+					dbaccount.PlatformEQ(service.PlatformGrok),
+					dbaccount.TypeEQ(service.AccountTypeOAuth),
+				),
+				dbaccount.And(
+					dbaccount.PlatformEQ(service.PlatformGemini),
+					dbaccount.TypeEQ(service.AccountTypeGeminiWeb),
+				),
+			),
 			dbaccount.RateLimitedAtEQ(observedLimitedAt),
 			dbaccount.RateLimitResetAtEQ(observedResetAt),
 		).
@@ -2748,13 +2757,24 @@ func (r *accountRepository) SetModelRateLimit(ctx context.Context, id int64, sco
 	}
 
 	client := clientFromContext(ctx, r.client)
+	// Antigravity can report a short throttle while another in-flight request
+	// reports a multi-day quota reset. Keep the longer record atomically, rather
+	// than doing a read/compare/write in the service. Values written here use
+	// UTC RFC3339, whose seconds are lexically ordered; malformed old values
+	// remain replaceable. Other providers retain their existing overwrite policy.
 	result, err := client.ExecContext(
 		ctx,
 		`UPDATE accounts SET 
 			extra = jsonb_set(
 				jsonb_set(COALESCE(extra, '{}'::jsonb), '{model_rate_limits}'::text[], COALESCE(extra->'model_rate_limits', '{}'::jsonb), true),
 				ARRAY['model_rate_limits', $1]::text[],
-				$2::jsonb,
+				CASE
+					WHEN platform = 'antigravity'
+						AND (extra #>> ARRAY['model_rate_limits', $1, 'rate_limit_reset_at']) ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]+)?Z$'
+						AND LEFT(extra #>> ARRAY['model_rate_limits', $1, 'rate_limit_reset_at'], 19) >= LEFT($4, 19)
+					THEN extra #> ARRAY['model_rate_limits', $1]
+					ELSE $2::jsonb
+				END,
 				true
 			),
 			updated_at = NOW()
@@ -2762,6 +2782,7 @@ func (r *accountRepository) SetModelRateLimit(ctx context.Context, id int64, sco
 		scope,
 		raw,
 		id,
+		resetAt.UTC().Format(time.RFC3339),
 	)
 	if err != nil {
 		return err
@@ -3415,9 +3436,33 @@ func (r *accountRepository) BulkUpdate(ctx context.Context, ids []int64, updates
 			return 0, err
 		}
 		credentialPlaceholder = "$" + itoa(idx)
-		setClauses = append(setClauses, "credentials = COALESCE(credentials, '{}'::jsonb) || "+credentialPlaceholder+"::jsonb")
 		args = append(args, payload)
 		idx++
+		credentialsExpr := "COALESCE(credentials, '{}'::jsonb) || " + credentialPlaceholder + "::jsonb"
+		if updates.MergeModelMapping {
+			defaults, err := json.Marshal(domain.DefaultAntigravityModelMapping)
+			if err != nil {
+				return 0, err
+			}
+			defaultsPlaceholder := "$" + itoa(idx)
+			args = append(args, defaults)
+			idx++
+			patch := "(" + credentialPlaceholder + "::jsonb -> 'model_mapping')"
+			// Read each current row inside the UPDATE, avoiding a stale read/merge
+			// that could discard concurrent mapping edits. Empty merges are no-ops.
+			// Existing aliases win over incoming identity/whitelist entries.
+			credentialsExpr = "COALESCE(credentials, '{}'::jsonb) || (" + credentialPlaceholder + "::jsonb - 'model_mapping') || " +
+				"CASE WHEN " + patch + " = '{}'::jsonb THEN '{}'::jsonb ELSE jsonb_build_object('model_mapping', (" +
+				"SELECT base.mapping || " + patch + " || COALESCE((" +
+				"SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(base.mapping) e " +
+				"WHERE e.value <> to_jsonb(e.key) AND " + patch + " -> e.key = to_jsonb(e.key)" +
+				"), '{}'::jsonb) FROM (SELECT CASE " +
+				"WHEN jsonb_typeof(credentials -> 'model_mapping') = 'object' AND credentials -> 'model_mapping' <> '{}'::jsonb " +
+				"THEN credentials -> 'model_mapping' " +
+				"WHEN platform = 'antigravity' THEN " + defaultsPlaceholder + "::jsonb ELSE '{}'::jsonb END AS mapping) base" +
+				")) END"
+		}
+		setClauses = append(setClauses, "credentials = "+credentialsExpr)
 	}
 
 	ollamaGroupIdentityChanges := make([]string, 0, 2)

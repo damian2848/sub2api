@@ -508,6 +508,10 @@ func buildAccountForCreate(input *CreateAccountInput, accountExtra map[string]an
 }
 
 func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccountInput) (*Account, error) {
+	input.Extra = maps.Clone(input.Extra)
+	if err := NormalizeAccountFamilyGroupExtra(input.Extra); err != nil {
+		return nil, err
+	}
 	if err := ValidateAccountCostMultiplierExtra(input.Extra); err != nil {
 		return nil, err
 	}
@@ -624,6 +628,10 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 }
 
 func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *UpdateAccountInput) (*Account, error) {
+	input.Extra = maps.Clone(input.Extra)
+	if err := NormalizeAccountFamilyGroupExtra(input.Extra); err != nil {
+		return nil, err
+	}
 	if err := ValidateAccountCostMultiplierExtra(input.Extra); err != nil {
 		return nil, err
 	}
@@ -779,6 +787,12 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		}
 		normalizedExtra = MergeOpenAICodexTicketExtra(normalizedExtra, account.Extra)
 		normalizedExtra = prepareCodexFingerprintExtraForUpdate(account, normalizedExtra)
+		// Omitted ownership metadata must survive credential refreshes and unrelated edits.
+		if _, changed := normalizedExtra[AccountFamilyGroupKey]; !changed {
+			if name, exists := account.Extra[AccountFamilyGroupKey]; exists {
+				normalizedExtra[AccountFamilyGroupKey] = name
+			}
+		}
 		account.Extra = normalizedExtra
 		if account.Platform == PlatformAntigravity && wasOveragesEnabled && !account.IsOveragesEnabled() {
 			delete(account.Extra, "antigravity_credits_overages") // 清理旧版 overages 运行态
@@ -1014,6 +1028,10 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 // UpdateAccountExtra 仅对 Extra JSONB 做 key 级合并，避免覆盖其它运行态键
 // （如 model_rate_limits / passive_usage_* 等）。
 func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, updates map[string]any) error {
+	updates = maps.Clone(updates)
+	if err := NormalizeAccountFamilyGroupExtra(updates); err != nil {
+		return err
+	}
 	if err := ValidateAccountCostMultiplierExtra(updates); err != nil {
 		return err
 	}
@@ -1066,6 +1084,13 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 // BulkUpdateAccounts updates multiple accounts in one request.
 // It merges credentials/extra keys instead of overwriting the whole object.
 func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUpdateAccountsInput) (*BulkUpdateAccountsResult, error) {
+	if err := validateBulkModelMappingUpdate(input); err != nil {
+		return nil, err
+	}
+	input.Extra = maps.Clone(input.Extra)
+	if err := NormalizeAccountFamilyGroupExtra(input.Extra); err != nil {
+		return nil, err
+	}
 	if err := ValidateAccountCostMultiplierExtra(input.Extra); err != nil {
 		return nil, err
 	}
@@ -1146,6 +1171,17 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	for _, account := range cachedTargets {
 		if account != nil {
 			targetsByID[account.ID] = account
+		}
+	}
+	if input.ModelMappingUpdateMode == "merge" {
+		for _, id := range input.AccountIDs {
+			account := targetsByID[id]
+			if account == nil {
+				return nil, ErrAccountNotFound
+			}
+			if account.Platform != PlatformAntigravity {
+				return nil, infraerrors.BadRequest("INVALID_MODEL_MAPPING_UPDATE_MODE", "merge model updates currently require Antigravity accounts")
+			}
 		}
 	}
 	if openAISettings.any() {
@@ -1284,6 +1320,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	// Prepare bulk updates for columns and JSONB fields.
 	repoUpdates := AccountBulkUpdate{
 		Credentials:                input.Credentials,
+		MergeModelMapping:          input.ModelMappingUpdateMode == "merge",
 		Extra:                      input.Extra,
 		ProbeEnabled:               input.ProbeEnabled,
 		EnsureCodexFingerprintSeed: ShouldEnsureCodexFingerprintSeedForExtraUpdates(input.Extra),
@@ -1417,6 +1454,7 @@ func (s *adminServiceImpl) resolveBulkUpdateTargetIDs(ctx context.Context, filte
 		return nil, nil
 	}
 
+	ctx = WithAccountFamilyGroupFilter(ctx, filters.FamilyGroup)
 	groupID := int64(0)
 	switch strings.TrimSpace(filters.Group) {
 	case "":

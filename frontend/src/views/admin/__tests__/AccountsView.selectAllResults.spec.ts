@@ -99,7 +99,7 @@ const AccountBulkActionsBarStub = {
 }
 
 const AccountTableFiltersStub = {
-  emits: ['change'],
+  emits: ['change', 'update:filters'],
   template: '<button data-test="change-filter" @click="$emit(\'change\')">change filter</button>'
 }
 
@@ -112,7 +112,7 @@ const mountView = () => mount(AccountsView, {
       },
       DataTable: {
         props: ['data'],
-        template: '<div data-test="data-table"><div v-for="row in data" :key="row.id"><slot name="cell-select" :row="row" /></div></div>'
+        template: '<div data-test="data-table"><div v-for="row in data" :key="row.id"><slot name="cell-select" :row="row" /><slot name="cell-name" :row="row" :value="row.name" /></div></div>'
       },
       Pagination: true,
       ConfirmDialog: true,
@@ -197,6 +197,36 @@ describe('admin AccountsView select all filtered results', () => {
       expect(batchRefresh).toHaveBeenLastCalledWith(expectedIds)
     }
     wrapper.unmount()
+  })
+
+  it('clears the previous selection when a family badge changes the filter', async () => {
+    const accounts = makeAccounts(2).map(account => ({ ...account, extra: { family_group: '家庭 A' } }))
+    listAccounts.mockResolvedValue({ items: accounts, total: 2, page: 1, page_size: 20, pages: 1 })
+    const wrapper = mountView()
+    await flushPromises()
+    await wrapper.get('[data-test="select-page"]').trigger('click')
+    expect(wrapper.get('[data-test="selected-count"]').text()).toBe('2')
+    await wrapper.get('[data-testid="family-group-badge"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-test="selected-count"]').text()).toBe('0')
+    expect(listAccounts.mock.lastCall?.[2]).toEqual(expect.objectContaining({ family_group: '家庭 A' }))
+  })
+
+  it('keeps the family filter when selecting matching accounts across pages', async () => {
+    const accounts = makeAccounts(1001)
+    listAccounts.mockImplementation(async (page: number, pageSize: number) => ({
+      items: accounts.slice((page - 1) * pageSize, page * pageSize), total: accounts.length,
+      page, page_size: pageSize, pages: Math.ceil(accounts.length / pageSize)
+    }))
+    const wrapper = mountView()
+    await flushPromises()
+    wrapper.getComponent(AccountTableFiltersStub).vm.$emit('update:filters', { family_group: '家庭 A' })
+    await flushPromises()
+    await wrapper.get('[data-test="select-all-results"]').trigger('click')
+    await flushPromises()
+    expect(listAccounts).toHaveBeenCalledWith(1, 1000, expect.objectContaining({ family_group: '家庭 A' }))
+    expect(listAccounts).toHaveBeenCalledWith(2, 1000, expect.objectContaining({ family_group: '家庭 A' }))
+    expect(wrapper.get('[data-test="selected-count"]').text()).toBe('1001')
   })
 
   it('selects all matching IDs in one commit and clears the selection when filters change', async () => {

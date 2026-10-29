@@ -1,7 +1,6 @@
 package geminiweb
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -132,17 +131,16 @@ func (c *Client) fetchQuota(ctx context.Context, cred Credential, do Doer, force
 	return result, nil
 }
 func decodeQuota(body []byte, observed time.Time) (Quota, error) {
-	parser := newFrameParser()
-	frames := parser.feed(string(bytes.TrimSpace(body)))
-	frames = append(frames, parser.flush()...)
-	for _, f := range frames {
-		var fields []any
-		d := json.NewDecoder(strings.NewReader(f.payload))
-		d.UseNumber()
-		if d.Decode(&fields) == nil {
-			if q, ok := parseQuotaPayload(fields, observed); ok {
-				return q, nil
-			}
+	payload, err := decodeBatchRPC(body, geminiWebQuotaRPC)
+	if err != nil {
+		return Quota{}, err
+	}
+	var fields []any
+	d := json.NewDecoder(strings.NewReader(string(payload)))
+	d.UseNumber()
+	if d.Decode(&fields) == nil {
+		if q, ok := parseQuotaPayload(fields, observed); ok {
+			return q, nil
 		}
 	}
 	return Quota{}, errors.New("invalid or unavailable Gemini Web usage data")

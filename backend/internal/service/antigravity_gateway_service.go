@@ -245,7 +245,7 @@ func (s *AntigravityGatewayService) handleAntigravityModelRateLimitBeforePolicy(
 	if rateLimitDuration <= 0 {
 		rateLimitDuration = antigravityDefaultRateLimitDuration
 	}
-	resetAt := time.Now().Add(rateLimitDuration)
+	resetAt := antigravityModelCooldownResetAt(respBody, rateLimitDuration)
 	if !s.setAntigravityModelRateLimits(p.ctx, p.accountRepo, p.account, modelName, p.prefix, statusCode, resetAt, false) {
 		return false
 	}
@@ -717,9 +717,12 @@ func injectIdentityPatchToGeminiRequest(body []byte) ([]byte, error) {
 
 // wrapV1InternalRequest 包装请求为 v1internal 格式
 func (s *AntigravityGatewayService) wrapV1InternalRequest(projectID, model string, originalBody []byte) ([]byte, error) {
-	var request any
+	var request map[string]any
 	if err := json.Unmarshal(originalBody, &request); err != nil {
 		return nil, fmt.Errorf("解析请求体失败: %w", err)
+	}
+	if err := prepareArgonFunctionPolicy(model, request); err != nil {
+		return nil, err
 	}
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {

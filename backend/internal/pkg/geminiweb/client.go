@@ -545,9 +545,10 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 		return Result{UpdatedCookie: updatedCookie}, fmt.Errorf("gemini web session rejected: %s", resp.Status)
 	}
 	if resp.StatusCode >= 400 {
-		return Result{UpdatedCookie: updatedCookie}, fmt.Errorf("gemini web upstream: %s", resp.Status)
+		return Result{UpdatedCookie: updatedCookie}, &UpstreamHTTPError{StatusCode: resp.StatusCode}
 	}
 	result := Result{UpdatedCookie: updatedCookie}
+	var upstreamErr *UpstreamRPCError
 	var raw bytes.Buffer
 	parser := newFrameParser()
 	buffer := make([]byte, 32*1024)
@@ -557,6 +558,12 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 			chunk := buffer[:n]
 			_, _ = raw.Write(chunk)
 			for _, frame := range parser.feed(string(chunk)) {
+				if frame.err != nil && upstreamErr == nil {
+					upstreamErr = frame.err
+				}
+				if upstreamErr != nil {
+					continue
+				}
 				result = applyFrame(result, frame)
 				clock.observe(result)
 				if req.OnResult != nil {
@@ -575,6 +582,12 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 		}
 	}
 	for _, frame := range parser.flush() {
+		if frame.err != nil && upstreamErr == nil {
+			upstreamErr = frame.err
+		}
+		if upstreamErr != nil {
+			continue
+		}
 		result = applyFrame(result, frame)
 		clock.observe(result)
 		if req.OnResult != nil {
@@ -584,16 +597,8 @@ func (c *Client) complete(ctx context.Context, cred Credential, req Request, do 
 		}
 	}
 	result.Raw = raw.Bytes()
-	for _, code := range []string{"1016", "1037", "1050", "1052", "1060", "1013"} {
-		if strings.Contains(raw.String(), "BardErrorInfo") && strings.Contains(raw.String(), code) {
-			if code == "1016" {
-				return result, ErrInvalidCredential
-			}
-			if code == "1037" || code == "1013" {
-				return result, ErrRateLimited
-			}
-			return result, fmt.Errorf("gemini web BardErrorInfo %s", code)
-		}
+	if upstreamErr != nil {
+		return result, upstreamErr
 	}
 	if strings.TrimSpace(result.Text) == "" && strings.TrimSpace(result.Thinking) == "" {
 		return result, ErrEmptyResponse
@@ -718,7 +723,7 @@ func (c *Client) getSession(ctx context.Context, cred Credential, base string, d
 		return session{}, updated, ErrRateLimited
 	}
 	if resp.StatusCode >= 400 {
-		return session{}, updated, fmt.Errorf("gemini web session upstream: %s", resp.Status)
+		return session{}, updated, &UpstreamHTTPError{StatusCode: resp.StatusCode, Operation: "session"}
 	}
 	now := time.Now()
 	s := session{At: findValue(string(b), `"SNlM0e"\s*:\s*"([^"]+)"`), Build: findValue(string(b), `"cfb2h"\s*:\s*"([^"]+)"`), Fsid: findValue(string(b), `"FdrFJe"\s*:\s*"([^"]+)"`), Language: findValue(string(b), `"TuX5cc"\s*:\s*"([^"]+)"`), Cookie: updated, CookieRefreshed: now, Fetched: now}
@@ -903,7 +908,10 @@ func mergeSetCookie(current string, values []string) string {
 // frame and payload parsing intentionally accepts both Google's length-prefixed
 // stream and a plain JSON array.  The length has changed units over time, while
 // the balanced JSON array remains stable.
-type frame struct{ payload string }
+type frame struct {
+	payload string
+	err     *UpstreamRPCError
+}
 type frameParser struct{ buf string }
 
 func newFrameParser() *frameParser               { return &frameParser{} }
@@ -945,6 +953,15 @@ func (p *frameParser) take(flush bool) []frame {
 			_ = json.Unmarshal(parts[0], &kind)
 			if kind != "wrb.fr" {
 				continue
+			}
+			// The RPC status belongs to the envelope, not the generated
+			// payload. Searching raw text would also match quoted examples
+			// of errors in otherwise successful answers.
+			if len(parts) > 5 {
+				if err := parseRPCError(parts[5]); err != nil {
+					out = append(out, frame{err: err})
+					continue
+				}
 			}
 			var payload string
 			_ = json.Unmarshal(parts[2], &payload)

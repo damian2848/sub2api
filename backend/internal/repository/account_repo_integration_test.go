@@ -1553,6 +1553,11 @@ func (s *AccountRepoSuite) TestUpdateExtra_SchedulerNeutralSkipsOutboxAndSyncsFr
 	}
 	s.repo.schedulerCache = cacheRecorder
 
+	// Other committed fixtures or migrations may already have outbox events.
+	// A neutral extra update must leave that count unchanged.
+	var outboxCountBefore int
+	s.Require().NoError(scanSingleRow(s.ctx, s.repo.sql, "SELECT COUNT(*) FROM scheduler_outbox", nil, &outboxCountBefore))
+
 	updates := map[string]any{
 		"codex_usage_updated_at":     "2026-03-11T10:00:00Z",
 		"codex_5h_used_percent":      88.5,
@@ -1568,7 +1573,7 @@ func (s *AccountRepoSuite) TestUpdateExtra_SchedulerNeutralSkipsOutboxAndSyncsFr
 
 	var outboxCount int
 	s.Require().NoError(scanSingleRow(s.ctx, s.repo.sql, "SELECT COUNT(*) FROM scheduler_outbox", nil, &outboxCount))
-	s.Require().Zero(outboxCount)
+	s.Require().Equal(outboxCountBefore, outboxCount)
 	s.Require().Len(cacheRecorder.setAccounts, 1)
 	s.Require().NotNil(cacheRecorder.accounts[account.ID])
 	s.Require().Equal(service.StatusActive, cacheRecorder.accounts[account.ID].Status)

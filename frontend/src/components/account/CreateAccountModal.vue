@@ -56,6 +56,7 @@
           data-tour="account-form-name"
         />
       </div>
+      <AccountFamilyGroupInput v-model="familyGroup" />
       <div>
         <label class="input-label">{{ t('admin.accounts.notes') }}</label>
         <textarea
@@ -1513,12 +1514,38 @@
       </div>
 
       <!-- Antigravity model restriction (applies to OAuth + Upstream) -->
-      <!-- Antigravity 只支持模型映射模式，不支持白名单模式 -->
-      <div v-if="form.platform === 'antigravity'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="form.platform === 'antigravity'" data-testid="antigravity-model-settings" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
+        <p class="input-hint mb-3">{{ t('admin.accounts.modelRestrictionCombinedHint') }}</p>
+        <div class="mb-4 flex rounded-lg bg-gray-100 p-1 dark:bg-dark-700">
+          <button
+            type="button"
+            data-testid="antigravity-whitelist-tab"
+            @click="antigravityModelRestrictionMode = 'whitelist'"
+            :class="['flex-1 rounded-md px-4 py-2 text-sm font-medium transition-colors', antigravityModelRestrictionMode === 'whitelist' ? 'bg-white text-primary-600 shadow-sm dark:bg-dark-600' : 'text-gray-600 dark:text-gray-400']"
+          >
+            {{ t('admin.accounts.modelWhitelist') }}
+          </button>
+          <button
+            type="button"
+            data-testid="antigravity-mapping-tab"
+            @click="antigravityModelRestrictionMode = 'mapping'"
+            :class="['flex-1 rounded-md px-4 py-2 text-sm font-medium transition-colors', antigravityModelRestrictionMode === 'mapping' ? 'bg-white text-primary-600 shadow-sm dark:bg-dark-600' : 'text-gray-600 dark:text-gray-400']"
+          >
+            {{ t('admin.accounts.modelMapping') }}
+          </button>
+        </div>
 
-        <!-- Mapping Mode Only (no toggle for Antigravity) -->
-        <div>
+        <div v-if="antigravityModelRestrictionMode === 'whitelist'">
+          <ModelWhitelistSelector
+            v-model="antigravityWhitelistModels"
+            :model-mappings="antigravityModelMappings"
+            platform="antigravity"
+            :sync-credentials="antigravitySyncPreviewCredentials"
+            @upstream-synced="upstreamModelsPreviewed = true"
+          />
+        </div>
+        <div v-else>
           <div class="mb-3 rounded-lg bg-purple-50 p-3 dark:bg-purple-900/20">
             <p class="text-xs text-purple-700 dark:text-purple-400">
               {{ t('admin.accounts.mapRequestModels') }}
@@ -1555,6 +1582,7 @@
                 />
                 <button
                   type="button"
+                  data-testid="antigravity-remove-mapping"
                   @click="removeAntigravityModelMapping(index)"
                   class="rounded-lg p-2 text-red-500 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20"
                 >
@@ -1580,6 +1608,7 @@
 
           <button
             type="button"
+            data-testid="antigravity-add-mapping"
             @click="addAntigravityModelMapping"
             class="mb-3 w-full rounded-lg border-2 border-dashed border-gray-300 px-4 py-2 text-gray-600 transition-colors hover:border-gray-400 hover:text-gray-700 dark:border-dark-500 dark:text-gray-400 dark:hover:border-dark-400 dark:hover:text-gray-300"
           >
@@ -1601,6 +1630,9 @@
             </button>
           </div>
         </div>
+        <p v-if="antigravityWhitelistModels.length === 0 && antigravityModelMappings.length === 0" class="input-hint mt-3">
+          {{ t('admin.accounts.antigravityDefaultModelsHint') }}
+        </p>
       </div>
 
       <!-- Add Method (only for Anthropic OAuth-based type) -->
@@ -2480,9 +2512,9 @@
         />
       </div>
 
-      <!-- 配额控制 (非 Anthropic apikey/bedrock) -->
+      <!-- 配额控制 (非 Anthropic apikey/bedrock，以及 Vertex service_account) -->
       <div
-        v-else-if="form.type === 'apikey' || form.type === 'bedrock'"
+        v-else-if="supportsAccountQuota(form.type)"
         class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
       >
         <div class="mb-3">
@@ -4261,6 +4293,7 @@
 </template>
 
 <script setup lang="ts">
+import AccountFamilyGroupInput from './AccountFamilyGroupInput.vue'
 import OpenAIRequestTimezoneField from '@/components/account/OpenAIRequestTimezoneField.vue'
 import { DEFAULT_ACCOUNT_COST_MULTIPLIER, isValidAccountCostMultiplier } from '@/utils/accountCost'
 
@@ -4280,6 +4313,7 @@ import {
   getModelsByPlatform,
   commonErrorCodes,
   buildModelMappingObject,
+  splitModelMappingObject,
   fetchAntigravityDefaultMappings,
   isValidWildcardPattern
 } from '@/composables/useModelWhitelist'
@@ -4367,6 +4401,7 @@ import {
   parseDateTimeLocalInput
 } from '@/utils/format'
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
+import { supportsAccountQuota } from '@/utils/accountQuota'
 import { getAccountExpiryTimestamp } from '@/components/account/accountExpiry'
 import { DEFAULT_EXCEL_BPS_MODELS, VERTEX_LOCATION_OPTIONS } from '@/constants/account'
 import {
@@ -4411,6 +4446,7 @@ const oauthStepTitle = computed(() => {
 
 // Platform-specific hints for API Key type
 // 上游ID：直接上游声明请求标识的响应头名，留空不记录。
+const familyGroup = ref('')
 const costMultiplier = ref(DEFAULT_ACCOUNT_COST_MULTIPLIER)
 const upstreamRequestIdHeader = ref('')
 const withAccountExtraSettings = (extra?: Record<string, unknown>): Record<string, unknown> => {
@@ -4418,7 +4454,7 @@ const withAccountExtraSettings = (extra?: Record<string, unknown>): Record<strin
     throw new Error(t('admin.accounts.costMultiplierInvalid'))
   }
   const name = upstreamRequestIdHeader.value.trim()
-  return { ...(extra || {}), cost_multiplier: costMultiplier.value, ...(name ? { upstream_request_id_header: name } : {}) }
+  return { ...(extra || {}), ...(familyGroup.value.trim() ? { family_group: familyGroup.value.trim() } : {}), cost_multiplier: costMultiplier.value, ...(name ? { upstream_request_id_header: name } : {}) }
 }
 
 const baseUrlHint = computed(() => {
@@ -4943,6 +4979,53 @@ const antigravityModelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist'
 const antigravityWhitelistModels = ref<string[]>([])
 const antigravityModelMappings = ref<ModelMapping[]>([])
 const antigravityPresetMappings = computed(() => getPresetMappingsByPlatform('antigravity'))
+let antigravityDefaultsGeneration = 0
+let antigravityModelSettingsRevision = 0
+watch(
+  [antigravityWhitelistModels, antigravityModelMappings],
+  () => { antigravityModelSettingsRevision++ },
+  { deep: true, flush: 'sync' }
+)
+
+function resetAntigravityModelSettings(loadDefaults: boolean) {
+  const generation = ++antigravityDefaultsGeneration
+  antigravityModelRestrictionMode.value = 'whitelist'
+  antigravityWhitelistModels.value = []
+  antigravityModelMappings.value = []
+  if (!loadDefaults) return
+  const revision = antigravityModelSettingsRevision
+  void fetchAntigravityDefaultMappings().then(mappings => {
+    if (
+      generation !== antigravityDefaultsGeneration ||
+      revision !== antigravityModelSettingsRevision ||
+      !props.show ||
+      form.platform !== 'antigravity'
+    ) return
+    const defaults = splitModelMappingObject(Object.fromEntries(mappings.map(({ from, to }) => [from, to])))
+    antigravityWhitelistModels.value = defaults.allowedModels
+    antigravityModelMappings.value = defaults.modelMappings
+  })
+}
+
+function applyAntigravityModelSettings(credentials: Record<string, unknown>) {
+  const mapping = buildModelMappingObject('combined', antigravityWhitelistModels.value, antigravityModelMappings.value)
+  if (mapping) credentials.model_mapping = mapping
+  else delete credentials.model_mapping
+}
+
+const antigravitySyncPreviewCredentials = computed(() => {
+  if (antigravityAccountType.value !== 'upstream' || !upstreamApiKey.value.trim()) return undefined
+  const credentials: Record<string, unknown> = {}
+  applyAntigravityModelSettings(credentials)
+  return {
+    platform: 'antigravity' as const,
+    type: 'apikey' as const,
+    base_url: upstreamBaseUrl.value.trim() || undefined,
+    api_key: upstreamApiKey.value.trim(),
+    proxy_id: authStore.isObserver ? undefined : form.proxy_id ?? undefined,
+    ...credentials
+  }
+})
 const bedrockPresets = computed(() => getPresetMappingsByPlatform('bedrock'))
 
 // Bedrock credentials
@@ -5280,18 +5363,7 @@ watch(
         .catch(() => { tlsFingerprintProfiles.value = [] })
       // Modal opened - fill related models
       allowedModels.value = [...getModelsByPlatform(form.platform)]
-      // Antigravity: 默认使用映射模式并填充默认映射
-      if (form.platform === 'antigravity') {
-        antigravityModelRestrictionMode.value = 'mapping'
-        fetchAntigravityDefaultMappings().then(mappings => {
-          antigravityModelMappings.value = [...mappings]
-        })
-        antigravityWhitelistModels.value = []
-      } else {
-        antigravityWhitelistModels.value = []
-        antigravityModelMappings.value = []
-        antigravityModelRestrictionMode.value = 'mapping'
-      }
+      resetAntigravityModelSettings(form.platform === 'antigravity')
     } else {
       resetForm()
     }
@@ -5356,21 +5428,13 @@ watch(
       modelRestrictionMode.value = 'whitelist'
       allowedModels.value = ['jev-latest']
     }
-    // Antigravity: 默认使用映射模式并填充默认映射
+    resetAntigravityModelSettings(newPlatform === 'antigravity')
     if (newPlatform === 'antigravity') {
-      antigravityModelRestrictionMode.value = 'mapping'
-      fetchAntigravityDefaultMappings().then(mappings => {
-        antigravityModelMappings.value = [...mappings]
-      })
-      antigravityWhitelistModels.value = []
       accountCategory.value = 'oauth-based'
       antigravityAccountType.value = 'oauth'
     } else {
       allowOverages.value = false
       antigravityProjectId.value = ''
-      antigravityWhitelistModels.value = []
-      antigravityModelMappings.value = []
-      antigravityModelRestrictionMode.value = 'mapping'
     }
     if (newPlatform === 'grok') {
       accountCategory.value = 'oauth-based'
@@ -5501,15 +5565,6 @@ watch(
   }
 )
 
-watch(
-  [antigravityModelRestrictionMode, () => form.platform],
-  ([, platform]) => {
-    if (platform !== 'antigravity') return
-    // Antigravity 默认不做限制：白名单留空表示允许所有（包含未来新增模型）。
-    // 如果需要快速填充常用模型，可在组件内点“填充相关模型”。
-  }
-)
-
 // Model mapping helpers
 const addModelMapping = () => {
   modelMappings.value.push({ from: '', to: '' })
@@ -5544,11 +5599,17 @@ const removeAntigravityModelMapping = (index: number) => {
 }
 
 const addAntigravityPresetMapping = (from: string, to: string) => {
-  if (antigravityModelMappings.value.some((m) => m.from === from)) {
+  const exists = antigravityWhitelistModels.value.includes(from) ||
+    antigravityModelMappings.value.some((m) => m.from === from)
+  if (exists) {
     appStore.showInfo(t('admin.accounts.mappingExists', { model: from }))
     return
   }
-  antigravityModelMappings.value.push({ from, to })
+  if (from === to) {
+    antigravityWhitelistModels.value.push(from)
+  } else {
+    antigravityModelMappings.value.push({ from, to })
+  }
 }
 
 // Error code toggle helper
@@ -5830,6 +5891,7 @@ const resetForm = () => {
   form.name = ''
   openAIRequestTimezone.value = 'Asia/Singapore'
   form.notes = ''
+  familyGroup.value = ''
   form.platform = 'anthropic'
   form.type = 'oauth'
   form.credentials = {}
@@ -5869,11 +5931,7 @@ const resetForm = () => {
   modelRestrictionMode.value = 'whitelist'
   allowedModels.value = [...claudeModels] // Default fill related models
 
-  antigravityModelRestrictionMode.value = 'mapping'
-  antigravityWhitelistModels.value = []
-  fetchAntigravityDefaultMappings().then(mappings => {
-    antigravityModelMappings.value = [...mappings]
-  })
+  resetAntigravityModelSettings(false)
   poolModeEnabled.value = false
   poolModeRetryCount.value = DEFAULT_POOL_MODE_RETRY_COUNT
   poolModeRetryStatusCodesInput.value = ''
@@ -6317,16 +6375,6 @@ const handleSubmit = async () => {
       api_key: upstreamApiKey.value.trim()
     }
 
-    // Antigravity 只使用映射模式
-    const antigravityModelMapping = buildModelMappingObject(
-      'mapping',
-      [],
-      antigravityModelMappings.value
-    )
-    if (antigravityModelMapping) {
-      credentials.model_mapping = antigravityModelMapping
-    }
-
     applyInterceptWarmup(credentials, interceptWarmupRequests.value, 'create')
 
     const extra = buildAntigravityExtra()
@@ -6559,12 +6607,13 @@ const createAccountAndFinish = async (
   credentials: Record<string, unknown>,
   extra?: Record<string, unknown>
 ) => {
+  if (platform === 'antigravity') applyAntigravityModelSettings(credentials)
   if (!applyTempUnschedConfig(credentials)) {
     return
   }
-  // Inject quota limits for apikey/bedrock accounts
+  // Inject quota limits for apikey/bedrock/service_account accounts
   let finalExtra = withAccountExtraSettings(extra)
-  if (type === 'apikey' || type === 'bedrock') {
+  if (supportsAccountQuota(type)) {
     const quotaExtra: Record<string, unknown> = { ...(finalExtra || {}) }
     if (editQuotaLimit.value != null && editQuotaLimit.value > 0) {
       quotaExtra.quota_limit = editQuotaLimit.value
@@ -6754,6 +6803,7 @@ const handleGrokImportSSO = async (ssoInput: string) => {
   try {
     const result = await adminAPI.grok.createFromSSO({
       sso_tokens: ssoTokens,
+      extra: withAccountExtraSettings(),
       name: form.name || undefined,
       notes: form.notes || undefined,
       proxy_id: form.proxy_id,
@@ -7410,6 +7460,7 @@ const handleAntigravityValidateRT = async (refreshTokenInput: string) => {
 
         const credentials = antigravityOAuth.buildCredentials(tokenInfo, refreshTokens[i])
         applyAntigravityProjectID(credentials, antigravityProjectId.value, 'create')
+        applyAntigravityModelSettings(credentials)
         
         // Generate account name with index for batch
         const accountName = refreshTokens.length > 1 ? `${form.name} #${i + 1}` : form.name
@@ -7528,15 +7579,6 @@ const handleAntigravityExchange = async (authCode: string) => {
 		const credentials = antigravityOAuth.buildCredentials(tokenInfo)
 		applyAntigravityProjectID(credentials, antigravityProjectId.value, 'create')
 		applyInterceptWarmup(credentials, interceptWarmupRequests.value, 'create')
-		// Antigravity 只使用映射模式
-		const antigravityModelMapping = buildModelMappingObject(
-			'mapping',
-			[],
-			antigravityModelMappings.value
-		)
-		if (antigravityModelMapping) {
-			credentials.model_mapping = antigravityModelMapping
-		}
 		const extra = buildAntigravityExtra()
 		await createAccountAndFinish('antigravity', 'oauth', credentials, extra)
   } catch (error: any) {

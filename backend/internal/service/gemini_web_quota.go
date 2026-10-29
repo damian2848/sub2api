@@ -17,6 +17,44 @@ import (
 // the cookie and records the final usage normally.
 const geminiWebQuotaPrecheckTimeout = 3 * time.Second
 
+// precheckGeminiWebGenerationQuota validates only the selected account, using
+// the client's quota cache and a bounded refresh on a cache miss. An unavailable
+// usage endpoint fails open, but a known exhausted window is persisted before
+// the caller selects another account.
+func (s *GeminiMessagesCompatService) precheckGeminiWebGenerationQuota(ctx context.Context, account *Account) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s == nil || account == nil || !account.IsGeminiWeb() {
+		return nil
+	}
+	if strings.TrimSpace(account.GetCredential("gemini_web_cookie")) == "" {
+		return geminiweb.ErrInvalidCredential
+	}
+	if s.httpUpstream == nil {
+		return nil
+	}
+	quota, err := s.readGeminiWebQuota(ctx, account, geminiWebQuotaPrecheckTimeout, false)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, geminiweb.ErrInvalidCredential) || errors.Is(err, geminiweb.ErrRateLimited) {
+			return err
+		}
+		return nil
+	}
+	now := time.Now()
+	applyGeminiWebQuotaRateLimit(ctx, s.accountRepo, account, quota, now)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if !geminiWebQuotaAvailable(quota, now) {
+		return geminiweb.ErrRateLimited
+	}
+	return nil
+}
+
 // passesGeminiWebQuotaPreCheck reads Gemini Web's account-wide usage windows
 // before candidate selection. Transport/decoding failures fail open, while an
 // invalid cookie or an explicit upstream rate limit removes the account.
@@ -144,16 +182,20 @@ func geminiWebWindowExhausted(w geminiweb.QuotaWindow) bool {
 
 // geminiWebQuotaRateLimitUntil returns when the account may be scheduled again
 // after a usage window reached 100%: the latest future refresh time among the
-// exhausted windows. A window without a usable refresh time sets no deadline;
-// the scheduler precheck still skips it while it reads as exhausted.
+// exhausted windows. Without a refresh time, a short deadline prevents every
+// request from rediscovering the same exhausted account; expiry allows a recheck.
 func geminiWebQuotaRateLimitUntil(quota geminiweb.Quota, now time.Time) (time.Time, bool) {
 	var until time.Time
 	for _, w := range quota.Windows {
-		if !geminiWebWindowExhausted(w) || !w.HasReset || !w.ResetAt.After(now) {
+		if !geminiWebWindowExhausted(w) {
 			continue
 		}
-		if w.ResetAt.After(until) {
-			until = w.ResetAt
+		resetAt := w.ResetAt
+		if !w.HasReset {
+			resetAt = now.Add(time.Minute)
+		}
+		if resetAt.After(now) && resetAt.After(until) {
+			until = resetAt
 		}
 	}
 	return until, !until.IsZero()
@@ -176,11 +218,27 @@ func applyGeminiWebQuotaRateLimit(ctx context.Context, repo AccountRepository, a
 	// leave the account schedulable on an exhausted window.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
+	observeGeminiWebHistoryQuota(ctx, repo, account, quota, now)
 	until, exhausted := geminiWebQuotaRateLimitUntil(quota, now)
 	if !exhausted {
 		if geminiWebQuotaAvailable(quota, now) && geminiWebQuotaRateLimitActive(account, now) {
-			if err := repo.ClearRateLimit(ctx, account.ID); err != nil {
+			if !quota.ObservedAt.IsZero() && quota.ObservedAt.Before(*account.RateLimitedAt) {
+				// A positive cache entry from before the current ban is not
+				// evidence that the account has recovered.
+				return
+			}
+			recoveryRepo, ok := repo.(grokRateLimitRecoveryRepository)
+			if !ok {
+				// A delayed usage read must not clear a newer limit without
+				// checking the generation it observed before the read.
+				return
+			}
+			cleared, err := recoveryRepo.ClearRateLimitIfObserved(ctx, account.ID, *account.RateLimitedAt, *account.RateLimitResetAt)
+			if err != nil {
 				slog.Warn("gemini_web_quota_rate_limit_clear_failed", "account_id", account.ID, "error", err)
+				return
+			}
+			if !cleared {
 				return
 			}
 			account.RateLimitedAt = nil
@@ -205,6 +263,34 @@ func applyGeminiWebQuotaRateLimit(ctx context.Context, repo AccountRepository, a
 	account.RateLimitedAt = &now
 	account.RateLimitResetAt = &until
 	slog.Info("gemini_web_quota_rate_limited", "account_id", account.ID, "reset_at", until, "reset_in", until.Sub(now).Truncate(time.Second))
+}
+
+// applyGeminiWebShortRateLimit records a transient 429 without replacing a
+// longer quota window. The repository's monotonic write also protects against
+// another request setting a longer limit after this account snapshot was read.
+func applyGeminiWebShortRateLimit(ctx context.Context, repo AccountRepository, account *Account) {
+	if repo == nil || account == nil || account.ID <= 0 {
+		return
+	}
+	now := time.Now()
+	until := now.Add(time.Minute)
+	if account.RateLimitResetAt != nil && !account.RateLimitResetAt.Before(until) {
+		return
+	}
+	stateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	var err error
+	if extendingRepo, ok := repo.(grokRateLimitExtendingRepository); ok {
+		err = extendingRepo.SetRateLimitedIfLater(stateCtx, account.ID, until)
+	} else {
+		err = repo.SetRateLimited(stateCtx, account.ID, until)
+	}
+	if err != nil {
+		slog.Warn("gemini_web_short_rate_limit_set_failed", "account_id", account.ID, "error", err)
+		return
+	}
+	account.RateLimitedAt = &now
+	account.RateLimitResetAt = &until
 }
 
 func geminiWebQuotaRateLimitActive(account *Account, now time.Time) bool {
@@ -237,11 +323,7 @@ func (s *GeminiMessagesCompatService) handleGeminiWebQuotaError(ctx context.Cont
 		}
 		return
 	}
-	if errors.Is(err, geminiweb.ErrRateLimited) && s.accountRepo != nil && account.ID > 0 {
-		now := time.Now()
-		resetAt := now.Add(time.Minute)
-		_ = s.accountRepo.SetRateLimited(ctx, account.ID, resetAt)
-		account.RateLimitedAt = &now
-		account.RateLimitResetAt = &resetAt
+	if errors.Is(err, geminiweb.ErrRateLimited) {
+		applyGeminiWebShortRateLimit(ctx, s.accountRepo, account)
 	}
 }

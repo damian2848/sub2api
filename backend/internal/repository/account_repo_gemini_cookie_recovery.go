@@ -93,7 +93,8 @@ func (r *accountRepository) UpdateGeminiWebCredentials(ctx context.Context, id i
 func (r *accountRepository) SetGeminiWebTempUnschedulable(ctx context.Context, id int64, generation string, until time.Time, reason string) (bool, error) {
 	result, err := r.sql.ExecContext(ctx, `WITH updated AS (UPDATE accounts SET temp_unschedulable_until=$3, temp_unschedulable_reason=$4, updated_at=NOW()
  WHERE id=$1 AND deleted_at IS NULL AND platform='gemini' AND type='gemini_web'
- AND coalesce(credentials->>'gemini_web_cookie_generation','')=$2 RETURNING id)
+ AND coalesce(credentials->>'gemini_web_cookie_generation','')=$2
+ AND (temp_unschedulable_until IS NULL OR temp_unschedulable_until < $3) RETURNING id)
  INSERT INTO scheduler_outbox (event_type, account_id, group_id, payload) SELECT $5,id,NULL,NULL FROM updated`, id, generation, until, reason, service.SchedulerOutboxEventAccountChanged)
 	if err != nil {
 		return false, err

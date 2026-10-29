@@ -58,6 +58,7 @@ export async function list(
     status?: string
     group?: string
     search?: string
+    family_group?: string
     privacy_mode?: string
     lite?: string
     include_scheduler_score?: string
@@ -76,6 +77,16 @@ export async function list(
     },
     signal: options?.signal
   })
+  return data
+}
+
+export interface AccountFamilyGroup {
+  name: string
+  account_count: number
+}
+
+export async function listFamilyGroups(): Promise<AccountFamilyGroup[]> {
+  const { data } = await apiClient.get<AccountFamilyGroup[]>('/admin/accounts/family-groups')
   return data
 }
 
@@ -100,6 +111,7 @@ export async function getUpstreamBillingRatesWithEtag(
     status?: string
     group?: string
     search?: string
+    family_group?: string
     privacy_mode?: string
     sort_by?: string
     sort_order?: 'asc' | 'desc'
@@ -133,6 +145,7 @@ export async function listWithEtag(
     status?: string
     group?: string
     search?: string
+    family_group?: string
     privacy_mode?: string
     lite?: string
     include_scheduler_score?: string
@@ -682,9 +695,13 @@ export async function batchUpdateCredentials(request: {
  * @param updates - Fields to update
  * @returns Success confirmation
  */
+export interface BulkAccountUpdates extends Record<string, unknown> {
+  model_mapping_update_mode?: 'merge' | 'replace'
+}
+
 export async function bulkUpdate(
-  accountIdsOrPayload: number[] | Record<string, unknown>,
-  updates?: Record<string, unknown>
+  accountIdsOrPayload: number[] | BulkAccountUpdates,
+  updates?: BulkAccountUpdates
 ): Promise<{
   success: number
   failed: number
@@ -890,6 +907,7 @@ export async function exportData(options?: {
     type?: string
     status?: string
     group?: string
+    family_group?: string
     privacy_mode?: string
     search?: string
     sort_by?: string
@@ -901,11 +919,12 @@ export async function exportData(options?: {
   if (options?.ids && options.ids.length > 0) {
     params.ids = options.ids.join(',')
   } else if (options?.filters) {
-    const { platform, type, status, group, privacy_mode, search, sort_by, sort_order } = options.filters
+    const { platform, type, status, group, family_group, privacy_mode, search, sort_by, sort_order } = options.filters
     if (platform) params.platform = platform
     if (type) params.type = type
     if (status) params.status = status
     if (group) params.group = group
+    if (family_group) params.family_group = family_group
     if (privacy_mode) params.privacy_mode = privacy_mode
     if (search) params.search = search
     if (sort_by) params.sort_by = sort_by
@@ -1621,6 +1640,7 @@ export async function getOpenAIRequestTimezones(): Promise<{ default: string; ti
 }
 
 export const accountsAPI = {
+  listFamilyGroups,
   getOpenAIRequestTimezones,
   list,
   listWithEtag,

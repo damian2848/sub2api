@@ -172,6 +172,7 @@ func (s *AntigravityGatewayService) forwardAntigravityCompat(
 ) (forwardResult *ForwardResult, forwardErr error) {
 	defer decorateAntigravityRetryDeadline(c, &forwardErr)
 	beginUpstreamResponseModelObservation(c)
+	ctx = WithAntigravityThinkingFromRequest(ctx, request.claudeBody, "messages")
 	call, err := s.prepareAntigravityCompatCall(ctx, c, account, request)
 	if err != nil {
 		return nil, err
@@ -226,6 +227,9 @@ func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
 	thinkingEnabled := claudeRequest.Thinking != nil &&
 		(claudeRequest.Thinking.Type == "enabled" || claudeRequest.Thinking.Type == "adaptive")
 	mappedModel = applyThinkingModelSuffix(mappedModel, thinkingEnabled)
+	if geminiImageGenerationDenied(c, nil, request.originalModel, mappedModel) {
+		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", ImageGenerationPermissionMessage())
+	}
 
 	if s.tokenProvider == nil {
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadGateway, "api_error", "Antigravity token provider not configured")

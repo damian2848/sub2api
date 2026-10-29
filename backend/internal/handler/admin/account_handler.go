@@ -193,12 +193,14 @@ type BulkUpdateAccountsRequest struct {
 	Schedulable             *bool                     `json:"schedulable"`
 	GroupIDs                *[]int64                  `json:"group_ids"`
 	Credentials             map[string]any            `json:"credentials"`
+	ModelMappingUpdateMode  string                    `json:"model_mapping_update_mode" binding:"omitempty,oneof=merge replace"`
 	Extra                   map[string]any            `json:"extra"`
 	ProbeEnabled            *bool                     `json:"upstream_billing_probe_enabled"`
 	ConfirmMixedChannelRisk *bool                     `json:"confirm_mixed_channel_risk"` // 用户确认混合渠道风险
 }
 
 type BulkUpdateAccountFilters struct {
+	FamilyGroup string `json:"family_group"`
 	Platform    string `json:"platform"`
 	Type        string `json:"type"`
 	Status      string `json:"status"`
@@ -692,6 +694,7 @@ func (h *AccountHandler) List(c *gin.Context) {
 	status := c.Query("status")
 	search := c.Query("search")
 	privacyMode := strings.TrimSpace(c.Query("privacy_mode"))
+	c.Request = c.Request.WithContext(service.WithAccountFamilyGroupFilter(c.Request.Context(), c.Query("family_group")))
 	sortBy := c.DefaultQuery("sort_by", "name")
 	sortOrder := c.DefaultQuery("sort_order", "asc")
 	// 标准化和验证 search 参数
@@ -2482,22 +2485,23 @@ func (h *AccountHandler) BulkUpdate(c *gin.Context) {
 	}
 
 	result, err := h.adminService.BulkUpdateAccounts(c.Request.Context(), &service.BulkUpdateAccountsInput{
-		AccountIDs:            req.AccountIDs,
-		Filters:               toServiceBulkUpdateAccountFilters(req.Filters),
-		Name:                  req.Name,
-		ProxyID:               req.ProxyID,
-		Concurrency:           req.Concurrency,
-		Priority:              req.Priority,
-		RateMultiplier:        req.RateMultiplier,
-		GroupRateMultiplier:   req.GroupRateMultiplier,
-		LoadFactor:            req.LoadFactor,
-		Status:                req.Status,
-		Schedulable:           req.Schedulable,
-		GroupIDs:              req.GroupIDs,
-		Credentials:           req.Credentials,
-		Extra:                 req.Extra,
-		ProbeEnabled:          req.ProbeEnabled,
-		SkipMixedChannelCheck: skipCheck,
+		AccountIDs:             req.AccountIDs,
+		Filters:                toServiceBulkUpdateAccountFilters(req.Filters),
+		Name:                   req.Name,
+		ProxyID:                req.ProxyID,
+		Concurrency:            req.Concurrency,
+		Priority:               req.Priority,
+		RateMultiplier:         req.RateMultiplier,
+		GroupRateMultiplier:    req.GroupRateMultiplier,
+		LoadFactor:             req.LoadFactor,
+		Status:                 req.Status,
+		Schedulable:            req.Schedulable,
+		GroupIDs:               req.GroupIDs,
+		Credentials:            req.Credentials,
+		ModelMappingUpdateMode: req.ModelMappingUpdateMode,
+		Extra:                  req.Extra,
+		ProbeEnabled:           req.ProbeEnabled,
+		SkipMixedChannelCheck:  skipCheck,
 	})
 	if err != nil {
 		var mixedErr *service.MixedChannelError
@@ -2532,6 +2536,7 @@ func toServiceBulkUpdateAccountFilters(filters *BulkUpdateAccountFilters) *servi
 		Group:       filters.Group,
 		Search:      filters.Search,
 		PrivacyMode: filters.PrivacyMode,
+		FamilyGroup: filters.FamilyGroup,
 	}
 }
 

@@ -1,10 +1,12 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 )
 
 // Gemini 原生请求（/v1beta/models/{model}:generateContent 等）经 Antigravity 账号转发时，
@@ -27,6 +29,79 @@ const (
 	geminiThinkingBudgetLowMax    = 1024
 	geminiThinkingBudgetMediumMax = 8192
 )
+
+type antigravityThinkingLevelContextKey struct{}
+
+// WithAntigravityThinkingFromRequest lets scheduling use the same Gemini variant
+// as forwarding. Only Antigravity model resolution reads this context value.
+// OpenAI protocols reuse their actual converters: e.g. reasoning "low" produces
+// no Claude thinking config, so the Antigravity variant remains the default high.
+func WithAntigravityThinkingFromRequest(ctx context.Context, body []byte, protocol string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	level := "high"
+	switch protocol {
+	case "gemini":
+		level = geminiThinkingLevelFromBody(body)
+	case "messages", "chat_completions", "responses":
+		// Read only fields that influence thinking. Avoid copying/converting large
+		// messages, tools, images or Responses input during account selection.
+		var probe struct {
+			Model           string                        `json:"model"`
+			Thinking        *antigravity.ThinkingConfig   `json:"thinking"`
+			ReasoningEffort string                        `json:"reasoning_effort"`
+			Reasoning       *apicompat.ResponsesReasoning `json:"reasoning"`
+		}
+		if json.Unmarshal(body, &probe) == nil {
+			if protocol == "messages" {
+				level = geminiThinkingLevelFromClaudeThinking(probe.Thinking)
+			} else {
+				request := &apicompat.ResponsesRequest{
+					Model: probe.Model, Reasoning: probe.Reasoning, Input: json.RawMessage(`[]`),
+				}
+				if protocol == "chat_completions" {
+					chat := &apicompat.ChatCompletionsRequest{
+						Model: probe.Model, ReasoningEffort: probe.ReasoningEffort,
+					}
+					if probe.Reasoning != nil {
+						chat.Reasoning = &apicompat.ChatReasoning{Effort: probe.Reasoning.Effort}
+					}
+					request, _ = chatCompletionsToResponses(nil, chat)
+				}
+				if request != nil {
+					converted, err := apicompat.ResponsesToAnthropicRequest(request)
+					if err == nil && converted.Thinking != nil {
+						level = geminiThinkingLevelFromClaudeThinking(&antigravity.ThinkingConfig{
+							Type: converted.Thinking.Type, BudgetTokens: converted.Thinking.BudgetTokens,
+						})
+					}
+				}
+			}
+		}
+	default:
+		return ctx
+	}
+	return context.WithValue(ctx, antigravityThinkingLevelContextKey{}, level)
+}
+
+func resolveAntigravityMappedModel(ctx context.Context, account *Account, requestedModel string) string {
+	// API-key/upstream accounts use passthrough forwarding, whose model mapping
+	// does not select OAuth Gemini thinking variants.
+	if account == nil || account.Type != AccountTypeOAuth {
+		return mapAntigravityModel(account, requestedModel)
+	}
+	level := "high"
+	if ctx != nil {
+		if configured, ok := ctx.Value(antigravityThinkingLevelContextKey{}).(string); ok {
+			level = configured
+		}
+	}
+	if model, ok := resolveGeminiThinkingVariantForLevel(account, requestedModel, level); ok {
+		return model
+	}
+	return mapAntigravityModel(account, requestedModel)
+}
 
 type geminiThinkingConfigProbe struct {
 	GenerationConfig struct {

@@ -524,6 +524,184 @@ describe('BulkEditAccountModal', () => {
     expect(wrapper.text()).not.toContain('GPT-5.3 Codex Spark')
   })
 
+  describe('Antigravity bulk model configuration', () => {
+    const antigravityProps = { selectedPlatforms: ['antigravity'], selectedTypes: ['oauth'] }
+    const submit = async (wrapper: ReturnType<typeof mountModal>) => {
+      await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+      await flushPromises()
+    }
+    const editWhitelist = async (wrapper: ReturnType<typeof mountModal>, models: string[]) => {
+      await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+      wrapper.get('#bulk-edit-model-restriction-body').getComponent(ModelWhitelistSelector)
+        .vm.$emit('update:modelValue', models)
+      await nextTick()
+    }
+    const addAlias = async (wrapper: ReturnType<typeof mountModal>, from: string, to: string) => {
+      const section = wrapper.get('#bulk-edit-model-restriction-body')
+      await section.findAll('button').find((button) => button.text() === 'admin.accounts.modelMapping')!
+        .trigger('click')
+      await section.findAll('button').find((button) => button.text() === 'admin.accounts.addMapping')!
+        .trigger('click')
+      await section.get('input[placeholder="admin.accounts.requestModel"]').setValue(from)
+      await section.get('input[placeholder="admin.accounts.actualModel"]').setValue(to)
+    }
+
+    it('defaults whitelist-only edits to merge and leaves existing aliases to the server', async () => {
+      const wrapper = mountModal(antigravityProps)
+      const mode = wrapper.get<HTMLSelectElement>('#bulk-edit-model-mapping-update-mode')
+      expect(mode.element.value).toBe('merge')
+      expect(mode.element.disabled).toBe(true)
+      await editWhitelist(wrapper, ['gemini-3.8-flash-high'])
+      expect(mode.element.disabled).toBe(false)
+      expect(wrapper.get('[data-testid="bulk-model-mapping-update-hint"]').text())
+        .toBe('admin.accounts.bulkModelMappingMergeHint')
+      await submit(wrapper)
+      expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+        model_mapping_update_mode: 'merge',
+        credentials: { model_mapping: { 'gemini-3.8-flash-high': 'gemini-3.8-flash-high' } }
+      })
+      wrapper.unmount()
+    })
+
+    it('merges alias-only edits without submitting an empty whitelist replacement', async () => {
+      const wrapper = mountModal(antigravityProps)
+      await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+      await addAlias(wrapper, 'custom-flash', 'gemini-3.8-flash-high')
+      await submit(wrapper)
+      expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+        model_mapping_update_mode: 'merge',
+        credentials: { model_mapping: { 'custom-flash': 'gemini-3.8-flash-high' } }
+      })
+      wrapper.unmount()
+    })
+
+    it.each(['whitelist', 'mapping'])('sends whitelist and aliases together from the %s tab', async (tab) => {
+      const wrapper = mountModal(antigravityProps)
+      await editWhitelist(wrapper, ['gemini-4-argon-low', 'custom-flash'])
+      await addAlias(wrapper, 'custom-flash', 'gemini-3.8-flash-high')
+      if (tab === 'whitelist') {
+        await wrapper.get('#bulk-edit-model-restriction-body').findAll('button')
+          .find((button) => button.text() === 'admin.accounts.modelWhitelist')!.trigger('click')
+      }
+      await submit(wrapper)
+      expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+        model_mapping_update_mode: 'merge',
+        credentials: { model_mapping: {
+          'gemini-4-argon-low': 'gemini-4-argon-low',
+          'custom-flash': 'gemini-3.8-flash-high'
+        } }
+      })
+      wrapper.unmount()
+    })
+
+    it('requires explicit replacement to reset both configurations to system defaults', async () => {
+      const wrapper = mountModal(antigravityProps)
+      await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+      expect(wrapper.get('#bulk-edit-model-restriction-body').text())
+        .not.toContain('admin.accounts.supportsAllModels')
+      expect(wrapper.get('#bulk-edit-model-restriction-body').text())
+        .not.toContain('admin.accounts.antigravityDefaultModelsHint')
+      await wrapper.get('#bulk-edit-model-mapping-update-mode').setValue('replace')
+      expect(wrapper.get('[data-testid="bulk-model-mapping-update-hint"]').text())
+        .toBe('admin.accounts.bulkModelMappingReplaceHint')
+      expect(wrapper.get('#bulk-edit-model-restriction-body').text())
+        .toContain('admin.accounts.antigravityDefaultModelsHint')
+      await submit(wrapper)
+      expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+        model_mapping_update_mode: 'replace',
+        credentials: { model_mapping: {} }
+      })
+      wrapper.unmount()
+    })
+
+    it('omits an empty merge and still submits other selected changes', async () => {
+      const wrapper = mountModal(antigravityProps)
+      await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+      await wrapper.get('#bulk-edit-status-enabled').setValue(true)
+      await submit(wrapper)
+      expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], { status: 'active' })
+      wrapper.unmount()
+    })
+
+    it('rejects an empty merge as no effective update when no other field is selected', async () => {
+      const wrapper = mountModal(antigravityProps)
+      await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+      await submit(wrapper)
+      expect(adminAPI.accounts.bulkUpdate).not.toHaveBeenCalled()
+      expect(showError).toHaveBeenCalledWith('admin.accounts.bulkEdit.noFieldsSelected')
+      wrapper.unmount()
+    })
+
+    it('keeps both configurations unchanged when the outer apply checkbox is cleared', async () => {
+      const wrapper = mountModal(antigravityProps)
+      await editWhitelist(wrapper, ['gemini-4-argon-low'])
+      await addAlias(wrapper, 'custom-flash', 'gemini-3.8-flash-high')
+      await wrapper.get('#bulk-edit-model-mapping-update-mode').setValue('replace')
+      await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(false)
+      await wrapper.get('#bulk-edit-status-enabled').setValue(true)
+      await submit(wrapper)
+      expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], { status: 'active' })
+      wrapper.unmount()
+    })
+
+    it('supports merge for all accounts matching an Antigravity filter', async () => {
+      const wrapper = mountModal({
+        accountIds: [],
+        selectedPlatforms: [],
+        selectedTypes: [],
+        target: {
+          mode: 'filtered',
+          filters: { platform: 'antigravity', status: 'active' },
+          previewCount: 8,
+          ...antigravityProps
+        }
+      })
+      await editWhitelist(wrapper, ['gemini-4-argon-low'])
+      await submit(wrapper)
+      expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith({
+        filters: { platform: 'antigravity', status: 'active' },
+        model_mapping_update_mode: 'merge',
+        credentials: { model_mapping: { 'gemini-4-argon-low': 'gemini-4-argon-low' } }
+      })
+      wrapper.unmount()
+    })
+
+    it.each([
+      { selectedPlatforms: ['anthropic'] },
+      { selectedPlatforms: ['antigravity', 'gemini'] },
+      { selectedPlatforms: [] }
+    ])(
+      'does not send a stale Antigravity update mode after targets change to %j',
+      async ({ selectedPlatforms }) => {
+        const wrapper = mountModal(antigravityProps)
+        await editWhitelist(wrapper, ['custom-model'])
+        await wrapper.get('#bulk-edit-model-mapping-update-mode').setValue('replace')
+        await wrapper.setProps({ selectedPlatforms })
+        expect(wrapper.find('#bulk-edit-model-mapping-update-mode').exists()).toBe(false)
+        await submit(wrapper)
+        expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+          credentials: { model_mapping: { 'custom-model': 'custom-model' } }
+        })
+        wrapper.unmount()
+      }
+    )
+
+    it('resets the update mode to merge when reopened', async () => {
+      const wrapper = mountModal(antigravityProps)
+      await editWhitelist(wrapper, ['gemini-4-argon-low'])
+      await wrapper.get('#bulk-edit-model-mapping-update-mode').setValue('replace')
+      await wrapper.setProps({ show: false })
+      await wrapper.setProps({ show: true })
+      expect(wrapper.get<HTMLSelectElement>('#bulk-edit-model-mapping-update-mode').element.value)
+        .toBe('merge')
+      expect(wrapper.get<HTMLInputElement>('#bulk-edit-model-restriction-enabled').element.checked)
+        .toBe(false)
+      expect(wrapper.get('#bulk-edit-model-restriction-body').getComponent(ModelWhitelistSelector).props('modelValue'))
+        .toEqual([])
+      wrapper.unmount()
+    })
+  })
+
   it('全部目标为 Gemini Web 账号时，映射预设和白名单使用 Gemini Web 模型', async () => {
     const wrapper = mountModal({ selectedPlatforms: ['gemini'], selectedTypes: ['gemini_web'] })
 
@@ -1596,6 +1774,20 @@ describe('bulk BPS defaults integration', () => {
       openai_excel_bps: true, openai_excel_bps_ignore_encrypted_content: true,
       openai_excel_bps_auto_disable_on_403: true, openai_excel_bps_cache_creation_as_input: true
     }) }))
+    wrapper.unmount()
+  })
+})
+
+
+describe('family group membership', () => {
+  it.each(['家庭 A', ''])('assigns or removes selected accounts using an explicit extra update: %s', async (name) => {
+    vi.mocked(adminAPI.accounts.bulkUpdate).mockResolvedValue({ success: 2, failed: 0 } as any)
+    const wrapper = mountModal()
+    await wrapper.get('[data-testid="enable-family-group"]').setValue(true)
+    await wrapper.get('[data-testid="family-group-input"]').setValue(name ? `  ${name}  ` : '')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenLastCalledWith([1, 2], { extra: { family_group: name } })
     wrapper.unmount()
   })
 })

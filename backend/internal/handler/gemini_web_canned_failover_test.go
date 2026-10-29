@@ -39,7 +39,7 @@ func geminiWebHandlerFrames(text string) string {
 
 func (u *cannedFirstGeminiWebUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
 	body := `"SNlM0e":"token" "cfb2h":"build" "FdrFJe":"sid"`
-	if req.Method == http.MethodPost {
+	if req.Method == http.MethodPost && strings.Contains(req.URL.Path, "StreamGenerate") {
 		u.mu.Lock()
 		if u.first == 0 {
 			u.first = accountID

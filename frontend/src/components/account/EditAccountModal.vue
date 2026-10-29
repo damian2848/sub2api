@@ -15,6 +15,7 @@
         <label class="input-label">{{ t('common.name') }}</label>
         <input v-model="form.name" type="text" required class="input" data-tour="edit-account-form-name" />
       </div>
+      <AccountFamilyGroupInput v-model="familyGroup" />
       <div>
         <label class="input-label">{{ t('admin.accounts.notes') }}</label>
         <textarea
@@ -1563,12 +1564,54 @@
       </div>
 
       <!-- Antigravity model restriction (applies to all antigravity types) -->
-      <!-- Antigravity 只支持模型映射模式，不支持白名单模式 -->
-      <div v-if="account.platform === 'antigravity'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <div v-if="account.platform === 'antigravity'" data-testid="antigravity-model-settings" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
+        <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+          {{ t('admin.accounts.modelRestrictionCombinedHint') }}
+        </p>
 
-        <!-- Mapping Mode Only (no toggle for Antigravity) -->
-        <div>
+        <div class="mb-4 flex gap-2">
+          <button
+            type="button"
+            data-testid="antigravity-whitelist-tab"
+            @click="antigravityModelRestrictionMode = 'whitelist'"
+            :class="[
+              'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all',
+              antigravityModelRestrictionMode === 'whitelist'
+                ? 'bg-primary-100 text-primary-700 dark:bg-primary-900/30 dark:text-primary-400'
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500'
+            ]"
+          >
+            {{ t('admin.accounts.modelWhitelist') }}
+          </button>
+          <button
+            type="button"
+            data-testid="antigravity-mapping-tab"
+            @click="antigravityModelRestrictionMode = 'mapping'"
+            :class="[
+              'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all',
+              antigravityModelRestrictionMode === 'mapping'
+                ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500'
+            ]"
+          >
+            {{ t('admin.accounts.modelMapping') }}
+          </button>
+        </div>
+
+        <div v-if="antigravityModelRestrictionMode === 'whitelist'">
+          <ModelWhitelistSelector
+            v-model="antigravityWhitelistModels"
+            :model-mappings="antigravityModelMappings"
+            platform="antigravity"
+            :account-id="account.id"
+          />
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.selectedModels', { count: antigravityWhitelistModels.length }) }}
+          </p>
+        </div>
+
+        <div v-else>
           <div class="mb-3 rounded-lg bg-purple-50 p-3 dark:bg-purple-900/20">
             <p class="text-xs text-purple-700 dark:text-purple-400">{{ t('admin.accounts.mapRequestModels') }}</p>
           </div>
@@ -1576,6 +1619,7 @@
           <div class="mb-3 flex flex-wrap gap-2">
             <button
               type="button"
+              data-testid="antigravity-sync-upstream-models"
               @click="syncAntigravityUpstreamModels"
               :disabled="isSyncingAntigravityUpstream || !account?.id"
               class="rounded-lg border border-emerald-200 px-3 py-1.5 text-sm text-emerald-600 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-emerald-800 dark:text-emerald-400 dark:hover:bg-emerald-900/30"
@@ -1615,6 +1659,7 @@
                 />
                 <button
                   type="button"
+                  data-testid="antigravity-remove-mapping"
                   @click="removeAntigravityModelMapping(index)"
                   class="rounded-lg p-2 text-red-500 transition-colors hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20"
                 >
@@ -1640,6 +1685,7 @@
 
           <button
             type="button"
+            data-testid="antigravity-add-mapping"
             @click="addAntigravityModelMapping"
             class="mb-3 w-full rounded-lg border-2 border-dashed border-gray-300 px-4 py-2 text-gray-600 transition-colors hover:border-gray-400 hover:text-gray-700 dark:border-dark-500 dark:text-gray-400 dark:hover:border-dark-400 dark:hover:text-gray-300"
           >
@@ -1661,6 +1707,9 @@
             </button>
           </div>
         </div>
+        <p v-if="antigravityWhitelistModels.length === 0 && antigravityModelMappings.length === 0" class="input-hint mt-3">
+          {{ t('admin.accounts.antigravityDefaultModelsHint') }}
+        </p>
       </div>
 
       <!-- Temp Unschedulable Rules -->
@@ -2710,9 +2759,9 @@
           @update:quotaNotifyTotalThresholdType="quotaNotifyState.total.thresholdType = $event"
         />
       </div>
-      <!-- 配额控制 (非 Anthropic apikey/bedrock) -->
+      <!-- 配额控制 (非 Anthropic apikey/bedrock，以及 Vertex service_account) -->
       <div
-        v-else-if="account?.type === 'apikey' || account?.type === 'bedrock'"
+        v-else-if="supportsAccountQuota(account?.type)"
         class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
       >
         <div class="mb-3">
@@ -3571,6 +3620,7 @@
 </template>
 
 <script setup lang="ts">
+import AccountFamilyGroupInput from './AccountFamilyGroupInput.vue'
 import OpenAIRequestTimezoneField from '@/components/account/OpenAIRequestTimezoneField.vue'
 import ExcelBPSCredentialStatus from './ExcelBPSCredentialStatus.vue'
 import { DEFAULT_ACCOUNT_COST_MULTIPLIER, isValidAccountCostMultiplier, readAccountCostMultiplier } from '@/utils/accountCost'
@@ -3680,6 +3730,7 @@ import {
 } from '@/utils/format'
 import { extractApiErrorMessage, extractI18nErrorMessage } from '@/utils/apiError'
 import { createStableObjectKeyResolver } from '@/utils/stableObjectKey'
+import { supportsAccountQuota } from '@/utils/accountQuota'
 import { getAccountExpiryTimestamp } from '@/components/account/accountExpiry'
 import { allSelectedGroupsEnableLongContextPricing } from '@/components/account/longContextBilling'
 import { DEFAULT_EXCEL_BPS_MODELS, VERTEX_LOCATION_OPTIONS } from '@/constants/account'
@@ -4642,6 +4693,7 @@ const mixedChannelWarningMessageText = computed(() => {
   return mixedChannelWarningRawMessage.value
 })
 
+const familyGroup = ref('')
 const costMultiplier = ref(DEFAULT_ACCOUNT_COST_MULTIPLIER)
 const costMultiplierAutoSync = ref(true)
 
@@ -4772,6 +4824,7 @@ const syncFormFromAccount = (newAccount: Account | null) => {
   form.status = (newAccount.status === 'active' || newAccount.status === 'inactive' || newAccount.status === 'error')
     ? newAccount.status
     : 'active'
+  familyGroup.value = newAccount.extra?.family_group || ''
   form.group_ids = newAccount.group_ids || []
   groupAllowedModels.value = groupAllowedModelsFromAccount(newAccount)
   form.expires_at = newAccount.expires_at ?? null
@@ -4961,8 +5014,8 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     }
   }
 
-  // Load quota limit for apikey/bedrock accounts (bedrock quota is also loaded in its own branch above)
-  if (newAccount.type === 'apikey' || newAccount.type === 'bedrock') {
+  // Load quota limit for apikey/bedrock/service_account accounts (bedrock quota is also loaded in its own branch above)
+  if (supportsAccountQuota(newAccount.type)) {
     const quotaVal = extra?.quota_limit as number | undefined
     editQuotaLimit.value = (quotaVal && quotaVal > 0) ? quotaVal : null
     const dailyVal = extra?.quota_daily_limit as number | undefined
@@ -4991,34 +5044,24 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     resetQuotaNotify()
   }
 
-  // Load antigravity model mapping (Antigravity 只支持映射模式)
+  // Both editor views persist together in model_mapping.
   if (newAccount.platform === 'antigravity') {
     const credentials = newAccount.credentials as Record<string, unknown> | undefined
-
-    // Antigravity 始终使用映射模式
-    antigravityModelRestrictionMode.value = 'mapping'
-    antigravityWhitelistModels.value = []
-
-    // 从 model_mapping 读取映射配置
     const rawAgMapping = credentials?.model_mapping as Record<string, string> | undefined
+    const { allowedModels: whitelist, modelMappings: mappings } = splitModelMappingObject(rawAgMapping)
     if (rawAgMapping && typeof rawAgMapping === 'object') {
-      const entries = Object.entries(rawAgMapping)
-      // 无论是白名单样式(key===value)还是真正的映射，都统一转换为映射列表
-      antigravityModelMappings.value = entries.map(([from, to]) => ({ from, to }))
+      antigravityWhitelistModels.value = whitelist
     } else {
-      // 兼容旧数据：从 model_whitelist 读取，转换为映射格式
       const rawWhitelist = credentials?.model_whitelist
-      if (Array.isArray(rawWhitelist) && rawWhitelist.length > 0) {
-        antigravityModelMappings.value = rawWhitelist
-          .map((v) => String(v).trim())
-          .filter((v) => v.length > 0)
-          .map((m) => ({ from: m, to: m }))
-      } else {
-        antigravityModelMappings.value = []
-      }
+      antigravityWhitelistModels.value = Array.isArray(rawWhitelist)
+        ? rawWhitelist.map((v) => String(v).trim()).filter(Boolean)
+        : []
     }
+    antigravityModelMappings.value = mappings
+    antigravityModelRestrictionMode.value =
+      antigravityWhitelistModels.value.length === 0 && mappings.length > 0 ? 'mapping' : 'whitelist'
   } else {
-    antigravityModelRestrictionMode.value = 'mapping'
+    antigravityModelRestrictionMode.value = 'whitelist'
     antigravityWhitelistModels.value = []
     antigravityModelMappings.value = []
   }
@@ -5316,12 +5359,17 @@ const removeAntigravityModelMapping = (index: number) => {
 }
 
 const addAntigravityPresetMapping = (from: string, to: string) => {
-  const exists = antigravityModelMappings.value.some((m) => m.from === from)
+  const exists = antigravityWhitelistModels.value.includes(from) ||
+    antigravityModelMappings.value.some((m) => m.from === from)
   if (exists) {
     appStore.showInfo(t('admin.accounts.mappingExists', { model: from }))
     return
   }
-  antigravityModelMappings.value.push({ from, to })
+  if (from === to) {
+    antigravityWhitelistModels.value.push(from)
+  } else {
+    antigravityModelMappings.value.push({ from, to })
+  }
 }
 
 const syncAntigravityUpstreamModels = async () => {
@@ -5338,9 +5386,10 @@ const syncAntigravityUpstreamModels = async () => {
 
     let addedCount = 0
     for (const model of upstreamModels) {
-      const exists = antigravityModelMappings.value.some((mapping) => mapping.from === model)
+      const exists = antigravityWhitelistModels.value.includes(model) ||
+        antigravityModelMappings.value.some((mapping) => mapping.from === model)
       if (!exists) {
-        antigravityModelMappings.value.push({ from: model, to: model })
+        antigravityWhitelistModels.value.push(model)
         addedCount += 1
       }
     }
@@ -6343,7 +6392,6 @@ const handleSubmit = async () => {
     }
 
     // Antigravity: persist model mapping to credentials (applies to all antigravity types)
-    // Antigravity 只支持映射模式
     if (props.account.platform === 'antigravity') {
       const currentCredentials = (updatePayload.credentials as Record<string, unknown>) ||
         ((props.account.credentials as Record<string, unknown>) || {})
@@ -6356,10 +6404,9 @@ const handleSubmit = async () => {
       delete newCredentials.model_whitelist
       delete newCredentials.model_mapping
 
-      // 只使用映射模式
       const antigravityModelMapping = buildModelMappingObject(
-        'mapping',
-        [],
+        'combined',
+        antigravityWhitelistModels.value,
         antigravityModelMappings.value
       )
       if (antigravityModelMapping) {
@@ -6720,8 +6767,8 @@ const handleSubmit = async () => {
       updatePayload.extra = newExtra
     }
 
-    // For apikey/bedrock accounts, handle quota_limit in extra
-    if (props.account.type === 'apikey' || props.account.type === 'bedrock') {
+    // For apikey/bedrock/service_account accounts, handle quota_limit in extra
+    if (supportsAccountQuota(props.account.type)) {
       const currentExtra = (updatePayload.extra as Record<string, unknown>) ||
         (props.account.extra as Record<string, unknown>) || {}
       const newExtra: Record<string, unknown> = { ...currentExtra }
@@ -6810,6 +6857,11 @@ const handleSubmit = async () => {
       costExtra.cost_multiplier_auto_sync = costMultiplierAutoSync.value
     } else {
       delete costExtra.cost_multiplier_auto_sync
+    }
+    if (familyGroup.value.trim() !== (props.account.extra?.family_group || '')) {
+      costExtra.family_group = familyGroup.value.trim()
+    } else {
+      delete costExtra.family_group
     }
     updatePayload.extra = costExtra
 

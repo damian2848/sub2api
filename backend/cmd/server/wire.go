@@ -102,6 +102,7 @@ func provideCleanup(
 	schedulerSnapshot *service.SchedulerSnapshotService,
 	tokenRefresh *service.TokenRefreshService,
 	geminiWebKeepalive *service.GeminiWebCookieKeepaliveService,
+	geminiWebHistoryCleanup *service.GeminiWebHistoryCleanupService,
 	accountExpiry *service.AccountExpiryService,
 	cnProviderBalanceCheck *service.CNProviderBalanceCheckService,
 	codexVersionSync *service.OpenAICodexVersionSyncService,
@@ -317,6 +318,12 @@ func provideCleanup(
 			{"GeminiWebCookieKeepaliveService", func() error {
 				if geminiWebKeepalive != nil {
 					geminiWebKeepalive.Stop()
+				}
+				return nil
+			}},
+			{"GeminiWebHistoryCleanupService", func() error {
+				if geminiWebHistoryCleanup != nil {
+					geminiWebHistoryCleanup.Stop()
 				}
 				return nil
 			}},

@@ -151,6 +151,7 @@ docs/*
 !docs/request-capture.md
 !docs/codex-credits.md
 !docs/account-token-guard.md
+!docs/account-family-groups.md
 !docs/priority-scheduling.md
 !docs/astra-account-scheduling.md
 !docs/legal/

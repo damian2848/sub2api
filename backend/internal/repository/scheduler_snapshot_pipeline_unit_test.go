@@ -35,6 +35,8 @@ func (h *snapshotReadHook) ProcessPipelineHook(next redis.ProcessPipelineHook) r
 func TestSchedulerSnapshotPipelinesBoundedFieldsAndFreshLastUsed(t *testing.T) {
 	ctx := context.Background()
 	cache := newSchedulerCacheUnit(t)
+	now := time.Now()
+	cache.now = func() time.Time { return now }
 	cache.mgetChunkSize = 2
 	bucket := service.SchedulerBucket{GroupID: 91, Platform: service.PlatformOpenAI, Mode: service.SchedulerModeSingle}
 	accounts := []service.Account{{ID: 801}, {ID: 802}, {ID: 803}}
@@ -70,6 +72,9 @@ func TestSchedulerSnapshotPipelinesBoundedFieldsAndFreshLastUsed(t *testing.T) {
 	require.True(t, hit)
 	require.Equal(t, newer, *result[2].LastUsedAt)
 	require.NoError(t, cache.rdb.Del(ctx, schedulerAccountMetaKey(strconv.Itoa(802))).Err())
+	// A raw Redis deletion bypasses the writer revision. The bounded memo
+	// lifetime must still expose the missing metadata without serving a partial pool.
+	now = now.Add(schedulerSnapshotCacheMaxAge)
 	_, hit, err = cache.GetSnapshot(ctx, bucket)
 	require.NoError(t, err)
 	require.False(t, hit) // missing metadata cannot return a partial candidate pool

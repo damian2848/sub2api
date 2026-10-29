@@ -153,6 +153,18 @@ func decorateAntigravityRetryDeadline(c *gin.Context, returnedErr *error) {
 // describe only a short transport backoff. Prefer the window regardless of the
 // order of details in the upstream error.
 func antigravityQuotaResetTime(body []byte) *time.Time {
+	if delay, ok := antigravityExplicitQuotaDelay(body); ok {
+		resetAt := time.Now().Add(delay)
+		return &resetAt
+	}
+	if timestamp := ParseGeminiRateLimitResetTime(body); timestamp != nil {
+		parsed := time.Unix(*timestamp, 0)
+		return &parsed
+	}
+	return nil
+}
+
+func antigravityExplicitQuotaDelay(body []byte) (time.Duration, bool) {
 	var payload struct {
 		Error struct {
 			Details []struct {
@@ -162,24 +174,34 @@ func antigravityQuotaResetTime(body []byte) *time.Time {
 			} `json:"details"`
 		} `json:"error"`
 	}
-	var resetAt *time.Time
+	var longest time.Duration
 	if json.Unmarshal(body, &payload) == nil {
 		for _, detail := range payload.Error.Details {
 			if delay, err := time.ParseDuration(detail.Metadata.QuotaResetDelay); err == nil && delay > 0 {
-				candidate := time.Now().Add(delay)
-				if resetAt == nil || candidate.After(*resetAt) {
-					resetAt = &candidate
+				if delay > longest {
+					longest = delay
 				}
 			}
 		}
 	}
-	if resetAt == nil {
-		if timestamp := ParseGeminiRateLimitResetTime(body); timestamp != nil {
-			parsed := time.Unix(*timestamp, 0)
-			resetAt = &parsed
-		}
+	return longest, longest > 0
+}
+
+func antigravityModelCooldownResetAt(body []byte, fallback time.Duration) time.Time {
+	quotaExhausted := classifyAntigravity429(body) == antigravity429QuotaExhausted
+	if quotaExhausted && fallback < antigravityDefaultRateLimitDuration {
+		fallback = antigravityDefaultRateLimitDuration
 	}
-	return resetAt
+	if resetAt := antigravityQuotaResetTime(body); resetAt != nil && resetAt.After(time.Now()) {
+		if quotaExhausted && time.Until(*resetAt) < antigravityRateLimitThreshold {
+			return time.Now().Add(fallback)
+		}
+		return *resetAt
+	}
+	if fallback <= 0 {
+		fallback = antigravityDefaultRateLimitDuration
+	}
+	return time.Now().Add(fallback)
 }
 
 // antigravityRetryLoopResult 重试循环的结果
@@ -312,7 +334,7 @@ func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParam
 		logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d oauth_long_delay model=%s account=%d upstream_retry_delay=%v body=%s (model rate limit, switch account)",
 			p.prefix, resp.StatusCode, modelName, p.account.ID, rateLimitDuration, truncateForLog(respBody, 200))
 
-		resetAt := time.Now().Add(rateLimitDuration)
+		resetAt := antigravityModelCooldownResetAt(respBody, rateLimitDuration)
 		if !s.setAntigravityModelRateLimits(p.ctx, p.accountRepo, p.account, modelName, p.prefix, resp.StatusCode, resetAt, false) {
 			p.handleError(p.ctx, p.prefix, p.account, resp.StatusCode, resp.Header, respBody, p.requestedModel, p.groupID, p.sessionHash, p.isStickySession)
 			logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d rate_limited account=%d (no model mapping)", p.prefix, resp.StatusCode, p.account.ID)
@@ -483,7 +505,9 @@ func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParam
 		log.Printf("%s status=%d smart_retry_exhausted attempts=%d model=%s account=%d upstream_retry_delay=%v body=%s (switch account)",
 			p.prefix, resp.StatusCode, maxAttempts, modelName, p.account.ID, rateLimitDuration, truncateForLog(retryBody, 200))
 
-		resetAt := time.Now().Add(rateLimitDuration)
+		// The retry can reveal a longer exhausted quota than the initial short
+		// backoff. Preserve that last response's reset before switching accounts.
+		resetAt := antigravityModelCooldownResetAt(retryBody, rateLimitDuration)
 		s.setAntigravityModelRateLimits(p.ctx, p.accountRepo, p.account, modelName, p.prefix, resp.StatusCode, resetAt, true)
 
 		// 清除粘性会话绑定，避免下次请求仍命中限流账号
@@ -884,6 +908,19 @@ urlFallbackLoop:
 		}
 	}
 
+	if err := s.checkArgonFunctionResponse(resp, p.body); err != nil {
+		logger.LegacyPrintf("service.antigravity_gateway", "%s function calling policy rejected upstream response: %v", p.prefix, err)
+		body, _ := json.Marshal(map[string]any{"error": map[string]any{
+			"code": http.StatusBadGateway, "status": "UNAVAILABLE", "message": err.Error(),
+		}})
+		resp.StatusCode = http.StatusBadGateway
+		resp.Header = resp.Header.Clone()
+		resp.Header.Set("Content-Type", "application/json")
+		resp.Header.Del("Content-Length")
+		resp.ContentLength = int64(len(body))
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+	}
+
 	if resp != nil && resp.StatusCode < 400 && usedBaseURL != "" {
 		antigravity.DefaultURLAvailability.MarkSuccess(usedBaseURL)
 	}
@@ -1022,10 +1059,12 @@ func antigravityBackoffDelay(attempt int) time.Duration {
 	return sleepFor
 }
 
-// isSingleAccountRetry 检查 context 中是否设置了单账号退避重试标记
+// isSingleAccountRetry 检查是否处于单账号退避重试模式：显式标记优先，否则使用请求挂载的延迟判定。
 func isSingleAccountRetry(ctx context.Context) bool {
-	v, _ := SingleAccountRetryFromContext(ctx)
-	return v
+	if v, ok := SingleAccountRetryFromContext(ctx); ok {
+		return v
+	}
+	return singleAccountRetryProbeResult(ctx)
 }
 
 // setModelRateLimitByModelName 使用官方模型 ID 设置模型级限流
@@ -1059,8 +1098,12 @@ func (s *AntigravityGatewayService) setAntigravityModelRateLimits(ctx context.Co
 
 	success := false
 	for _, key := range keys {
-		if setModelRateLimitByModelName(ctx, repo, account.ID, key, prefix, statusCode, resetAt, afterSmartRetry) {
-			s.updateAccountModelRateLimitInCache(ctx, account, key, resetAt)
+		effectiveResetAt := resetAt
+		if existing := account.modelRateLimitResetAt(key); existing != nil && existing.After(effectiveResetAt) {
+			effectiveResetAt = *existing
+		}
+		if setModelRateLimitByModelName(ctx, repo, account.ID, key, prefix, statusCode, effectiveResetAt, afterSmartRetry) {
+			s.updateAccountModelRateLimitInCache(ctx, account, key, effectiveResetAt)
 			success = true
 		}
 	}
@@ -1205,6 +1248,14 @@ func parseAntigravitySmartRetryInfo(body []byte) *antigravitySmartRetryInfo {
 	if retryDelay <= 0 {
 		retryDelay = antigravityDefaultRateLimitDuration
 	}
+	if !hasModelCapacityExhausted {
+		// RetryInfo is a transport backoff, and may coexist with a much later
+		// quota reset. All callers, including error-policy handling, need the
+		// later reset rather than only the smart-retry entry point.
+		if quotaDelay, ok := antigravityExplicitQuotaDelay(body); ok && quotaDelay > retryDelay {
+			retryDelay = quotaDelay
+		}
+	}
 
 	return &antigravitySmartRetryInfo{
 		RetryDelay:               retryDelay,
@@ -1324,7 +1375,7 @@ func (s *AntigravityGatewayService) handleModelRateLimit(p *handleModelRateLimit
 
 // setModelRateLimitAndClearSession 设置模型限流并清除粘性会话
 func (s *AntigravityGatewayService) setModelRateLimitAndClearSession(p *handleModelRateLimitParams, info *antigravitySmartRetryInfo) {
-	resetAt := time.Now().Add(info.RetryDelay)
+	resetAt := antigravityModelCooldownResetAt(p.body, info.RetryDelay)
 	logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d model_rate_limited model=%s account=%d reset_in=%v",
 		p.prefix, p.statusCode, info.ModelName, p.account.ID, info.RetryDelay)
 
@@ -1336,31 +1387,33 @@ func (s *AntigravityGatewayService) setModelRateLimitAndClearSession(p *handleMo
 	}
 }
 
-// updateAccountModelRateLimitInCache 立即更新 Redis 中账号的模型限流状态
+// updateAccountModelRateLimitInCache updates only the request-local snapshot.
+// SetModelRateLimit already refreshes the scheduler from the database and emits
+// an outbox event. Publishing this older Account again could overwrite a newer
+// concurrent quota reset in Redis.
 func (s *AntigravityGatewayService) updateAccountModelRateLimitInCache(ctx context.Context, account *Account, modelKey string, resetAt time.Time) {
-	if s.schedulerSnapshot == nil || account == nil || modelKey == "" {
+	if account == nil || modelKey == "" {
+		return
+	}
+	if existing := account.modelRateLimitResetAt(modelKey); existing != nil && !existing.Before(resetAt) {
 		return
 	}
 
-	// 更新账号对象的 Extra 字段
-	if account.Extra == nil {
-		account.Extra = make(map[string]any)
+	// Copy the maps so another snapshot sharing Extra is not mutated.
+	extra := make(map[string]any, len(account.Extra)+1)
+	for key, value := range account.Extra {
+		extra[key] = value
 	}
-
-	limits, _ := account.Extra["model_rate_limits"].(map[string]any)
-	if limits == nil {
-		limits = make(map[string]any)
-		account.Extra["model_rate_limits"] = limits
+	existingLimits, _ := account.Extra[modelRateLimitsKey].(map[string]any)
+	limits := make(map[string]any, len(existingLimits)+1)
+	for key, value := range existingLimits {
+		limits[key] = value
 	}
-
+	extra[modelRateLimitsKey] = limits
+	account.Extra = extra
 	limits[modelKey] = map[string]any{
 		"rate_limited_at":     time.Now().UTC().Format(time.RFC3339),
 		"rate_limit_reset_at": resetAt.UTC().Format(time.RFC3339),
-	}
-
-	// 更新 Redis 快照
-	if err := s.schedulerSnapshot.UpdateAccountInCache(ctx, account); err != nil {
-		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] cache_update_failed account=%d model=%s err=%v", account.ID, modelKey, err)
 	}
 }
 
@@ -1402,7 +1455,6 @@ func (s *AntigravityGatewayService) handleUpstreamError(
 			logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity-Debug] 429 response body: %s", truncateString(string(body), maxBytes))
 		}
 
-		resetAt := ParseGeminiRateLimitResetTime(body)
 		defaultDur := s.getDefaultRateLimitDuration()
 
 		// 尝试解析模型 key 并设置模型级限流
@@ -1417,7 +1469,7 @@ func (s *AntigravityGatewayService) handleUpstreamError(
 			modelKey = resolveAntigravityModelKey(requestedModel)
 		}
 		if modelKey != "" {
-			ra := s.resolveResetTime(resetAt, defaultDur)
+			ra := antigravityModelCooldownResetAt(body, defaultDur)
 			if !s.setAntigravityModelRateLimits(ctx, s.accountRepo, account, modelKey, prefix, statusCode, ra, false) {
 				logger.LegacyPrintf("service.antigravity_gateway", "%s status=429 model_rate_limit_set_failed model=%s", prefix, modelKey)
 			} else {
@@ -1428,7 +1480,7 @@ func (s *AntigravityGatewayService) handleUpstreamError(
 		}
 
 		// 无法解析模型 key，兜底为账号级限流
-		ra := s.resolveResetTime(resetAt, defaultDur)
+		ra := antigravityModelCooldownResetAt(body, defaultDur)
 		logger.LegacyPrintf("service.antigravity_gateway", "%s status=429 rate_limited account=%d reset_at=%v reset_in=%v (fallback)",
 			prefix, account.ID, ra.Format("15:04:05"), time.Until(ra).Truncate(time.Second))
 		if err := s.accountRepo.SetRateLimited(ctx, account.ID, ra); err != nil {
@@ -1457,12 +1509,4 @@ func (s *AntigravityGatewayService) getDefaultRateLimitDuration() time.Duration 
 		defaultDur = override
 	}
 	return defaultDur
-}
-
-// resolveResetTime 根据解析的重置时间或默认时长计算重置时间点
-func (s *AntigravityGatewayService) resolveResetTime(resetAt *int64, defaultDur time.Duration) time.Time {
-	if resetAt != nil {
-		return time.Unix(*resetAt, 0)
-	}
-	return time.Now().Add(defaultDur)
 }

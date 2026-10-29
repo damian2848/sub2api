@@ -121,6 +121,7 @@ export default {
         daysHours: '{d}d {h}h',
         hoursMinutes: '{h}h {m}m',
         minutes: '{m}m',
+        seconds: '{s}s',
         withSuffix: '{time} to lift'
       }
     }

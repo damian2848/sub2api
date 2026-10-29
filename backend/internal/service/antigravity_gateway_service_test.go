@@ -18,7 +18,162 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
+
+func TestCleanGeminiRequestResponseSchemaEnums(t *testing.T) {
+	for _, configKey := range []string{"generationConfig", "generation_config"} {
+		for _, schemaKey := range []string{"responseSchema", "response_schema"} {
+			t.Run(configKey+"/"+schemaKey, func(t *testing.T) {
+				schema := `{"type":"OBJECT","required":["flag"],"propertyOrdering":["flag"],"properties":{
+					"flag":{"type":"INTEGER","enum":[0,1],"minimum":0,"maximum":1},
+					"large":{"type":"INTEGER","enum":[9007199254740993]},
+					"rows":{"type":"ARRAY","items":{"type":"OBJECT","properties":{
+						"enum":{"type":"BOOLEAN","enum":[true,false]},
+						"ratio":{"type":"NUMBER","enum":[0.25,0.5]}}}},
+					"choice":{"anyOf":[{"type":"INTEGER","enum":[0,1]},{"type":"STRING","enum":["unknown"]}]},
+					"nullable":{"type":"STRING","nullable":true,"enum":["yes",null]},
+					"label":{"type":"STRING","enum":["0","1"]}}}`
+				wantSchema := `{"type":"OBJECT","required":["flag"],"propertyOrdering":["flag"],"properties":{
+					"flag":{"type":"INTEGER","enum":["0","1"],"minimum":0,"maximum":1},
+					"large":{"type":"INTEGER","enum":["9007199254740993"]},
+					"rows":{"type":"ARRAY","items":{"type":"OBJECT","properties":{
+						"enum":{"type":"BOOLEAN","enum":["true","false"]},
+						"ratio":{"type":"NUMBER","enum":["0.25","0.5"]}}}},
+					"choice":{"anyOf":[{"type":"INTEGER","enum":["0","1"]},{"type":"STRING","enum":["unknown"]}]},
+					"nullable":{"type":"STRING","nullable":true,"enum":["yes",null]},
+					"label":{"type":"STRING","enum":["0","1"]}}}`
+				body := []byte(fmt.Sprintf(`{"contents":[{"parts":[{"text":"enum: [0,1]"}]}],%q:{"maxOutputTokens":8,"temperature":0.125,%q:%s}}`, configKey, schemaKey, schema))
+				got, err := cleanGeminiRequest(body)
+				require.NoError(t, err)
+				want := fmt.Sprintf(`{"contents":[{"parts":[{"text":"enum: [0,1]"}]}],%q:{"maxOutputTokens":8,"temperature":0.125,%q:%s}}`, configKey, schemaKey, wantSchema)
+				require.JSONEq(t, want, string(got), "only enum wire values change; schema types and constraints survive")
+			})
+		}
+	}
+	for _, body := range []string{
+		`{"contents":[],"generationConfig":{"responseJsonSchema":{"type":"integer","enum":[0,1]}}}`,
+		`{"contents":[],"generationConfig":{"responseSchema":{"type":"STRING","enum":["0","1"]}}}`,
+		`{"contents":[],"generationConfig":{"responseSchema":{"type":"INTEGER","enum":[]}}}`,
+	} {
+		got, err := cleanGeminiRequest([]byte(body))
+		require.NoError(t, err)
+		require.Equal(t, body, string(got), "already compatible requests and JSON Schema retain their original encoding")
+	}
+}
+
+func TestArgonFunctionPolicy(t *testing.T) {
+	svc := newAntigravityTestService(&config.Config{})
+	for _, tier := range []string{"high", "medium", "low"} {
+		for _, mode := range []string{"ANY", "NONE", "AUTO"} {
+			t.Run(tier+"/"+mode, func(t *testing.T) {
+				body := []byte(fmt.Sprintf(`{"contents":[{"role":"user","parts":[{"text":"only hello, no tools"}]}],"systemInstruction":{"parts":[{"text":"Keep this instruction"}]},"generationConfig":{"maxOutputTokens":8},"tools":[{"functionDeclarations":[{"name":"emit_code"},{"name":"emit_other"}]}],"toolConfig":{"functionCallingConfig":{"mode":%q,"allowedFunctionNames":["emit_code"]}}}`, mode))
+				wrapped, err := svc.wrapV1InternalRequest("test-project", "gemini-4-argon-"+tier, body)
+				require.NoError(t, err)
+				request := gjson.GetBytes(wrapped, "request")
+				require.Equal(t, int64(8), request.Get("generationConfig.maxOutputTokens").Int())
+				require.Equal(t, "Keep this instruction", request.Get("systemInstruction.parts.0.text").String())
+				if mode == "NONE" {
+					require.False(t, request.Get("tools").Exists())
+				} else {
+					declarations := request.Get("tools.0.functionDeclarations").Array()
+					require.Len(t, declarations, 1)
+					require.Equal(t, "emit_code", declarations[0].Get("name").String())
+				}
+				if mode == "ANY" {
+					require.Contains(t, request.Get("systemInstruction.parts.1.text").String(), "emit_code")
+				}
+				require.Len(t, gjson.GetBytes(body, "tools.0.functionDeclarations").Array(), 2)
+			})
+		}
+	}
+	for _, body := range []string{
+		`{"toolConfig":{"functionCallingConfig":{"mode":"ANY"}}}`,
+		`{"tools":[{"functionDeclarations":[{"name":"emit_code"}]}],"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["missing"]}}}`,
+	} {
+		_, err := svc.wrapV1InternalRequest("test-project", "gemini-4-argon-high", []byte(body))
+		require.Error(t, err)
+	}
+}
+
+func TestArgonFunctionResponseContract(t *testing.T) {
+	svc := newAntigravityTestService(&config.Config{})
+	for _, tc := range []struct {
+		name, mode, payload string
+		fail                bool
+	}{
+		{"required_call", "ANY", `{"candidates":[{"content":{"parts":[{"functionCall":{"name":"emit_code","args":{"code":"x"}}}]},"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":8}}`, false},
+		{"required_text", "ANY", `{"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}]}`, true},
+		{"required_empty", "ANY", `{"candidates":[{"finishReason":"STOP"}]}`, true},
+		{"unselected_function", "ANY", `{"candidates":[{"content":{"parts":[{"functionCall":{"name":"emit_other"}}]},"finishReason":"STOP"}]}`, true},
+		{"none_call", "NONE", `{"candidates":[{"content":{"parts":[{"functionCall":{"name":"emit_code"}}]},"finishReason":"STOP"}]}`, true},
+		{"none_text", "NONE", `{"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}]}`, false},
+		{"token_limit", "ANY", `{"candidates":[{"content":{"parts":[{"text":"thinking","thought":true}]},"finishReason":"MAX_TOKENS"}]}`, false},
+		{"safety", "ANY", `{"candidates":[{"finishReason":"SAFETY"}]}`, false},
+		{"missing_finish", "ANY", `{"candidates":[{"content":{"parts":[{"functionCall":{"name":"emit_code"}}]}}]}`, true},
+		{"incomplete_candidate", "ANY", `{"candidates":[{"index":0,"finishReason":"MAX_TOKENS"},{"index":1,"content":{"parts":[{"functionCall":{"name":"emit_code"}}]}}]}`, true},
+		{"provider_error", "ANY", `{"error":{"message":"failed"}}`, true},
+	} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", tc.name, stream), func(t *testing.T) {
+				request := []byte(fmt.Sprintf(`{"model":"gemini-4-argon-high","request":{"tools":[{"functionDeclarations":[{"name":"emit_code"}]}],"toolConfig":{"functionCallingConfig":{"mode":%q,"allowedFunctionNames":["emit_code"]}}}}`, tc.mode))
+				payload, contentType := tc.payload, "application/json"
+				if stream {
+					payload = ": heartbeat\n\ndata: {\"response\":" + tc.payload + "}\n\ndata: [DONE]\n\n"
+					contentType = "text/event-stream"
+				}
+				resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{contentType}}, Body: io.NopCloser(strings.NewReader(payload))}
+				err := svc.checkArgonFunctionResponse(resp, request)
+				if tc.fail {
+					require.Error(t, err)
+					return
+				}
+				require.NoError(t, err)
+				replayed, err := io.ReadAll(resp.Body)
+				require.NoError(t, err)
+				require.Equal(t, payload, string(replayed), "preserve provider usage, signatures and finish reasons")
+			})
+		}
+	}
+	request := []byte(`{"model":"gemini-4-argon-low","request":{"toolConfig":{"functionCallingConfig":{"mode":"NONE"}}}}`)
+	svc.settingService.cfg.Gateway.UpstreamResponseReadMaxBytes = 8
+	resp := &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(strings.Repeat("x", 9)))}
+	require.ErrorContains(t, svc.checkArgonFunctionResponse(resp, request), "body limit")
+}
+
+func TestArgonFunctionPolicyFailsOverBeforeCommitting(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, protocol := range []string{"native", "openai"} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", protocol, stream), func(t *testing.T) {
+				upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{{StatusCode: 200,
+					Header: http.Header{"Content-Type": []string{"text/event-stream"}},
+					Body:   io.NopCloser(strings.NewReader("data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]},\"finishReason\":\"STOP\"}]}}\n\n")),
+				}}}
+				svc := newAntigravityCompatService(config.GatewayConfig{MaxLineSize: defaultMaxLineSize}, upstream)
+				account := newAntigravityCompatAccount(AccountTypeOAuth)
+				account.Credentials["model_mapping"] = map[string]any{"gemini-4-argon-high": "gemini-4-argon-high"}
+				body := []byte(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"tools":[{"functionDeclarations":[{"name":"emit_code"}]}],"toolConfig":{"functionCallingConfig":{"mode":"ANY","allowedFunctionNames":["emit_code"]}}}`)
+				if protocol == "openai" {
+					body = []byte(fmt.Sprintf(`{"model":"gemini-4-argon-high","stream":%t,"messages":[{"role":"user","content":"hello"}],"tools":[{"type":"function","function":{"name":"emit_code","parameters":{"type":"object","properties":{}}}}],"tool_choice":{"type":"function","function":{"name":"emit_code"}}}`, stream))
+				}
+				c, writer := newAntigravityCompatContext(http.MethodPost, "/test", body)
+				var err error
+				if protocol == "native" {
+					_, err = svc.ForwardGemini(context.Background(), c, account, "gemini-4-argon-high", "generateContent", stream, body, false)
+				} else {
+					_, err = svc.ForwardAsChatCompletions(context.Background(), c, account, body, nil)
+				}
+				var failover *UpstreamFailoverError
+				require.ErrorAs(t, err, &failover)
+				require.Equal(t, http.StatusBadGateway, failover.StatusCode)
+				require.False(t, c.Writer.Written())
+				require.Empty(t, writer.Body.String())
+			})
+		}
+	}
+
+}
 
 // antigravityFailingWriter 模拟客户端断开连接的 gin.ResponseWriter
 type antigravityFailingWriter struct {
@@ -294,6 +449,10 @@ func TestAntigravityGatewayService_ForwardGemini_UsesConfiguredProjectFallback(t
 		"contents": []map[string]any{
 			{"role": "user", "parts": []map[string]any{{"text": "hello"}}},
 		},
+		"generationConfig": map[string]any{
+			"responseMimeType": "application/json",
+			"responseSchema":   map[string]any{"type": "INTEGER", "enum": []int64{0, 1, 9007199254740993}},
+		},
 	})
 	require.NoError(t, err)
 	c.Request = httptest.NewRequest(http.MethodPost, "/antigravity/v1beta/models/gemini-2.5-flash:streamGenerateContent", bytes.NewReader(body))
@@ -338,6 +497,7 @@ func TestAntigravityGatewayService_ForwardGemini_UsesConfiguredProjectFallback(t
 	var wrapped map[string]any
 	require.NoError(t, json.Unmarshal(upstream.requestBodies[0], &wrapped))
 	require.Equal(t, "configured-project", wrapped["project"])
+	require.JSONEq(t, `{"type":"INTEGER","enum":["0","1","9007199254740993"]}`, gjson.GetBytes(upstream.requestBodies[0], "request.generationConfig.responseSchema").Raw)
 }
 
 func TestAntigravityGatewayService_ForwardGemini_ImageUsesDefaultMappingAndOAuth(t *testing.T) {
@@ -851,9 +1011,8 @@ func TestAntigravityGatewayService_ForwardGemini_ClearsStickySessionOnGeminiRate
 	var failoverErr *UpstreamFailoverError
 	require.ErrorAs(t, err, &failoverErr)
 	require.Equal(t, http.StatusServiceUnavailable, failoverErr.StatusCode)
-	require.Len(t, repo.modelRateLimitCalls, 2)
+	require.Len(t, repo.modelRateLimitCalls, 1)
 	require.Equal(t, "gemini-3-flash", repo.modelRateLimitCalls[0].modelKey)
-	require.Equal(t, antigravityGeminiModelRateLimitKey, repo.modelRateLimitCalls[1].modelKey)
 	require.Len(t, cache.deleteCalls, 1)
 	require.Equal(t, int64(77), cache.deleteCalls[0].groupID)
 	require.Equal(t, "gemini:sticky-runtime", cache.deleteCalls[0].sessionHash)

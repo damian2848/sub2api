@@ -76,6 +76,7 @@ type AdminService interface {
 
 	// Account management
 	ListAccounts(ctx context.Context, page, pageSize int, platform, accountType, status, search string, groupID int64, privacyMode string, sortBy, sortOrder string) ([]Account, int64, error)
+	ListAccountFamilyGroups(ctx context.Context) ([]AccountFamilyGroup, error)
 	// ListAccountsForSchedulerScoreFilter 返回符合过滤条件的全部账号（不分页），
 	// 作为账号列表页计算 OpenAI 调度分数的过滤范围池。
 	ListAccountsForSchedulerScoreFilter(ctx context.Context, platform, accountType, status, search string, groupID int64, privacyMode string) ([]Account, error)
@@ -479,27 +480,29 @@ type UpdateAccountInput struct {
 
 // BulkUpdateAccountsInput describes the payload for bulk updating accounts.
 type BulkUpdateAccountsInput struct {
-	AccountIDs          []int64
-	Filters             *BulkUpdateAccountFilters
-	Name                string
-	ProxyID             *int64
-	Concurrency         *int
-	Priority            *int
-	RateMultiplier      *float64 // 账号计费倍率（>=0，允许 0）
-	GroupRateMultiplier *float64 // 账号级分组计费倍率（>=0，默认 1）
-	LoadFactor          *int
-	Status              string
-	Schedulable         *bool
-	GroupIDs            *[]int64
-	Credentials         map[string]any
-	Extra               map[string]any
-	ProbeEnabled        *bool
+	AccountIDs             []int64
+	Filters                *BulkUpdateAccountFilters
+	Name                   string
+	ProxyID                *int64
+	Concurrency            *int
+	Priority               *int
+	RateMultiplier         *float64 // 账号计费倍率（>=0，允许 0）
+	GroupRateMultiplier    *float64 // 账号级分组计费倍率（>=0，默认 1）
+	LoadFactor             *int
+	Status                 string
+	Schedulable            *bool
+	GroupIDs               *[]int64
+	Credentials            map[string]any
+	ModelMappingUpdateMode string
+	Extra                  map[string]any
+	ProbeEnabled           *bool
 	// SkipMixedChannelCheck skips the mixed channel risk check when binding groups.
 	// This should only be set when the caller has explicitly confirmed the risk.
 	SkipMixedChannelCheck bool
 }
 
 type BulkUpdateAccountFilters struct {
+	FamilyGroup string
 	Platform    string
 	Type        string
 	Status      string

@@ -181,7 +181,9 @@ type AccountBulkUpdate struct {
 	Status              *string
 	Schedulable         *bool
 	Credentials         map[string]any
-	Extra               map[string]any
+	// MergeModelMapping merges model_mapping entries atomically with each row.
+	MergeModelMapping bool
+	Extra             map[string]any
 	// Per-account preparation state is applied in the same bulk SQL update.
 	ExcelBPSAuthorizationPending map[int64]bool
 	ProbeEnabled                 *bool

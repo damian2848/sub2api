@@ -1,4 +1,5 @@
 import { getAutoConfig } from '@/api/admin/autoConfig'
+import { getAntigravityDefaultModelMapping } from '@/api/admin/accounts'
 import { defaultExcelBPSDefaults } from '@/utils/excelBPSDefaults'
 vi.mock('@/api/admin/autoConfig', () => ({ getAutoConfig: vi.fn() }))
 beforeEach(() => { vi.mocked(getAutoConfig).mockResolvedValue({ excel_bps: defaultExcelBPSDefaults() } as Awaited<ReturnType<typeof getAutoConfig>>) })
@@ -13,10 +14,11 @@ import {
   setPlatformCatalog
 } from '@/constants/platformCatalog'
 
-const { updateAccountMock, checkMixedChannelRiskMock, authIsSimpleMode, showErrorMock } = vi.hoisted(() => ({
+const { updateAccountMock, checkMixedChannelRiskMock, syncUpstreamModelsMock, authIsSimpleMode, showErrorMock } = vi.hoisted(() => ({
   showErrorMock: vi.fn(),
   updateAccountMock: vi.fn(),
   checkMixedChannelRiskMock: vi.fn(),
+  syncUpstreamModelsMock: vi.fn(),
   authIsSimpleMode: { value: true }
 }))
 
@@ -41,6 +43,7 @@ vi.mock('@/api/admin', () => ({
     accounts: {
       getManagementCapabilities: vi.fn().mockResolvedValue({ web_search_enabled: false, account_quota_notify_enabled: false }),
       update: updateAccountMock,
+      syncUpstreamModels: syncUpstreamModelsMock,
       checkMixedChannelRisk: checkMixedChannelRiskMock
     },
     settings: {
@@ -2526,6 +2529,26 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock).toHaveBeenCalledTimes(1)
   })
 
+  it('shows quota limit card for Vertex SA account and keeps quota limits on save', async () => {
+    const account = buildVertexAccount()
+    account.extra = { quota_limit: 200, quota_daily_limit: 20, quota_used: 35.5 }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    expect(wrapper.findComponent({ name: 'QuotaLimitCard' }).exists()).toBe(true)
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra?.quota_limit).toBe(200)
+    expect(extra?.quota_daily_limit).toBe(20)
+    expect(extra?.quota_weekly_limit).toBeUndefined()
+  })
+
   it('blocks Vertex SA save when neither credentials_status nor legacy json indicates existence', async () => {
     const account = buildVertexAccount()
     account.credentials = {
@@ -2744,6 +2767,217 @@ describe('EditAccountModal', () => {
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
     await flushPromises()
     expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).not.toHaveProperty('model_mapping')
+  })
+})
+
+describe('EditAccountModal Antigravity combined model settings', () => {
+  beforeEach(() => {
+    authIsSimpleMode.value = true
+    updateAccountMock.mockReset().mockResolvedValue(buildAntigravityAccount())
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    syncUpstreamModelsMock.mockReset()
+    vi.mocked(getAntigravityDefaultModelMapping).mockClear()
+  })
+
+  it.each(['whitelist', 'mapping'])('round-trips all 59 stored entries from the %s tab without restoring removed Argon models', async (tab) => {
+    const mapping: Record<string, string> = {
+      'gemini-3.8-flash-high': 'gemini-3.8-flash-high',
+      'claude-opus-5-5-high': 'claude-opus-5-5-high',
+      'gemini-3*': 'gemini-3.8-flash-high',
+      ...Object.fromEntries(Array.from({ length: 56 }, (_, index) => [
+        `saved-alias-${index}`,
+        index % 2 === 0 ? 'gemini-3.8-flash-high' : 'claude-opus-5-5-high'
+      ]))
+    }
+    const account = buildAntigravityAccount()
+    account.credentials.model_mapping = mapping
+    const wrapper = mountModal(account)
+    await flushPromises()
+    const section = wrapper.get('[data-testid="antigravity-model-settings"]')
+    expect(section.getComponent(ModelWhitelistSelectorStub).props('modelValue')).toEqual([
+      'gemini-3.8-flash-high', 'claude-opus-5-5-high'
+    ])
+    expect(section.getComponent(ModelWhitelistSelectorStub).props('modelMappings')).toHaveLength(57)
+    await section.get('[data-testid="antigravity-mapping-tab"]').trigger('click')
+    expect(section.findAll('input[placeholder="admin.accounts.requestModel"]')).toHaveLength(57)
+    await section.get('[data-testid="antigravity-whitelist-tab"]').trigger('click')
+    await section.get(`[data-testid="antigravity-${tab}-tab"]`).trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const savedMapping = updateAccountMock.mock.calls[0]?.[1]?.credentials?.model_mapping
+    expect(savedMapping).toEqual(mapping)
+    expect(Object.keys(savedMapping)).toHaveLength(59)
+    expect(JSON.stringify(savedMapping)).not.toContain('argon')
+    expect(account.credentials.model_mapping).toEqual(mapping)
+    expect(getAntigravityDefaultModelMapping).not.toHaveBeenCalled()
+  })
+
+  it.each(['whitelist', 'mapping'])('saves edits from both views while the %s tab is selected', async (tab) => {
+    const account = buildAntigravityAccount()
+    account.credentials.model_mapping = {
+      'gemini-3.8-flash-high': 'gemini-3.8-flash-high',
+      'custom-alias': 'gemini-3.8-flash-high'
+    }
+    const wrapper = mountModal(account)
+    const section = wrapper.get('[data-testid="antigravity-model-settings"]')
+    section.getComponent(ModelWhitelistSelectorStub).vm.$emit('update:modelValue', [
+      'gemini-3.8-flash-high', 'claude-opus-5-5-high'
+    ])
+    await section.get('[data-testid="antigravity-mapping-tab"]').trigger('click')
+    await section.get('input[placeholder="admin.accounts.actualModel"]').setValue('claude-opus-5-5-high')
+    await section.get('[data-testid="antigravity-whitelist-tab"]').trigger('click')
+    expect(section.getComponent(ModelWhitelistSelectorStub).props('modelValue')).toEqual([
+      'gemini-3.8-flash-high', 'claude-opus-5-5-high'
+    ])
+    expect(section.getComponent(ModelWhitelistSelectorStub).props('modelMappings')).toEqual([
+      { from: 'custom-alias', to: 'claude-opus-5-5-high' }
+    ])
+    await section.get(`[data-testid="antigravity-${tab}-tab"]`).trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.model_mapping).toEqual({
+      'gemini-3.8-flash-high': 'gemini-3.8-flash-high',
+      'claude-opus-5-5-high': 'claude-opus-5-5-high',
+      'custom-alias': 'claude-opus-5-5-high'
+    })
+    expect(account.credentials.model_mapping['custom-alias']).toBe('gemini-3.8-flash-high')
+  })
+
+  it.each([undefined, {}])('leaves empty custom configuration %j on the backend default fallback', async (mapping) => {
+    const account = buildAntigravityAccount()
+    account.credentials.model_mapping = mapping
+    const wrapper = mountModal(account)
+    const section = wrapper.get('[data-testid="antigravity-model-settings"]')
+    expect(section.getComponent(ModelWhitelistSelectorStub).props('modelValue')).toEqual([])
+    expect(section.getComponent(ModelWhitelistSelectorStub).props('modelMappings')).toEqual([])
+    expect(section.text()).toContain('admin.accounts.antigravityDefaultModelsHint')
+    await section.get('[data-testid="antigravity-mapping-tab"]').trigger('click')
+    expect(section.findAll('input[placeholder="admin.accounts.requestModel"]')).toHaveLength(0)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).not.toHaveProperty('model_mapping')
+    expect(getAntigravityDefaultModelMapping).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('preserves aliases when clearing only the whitelist; clear both = %s', async (clearMappings) => {
+    const account = buildAntigravityAccount()
+    account.credentials.model_mapping = {
+      'gemini-3.8-flash-high': 'gemini-3.8-flash-high',
+      'custom-alias': 'gemini-3.8-flash-high'
+    }
+    const wrapper = mountModal(account)
+    const section = wrapper.get('[data-testid="antigravity-model-settings"]')
+    section.getComponent(ModelWhitelistSelectorStub).vm.$emit('update:modelValue', [])
+    await flushPromises()
+    expect(section.text()).not.toContain('admin.accounts.antigravityDefaultModelsHint')
+    if (clearMappings) {
+      await section.get('[data-testid="antigravity-mapping-tab"]').trigger('click')
+      await section.get('[data-testid="antigravity-remove-mapping"]').trigger('click')
+      expect(section.text()).toContain('admin.accounts.antigravityDefaultModelsHint')
+    }
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    const savedCredentials = updateAccountMock.mock.calls[0]?.[1]?.credentials
+    if (clearMappings) {
+      expect(savedCredentials).not.toHaveProperty('model_mapping')
+    } else {
+      expect(savedCredentials.model_mapping).toEqual({ 'custom-alias': 'gemini-3.8-flash-high' })
+    }
+  })
+
+  it('loads legacy model_whitelist and saves the combined representation', async () => {
+    const account = buildAntigravityAccount()
+    delete account.credentials.model_mapping
+    account.credentials.model_whitelist = [' gemini-3.8-flash-high ', 'claude-opus-5-5-high']
+    const wrapper = mountModal(account)
+    const section = wrapper.get('[data-testid="antigravity-model-settings"]')
+    expect(section.getComponent(ModelWhitelistSelectorStub).props('modelValue')).toEqual([
+      'gemini-3.8-flash-high', 'claude-opus-5-5-high'
+    ])
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    const savedCredentials = updateAccountMock.mock.calls[0]?.[1]?.credentials
+    expect(savedCredentials.model_mapping).toEqual({
+      'gemini-3.8-flash-high': 'gemini-3.8-flash-high',
+      'claude-opus-5-5-high': 'claude-opus-5-5-high'
+    })
+    expect(savedCredentials).not.toHaveProperty('model_whitelist')
+  })
+
+  it('replaces both views when reopening a different account without loading default models', async () => {
+    const account = buildAntigravityAccount()
+    account.credentials.model_mapping = { 'old-alias': 'gemini-3.8-flash-high' }
+    const wrapper = mountModal(account)
+    const section = wrapper.get('[data-testid="antigravity-model-settings"]')
+    expect(section.get<HTMLInputElement>('input[placeholder="admin.accounts.requestModel"]').element.value).toBe('old-alias')
+    await wrapper.setProps({ show: false })
+    const nextAccount = { ...buildAntigravityAccount(), id: 4, credentials: {} }
+    await wrapper.setProps({ show: true, account: nextAccount })
+    const nextSection = wrapper.get('[data-testid="antigravity-model-settings"]')
+    expect(nextSection.getComponent(ModelWhitelistSelectorStub).props('modelValue')).toEqual([])
+    expect(nextSection.getComponent(ModelWhitelistSelectorStub).props('modelMappings')).toEqual([])
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+
+    expect(updateAccountMock.mock.calls[0]?.[0]).toBe(4)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials).not.toHaveProperty('model_mapping')
+    expect(getAntigravityDefaultModelMapping).not.toHaveBeenCalled()
+  })
+
+  it('syncs upstream identity models into the whitelist without overwriting existing aliases', async () => {
+    const account = buildAntigravityAccount()
+    account.credentials.model_mapping = {
+      'gemini-3.8-flash-high': 'gemini-3.8-flash-high',
+      'custom-alias': 'gemini-3.8-flash-high'
+    }
+    syncUpstreamModelsMock.mockResolvedValue({
+      models: ['gemini-3.8-flash-high', 'custom-alias', ' claude-opus-5-5-high '], warnings: []
+    })
+    const wrapper = mountModal(account)
+    const section = wrapper.get('[data-testid="antigravity-model-settings"]')
+    await section.get('[data-testid="antigravity-mapping-tab"]').trigger('click')
+    await section.get('[data-testid="antigravity-sync-upstream-models"]').trigger('click')
+    await flushPromises()
+    await section.get('[data-testid="antigravity-whitelist-tab"]').trigger('click')
+
+    expect(syncUpstreamModelsMock).toHaveBeenCalledWith(account.id)
+    expect(section.getComponent(ModelWhitelistSelectorStub).props('modelValue')).toEqual([
+      'gemini-3.8-flash-high', 'claude-opus-5-5-high'
+    ])
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.model_mapping).toEqual({
+      'gemini-3.8-flash-high': 'gemini-3.8-flash-high',
+      'claude-opus-5-5-high': 'claude-opus-5-5-high',
+      'custom-alias': 'gemini-3.8-flash-high'
+    })
+  })
+
+  it('keeps identity and alias presets in their corresponding editor views', async () => {
+    const account = buildAntigravityAccount()
+    delete account.credentials.model_mapping
+    const wrapper = mountModal(account)
+    const section = wrapper.get('[data-testid="antigravity-model-settings"]')
+    await section.get('[data-testid="antigravity-mapping-tab"]').trigger('click')
+    await section.findAll('button').find((button) => button.text() === '+ 3.8 Flash High')!.trigger('click')
+    await section.findAll('button').find((button) => button.text() === '+ Opus 5.5→High')!.trigger('click')
+    await section.get('[data-testid="antigravity-whitelist-tab"]').trigger('click')
+    expect(section.getComponent(ModelWhitelistSelectorStub).props('modelValue')).toEqual(['gemini-3.8-flash-high'])
+    expect(section.getComponent(ModelWhitelistSelectorStub).props('modelMappings')).toEqual([
+      { from: 'claude-opus-5-5', to: 'claude-opus-5-5-high' }
+    ])
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.credentials?.model_mapping).toEqual({
+      'gemini-3.8-flash-high': 'gemini-3.8-flash-high',
+      'claude-opus-5-5': 'claude-opus-5-5-high'
+    })
   })
 })
 
@@ -3077,5 +3311,29 @@ describe('EditAccountModal temp-unschedulable rule scope', () => {
 
     expect(checkedScopes(wrapper)).toEqual(['temp-unsched-scope-model'])
     wrapper.unmount()
+  })
+})
+
+
+describe('account family membership', () => {
+  it.each(['家庭 B', ''])('loads the current family and persists changes: %s', async (name) => {
+    const account = { ...buildAccount(), extra: { family_group: '家庭 A' } }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="family-group-input"]').element.value).toBe('家庭 A')
+    await wrapper.get('[data-testid="family-group-input"]').setValue(name)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.family_group).toBe(name)
+  })
+
+  it('omits unchanged family metadata from unrelated edits', async () => {
+    const account = { ...buildAccount(), extra: { family_group: '家庭 A' } }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(updateAccountMock).toHaveBeenCalled()
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).not.toHaveProperty('family_group')
   })
 })

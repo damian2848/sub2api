@@ -527,7 +527,7 @@ func (s *GatewayService) SelectAccountWithLoadAwareness(ctx context.Context, gro
 			account, ok := accountByID[accountID]
 			if ok {
 				// 检查账户是否需要清理粘性会话绑定
-				clearSticky := shouldClearStickySession(account, requestedModel)
+				clearSticky := shouldClearStickySessionWithContext(ctx, account, requestedModel)
 				if clearSticky {
 					slog.Debug("sticky.layer1_5_no_routing_clear",
 						"account_id", accountID,
@@ -1128,10 +1128,22 @@ func (s *GatewayService) listSchedulableAccounts(ctx context.Context, groupID *i
 	return accounts, useMixed, nil
 }
 
-// IsSingleAntigravityAccountGroup 检查指定分组是否只有一个 antigravity 平台的可调度账号。
-// 用于 Handler 层在首次请求时提前设置 SingleAccountRetry context，
-// 避免单账号分组收到 503 时错误地设置模型限流标记导致后续请求连续快速失败。
-func (s *GatewayService) IsSingleAntigravityAccountGroup(ctx context.Context, groupID *int64) bool {
+// WithSingleAntigravityAccountGroupProbe 为请求挂载「分组是否只有一个 antigravity 可调度账号」的延迟判定。
+// 只有 antigravity 账号遇到 503 或模型限流预检查时才会查询；其他平台的请求不读取该判定。
+func (s *GatewayService) WithSingleAntigravityAccountGroupProbe(ctx context.Context, groupID *int64) context.Context {
+	var probeGroupID *int64
+	if groupID != nil {
+		id := *groupID
+		probeGroupID = &id
+	}
+	return WithSingleAccountRetryProbe(ctx, func(probeCtx context.Context) bool {
+		return s.isSingleAntigravityAccountGroup(probeCtx, probeGroupID)
+	})
+}
+
+// isSingleAntigravityAccountGroup 检查指定分组是否只有一个 antigravity 平台的可调度账号。
+// 单账号分组收到 503 时原地重试而不设置模型限流，避免后续请求连续快速失败。
+func (s *GatewayService) isSingleAntigravityAccountGroup(ctx context.Context, groupID *int64) bool {
 	accounts, _, err := s.listSchedulableAccounts(ctx, groupID, PlatformAntigravity, true)
 	if err != nil {
 		return false
@@ -1315,9 +1327,9 @@ func (s *GatewayService) withWindowCostPrefetch(ctx context.Context, accounts []
 }
 
 // isAccountSchedulableForQuota 检查账号是否在配额限制内
-// 适用于配置了 quota_limit 的 apikey 和 bedrock 类型账号
+// 适用于配置了 quota_limit 的 apikey、bedrock 和 service_account 类型账号
 func (s *GatewayService) isAccountSchedulableForQuota(account *Account) bool {
-	if !account.IsAPIKeyOrBedrock() {
+	if !account.SupportsAccountQuota() {
 		return true
 	}
 	return !account.IsQuotaExceeded()
@@ -1895,7 +1907,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 					account, err := s.getSchedulableAccount(ctx, accountID)
 					// 检查账号分组归属和平台匹配（确保粘性会话不会跨分组或跨平台）
 					if err == nil {
-						clearSticky := shouldClearStickySession(account, requestedModel)
+						clearSticky := shouldClearStickySessionWithContext(ctx, account, requestedModel)
 						if clearSticky {
 							_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 						}
@@ -2017,7 +2029,7 @@ func (s *GatewayService) selectAccountForModelWithPlatform(ctx context.Context, 
 				account, err := s.getSchedulableAccount(ctx, accountID)
 				// 检查账号分组归属和平台匹配（确保粘性会话不会跨分组或跨平台）
 				if err == nil {
-					clearSticky := shouldClearStickySession(account, requestedModel)
+					clearSticky := shouldClearStickySessionWithContext(ctx, account, requestedModel)
 					if clearSticky {
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					}
@@ -2167,7 +2179,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 					account, err := s.getSchedulableAccount(ctx, accountID)
 					// 检查账号分组归属和有效性：原生平台直接匹配，antigravity 需要启用混合调度
 					if err == nil {
-						clearSticky := shouldClearStickySession(account, requestedModel)
+						clearSticky := shouldClearStickySessionWithContext(ctx, account, requestedModel)
 						if clearSticky {
 							_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 						}
@@ -2291,7 +2303,7 @@ func (s *GatewayService) selectAccountWithMixedScheduling(ctx context.Context, g
 				account, err := s.getSchedulableAccount(ctx, accountID)
 				// 检查账号分组归属和有效性：原生平台直接匹配，antigravity 需要启用混合调度
 				if err == nil {
-					clearSticky := shouldClearStickySession(account, requestedModel)
+					clearSticky := shouldClearStickySessionWithContext(ctx, account, requestedModel)
 					if clearSticky {
 						_ = s.cache.DeleteSessionAccountID(ctx, derefGroupID(groupID), sessionHash)
 					}
@@ -2611,7 +2623,7 @@ func (s *GatewayService) isModelSupportedByAccountWithContext(ctx context.Contex
 			return true
 		}
 		// 使用与转发阶段一致的映射逻辑：自定义映射优先 → 默认映射兜底
-		mapped := mapAntigravityModel(account, requestedModel)
+		mapped := resolveAntigravityMappedModel(ctx, account, requestedModel)
 		if mapped == "" {
 			return false
 		}
@@ -2640,7 +2652,7 @@ func (s *GatewayService) isModelSupportedByAccount(account *Account, requestedMo
 		if strings.TrimSpace(requestedModel) == "" {
 			return true
 		}
-		return mapAntigravityModel(account, requestedModel) != ""
+		return resolveAntigravityMappedModel(context.Background(), account, requestedModel) != ""
 	}
 	if account.IsBedrock() {
 		_, ok := ResolveBedrockModelID(account, requestedModel)

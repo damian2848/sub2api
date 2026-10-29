@@ -31,6 +31,14 @@
         </p>
       </div>
 
+      <div class="space-y-3 rounded-lg border border-gray-200 p-3 dark:border-dark-600">
+        <label class="flex items-center gap-2 text-sm">
+          <input v-model="enableFamilyGroup" type="checkbox" data-testid="enable-family-group" class="rounded border-gray-300 text-primary-600" />
+          {{ t('admin.accounts.familyGroupChange') }}
+        </label>
+        <AccountFamilyGroupInput v-if="enableFamilyGroup" v-model="familyGroup" />
+      </div>
+
       <!-- Excel / BPS protocol (ChatGPT OAuth only) -->
       <div v-if="allOpenAIOAuthOnly && globalBpsEnabled" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
@@ -465,6 +473,25 @@
           </div>
 
           <template v-else>
+            <div v-if="allTargetsAntigravity" class="mb-4">
+              <label class="input-label" for="bulk-edit-model-mapping-update-mode">
+                {{ t('admin.accounts.bulkModelMappingUpdateMode') }}
+              </label>
+              <select
+                id="bulk-edit-model-mapping-update-mode"
+                v-model="modelMappingUpdateMode"
+                class="input"
+                :disabled="!enableModelRestriction"
+              >
+                <option value="merge">{{ t('admin.accounts.bulkModelMappingMerge') }}</option>
+                <option value="replace">{{ t('admin.accounts.bulkModelMappingReplace') }}</option>
+              </select>
+              <p class="input-hint" data-testid="bulk-model-mapping-update-hint">
+                {{ t(modelMappingUpdateMode === 'merge'
+                  ? 'admin.accounts.bulkModelMappingMergeHint'
+                  : 'admin.accounts.bulkModelMappingReplaceHint') }}
+              </p>
+            </div>
             <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.modelRestrictionCombinedHint') }}
             </p>
@@ -551,8 +578,11 @@
 
               <p class="text-xs text-gray-500 dark:text-gray-400">
                 {{ t('admin.accounts.selectedModels', { count: allowedModels.length }) }}
-                <span v-if="allowedModels.length === 0 && modelMappings.length === 0">{{
+                <span v-if="!allTargetsAntigravity && allowedModels.length === 0 && modelMappings.length === 0">{{
                   t('admin.accounts.supportsAllModels')
+                }}</span>
+                <span v-else-if="allTargetsAntigravity && modelMappingUpdateMode === 'replace' && allowedModels.length === 0 && modelMappings.length === 0">{{
+                  t('admin.accounts.antigravityDefaultModelsHint')
                 }}</span>
               </p>
             </div>
@@ -1624,6 +1654,7 @@
 </template>
 
 <script setup lang="ts">
+import AccountFamilyGroupInput from './AccountFamilyGroupInput.vue'
 import { DEFAULT_ACCOUNT_COST_MULTIPLIER, isValidAccountCostMultiplier } from '@/utils/accountCost'
 
 import { ref, watch, computed } from 'vue'
@@ -1715,6 +1746,11 @@ const allTargetsGrok = computed(
   () =>
     targetSelectedPlatforms.value.length > 0 &&
     targetSelectedPlatforms.value.every((p) => p === 'grok')
+)
+const allTargetsAntigravity = computed(
+  () =>
+    targetSelectedPlatforms.value.length > 0 &&
+    targetSelectedPlatforms.value.every((platform) => platform === 'antigravity')
 )
 const isMixedPlatform = computed(() => targetSelectedPlatforms.value.length > 1)
 
@@ -1813,6 +1849,8 @@ interface ModelMapping {
 }
 
 // State - field enable flags
+const enableFamilyGroup = ref(false)
+const familyGroup = ref('')
 const enableBaseUrl = ref(false)
 const enableModelRestriction = ref(false)
 const enableOpenAIModelAliases = ref(false)
@@ -1854,6 +1892,7 @@ const mixedChannelWarningMessage = ref('')
 const pendingUpdatesForConfirm = ref<Record<string, unknown> | null>(null)
 const baseUrl = ref('')
 const modelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
+const modelMappingUpdateMode = ref<'merge' | 'replace'>('merge')
 const allowedModels = ref<string[]>([])
 const modelMappings = ref<ModelMapping[]>([])
 const selectedErrorCodes = ref<number[]>([])
@@ -2153,6 +2192,10 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     return updates.extra as Record<string, unknown>
   }
 
+  if (enableFamilyGroup.value) {
+    ensureExtra().family_group = familyGroup.value.trim()
+  }
+
   if (enableProxy.value) {
     // 后端期望 proxy_id: 0 表示清除代理，而不是 null
     updates.proxy_id = proxyId.value === null ? 0 : proxyId.value
@@ -2271,10 +2314,16 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
   }
 
   if (enableModelRestriction.value && !isOpenAIModelRestrictionDisabled.value) {
-    // Tabs only choose the editor; both sides are saved together. An explicitly
-    // enabled empty configuration still clears existing custom restrictions.
-    credentials.model_mapping = buildModelMappingObject() ?? {}
-    credentialsChanged = true
+    // Tabs only choose the editor; both sides are saved together. Antigravity
+    // merges by default so editing one side preserves other existing rules.
+    const mapping = buildModelMappingObject()
+    if (!allTargetsAntigravity.value || modelMappingUpdateMode.value === 'replace' || mapping) {
+      credentials.model_mapping = mapping ?? {}
+      credentialsChanged = true
+      if (allTargetsAntigravity.value) {
+        updates.model_mapping_update_mode = modelMappingUpdateMode.value
+      }
+    }
   }
 
   if (enableOpenAIModelAliases.value && allOpenAIOAuthOnly.value) {
@@ -2444,6 +2493,7 @@ const handleSubmit = async () => {
   }
 
   const hasAnyFieldEnabled =
+    enableFamilyGroup.value ||
     enableBaseUrl.value ||
     (enableExcelBPS.value && allOpenAIOAuthOnly.value) ||
     enableOpenAIPassthrough.value ||
@@ -2618,6 +2668,8 @@ watch(
   (newShow) => {
     if (!newShow) {
       // Reset all enable flags
+      enableFamilyGroup.value = false
+      familyGroup.value = ''
       enableBaseUrl.value = false
       enableModelRestriction.value = false
       enableOpenAIModelAliases.value = false
@@ -2675,6 +2727,7 @@ watch(
       openAIEndpointCapabilities.value = ['chat_completions', 'embeddings']
       openAIResponsesMode.value = 'auto'
       modelRestrictionMode.value = 'whitelist'
+      modelMappingUpdateMode.value = 'merge'
       allowedModels.value = []
       modelMappings.value = []
       selectedErrorCodes.value = []
