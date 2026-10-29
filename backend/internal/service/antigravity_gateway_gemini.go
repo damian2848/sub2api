@@ -368,6 +368,9 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 		upstreamMsg := strings.TrimSpace(extractAntigravityErrorMessage(unwrappedForOps))
 		upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
 		upstreamDetail := s.getUpstreamErrorDetail(unwrappedForOps)
+		if isGeminiModelTurnRejection(resp.StatusCode, upstreamMsg) {
+			logGeminiModelTurnRejection(ctx, account, originalModel, mappedModel, stream, body, injectedBody)
+		}
 
 		// Always record upstream context for Ops error logs, even when we will failover.
 		setOpsUpstreamError(c, resp.StatusCode, upstreamMsg, upstreamDetail)
