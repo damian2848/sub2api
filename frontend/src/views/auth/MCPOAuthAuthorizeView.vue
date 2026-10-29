@@ -23,7 +23,7 @@
             </div>
             <div>
               <dt class="text-gray-500 dark:text-gray-400">{{ t('mcp.clientId') }}</dt>
-              <dd class="mt-1 break-all font-mono text-xs text-gray-700 dark:text-gray-200">{{ consent.client_id }}</dd>
+              <dd class="mt-1 truncate font-mono text-xs text-gray-700 dark:text-gray-200" :title="consent.client_id">{{ consent.client_id }}</dd>
             </div>
             <div>
               <dt class="text-gray-500 dark:text-gray-400">{{ t('mcp.returnAddress') }}</dt>

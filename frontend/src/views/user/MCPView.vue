@@ -51,7 +51,7 @@
                   <span class="rounded-md bg-primary-50 px-2 py-0.5 text-xs text-primary-700 dark:bg-primary-900/20 dark:text-primary-300">{{ grant.read_only ? t('mcp.readOnly') : t('mcp.readWrite') }}</span>
                   <span class="text-xs" :class="isActive(grant) ? 'text-emerald-600 dark:text-emerald-400' : 'text-gray-500 dark:text-gray-400'">{{ grantStatus(grant) }}</span>
                 </div>
-                <p class="break-all font-mono text-xs text-gray-500 dark:text-gray-400">{{ grant.client_id }}</p>
+                <p class="truncate font-mono text-xs text-gray-500 dark:text-gray-400" :title="grant.client_id">{{ grant.client_id }}</p>
                 <div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
                   <span>{{ t('mcp.createdAt', { date: formatDate(grant.created_at) }) }}</span>
                   <span>{{ t('mcp.expiresAt', { date: formatDate(grant.expires_at) }) }}</span>
