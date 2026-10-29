@@ -2,11 +2,13 @@ package service
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"strings"
@@ -25,12 +27,12 @@ const (
 	MCPOAuthAccessLifetime = 10 * time.Minute
 	MCPOAuthCodeLifetime   = 5 * time.Minute
 	MCPOAuthGrantLifetime  = 30 * 24 * time.Hour
-	// Registration is unauthenticated: clients that never obtain a grant expire
-	// quickly, and the number awaiting authorization is capped globally.
-	MCPOAuthPendingClientLifetime = 24 * time.Hour
-	MCPOAuthPendingClientLimit    = 1000
 	// last_used_at is advisory; writing it once per interval keeps requests read-only.
 	MCPOAuthTouchInterval = time.Minute
+
+	mcpOAuthClientIDPrefix = "mcp_client_"
+	// Registration bounds keep issued IDs well below this limit.
+	mcpOAuthClientIDMaxLength = 2048
 )
 
 var (
@@ -38,7 +40,6 @@ var (
 	ErrMCPOAuthNotFound      = errors.New("MCP OAuth record not found")
 	ErrMCPOAuthGrantLimit    = infraerrors.Conflict("MCP_GRANT_LIMIT", "Revoke an existing MCP authorization before authorizing another client (maximum 20 active authorizations)")
 	ErrMCPOAuthGrantNotFound = infraerrors.NotFound("MCP_GRANT_NOT_FOUND", "MCP authorization not found")
-	ErrMCPOAuthClientLimit   = errors.New("too many MCP OAuth clients are awaiting authorization")
 )
 
 type MCPOAuthError struct {
@@ -157,10 +158,8 @@ type MCPOAuthCredential struct {
 }
 
 type MCPOAuthRepository interface {
-	// CreateClient returns ErrMCPOAuthClientLimit when the given number of
-	// recently registered clients without any grant already exists.
-	CreateClient(context.Context, *MCPOAuthClient, int) error
-	GetClient(context.Context, string) (*MCPOAuthClient, error)
+	// ClientIDKey returns the persistent key that signs stateless client IDs.
+	ClientIDKey(context.Context) ([]byte, error)
 	CreateAuthorization(context.Context, *MCPOAuthGrant, *MCPOAuthCode, int) error
 	GetCode(context.Context, string) (*MCPOAuthCode, error)
 	GetCredential(context.Context, string) (*MCPOAuthCredential, error)
@@ -222,19 +221,102 @@ func (s *MCPOAuthService) Register(ctx context.Context, input MCPOAuthRegisterIn
 	if len(input.ResponseTypes) != 0 && (len(input.ResponseTypes) != 1 || input.ResponseTypes[0] != "code") {
 		return nil, mcpOAuthError("invalid_client_metadata", "Only the code response type is supported")
 	}
-	id, err := mcpOAuthSecret("mcp_client_")
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	claims := mcpOAuthClientClaims{Name: input.ClientName, GrantTypes: append([]string(nil), grants...)}
+	for _, uri := range redirects {
+		claims.RedirectDigests = append(claims.RedirectDigests, mcpOAuthRedirectDigest(uri))
+	}
+	id, err := s.encodeClientID(ctx, base64.RawURLEncoding.EncodeToString(nonce), &claims)
 	if err != nil {
 		return nil, err
 	}
-	client := &MCPOAuthClient{
+	return &MCPOAuthClient{
 		ClientID: id, ClientName: input.ClientName, RedirectURIs: redirects,
-		GrantTypes: append([]string(nil), grants...), ResponseTypes: []string{"code"},
+		GrantTypes: claims.GrantTypes, ResponseTypes: []string{"code"},
 		TokenEndpointAuthMethod: "none", ClientIDIssuedAt: time.Now().UTC().Unix(),
+	}, nil
+}
+
+// Registration is unauthenticated, so it is never persisted: the client ID is
+// the signed metadata itself. Nothing is stored until a user approves a client,
+// leaving no storage or shared capacity for anonymous registrations to exhaust.
+// Redirect URIs are embedded as digests to keep IDs short enough for URLs.
+//
+// Format: mcp_client_<nonce>.<base64url claims>.<HMAC of nonce and claims>.
+// The random nonce leads, so truncated IDs still tell clients apart.
+type mcpOAuthClientClaims struct {
+	Name            string   `json:"n"`
+	RedirectDigests []string `json:"r"`
+	GrantTypes      []string `json:"g"`
+}
+
+func (c *mcpOAuthClientClaims) allowsRedirect(uri string) bool {
+	return containsMCPString(c.RedirectDigests, mcpOAuthRedirectDigest(uri))
+}
+
+func mcpOAuthRedirectDigest(uri string) string {
+	sum := sha256.Sum256([]byte(uri))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func (s *MCPOAuthService) encodeClientID(ctx context.Context, nonce string, claims *mcpOAuthClientClaims) (string, error) {
+	raw, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
 	}
-	if err := s.repo.CreateClient(ctx, client, MCPOAuthPendingClientLimit); err != nil {
+	signed := nonce + "." + base64.RawURLEncoding.EncodeToString(raw)
+	signature, err := s.signClientID(ctx, signed)
+	if err != nil {
+		return "", err
+	}
+	return mcpOAuthClientIDPrefix + signed + "." + signature, nil
+}
+
+// client verifies a client ID and returns its metadata. IDs that were not
+// issued by this server yield ErrMCPOAuthNotFound.
+func (s *MCPOAuthService) client(ctx context.Context, id string) (*mcpOAuthClientClaims, error) {
+	if len(id) > mcpOAuthClientIDMaxLength || !strings.HasPrefix(id, mcpOAuthClientIDPrefix) {
+		return nil, ErrMCPOAuthNotFound
+	}
+	signed := id[len(mcpOAuthClientIDPrefix):]
+	dot := strings.LastIndexByte(signed, '.')
+	if dot < 0 {
+		return nil, ErrMCPOAuthNotFound
+	}
+	signed, signature := signed[:dot], signed[dot+1:]
+	expected, err := s.signClientID(ctx, signed)
+	if err != nil {
 		return nil, err
 	}
-	return client, nil
+	if !hmac.Equal([]byte(signature), []byte(expected)) {
+		return nil, ErrMCPOAuthNotFound
+	}
+	_, payload, ok := strings.Cut(signed, ".")
+	if !ok {
+		return nil, ErrMCPOAuthNotFound
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, ErrMCPOAuthNotFound
+	}
+	var claims mcpOAuthClientClaims
+	if err := json.Unmarshal(raw, &claims); err != nil {
+		return nil, ErrMCPOAuthNotFound
+	}
+	return &claims, nil
+}
+
+func (s *MCPOAuthService) signClientID(ctx context.Context, payload string) (string, error) {
+	key, err := s.repo.ClientIDKey(ctx)
+	if err != nil {
+		return "", err
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(payload))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), nil
 }
 
 func validMCPClientName(name string) bool {
@@ -287,15 +369,15 @@ func validMCPOAuthScope(scope string) bool {
 	return len(fields) == 0 || (len(fields) == 1 && fields[0] == MCPOAuthScope)
 }
 
-func (s *MCPOAuthService) validateAuthorization(ctx context.Context, userID int64, input MCPOAuthAuthorizeInput, resource string) (*MCPOAuthClient, *User, error) {
-	client, err := s.repo.GetClient(ctx, input.ClientID)
+func (s *MCPOAuthService) validateAuthorization(ctx context.Context, userID int64, input MCPOAuthAuthorizeInput, resource string) (*mcpOAuthClientClaims, *User, error) {
+	client, err := s.client(ctx, input.ClientID)
 	if errors.Is(err, ErrMCPOAuthNotFound) {
 		return nil, nil, mcpOAuthError("invalid_client", "Unknown client")
 	}
 	if err != nil {
 		return nil, nil, err
 	}
-	if client == nil || !containsMCPString(client.RedirectURIs, input.RedirectURI) {
+	if !client.allowsRedirect(input.RedirectURI) {
 		return nil, nil, mcpOAuthError("invalid_request", "redirect_uri must exactly match a registered URI")
 	}
 	if input.ResponseType != "code" {
@@ -329,7 +411,7 @@ func (s *MCPOAuthService) Preview(ctx context.Context, userID int64, input MCPOA
 	if err != nil {
 		return nil, err
 	}
-	return &MCPOAuthConsent{ClientID: client.ClientID, ClientName: client.ClientName, RedirectURI: input.RedirectURI, Resource: resource, Scope: MCPOAuthScope}, nil
+	return &MCPOAuthConsent{ClientID: input.ClientID, ClientName: client.Name, RedirectURI: input.RedirectURI, Resource: resource, Scope: MCPOAuthScope}, nil
 }
 
 func (s *MCPOAuthService) Decide(ctx context.Context, userID int64, input MCPOAuthConsentInput, resource string) (string, error) {
@@ -370,13 +452,13 @@ func (s *MCPOAuthService) Decide(ctx context.Context, userID int64, input MCPOAu
 		return "", err
 	}
 	now := time.Now().UTC()
-	grant := &MCPOAuthGrant{ID: id, ClientID: client.ClientID, ClientName: client.ClientName,
+	grant := &MCPOAuthGrant{ID: id, ClientID: input.Authorization.ClientID, ClientName: client.Name,
 		UserID: user.ID, TokenVersion: resolvedTokenVersion(user), Resource: resource,
 		Scope: input.Scope, ReadOnly: true, CreatedAt: now, ExpiresAt: now.Add(MCPOAuthGrantLifetime)}
 	if input.ReadOnly != nil {
 		grant.ReadOnly = *input.ReadOnly
 	}
-	code := &MCPOAuthCode{Hash: hashMCPOAuthSecret(rawCode), GrantID: grant.ID, ClientID: client.ClientID,
+	code := &MCPOAuthCode{Hash: hashMCPOAuthSecret(rawCode), GrantID: grant.ID, ClientID: grant.ClientID,
 		RedirectURI: input.Authorization.RedirectURI, Resource: resource, CodeChallenge: input.Authorization.CodeChallenge,
 		ExpiresAt: now.Add(MCPOAuthCodeLifetime)}
 	if err := s.repo.CreateAuthorization(ctx, grant, code, MCPOAuthGrantLimit); err != nil {
@@ -388,8 +470,8 @@ func (s *MCPOAuthService) Decide(ctx context.Context, userID int64, input MCPOAu
 }
 
 func (s *MCPOAuthService) Token(ctx context.Context, input MCPOAuthTokenInput, resource string) (*MCPOAuthTokenResponse, error) {
-	client, err := s.repo.GetClient(ctx, input.ClientID)
-	if errors.Is(err, ErrMCPOAuthNotFound) || (err == nil && client == nil) {
+	client, err := s.client(ctx, input.ClientID)
+	if errors.Is(err, ErrMCPOAuthNotFound) {
 		return nil, mcpOAuthError("invalid_client", "Unknown client")
 	}
 	if err != nil {

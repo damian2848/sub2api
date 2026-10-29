@@ -379,7 +379,9 @@ func TestMCPToolResultIsReturnedOnceAndBoundedAfterEncoding(t *testing.T) {
 	content, ok := toolResult["content"].([]any)
 	require.True(t, ok)
 	require.Len(t, content, 1)
-	require.JSONEq(t, `{"http_status":200,"result":{"data":{"name":"ok"}}}`, rpcObject(t, content[0])["text"].(string))
+	text, ok := rpcObject(t, content[0])["text"].(string)
+	require.True(t, ok)
+	require.JSONEq(t, `{"http_status":200,"result":{"data":{"name":"ok"}}}`, text)
 
 	// Under the capture limit as received, but HTML escaping expands it 6x.
 	payload = `{"data":"` + strings.Repeat("<", maxResultBytes/3) + `"}`

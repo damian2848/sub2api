@@ -5,46 +5,45 @@ package repository
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/Wei-Shaw/sub2api/ent/securitysecret"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
 
-func TestMCPOAuthRepositoryRegistrationPrunesOnlyOldUnreferencedDataInBatches(t *testing.T) {
-	for _, atLimit := range []bool{false, true} {
-		t.Run(map[bool]string{false: "create", true: "at pending limit"}[atLimit], func(t *testing.T) {
-			db, mock, err := sqlmock.New()
-			require.NoError(t, err)
-			defer db.Close()
-			repo := NewMCPOAuthRepository(db)
-			now := time.Unix(1800000000, 0).UTC()
-			pendingSince := now.Add(-service.MCPOAuthPendingClientLifetime)
-			client := &service.MCPOAuthClient{ClientID: "client", ClientName: "Client", RedirectURIs: []string{"https://client.example/cb"}, GrantTypes: []string{"authorization_code", "refresh_token"}, ClientIDIssuedAt: now.Unix()}
-			pending := 999
-			if atLimit {
-				pending = 1000
-			}
-			mock.ExpectBegin()
-			mock.ExpectExec(`SELECT pg_advisory_xact_lock\(hashtext\('mcp_oauth_client_registration'\)\)`).WillReturnResult(sqlmock.NewResult(0, 0))
-			mock.ExpectExec(`DELETE FROM mcp_oauth_grants WHERE id IN \(SELECT id FROM mcp_oauth_grants WHERE expires_at<\$1 ORDER BY expires_at LIMIT 100 FOR UPDATE SKIP LOCKED\)`).WithArgs(now.Add(-7 * 24 * time.Hour)).WillReturnResult(sqlmock.NewResult(0, 2))
-			mock.ExpectQuery(`SELECT c.client_id FROM mcp_oauth_clients c WHERE c.created_at<\$1 AND NOT EXISTS \(SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id=c.client_id\) ORDER BY c.created_at LIMIT 100 FOR UPDATE SKIP LOCKED`).WithArgs(pendingSince).WillReturnRows(sqlmock.NewRows([]string{"client_id"}).AddRow("stale-client"))
-			mock.ExpectExec(`DELETE FROM mcp_oauth_clients c WHERE c.client_id=ANY\(\$1\) AND NOT EXISTS \(SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id=c.client_id\)`).WithArgs(`{"stale-client"}`).WillReturnResult(sqlmock.NewResult(0, 1))
-			mock.ExpectQuery(`SELECT COUNT\(\*\) FROM mcp_oauth_clients c WHERE c.created_at>=\$1 AND NOT EXISTS \(SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id=c.client_id\)`).WithArgs(pendingSince).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(pending))
-			if atLimit {
-				// Cleanup still commits so capacity recovers; nothing is inserted.
-				mock.ExpectCommit()
-				require.ErrorIs(t, repo.CreateClient(context.Background(), client, 1000), service.ErrMCPOAuthClientLimit)
-			} else {
-				mock.ExpectExec(`INSERT INTO mcp_oauth_clients`).WithArgs(client.ClientID, client.ClientName, `["https://client.example/cb"]`, `["authorization_code","refresh_token"]`, now).WillReturnResult(sqlmock.NewResult(0, 1))
-				mock.ExpectCommit()
-				require.NoError(t, repo.CreateClient(context.Background(), client, 1000))
-			}
-			require.NoError(t, mock.ExpectationsWereMet())
-		})
-	}
+func TestMCPOAuthRepositoryClientIDKeyIsPersistedAndCached(t *testing.T) {
+	ctx := context.Background()
+	client := newSecuritySecretTestClient(t)
+	repo := NewMCPOAuthRepository(client, nil)
+	key, err := repo.ClientIDKey(ctx)
+	require.NoError(t, err)
+	require.Len(t, key, 64)
+	other, err := NewMCPOAuthRepository(client, nil).ClientIDKey(ctx)
+	require.NoError(t, err)
+	require.Equal(t, key, other, "instances must share the stored key")
+	_, err = client.SecuritySecret.Delete().Where(securitysecret.KeyEQ(mcpOAuthClientIDKeyName)).Exec(ctx)
+	require.NoError(t, err)
+	cached, err := repo.ClientIDKey(ctx)
+	require.NoError(t, err)
+	require.Equal(t, key, cached, "a loaded key is served from memory")
+}
+
+func TestMCPOAuthRepositoryClientIDKeyDoesNotCacheInvalidSecret(t *testing.T) {
+	ctx := context.Background()
+	client := newSecuritySecretTestClient(t)
+	require.NoError(t, client.SecuritySecret.Create().SetKey(mcpOAuthClientIDKeyName).SetValue("short").Exec(ctx))
+	repo := NewMCPOAuthRepository(client, nil)
+	_, err := repo.ClientIDKey(ctx)
+	require.Error(t, err)
+	valid := strings.Repeat("c", 64)
+	require.NoError(t, client.SecuritySecret.Update().Where(securitysecret.KeyEQ(mcpOAuthClientIDKeyName)).SetValue(valid).Exec(ctx))
+	key, err := repo.ClientIDKey(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []byte(valid), key)
 }
 
 func TestMCPOAuthRepositoryConsumptionCommitsReplayRevocation(t *testing.T) {
@@ -53,7 +52,7 @@ func TestMCPOAuthRepositoryConsumptionCommitsReplayRevocation(t *testing.T) {
 			db, mock, err := sqlmock.New()
 			require.NoError(t, err)
 			defer db.Close()
-			repo := NewMCPOAuthRepository(db)
+			repo := NewMCPOAuthRepository(nil, db)
 			now := time.Now().UTC()
 			used := now.Add(-time.Minute)
 			mock.ExpectBegin()
@@ -87,7 +86,7 @@ func TestMCPOAuthRepositoryConsumptionAndIssuanceAreOneTransaction(t *testing.T)
 				db, mock, err := sqlmock.New()
 				require.NoError(t, err)
 				defer db.Close()
-				repo := NewMCPOAuthRepository(db)
+				repo := NewMCPOAuthRepository(nil, db)
 				now := time.Now().UTC()
 				access := &service.MCPOAuthCredential{Hash: "access-digest", GrantID: "grant", Kind: "access", ExpiresAt: now.Add(10 * time.Minute)}
 				refresh := &service.MCPOAuthCredential{Hash: "refresh-digest", GrantID: "grant", Kind: "refresh", ExpiresAt: now.Add(time.Hour)}
@@ -131,7 +130,7 @@ func TestMCPOAuthRepositoryRejectsExpiredAndRevokedFamilies(t *testing.T) {
 	for _, revoked := range []bool{false, true} {
 		db, mock, err := sqlmock.New()
 		require.NoError(t, err)
-		repo := NewMCPOAuthRepository(db)
+		repo := NewMCPOAuthRepository(nil, db)
 		now := time.Now().UTC()
 		var revokedAt *time.Time
 		expiry := now.Add(-time.Second)
@@ -155,14 +154,16 @@ func TestMCPOAuthRepositoryAuthorizationSerializesLimit(t *testing.T) {
 			db, mock, err := sqlmock.New()
 			require.NoError(t, err)
 			defer db.Close()
-			repo := NewMCPOAuthRepository(db)
+			repo := NewMCPOAuthRepository(nil, db)
 			now := time.Now().UTC()
-			grant := &service.MCPOAuthGrant{ID: "grant", ClientID: "client", UserID: 7, TokenVersion: 42, Resource: "https://example.com/mcp", Scope: "user", ReadOnly: true, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+			grant := &service.MCPOAuthGrant{ID: "grant", ClientID: "client", ClientName: "Client", UserID: 7, TokenVersion: 42, Resource: "https://example.com/mcp", Scope: "user", ReadOnly: true, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
 			code := &service.MCPOAuthCode{Hash: "code-digest", GrantID: grant.ID, ClientID: grant.ClientID, RedirectURI: "https://client.example/cb", Resource: grant.Resource, CodeChallenge: "challenge", ExpiresAt: now.Add(time.Minute)}
 			count := 19
 			if atLimit {
 				count = 20
 			}
+			// Bounded retention runs before the owner row is locked.
+			mock.ExpectExec(`DELETE FROM mcp_oauth_grants WHERE id IN \(SELECT id FROM mcp_oauth_grants WHERE expires_at<\$1 ORDER BY expires_at LIMIT 100 FOR UPDATE SKIP LOCKED\)`).WithArgs(now.Add(-7 * 24 * time.Hour)).WillReturnResult(sqlmock.NewResult(0, 2))
 			mock.ExpectBegin()
 			mock.ExpectQuery(`SELECT id FROM users WHERE id=\$1 AND deleted_at IS NULL FOR UPDATE`).WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(7))
 			mock.ExpectQuery(`SELECT COUNT\(\*\) FROM mcp_oauth_grants WHERE user_id=\$1 AND revoked_at IS NULL AND expires_at>\$2`).WithArgs(int64(7), now).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(count))
@@ -170,7 +171,7 @@ func TestMCPOAuthRepositoryAuthorizationSerializesLimit(t *testing.T) {
 				mock.ExpectRollback()
 				require.ErrorIs(t, repo.CreateAuthorization(context.Background(), grant, code, 20), service.ErrMCPOAuthGrantLimit)
 			} else {
-				mock.ExpectExec(`INSERT INTO mcp_oauth_grants`).WithArgs(grant.ID, grant.ClientID, grant.UserID, grant.TokenVersion, grant.Resource, grant.Scope, grant.ReadOnly, grant.CreatedAt, grant.ExpiresAt).WillReturnResult(sqlmock.NewResult(0, 1))
+				mock.ExpectExec(`INSERT INTO mcp_oauth_grants`).WithArgs(grant.ID, grant.ClientID, grant.ClientName, grant.UserID, grant.TokenVersion, grant.Resource, grant.Scope, grant.ReadOnly, grant.CreatedAt, grant.ExpiresAt).WillReturnResult(sqlmock.NewResult(0, 1))
 				mock.ExpectExec(`INSERT INTO mcp_oauth_codes`).WithArgs(code.Hash, code.GrantID, code.ClientID, code.RedirectURI, code.Resource, code.CodeChallenge, code.ExpiresAt).WillReturnResult(sqlmock.NewResult(0, 1))
 				mock.ExpectCommit()
 				require.NoError(t, repo.CreateAuthorization(context.Background(), grant, code, 20))
@@ -184,7 +185,7 @@ func TestMCPOAuthRepositoryOwnerAndRevocationBoundaries(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer db.Close()
-	repo := NewMCPOAuthRepository(db)
+	repo := NewMCPOAuthRepository(nil, db)
 	now := time.Now().UTC()
 	mock.ExpectExec(`UPDATE mcp_oauth_grants SET revoked_at=COALESCE\(revoked_at,\$3\) WHERE id=\$1 AND user_id=\$2`).WithArgs("grant", int64(8), now).WillReturnResult(sqlmock.NewResult(0, 0))
 	require.ErrorIs(t, repo.RevokeGrant(context.Background(), 8, "grant", now), service.ErrMCPOAuthNotFound)
@@ -197,7 +198,7 @@ func TestMCPOAuthRepositoryRevokeUserGrantsCoversEveryActiveGrant(t *testing.T) 
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
 	defer db.Close()
-	repo := NewMCPOAuthRepository(db)
+	repo := NewMCPOAuthRepository(nil, db)
 	now := time.Now().UTC()
 	mock.ExpectExec(`UPDATE mcp_oauth_grants SET revoked_at=\$2 WHERE user_id=\$1 AND revoked_at IS NULL$`).WithArgs(int64(8), now).WillReturnResult(sqlmock.NewResult(0, 0))
 	require.NoError(t, repo.RevokeUserGrants(context.Background(), 8, now), "no active grants is not an error")

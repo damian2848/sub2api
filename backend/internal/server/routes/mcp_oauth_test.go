@@ -29,27 +29,13 @@ import (
 // database. SQL locking/rollback behavior is covered by repository unit tests.
 type mcpOAuthRouteRepo struct {
 	mu          sync.Mutex
-	clients     map[string]*service.MCPOAuthClient
 	grants      map[string]*service.MCPOAuthGrant
 	codes       map[string]*service.MCPOAuthCode
 	credentials map[string]*service.MCPOAuthCredential
 }
 
-func (r *mcpOAuthRouteRepo) CreateClient(_ context.Context, client *service.MCPOAuthClient, _ int) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.clients[client.ClientID] = client
-	return nil
-}
-
-func (r *mcpOAuthRouteRepo) GetClient(_ context.Context, id string) (*service.MCPOAuthClient, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if item := r.clients[id]; item != nil {
-		copy := *item
-		return &copy, nil
-	}
-	return nil, service.ErrMCPOAuthNotFound
+func (r *mcpOAuthRouteRepo) ClientIDKey(context.Context) ([]byte, error) {
+	return []byte("route-test-mcp-client-id-key-000"), nil
 }
 
 func (r *mcpOAuthRouteRepo) CreateAuthorization(_ context.Context, grant *service.MCPOAuthGrant, code *service.MCPOAuthCode, limit int) error {
@@ -210,8 +196,8 @@ func (r *mcpOAuthRouteUsers) GetUserAvatar(context.Context, int64) (*service.Use
 
 func newMCPRouteOAuthService(role string) (*service.MCPOAuthService, *mcpOAuthRouteRepo, *mcpOAuthRouteUsers) {
 	repo := &mcpOAuthRouteRepo{
-		clients: map[string]*service.MCPOAuthClient{}, grants: map[string]*service.MCPOAuthGrant{},
-		codes: map[string]*service.MCPOAuthCode{}, credentials: map[string]*service.MCPOAuthCredential{},
+		grants: map[string]*service.MCPOAuthGrant{}, codes: map[string]*service.MCPOAuthCode{},
+		credentials: map[string]*service.MCPOAuthCredential{},
 	}
 	users := &mcpOAuthRouteUsers{user: &service.User{ID: 7, Role: role, Status: service.StatusActive, PasswordHash: "test-password", Email: "mcp@example.com"}}
 	return service.NewMCPOAuthService(repo, users), repo, users

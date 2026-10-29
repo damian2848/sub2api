@@ -3,112 +3,51 @@ package repository
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"time"
 
+	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/service"
-	"github.com/lib/pq"
 )
 
-type mcpOAuthRepository struct{ db *sql.DB }
+const mcpOAuthClientIDKeyName = "mcp_oauth_client_id_key"
 
-func NewMCPOAuthRepository(db *sql.DB) service.MCPOAuthRepository {
-	return &mcpOAuthRepository{db: db}
+type mcpOAuthRepository struct {
+	client      *dbent.Client
+	db          *sql.DB
+	clientIDKey atomic.Pointer[[]byte]
 }
 
-func (r *mcpOAuthRepository) CreateClient(ctx context.Context, client *service.MCPOAuthClient, pendingLimit int) error {
-	redirects, err := json.Marshal(client.RedirectURIs)
-	if err != nil {
-		return err
-	}
-	grants, err := json.Marshal(client.GrantTypes)
-	if err != nil {
-		return err
-	}
-	// Registration is unauthenticated, so it performs bounded retention work and
-	// caps clients awaiting authorization. Active authorizations protect their
-	// client registration; used refresh hashes remain for the entire grant
-	// lifetime so replay detection is never shortened by cleanup.
-	now := time.Unix(client.ClientIDIssuedAt, 0).UTC()
-	pendingSince := now.Add(-service.MCPOAuthPendingClientLifetime)
-	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	// Serialize registrations so concurrent requests cannot overshoot the cap.
-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('mcp_oauth_client_registration'))`); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM mcp_oauth_grants WHERE id IN (SELECT id FROM mcp_oauth_grants WHERE expires_at<$1 ORDER BY expires_at LIMIT 100 FOR UPDATE SKIP LOCKED)`, now.Add(-7*24*time.Hour)); err != nil {
-		return err
-	}
-	rows, err := tx.QueryContext(ctx, `SELECT c.client_id FROM mcp_oauth_clients c WHERE c.created_at<$1 AND NOT EXISTS (SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id=c.client_id) ORDER BY c.created_at LIMIT 100 FOR UPDATE SKIP LOCKED`, pendingSince)
-	if err != nil {
-		return err
-	}
-	var staleClientIDs []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		staleClientIDs = append(staleClientIDs, id)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if len(staleClientIDs) != 0 {
-		// The second statement gets a fresh READ COMMITTED snapshot after the
-		// client rows are locked. A concurrent consent that committed just before
-		// those locks must protect its newly inserted grant from client cleanup.
-		if _, err := tx.ExecContext(ctx, `DELETE FROM mcp_oauth_clients c WHERE c.client_id=ANY($1) AND NOT EXISTS (SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id=c.client_id)`, pq.Array(staleClientIDs)); err != nil {
-			return err
-		}
-	}
-	var pending int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM mcp_oauth_clients c WHERE c.created_at>=$1 AND NOT EXISTS (SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id=c.client_id)`, pendingSince).Scan(&pending); err != nil {
-		return err
-	}
-	if pending >= pendingLimit {
-		// Keep the retention work so capacity recovers as registrations expire.
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		return service.ErrMCPOAuthClientLimit
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO mcp_oauth_clients (client_id,client_name,redirect_uris,grant_types,created_at) VALUES ($1,$2,$3,$4,$5)`, client.ClientID, client.ClientName, string(redirects), string(grants), now); err != nil {
-		return err
-	}
-	return tx.Commit()
+func NewMCPOAuthRepository(client *dbent.Client, db *sql.DB) service.MCPOAuthRepository {
+	return &mcpOAuthRepository{client: client, db: db}
 }
 
-func (r *mcpOAuthRepository) GetClient(ctx context.Context, id string) (*service.MCPOAuthClient, error) {
-	client := &service.MCPOAuthClient{TokenEndpointAuthMethod: "none", ResponseTypes: []string{"code"}}
-	var redirects, grants []byte
-	var createdAt time.Time
-	err := r.db.QueryRowContext(ctx, `SELECT client_id,client_name,redirect_uris,grant_types,created_at FROM mcp_oauth_clients WHERE client_id=$1`, id).
-		Scan(&client.ClientID, &client.ClientName, &redirects, &grants, &createdAt)
+// ClientIDKey loads the key that signs stateless client IDs, creating it on
+// first use. It is persisted so issued client IDs and grants survive restarts,
+// and instances racing to create it converge on the stored value.
+func (r *mcpOAuthRepository) ClientIDKey(ctx context.Context) ([]byte, error) {
+	if key := r.clientIDKey.Load(); key != nil {
+		return *key, nil
+	}
+	value, _, err := getOrCreateGeneratedSecuritySecret(ctx, r.client, mcpOAuthClientIDKeyName, 32)
 	if err != nil {
-		return nil, mcpOAuthSQLError(err)
-	}
-	if err := json.Unmarshal(redirects, &client.RedirectURIs); err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal(grants, &client.GrantTypes); err != nil {
-		return nil, err
-	}
-	client.ClientIDIssuedAt = createdAt.Unix()
-	return client, nil
+	key := []byte(value)
+	r.clientIDKey.Store(&key)
+	return key, nil
 }
 
 func (r *mcpOAuthRepository) CreateAuthorization(ctx context.Context, grant *service.MCPOAuthGrant, code *service.MCPOAuthCode, limit int) error {
+	// Grants are the only rows that outlive a request, so each new one performs
+	// bounded retention work. It runs before the owner row is locked, keeping
+	// cascaded deletes from blocking other updates to that user. Used refresh
+	// hashes remain for the entire grant lifetime so replay detection is never
+	// shortened by cleanup.
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM mcp_oauth_grants WHERE id IN (SELECT id FROM mcp_oauth_grants WHERE expires_at<$1 ORDER BY expires_at LIMIT 100 FOR UPDATE SKIP LOCKED)`, grant.CreatedAt.Add(-7*24*time.Hour)); err != nil {
+		return err
+	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -126,8 +65,8 @@ func (r *mcpOAuthRepository) CreateAuthorization(ctx context.Context, grant *ser
 	if count >= limit {
 		return service.ErrMCPOAuthGrantLimit
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO mcp_oauth_grants (id,client_id,user_id,token_version,resource,scope,read_only,created_at,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		grant.ID, grant.ClientID, grant.UserID, grant.TokenVersion, grant.Resource, grant.Scope, grant.ReadOnly, grant.CreatedAt, grant.ExpiresAt)
+	_, err = tx.ExecContext(ctx, `INSERT INTO mcp_oauth_grants (id,client_id,client_name,user_id,token_version,resource,scope,read_only,created_at,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		grant.ID, grant.ClientID, grant.ClientName, grant.UserID, grant.TokenVersion, grant.Resource, grant.Scope, grant.ReadOnly, grant.CreatedAt, grant.ExpiresAt)
 	if err != nil {
 		return err
 	}
@@ -159,7 +98,7 @@ func (r *mcpOAuthRepository) GetCredential(ctx context.Context, hash string) (*s
 	return credential, nil
 }
 
-const mcpOAuthGrantColumns = `g.id,g.client_id,c.client_name,g.user_id,g.token_version,g.resource,g.scope,g.read_only,g.created_at,g.expires_at,g.last_used_at,g.revoked_at`
+const mcpOAuthGrantColumns = `id,client_id,client_name,user_id,token_version,resource,scope,read_only,created_at,expires_at,last_used_at,revoked_at`
 
 func scanMCPOAuthGrant(row interface{ Scan(...any) error }) (*service.MCPOAuthGrant, error) {
 	grant := &service.MCPOAuthGrant{}
@@ -171,11 +110,11 @@ func scanMCPOAuthGrant(row interface{ Scan(...any) error }) (*service.MCPOAuthGr
 }
 
 func (r *mcpOAuthRepository) GetGrant(ctx context.Context, id string) (*service.MCPOAuthGrant, error) {
-	return scanMCPOAuthGrant(r.db.QueryRowContext(ctx, `SELECT `+mcpOAuthGrantColumns+` FROM mcp_oauth_grants g JOIN mcp_oauth_clients c ON c.client_id=g.client_id WHERE g.id=$1`, id))
+	return scanMCPOAuthGrant(r.db.QueryRowContext(ctx, `SELECT `+mcpOAuthGrantColumns+` FROM mcp_oauth_grants WHERE id=$1`, id))
 }
 
 func (r *mcpOAuthRepository) ListGrants(ctx context.Context, userID int64) ([]*service.MCPOAuthGrant, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT `+mcpOAuthGrantColumns+` FROM mcp_oauth_grants g JOIN mcp_oauth_clients c ON c.client_id=g.client_id WHERE g.user_id=$1 ORDER BY g.created_at DESC`, userID)
+	rows, err := r.db.QueryContext(ctx, `SELECT `+mcpOAuthGrantColumns+` FROM mcp_oauth_grants WHERE user_id=$1 ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil, err
 	}

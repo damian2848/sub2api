@@ -20,41 +20,18 @@ import (
 
 type mcpOAuthMemoryRepo struct {
 	mu          sync.Mutex
-	clients     map[string]*MCPOAuthClient
+	clientIDKey []byte
 	grants      map[string]*MCPOAuthGrant
 	codes       map[string]*MCPOAuthCode
 	credentials map[string]*MCPOAuthCredential
 	touches     int
 }
 
-func (r *mcpOAuthMemoryRepo) CreateClient(_ context.Context, client *MCPOAuthClient, pendingLimit int) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	pending := 0
-	for id := range r.clients {
-		authorized := false
-		for _, grant := range r.grants {
-			authorized = authorized || grant.ClientID == id
-		}
-		if !authorized {
-			pending++
-		}
+func (r *mcpOAuthMemoryRepo) ClientIDKey(context.Context) ([]byte, error) {
+	if r.clientIDKey == nil {
+		return []byte("mcp-oauth-service-test-client-id-key"), nil
 	}
-	if pending >= pendingLimit {
-		return ErrMCPOAuthClientLimit
-	}
-	r.clients[client.ClientID] = client
-	return nil
-}
-
-func (r *mcpOAuthMemoryRepo) GetClient(_ context.Context, id string) (*MCPOAuthClient, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if client := r.clients[id]; client != nil {
-		copy := *client
-		return &copy, nil
-	}
-	return nil, ErrMCPOAuthNotFound
+	return r.clientIDKey, nil
 }
 
 func (r *mcpOAuthMemoryRepo) CreateAuthorization(_ context.Context, grant *MCPOAuthGrant, code *MCPOAuthCode, limit int) error {
@@ -223,7 +200,7 @@ type mcpOAuthFixture struct {
 
 func newMCPOAuthFixture(t *testing.T) *mcpOAuthFixture {
 	t.Helper()
-	r := &mcpOAuthMemoryRepo{clients: map[string]*MCPOAuthClient{}, grants: map[string]*MCPOAuthGrant{}, codes: map[string]*MCPOAuthCode{}, credentials: map[string]*MCPOAuthCredential{}}
+	r := &mcpOAuthMemoryRepo{grants: map[string]*MCPOAuthGrant{}, codes: map[string]*MCPOAuthCode{}, credentials: map[string]*MCPOAuthCredential{}}
 	u := &mcpOAuthUserRepo{user: &User{ID: 7, Role: RoleUser, Status: StatusActive, Email: "user@example.com", PasswordHash: "original", Concurrency: 3}}
 	s := NewMCPOAuthService(r, u)
 	client, err := s.Register(context.Background(), MCPOAuthRegisterInput{ClientName: "My MCP client", RedirectURIs: []string{"http://127.0.0.1:2345/callback?existing=1", "https://client.example/callback"}})
@@ -544,7 +521,9 @@ func TestMCPOAuthClientRevocationInvalidatesAccessAndRefresh(t *testing.T) {
 
 func TestMCPOAuthCodeOnlyClientReceivesNoRefreshToken(t *testing.T) {
 	f := newMCPOAuthFixture(t)
-	f.r.clients[f.client.ClientID].GrantTypes = []string{"authorization_code"}
+	client, err := f.s.Register(context.Background(), MCPOAuthRegisterInput{RedirectURIs: f.client.RedirectURIs, GrantTypes: []string{"authorization_code"}})
+	require.NoError(t, err)
+	f.client, f.authorize.ClientID = client, client.ClientID
 	tokens := f.tokens(t)
 	require.NotEmpty(t, tokens.AccessToken)
 	require.Empty(t, tokens.RefreshToken)
@@ -590,16 +569,88 @@ func TestMCPOAuthRegistrationRejectsDisguisedClientNames(t *testing.T) {
 	require.Equal(t, "桌面助手 · Desktop (beta) ✨", client.ClientName)
 }
 
-func TestMCPOAuthRegistrationStopsAtPendingClientLimit(t *testing.T) {
+func TestMCPOAuthRegistrationIsStatelessAndSigned(t *testing.T) {
 	f := newMCPOAuthFixture(t)
-	f.code(t, "", nil) // An authorized client does not count as pending.
-	for i := 0; i < MCPOAuthPendingClientLimit; i++ {
-		f.r.clients[fmt.Sprintf("pending-%d", i)] = &MCPOAuthClient{}
+	// Anonymous registration persists nothing, so there is no capacity to exhaust.
+	for i := 0; i < 100; i++ {
+		_, err := f.s.Register(context.Background(), MCPOAuthRegisterInput{RedirectURIs: []string{"https://client.example/cb"}})
+		require.NoError(t, err)
 	}
-	_, err := f.s.Register(context.Background(), MCPOAuthRegisterInput{RedirectURIs: []string{"https://client.example/cb"}})
-	require.ErrorIs(t, err, ErrMCPOAuthClientLimit)
-	require.Len(t, f.r.clients, MCPOAuthPendingClientLimit+1)
+	require.Empty(t, f.r.grants)
+	require.Empty(t, f.r.codes)
+	require.Empty(t, f.r.credentials)
+	twin, err := f.s.Register(context.Background(), MCPOAuthRegisterInput{ClientName: f.client.ClientName, RedirectURIs: f.client.RedirectURIs})
+	require.NoError(t, err)
+	// The random nonce leads, so even truncated IDs of identical clients differ.
+	visible := len(mcpOAuthClientIDPrefix) + 22
+	require.NotEqual(t, f.client.ClientID[:visible], twin.ClientID[:visible], "identical metadata must still yield distinct clients")
+
+	parts := strings.Split(strings.TrimPrefix(f.client.ClientID, mcpOAuthClientIDPrefix), ".")
+	require.Len(t, parts, 3)
+	nonce, payload, signature := parts[0], parts[1], parts[2]
+	twinNonce, _, _ := strings.Cut(strings.TrimPrefix(twin.ClientID, mcpOAuthClientIDPrefix), ".")
+	raw, err := base64.RawURLEncoding.DecodeString(payload)
+	require.NoError(t, err)
+	renamed := strings.Replace(string(raw), `"n":"My MCP client"`, `"n":"Trusted client"`, 1)
+	require.NotEqual(t, string(raw), renamed)
+	foreign, err := NewMCPOAuthService(&mcpOAuthMemoryRepo{clientIDKey: []byte("another-deployment-client-id-key")}, f.u).
+		Register(context.Background(), MCPOAuthRegisterInput{ClientName: f.client.ClientName, RedirectURIs: f.client.RedirectURIs})
+	require.NoError(t, err)
+	tampered := []byte(f.client.ClientID)
+	tampered[len(tampered)-1] ^= 1
+	for name, id := range map[string]string{
+		"forged metadata": mcpOAuthClientIDPrefix + nonce + "." + base64.RawURLEncoding.EncodeToString([]byte(renamed)) + "." + signature,
+		"swapped nonce":   mcpOAuthClientIDPrefix + twinNonce + "." + payload + "." + signature,
+		"other key":       foreign.ClientID,
+		"bad signature":   string(tampered),
+		"unsigned":        mcpOAuthClientIDPrefix + nonce + "." + payload,
+		"missing prefix":  strings.TrimPrefix(f.client.ClientID, mcpOAuthClientIDPrefix),
+		"oversized":       f.client.ClientID + strings.Repeat("A", mcpOAuthClientIDMaxLength),
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := f.authorize
+			input.ClientID = id
+			_, err := f.s.Preview(context.Background(), 7, input, mcpTestResource)
+			requireMCPOAuthError(t, err, "invalid_client")
+			_, err = f.s.Token(context.Background(), MCPOAuthTokenInput{GrantType: "authorization_code", ClientID: id}, mcpTestResource)
+			requireMCPOAuthError(t, err, "invalid_client")
+		})
+	}
 }
+
+func TestMCPOAuthLargestRegistrationFitsClientIDLimit(t *testing.T) {
+	f := newMCPOAuthFixture(t)
+	redirects := make([]string, 10)
+	for i := range redirects {
+		redirects[i] = fmt.Sprintf("https://client.example/%d/%s", i, strings.Repeat("p", 2000))
+	}
+	// "<" is JSON-escaped to six bytes, the worst case for an allowed name.
+	client, err := f.s.Register(context.Background(), MCPOAuthRegisterInput{ClientName: strings.Repeat("<", 100), RedirectURIs: redirects})
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(client.ClientID), mcpOAuthClientIDMaxLength)
+	input := f.authorize
+	input.ClientID, input.RedirectURI = client.ClientID, redirects[9]
+	preview, err := f.s.Preview(context.Background(), 7, input, mcpTestResource)
+	require.NoError(t, err)
+	require.Equal(t, client.ClientName, preview.ClientName)
+}
+
+func TestMCPOAuthClientIDKeyErrorIsNotUnknownClient(t *testing.T) {
+	f := newMCPOAuthFixture(t)
+	unavailable := errors.New("database unavailable")
+	s := NewMCPOAuthService(&mcpOAuthKeyErrorRepo{mcpOAuthMemoryRepo: f.r, err: unavailable}, f.u)
+	_, err := s.Register(context.Background(), MCPOAuthRegisterInput{RedirectURIs: []string{"https://client.example/cb"}})
+	require.ErrorIs(t, err, unavailable)
+	_, err = s.Preview(context.Background(), 7, f.authorize, mcpTestResource)
+	require.ErrorIs(t, err, unavailable)
+}
+
+type mcpOAuthKeyErrorRepo struct {
+	*mcpOAuthMemoryRepo
+	err error
+}
+
+func (r *mcpOAuthKeyErrorRepo) ClientIDKey(context.Context) ([]byte, error) { return nil, r.err }
 
 func TestMCPOAuthAuthenticateThrottlesLastUsedWrites(t *testing.T) {
 	f := newMCPOAuthFixture(t)

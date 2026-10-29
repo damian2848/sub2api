@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
-	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,18 +32,13 @@ type mcpOAuthIntegrationFixture struct {
 func newMCPOAuthIntegrationFixture(t *testing.T, ctx context.Context) mcpOAuthIntegrationFixture {
 	t.Helper()
 	user := mustCreateUser(t, testEntClient(t), &service.User{})
-	repo := NewMCPOAuthRepository(integrationDB)
+	repo := NewMCPOAuthRepository(integrationEntClient, integrationDB)
 	oauth := service.NewMCPOAuthService(repo, NewUserRepository(integrationEntClient, integrationDB))
-	var clientID string
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_, err := integrationDB.ExecContext(cleanupCtx, `DELETE FROM users WHERE id=$1`, user.ID)
 		require.NoError(t, err)
-		if clientID != "" {
-			_, err = integrationDB.ExecContext(cleanupCtx, `DELETE FROM mcp_oauth_clients WHERE client_id=$1`, clientID)
-			require.NoError(t, err)
-		}
 	})
 
 	const redirectURI = "https://client.example/callback?channel=desktop"
@@ -53,10 +47,7 @@ func newMCPOAuthIntegrationFixture(t *testing.T, ctx context.Context) mcpOAuthIn
 		TokenEndpointAuthMethod: "none",
 	})
 	require.NoError(t, err)
-	clientID = client.ClientID
-	registered, err := repo.GetClient(ctx, clientID)
-	require.NoError(t, err)
-	require.Equal(t, client, registered)
+	clientID := client.ClientID
 
 	verifier := strings.Repeat("v", 64)
 	challenge := sha256.Sum256([]byte(verifier))
@@ -84,6 +75,8 @@ func newMCPOAuthIntegrationFixture(t *testing.T, ctx context.Context) mcpOAuthIn
 	require.Equal(t, service.MCPScopeUser, grants[0].Scope)
 	require.True(t, grants[0].ReadOnly)
 	require.False(t, grants[0].Invalidated)
+	require.Equal(t, clientID, grants[0].ClientID)
+	require.Equal(t, client.ClientName, grants[0].ClientName)
 	return mcpOAuthIntegrationFixture{
 		oauth: oauth, repo: repo, userID: user.ID, grantID: grants[0].ID,
 		input: service.MCPOAuthTokenInput{
@@ -244,25 +237,37 @@ func TestMCPOAuthIntegrationAccountChangesRevokeGrantsPersistently(t *testing.T)
 	requireMCPIntegrationInvalidGrant(t, err)
 }
 
-func TestMCPOAuthIntegrationRegistrationStopsAtPendingLimit(t *testing.T) {
+func TestMCPOAuthIntegrationClientIDKeyConvergesAcrossInstances(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	repo := NewMCPOAuthRepository(integrationDB)
-	var pending int
-	require.NoError(t, integrationDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM mcp_oauth_clients c WHERE c.created_at>=$1 AND NOT EXISTS (SELECT 1 FROM mcp_oauth_grants g WHERE g.client_id=c.client_id)`,
-		time.Now().Add(-service.MCPOAuthPendingClientLifetime)).Scan(&pending))
-	ids := []string{"mcp_client_pending_limit_a", "mcp_client_pending_limit_b"}
-	t.Cleanup(func() {
-		_, err := integrationDB.ExecContext(context.Background(), `DELETE FROM mcp_oauth_clients WHERE client_id=ANY($1)`, pq.Array(ids))
-		require.NoError(t, err)
-	})
-	newClient := func(id string) *service.MCPOAuthClient {
-		return &service.MCPOAuthClient{ClientID: id, ClientName: "Pending", RedirectURIs: []string{"https://client.example/cb"},
-			GrantTypes: []string{"authorization_code"}, ClientIDIssuedAt: time.Now().Unix()}
+	// Start without a key so the instances race to create it.
+	_, err := integrationDB.ExecContext(ctx, `DELETE FROM security_secrets WHERE key=$1`, mcpOAuthClientIDKeyName)
+	require.NoError(t, err)
+	const instances = 8
+	keys := make([][]byte, instances)
+	errs := make([]error, instances)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < instances; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			keys[i], errs[i] = NewMCPOAuthRepository(integrationEntClient, integrationDB).ClientIDKey(ctx)
+		}(i)
 	}
-	require.NoError(t, repo.CreateClient(ctx, newClient(ids[0]), pending+1))
-	require.ErrorIs(t, repo.CreateClient(ctx, newClient(ids[1]), pending+1), service.ErrMCPOAuthClientLimit)
-	_, err := repo.GetClient(ctx, ids[1])
-	require.ErrorIs(t, err, service.ErrMCPOAuthNotFound)
+	close(start)
+	wg.Wait()
+	for i := 0; i < instances; i++ {
+		require.NoError(t, errs[i])
+		require.GreaterOrEqual(t, len(keys[i]), 32)
+		require.Equal(t, keys[0], keys[i])
+	}
+
+	// A client registered by one instance is accepted by another.
+	users := NewUserRepository(integrationEntClient, integrationDB)
+	client, err := service.NewMCPOAuthService(NewMCPOAuthRepository(integrationEntClient, integrationDB), users).Register(ctx, service.MCPOAuthRegisterInput{RedirectURIs: []string{"https://client.example/cb"}})
+	require.NoError(t, err)
+	_, err = service.NewMCPOAuthService(NewMCPOAuthRepository(integrationEntClient, integrationDB), users).Token(ctx, service.MCPOAuthTokenInput{GrantType: "authorization_code", ClientID: client.ClientID}, mcpIntegrationResource)
+	requireMCPIntegrationInvalidGrant(t, err)
 }

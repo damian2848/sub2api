@@ -168,4 +168,4 @@ curl 'https://api.example.com/.well-known/oauth-authorization-server'
 
 工具目录位于 `backend/internal/managementmcp/catalog.go`。新增工具应绑定已有管理路由，使用封闭参数 schema，并覆盖权限、资源归属、参数边界及凭证脱敏测试。
 
-OAuth 存储由 `249_mcp_oauth.sql` 创建。注册时有界清理过期 7 天以上的授权，以及 24 小时前注册且从未获得授权的客户端。24 小时内注册但尚未获得授权的客户端全站最多 1000 个，达到上限后注册返回 503 `temporarily_unavailable`，待旧注册过期后自动恢复。浏览器使用 JWT 保护的 `/api/v1/user/mcp/config` 获取服务端配置的连接地址、`/api/v1/user/mcp/authorize` 预览/决定授权，以及 `/api/v1/user/mcp/grants` 列表、撤销接口。客户端协议端点返回标准 OAuth JSON，浏览器接口沿用平台响应格式。
+OAuth 存储由 `249_mcp_oauth.sql` 创建。动态注册不写数据库：`client_id` 是服务端签名的无状态标识，自带客户端名称、回调 URI 摘要和 grant type，签名密钥首次使用时生成并保存在 `security_secrets`，多实例共享。只有用户同意授权后才写入授权记录，因此匿名注册不会占用存储，也没有可被占满的全站名额。每次新授权时有界清理过期 7 天以上的授权。浏览器使用 JWT 保护的 `/api/v1/user/mcp/config` 获取服务端配置的连接地址、`/api/v1/user/mcp/authorize` 预览/决定授权，以及 `/api/v1/user/mcp/grants` 列表、撤销接口。客户端协议端点返回标准 OAuth JSON，浏览器接口沿用平台响应格式。

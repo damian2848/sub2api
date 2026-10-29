@@ -122,11 +122,6 @@ func (h *MCPOAuthHandler) Register(c *gin.Context) {
 		return
 	}
 	client, err := h.oauth.Register(c.Request.Context(), input)
-	if errors.Is(err, service.ErrMCPOAuthClientLimit) {
-		c.Header("Retry-After", "3600")
-		mcpOAuthErrorResponse(c, http.StatusServiceUnavailable, "temporarily_unavailable", "Too many clients are awaiting authorization; retry later")
-		return
-	}
 	if mcpOAuthHandleError(c, err, true) {
 		return
 	}
@@ -332,7 +327,7 @@ func mcpOAuthHandleError(c *gin.Context, err error, protocol bool) bool {
 func mcpOAuthReadJSON(c *gin.Context, out any, browser bool) bool {
 	mediaType, _, _ := mime.ParseMediaType(c.GetHeader("Content-Type"))
 	if mediaType == "application/json" {
-		// Unauthenticated registrations are persisted, so they get a tighter bound.
+		// Unauthenticated registrations are embedded in client IDs, so they get a tighter bound.
 		limit := int64(4 << 10)
 		if browser {
 			limit = 16 << 10
