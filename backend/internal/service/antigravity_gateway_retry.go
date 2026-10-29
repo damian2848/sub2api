@@ -48,11 +48,13 @@ const antigravityRetryBudgetKey = "antigravity_retry_budget"
 // This limits scheduling additional attempts, never the lifetime of an upstream
 // request or successful response body. The same budget follows account changes.
 type antigravityRetryBudget struct {
-	deadline     time.Time
-	status       int
-	headers      http.Header
-	body         []byte
-	transportErr error
+	deadline           time.Time
+	status             int
+	headers            http.Header
+	body               []byte
+	transportErr       error
+	generic429Model    string
+	generic429Accounts map[int64]struct{}
 }
 
 // AntigravityRetryDeadline exposes the retry scheduling deadline to queue and
@@ -87,6 +89,9 @@ func (b *antigravityRetryBudget) recordResponse(resp *http.Response, body []byte
 		return
 	}
 	b.status, b.headers, b.body = resp.StatusCode, resp.Header.Clone(), bytes.Clone(body)
+	if !isAntigravityGeneric429(resp.StatusCode, resp.Header, body) {
+		b.generic429Accounts = nil
+	}
 }
 
 func (b *antigravityRetryBudget) exhaustedError() *UpstreamFailoverError {
@@ -906,6 +911,11 @@ urlFallbackLoop:
 			// 成功响应（< 400）
 			break urlFallbackLoop
 		}
+	}
+
+	if err := p.repeatedGeneric429Error(resp); err != nil {
+		_ = resp.Body.Close()
+		return nil, err
 	}
 
 	if err := s.checkArgonFunctionResponse(resp, p.body); err != nil {
