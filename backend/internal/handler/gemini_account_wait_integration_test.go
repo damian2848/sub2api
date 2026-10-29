@@ -5,10 +5,13 @@ package handler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -279,5 +282,156 @@ func TestGeminiWebAdmission_AllProtocolsReselectAndRejectCooledQueuedAccount(t *
 				})
 			})
 		}
+	}
+}
+
+// Simulated upstream: gateway admission at 60 RPM and a full-minute burst.
+type poolRecoveryLoadCache struct {
+	fakeConcurrencyCache
+	mu     sync.Mutex
+	active map[int64]int
+	peak   int
+}
+
+func (c *poolRecoveryLoadCache) AcquireAccountSlot(_ context.Context, id int64, limit int, _ string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.active[id] >= limit {
+		return false, nil
+	}
+	c.active[id]++
+	c.peak = max(c.peak, c.active[id])
+	return true, nil
+}
+func (c *poolRecoveryLoadCache) ReleaseAccountSlot(_ context.Context, id int64, _ string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.active[id]--
+	return nil
+}
+
+// Redis snapshots deserialize a fresh account for each read. The existing
+// single-request fixture shares pointers and cannot model concurrent callers.
+type poolRecoverySnapshotCache struct{ fakeSchedulerCache }
+
+func (c *poolRecoverySnapshotCache) GetSnapshot(_ context.Context, _ service.SchedulerBucket) ([]*service.Account, bool, error) {
+	data, err := json.Marshal(c.accounts)
+	if err != nil {
+		return nil, false, err
+	}
+	var accounts []*service.Account
+	err = json.Unmarshal(data, &accounts)
+	return accounts, err == nil, err
+}
+func (c *poolRecoverySnapshotCache) GetAccount(ctx context.Context, id int64) (*service.Account, error) {
+	account, err := c.fakeSchedulerCache.GetAccount(ctx, id)
+	if err != nil || account == nil {
+		return account, err
+	}
+	data, err := json.Marshal(account)
+	if err != nil {
+		return nil, err
+	}
+	var fresh service.Account
+	err = json.Unmarshal(data, &fresh)
+	return &fresh, err
+}
+
+func TestAntigravityPoolRecoveryNative60RPM(t *testing.T) {
+	t.Setenv("ANTIGRAVITY_POOL_RECOVERY_GROUP_IDS", "55")
+	gin.SetMode(gin.TestMode)
+	for _, scenario := range []struct {
+		name      string
+		count     int
+		interval  time.Duration
+		loadBatch bool
+	}{
+		{"steady_three_minutes", 180, time.Second, false}, {"sixty_request_burst", 60, 0, false},
+		{"load_aware_steady", 180, time.Second, true}, {"load_aware_burst", 60, 0, true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			var start, resetAt time.Time
+			groupID := int64(55)
+			group := &service.Group{ID: groupID, Hydrated: true, Platform: service.PlatformAntigravity, Status: service.StatusActive}
+			var accounts []*service.Account
+			var persisted []service.Account
+			for id := int64(1); id <= 11; id++ {
+				a := &service.Account{ID: id, Platform: service.PlatformAntigravity, Type: service.AccountTypeAPIKey,
+					Credentials: map[string]any{"api_key": "synthetic", "model_mapping": map[string]any{"gemini-2.5-flash": "gemini-2.5-flash"}},
+					Status:      service.StatusActive, Schedulable: true, Concurrency: 20, Priority: int(id), AccountGroups: []service.AccountGroup{{AccountID: id, GroupID: groupID}},
+					Extra: map[string]any{"model_rate_limits": map[string]any{"gemini-2.5-flash": map[string]any{"rate_limit_reset_at": resetAt.Format(time.RFC3339Nano)}}}}
+				accounts = append(accounts, a)
+				persisted = append(persisted, *a)
+			}
+			cache := &poolRecoveryLoadCache{active: map[int64]int{}}
+			concurrency := service.NewConcurrencyService(cache)
+			cfg := &config.Config{RunMode: config.RunModeStandard}
+			cfg.Gateway.Scheduling = config.GatewaySchedulingConfig{StickySessionMaxWaiting: 64, StickySessionWaitTimeout: 30 * time.Second, FallbackWaitTimeout: 30 * time.Second, FallbackMaxWaiting: 64, LoadBatchEnabled: scenario.loadBatch}
+			snapshot := service.NewSchedulerSnapshotService(&poolRecoverySnapshotCache{fakeSchedulerCache: fakeSchedulerCache{accounts: accounts}}, nil, nil, nil, nil)
+			repo := &gatewayModelsAccountRepoStub{byGroup: map[int64][]service.Account{groupID: persisted}}
+			gateway := service.NewGatewayService(repo, &fakeGroupRepo{group: group}, nil, nil, nil, nil, nil, nil, cfg, snapshot, concurrency, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+			h, cleanup := newTestGatewayHandler(t, group, accounts)
+			defer cleanup()
+			h.gatewayService = gateway
+			h.concurrencyHelper = NewConcurrencyHelper(concurrency, SSEPingFormatNone, 0)
+			var forwarded atomic.Int64
+			upstream := &geminiWaitUpstream{do: func(req *http.Request, id int64) (*http.Response, error) {
+				if time.Now().Before(resetAt) {
+					t.Error("forwarded before account cooldown expired")
+				}
+				forwarded.Add(1)
+				time.Sleep(20 * time.Second)
+				if req.Context().Err() != nil {
+					t.Error("successful generation canceled by admission budget")
+				}
+				return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"candidates":[{"content":{"role":"model","parts":[{"text":"OK"}]},"finishReason":"STOP"}]}`))}, nil
+			}}
+			h.geminiCompatService = service.NewGeminiMessagesCompatService(nil, nil, nil, nil, nil, nil, upstream, nil, cfg)
+			apiKey := &service.APIKey{ID: 1, UserID: 2, GroupID: &groupID, Group: group, Status: service.StatusActive, User: &service.User{ID: 2, Concurrency: 64, Balance: 100}}
+			router := gin.New()
+			router.POST("/v1beta/models/*modelAction", func(c *gin.Context) {
+				c.Set(string(middleware.ContextKeyAPIKey), apiKey)
+				c.Set("force_platform", service.PlatformAntigravity)
+				c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 2, Concurrency: 64})
+				h.GeminiV1BetaModels(c)
+			})
+			synctest.Test(t, func(t *testing.T) {
+				start = time.Now()
+				resetAt = start.Add(2 * time.Second)
+				for _, a := range accounts {
+					a.Extra["model_rate_limits"] = map[string]any{"gemini-2.5-flash": map[string]any{"rate_limit_reset_at": resetAt.Format(time.RFC3339Nano)}}
+				}
+				var wg sync.WaitGroup
+				results := make([]int, scenario.count)
+				for i := range scenario.count {
+					wg.Go(func() {
+						req := httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-2.5-flash:generateContent", strings.NewReader(`{"contents":[{"role":"user","parts":[{"text":"synthetic"}]}]}`))
+						ctx := context.WithValue(req.Context(), ctxkey.Group, group)
+						ctx = context.WithValue(ctx, ctxkey.ForcePlatform, service.PlatformAntigravity)
+						rec := httptest.NewRecorder()
+						router.ServeHTTP(rec, req.WithContext(ctx))
+						results[i] = rec.Code
+						if rec.Code != 200 {
+							t.Errorf("request %d: %d %s", i, rec.Code, rec.Body.String())
+						}
+					})
+					if scenario.interval > 0 {
+						time.Sleep(scenario.interval)
+					}
+				}
+				wg.Wait()
+				require.Equal(t, int64(scenario.count), forwarded.Load())
+				for _, status := range results {
+					require.Equal(t, http.StatusOK, status)
+				}
+				cache.mu.Lock()
+				defer cache.mu.Unlock()
+				require.LessOrEqual(t, cache.peak, 20)
+				for _, active := range cache.active {
+					require.Zero(t, active)
+				}
+				t.Logf("requests=%d successes=%d simulated_elapsed=%s peak_per_account=%d", scenario.count, forwarded.Load(), time.Since(start), cache.peak)
+			})
+		})
 	}
 }
