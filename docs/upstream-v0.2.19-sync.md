@@ -67,3 +67,23 @@ fork 与上游自 `efe9aab1e`（2026-09-17）分叉，此后上游有 505 个非
 ## 数据库迁移
 
 新增 `247_scoped_admin_api_keys.sql`（只依赖 `users`）与 `248_group_image_count_billing.sql`（只修改 `groups`），保留上游文件名。迁移执行器按完整文件名记录并按文件名排序执行，未执行过的迁移会补跑；已部署库会在启动时执行这两个文件。全新数据库中它们排在 fork 的 248～287 之前，两者依赖的表在更早的迁移中已创建。保留上游文件名也避免以后再同步时出现重复迁移。
+
+## 收尾适配
+
+- 上游 `31564b2e8` 从 Gemini 兜底模型列表移除已停用的 2.x 模型后，fork 的 Gemini Web 作用域回归测试改用 `gemini-3.1-pro-preview`：它仍在兜底列表内，但不在 Gemini Web 默认范围，测试前提保持成立，网关行为不变。
+- 格式化 fork 原有的 `api_key_admission_integration_test.go`。
+
+## 验证
+
+均在本地运行，没有生产操作。
+
+| 检查 | 结果 |
+| --- | --- |
+| `golangci-lint run ./...`（v2.14.0，与 CI 相同） | 0 issues |
+| `govulncheck ./...` | No vulnerabilities found（GO-2026-6860 已随 `x/net` v0.62.0 修复） |
+| `go test -tags=unit ./...` | 通过（含 `internal/mihomo`） |
+| `go test -tags=integration ./...` | 通过，本地 Docker PostgreSQL / Redis |
+| 前端 `lint:check`、`typecheck` | 通过；1 个 warning 为 fork 原有 SettingsView 测试的未使用变量 |
+| 前端 `vitest run`（全部） | 489 个文件、4406 个用例通过，9 个原有 skip |
+| 前端 `build` | 通过 |
+| `pnpm audit` 例外检查 | 剩余 `vue-i18n` / `@intlify/*` GHSA-83rm-6c8r-g728：修复版本为 11.4.14，需从 9.x 跨两个大版本升级，上游同样未处理，本次不纳入 |
