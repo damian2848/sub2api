@@ -26,7 +26,7 @@ func TestGeminiWebGetModelHandlerPreservesEffectiveModelPolicy(t *testing.T) {
 	}{
 		{name: "default canonical", model: "gemini-4-argon", status: http.StatusOK},
 		{name: "default alias", model: "gemini-4-argon-low", status: http.StatusOK},
-		{name: "default scope rejects static model", model: "gemini-2.5-flash", status: http.StatusNotFound, staticFallback: true},
+		{name: "default scope rejects static model", model: "gemini-3.1-pro-preview", status: http.StatusNotFound, staticFallback: true},
 		{name: "custom alias", model: "custom-pro", mapping: map[string]any{"custom-pro": "gemini-3.1-pro"}, status: http.StatusOK},
 		{name: "custom scope rejects default", model: "gemini-4-argon", mapping: map[string]any{"custom-pro": "gemini-3.1-pro"}, status: http.StatusNotFound, staticFallback: true},
 		{name: "custom scope rejects target name", model: "gemini-3.1-pro", mapping: map[string]any{"custom-pro": "gemini-3.1-pro"}, status: http.StatusNotFound},
