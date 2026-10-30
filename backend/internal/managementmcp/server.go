@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -25,7 +26,9 @@ const (
 
 // NewHandler serves stateless Streamable HTTP. Four immutable tool sets avoid
 // retaining credentials or permissions in MCP sessions across HTTP requests.
-func NewHandler(dispatcher http.Handler) http.Handler {
+// allowedOrigins must match the list given to Authenticate so the SDK's
+// cross-origin check accepts the same browser origins.
+func NewHandler(dispatcher http.Handler, allowedOrigins []string) http.Handler {
 	servers := map[string]*mcp.Server{}
 	for _, scope := range []string{service.MCPScopeUser, service.MCPScopeAdmin} {
 		for _, readOnly := range []bool{true, false} {
@@ -56,7 +59,7 @@ func NewHandler(dispatcher http.Handler) http.Handler {
 			return nil
 		}
 		return servers[serverKey(identity.principal.Scope, identity.principal.ReadOnly)]
-	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true, CrossOriginProtection: crossOriginProtection(allowedOrigins)})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		if r.Method != http.MethodPost {
@@ -77,9 +80,31 @@ func NewHandler(dispatcher http.Handler) http.Handler {
 			http.Error(w, "MCP requests must contain a single JSON-RPC object; batches are not supported", http.StatusBadRequest)
 			return
 		}
+		// The SDK compares Content-Type verbatim; accept JSON with parameters such
+		// as charset, while form and text bodies are still refused.
+		if mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mediaType != "application/json" {
+			http.Error(w, "Content-Type must be 'application/json'", http.StatusUnsupportedMediaType)
+			return
+		}
+		r.Header.Set("Content-Type", "application/json")
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		transport.ServeHTTP(noStoreResponse{w}, r)
 	})
+}
+
+// crossOriginProtection trusts the origins Authenticate accepts. Wildcard CORS
+// does not relax MCP origin validation, so "*" is never trusted here either.
+func crossOriginProtection(allowedOrigins []string) *http.CrossOriginProtection {
+	protection := http.NewCrossOriginProtection()
+	for _, origin := range allowedOrigins {
+		origin = strings.TrimSpace(origin)
+		if origin == "" || origin == "*" {
+			continue
+		}
+		// Authenticate matches origins verbatim, so malformed entries never match there either.
+		_ = protection.AddTrustedOrigin(origin)
+	}
+	return protection
 }
 
 func serverKey(scope string, readOnly bool) string { return scope + ":" + strconv.FormatBool(readOnly) }

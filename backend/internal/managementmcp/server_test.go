@@ -48,7 +48,7 @@ func newTestEndpoint(dispatcher http.Handler) (*gin.Engine, *testTokenAuth) {
 	r := gin.New()
 	r.Any("/api/v1/mcp", Authenticate(auth, []string{"https://console.example"}, func(context.Context) (string, error) {
 		return "https://platform.example/api/v1/mcp", nil
-	}), gin.WrapH(NewHandler(dispatcher)))
+	}), gin.WrapH(NewHandler(dispatcher, []string{"https://console.example"})))
 	return r, auth
 }
 
@@ -288,6 +288,41 @@ func TestMCPOriginAuthenticationAndRequestLimits(t *testing.T) {
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
 		require.Equal(t, 405, w.Code)
+	}
+}
+
+// The SDK's own cross-origin and Content-Type checks must agree with
+// Authenticate: allowlisted browser origins and JSON with parameters succeed.
+func TestMCPTransportAcceptsAuthenticatedOriginsAndJSONMediaTypes(t *testing.T) {
+	r, _ := newTestEndpoint(http.NotFoundHandler())
+	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`
+	for _, tc := range []struct {
+		name, origin, site, contentType string
+		status                          int
+	}{
+		{"native", "", "", "application/json", 200},
+		{"same host", "https://platform.example", "same-origin", "application/json", 200},
+		{"allowlisted origin", "https://console.example", "cross-site", "application/json", 200},
+		{"allowlisted origin without fetch metadata", "https://console.example", "", "application/json", 200},
+		{"unlisted origin", "https://attacker.example", "cross-site", "application/json", 403},
+		{"json with charset", "", "", "application/json; charset=utf-8", 200},
+		{"text body", "", "", "text/plain", 415},
+		{"form body", "", "", "application/x-www-form-urlencoded", 415},
+	} {
+		req := httptest.NewRequest("POST", "http://platform.example/api/v1/mcp", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer reader")
+		req.Header.Set("Content-Type", tc.contentType)
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("MCP-Protocol-Version", "2025-06-18")
+		if tc.origin != "" {
+			req.Header.Set("Origin", tc.origin)
+		}
+		if tc.site != "" {
+			req.Header.Set("Sec-Fetch-Site", tc.site)
+		}
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, tc.status, w.Code, "%s: %s", tc.name, w.Body.String())
 	}
 }
 

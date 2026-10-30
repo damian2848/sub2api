@@ -27,7 +27,7 @@ func RegisterMCPRoutes(v1 *gin.RouterGroup, h *handler.Handlers, audit middlewar
 	api := inner.Group("/api/v1")
 	RegisterUserRoutes(api, h, middleware.JWTAuthMiddleware(managementmcp.DispatchAuth(false)), audit, settings, limiter)
 	RegisterAdminRoutes(api, h, middleware.AdminAuthMiddleware(managementmcp.DispatchAuth(true)), audit, stepUp, settings, limiter)
-	transport := managementmcp.NewHandler(inner)
+	transport := managementmcp.NewHandler(inner, allowedOrigins)
 	var handlers []gin.HandlerFunc
 	if redisClient != nil {
 		// Bound token probes per network before authentication reaches the database.
