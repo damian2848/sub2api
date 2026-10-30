@@ -604,7 +604,9 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebClaude(ctx context.Context
 	if err := json.Unmarshal(body, &req); err != nil || strings.TrimSpace(req.Model) == "" {
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
 	}
-	geminiBody, err := convertClaudeMessagesToGeminiGenerateContent(body)
+	// Gemini Web flattens tool results into its own prompt, so keep tool media as
+	// separate parts instead of multimodal functionResponse parts.
+	geminiBody, err := convertClaudeMessagesToGeminiGenerateContent(body, "")
 	if err != nil {
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
@@ -644,7 +646,7 @@ func (s *GeminiMessagesCompatService) forwardGeminiWebChatCompletions(ctx contex
 	}
 	anthropic.Stream = req.Stream
 	claudeBody, _ := json.Marshal(anthropic)
-	geminiBody, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody)
+	geminiBody, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody, "")
 	if err != nil {
 		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
