@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 
@@ -19,14 +18,6 @@ func handleRequestBodyReadError(c *gin.Context, err error) bool {
 		return true
 	}
 	return middleware2.RejectRequestBodyMemoryOverload(c, err)
-}
-
-func extractMaxBytesError(err error) (*http.MaxBytesError, bool) {
-	var maxErr *http.MaxBytesError
-	if errors.As(err, &maxErr) {
-		return maxErr, true
-	}
-	return nil, false
 }
 
 func formatBodyLimit(limit int64) string {
