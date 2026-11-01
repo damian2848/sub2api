@@ -5,7 +5,7 @@ export default {
   "secretWarning": "The full key is shown only once. Copy and save it before closing.",
   "copySecret": "Copy key",
   "dismissSecret": "Saved, close",
-  "create": "Create scoped key",
+  "create": "Create administrator key",
   "refresh": "Refresh",
   "loading": "Loading keys and permissions…",
   "noDescription": "No description",
@@ -31,7 +31,7 @@ export default {
   "accountTypes": "Account types (account operations only; none means no account access)",
   "platforms": "Platforms (multiple selection; empty allows all)",
   "accountOperations": "Allowed account operations",
-  "groupOperations": "Allowed group model operations (subject to the group and platform scopes above)",
+  "groupOperations": "Allowed group operations (restricted by the groups and platforms above)",
   "modelAllowlistHint": "The group model allowlist restricts which models the group can use.",
   "removeRule": "Remove rule",
   "addRule": "Add resource rule",
@@ -69,5 +69,11 @@ export default {
   "rotateConfirm": "Rotating “{name}” immediately invalidates its current key. Continue?",
   "revokeConfirm": "Permanently revoking “{name}” cannot be undone. Continue?",
   "deleteConfirm": "Delete the key record “{name}”? This removes it from the list only. Historical operation records are retained.",
-  "legacy": "Legacy full-access key (migration to scoped keys recommended)"
+  "legacy": "Legacy full-access key (migration to scoped keys recommended)",
+  "fullAccessLabel": "Full access (legacy administrator key compatibility)",
+  "fullAccessWarning": "This key can access all administrative resources, read sensitive data, and change account and financial settings, including future administrative endpoints. Group, platform, account type, and operation rules no longer restrict this key. Endpoints requiring an administrator browser session or step-up verification keep those requirements.",
+  "rulesSuspended": "Resource rules are suspended and resume when full access is disabled. Expiration, IP restrictions, rate limits, and auditing remain active.",
+  "fullAccessConfirmTitle": "Confirm full access",
+  "fullAccessPhrase": "ENABLE FULL ACCESS",
+  "fullAccessPhraseHint": "Type “{phrase}” to confirm:"
 }

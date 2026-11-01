@@ -5,7 +5,7 @@ export default {
   "secretWarning": "完整密钥仅展示本次，请立即复制保存。关闭后无法再次查看。",
   "copySecret": "复制密钥",
   "dismissSecret": "已保存，关闭展示",
-  "create": "创建受限密钥",
+  "create": "创建管理密钥",
   "refresh": "刷新列表",
   "loading": "正在加载密钥及权限目录…",
   "noDescription": "无备注",
@@ -31,7 +31,7 @@ export default {
   "accountTypes": "账户类型（仅限制账户操作，未选表示无账户权限）",
   "platforms": "平台（可多选，未选表示不限平台）",
   "accountOperations": "允许的账户操作",
-  "groupOperations": "允许的分组模型操作（同样受上方分组与平台限制）",
+  "groupOperations": "允许的分组操作（受上方分组与平台限制）",
   "modelAllowlistHint": "分组模型白名单会限制分组可调用的模型。",
   "removeRule": "删除规则",
   "addRule": "添加资源规则",
@@ -69,5 +69,11 @@ export default {
   "rotateConfirm": "轮换“{name}”将立即使原密钥失效，是否继续？",
   "revokeConfirm": "永久撤销“{name}”后无法恢复，是否继续？",
   "deleteConfirm": "确定删除“{name}”的密钥记录？删除只是从列表移除，历史操作记录仍会继续保留。",
-  "legacy": "旧版全权密钥兼容区（建议迁移到受限密钥）"
+  "legacy": "旧版全权密钥兼容区（建议迁移到受限密钥）",
+  "fullAccessLabel": "全权访问（兼容旧版管理员 Key）",
+  "fullAccessWarning": "开启后，此密钥可访问全部管理资源、读取敏感数据并修改账户和财务配置；未来新增的管理接口也将允许访问。分组、平台、账户类型和操作规则不再限制此密钥。仅限管理员登录会话及二次验证的接口仍遵循原要求。",
+  "rulesSuspended": "资源规则已暂停，关闭全权访问后恢复；有效期、IP 限制、限流和审计继续生效。",
+  "fullAccessConfirmTitle": "确认开启全权访问",
+  "fullAccessPhrase": "开启全权访问",
+  "fullAccessPhraseHint": "请输入“{phrase}”以确认："
 }

@@ -2196,7 +2196,7 @@ func (r *accountRepository) BindGroups(ctx context.Context, accountID int64, gro
 	if err := service.ValidateObserverGroupBindings(ctx, groupIDs); err != nil {
 		return err
 	}
-	if adminaccess.FromContext(ctx) != nil {
+	if adminaccess.RestrictedFromContext(ctx) != nil {
 		return r.scopedAdminBindGroups(ctx, accountID, groupIDs)
 	}
 	existingGroupIDs, err := r.loadAccountGroupIDs(ctx, accountID)
