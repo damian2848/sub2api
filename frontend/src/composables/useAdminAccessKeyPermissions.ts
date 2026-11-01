@@ -5,11 +5,11 @@ import type { Permission } from '@/api/admin/adminAccessKeys'
 export function useAdminAccessKeyPermissions() {
   const { t, te } = useI18n()
   function permissionLabel(permission: Permission): string {
-    const key = `adminAccessKeys.permissions.${permission.id.replaceAll('_', '_u').replaceAll('.', '_d')}.label`
+    const key = `adminAccessKeys.permissions.${permission.id.replace(/_/g, '_u').replace(/\./g, '_d')}.label`
     return te(key) ? t(key) : t('adminAccessKeys.unknownPermission', { id: permission.id })
   }
   function permissionCategory(permission: Permission): string {
-    const key = `adminAccessKeys.permissions.${permission.id.replaceAll('_', '_u').replaceAll('.', '_d')}.category`
+    const key = `adminAccessKeys.permissions.${permission.id.replace(/_/g, '_u').replace(/\./g, '_d')}.category`
     return te(key) ? t(key) : t('adminAccessKeys.other')
   }
   return { permissionLabel, permissionCategory }
