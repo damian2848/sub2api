@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
@@ -768,7 +769,9 @@ func (s *APIKeyService) GetByKey(ctx context.Context, key string) (*APIKey, erro
 	if s.cfg != nil && s.cfg.Runtime.Role == config.RuntimeRoleGateway && s.cfg.Runtime.RegionalAuthFile != "" {
 		return nil, ErrRegionalAuthUnavailable
 	}
-	if len(key) == 0 || len(key) > MaxAPIKeyCredentialBytes {
+	// 非 UTF-8 的 key 不可能存在（生成和自定义的 key 都是 ASCII），且 Postgres 会以
+	// invalid byte sequence 拒绝该参数；直接按不存在处理，避免返回 500。
+	if len(key) == 0 || len(key) > MaxAPIKeyCredentialBytes || !utf8.ValidString(key) {
 		return nil, ErrAPIKeyNotFound
 	}
 	cacheKey := s.authCacheKey(key)
