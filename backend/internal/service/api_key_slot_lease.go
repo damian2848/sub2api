@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	pkghttputil "github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 )
 
 var ErrAPIKeySlotLeaseLost = errors.New("API key concurrency lease lost")
@@ -57,8 +59,10 @@ func APIKeySlotLeaseLost(ctx context.Context) bool {
 }
 
 // Detach client cancellation, but never detach the capacity owner's stop signal.
-func detachAPIKeyUpstreamContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	base := context.WithoutCancel(ctx)
+func detachAPIKeyUpstreamContext(ctx context.Context, drainTimeout ...time.Duration) (context.Context, context.CancelFunc) {
+	// The drain policy remembers the client context so a disconnect starts a
+	// bounded upstream drain window instead of waiting indefinitely.
+	base := pkghttputil.DetachUpstreamContext(ctx, drainTimeout...)
 	owner, ok := apiKeyAdmissionOwnerFromContext(ctx)
 	if !ok {
 		return base, func() {}
