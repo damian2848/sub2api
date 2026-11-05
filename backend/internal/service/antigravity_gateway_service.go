@@ -511,13 +511,7 @@ func (s *AntigravityGatewayService) buildGeminiTestRequestWithPrompt(projectID, 
 		return s.wrapV1InternalRequest(projectID, model, payloadBytes)
 	}
 
-	maxTokens := 1
-	textPrompt := strings.TrimSpace(prompt)
-	if textPrompt == "" {
-		textPrompt = "."
-	} else {
-		maxTokens = pelicanClaudeMaxTokens
-	}
+	textPrompt, maxTokens := antigravityTestPromptAndMaxTokens(prompt)
 	payload := map[string]any{
 		"contents": []map[string]any{
 			{
@@ -547,16 +541,9 @@ func (s *AntigravityGatewayService) buildGeminiTestRequestWithPrompt(projectID, 
 }
 
 // buildClaudeTestRequest 构建 Claude 格式测试请求并转换为 Gemini 格式
-// 使用最小 token 消耗：输入 "." + MaxTokens: 1
-
+// 与其他平台一致：发送管理员输入的提示词（默认 "hi"），留出足够的输出 token 以便模型回答。
 func (s *AntigravityGatewayService) buildClaudeTestRequest(projectID, mappedModel, prompt string) ([]byte, error) {
-	maxTokens := 1
-	textPrompt := strings.TrimSpace(prompt)
-	if textPrompt == "" {
-		textPrompt = "."
-	} else {
-		maxTokens = pelicanClaudeMaxTokens
-	}
+	textPrompt, maxTokens := antigravityTestPromptAndMaxTokens(prompt)
 	content, err := json.Marshal(textPrompt)
 	if err != nil {
 		return nil, err
@@ -583,6 +570,28 @@ func (s *AntigravityGatewayService) getClaudeTransformOptions(ctx context.Contex
 	opts.EnableIdentityPatch = s.settingService.IsIdentityPatchEnabled(ctx)
 	opts.IdentityPatch = s.settingService.GetIdentityPatchPrompt(ctx)
 	return opts
+}
+
+// antigravityTestMaxOutputTokens leaves a thinking model room to think and still answer a short
+// test prompt. It was 1, so gemini-4-argon / gemini-3.8-flash returned no text at all.
+const antigravityTestMaxOutputTokens = 256
+
+// antigravityTestPrompt is the admin's test prompt, or "hi" like the other platforms' tests.
+// antigravityTestPromptAndMaxTokens keeps the upstream default test ("hi" with
+// a short answer budget) and gives explicit prompts, such as the Pelican
+// showcase, the full Claude output budget.
+func antigravityTestPromptAndMaxTokens(prompt string) (string, int) {
+	if strings.TrimSpace(prompt) != "" {
+		return antigravityTestPrompt(prompt), pelicanClaudeMaxTokens
+	}
+	return antigravityTestPrompt(prompt), antigravityTestMaxOutputTokens
+}
+
+func antigravityTestPrompt(prompt string) string {
+	if trimmed := strings.TrimSpace(prompt); trimmed != "" {
+		return trimmed
+	}
+	return defaultGeminiTextTestPrompt
 }
 
 // extractContentFromSSEResponse 从 SSE 流式响应中提取文本和内联图片
