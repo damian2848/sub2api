@@ -14,7 +14,7 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
-const apiKeyAuthSnapshotVersion = 28 // v28: group image_count_billing switch; v27: include API key concurrency limit; retain stream_only and user-group denied models
+const apiKeyAuthSnapshotVersion = 29 // v29: user_group_rpm_override_group_id (upstream v26); v28: group image_count_billing switch; v27: include API key concurrency limit; retain stream_only and user-group denied models
 
 type apiKeyAuthCacheConfig struct {
 	l1Size        int
@@ -395,10 +395,11 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 	// 填充 (user, group) RPM override —— snapshot 构建时查一次 DB，后续请求零 DB 往返。
 	if apiKey.GroupID != nil && *apiKey.GroupID > 0 && s.userGroupRateRepo != nil {
 		override, err := s.userGroupRateRepo.GetRPMOverrideByUserAndGroup(ctx, apiKey.UserID, *apiKey.GroupID)
-		if err == nil && override != nil {
+		if err == nil {
 			snapshot.User.UserGroupRPMOverride = override
+			snapshot.User.UserGroupRPMOverrideGroupID = *apiKey.GroupID
 		}
-		// 查询失败或无 override 时留 nil，checkRPM 会回退到 DB 查询
+		// 查询失败时不记录分组，checkRPM 会回退到 DB 查询
 	}
 	if apiKey.Group != nil {
 		snapshot.Group = &APIKeyAuthGroupSnapshot{
@@ -486,23 +487,24 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 		RateLimit1d:      snapshot.RateLimit1d,
 		RateLimit7d:      snapshot.RateLimit7d,
 		User: &User{
-			ID:                         snapshot.User.ID,
-			Status:                     snapshot.User.Status,
-			Role:                       snapshot.User.Role,
-			Balance:                    snapshot.User.Balance,
-			Concurrency:                snapshot.User.Concurrency,
-			AllowedGroups:              snapshot.User.AllowedGroups,
-			Email:                      snapshot.User.Email,
-			Username:                   snapshot.User.Username,
-			BalanceNotifyEnabled:       snapshot.User.BalanceNotifyEnabled,
-			RestrictPublicGroups:       snapshot.User.RestrictPublicGroups,
-			BalanceNotifyThresholdType: snapshot.User.BalanceNotifyThresholdType,
-			BalanceNotifyThreshold:     snapshot.User.BalanceNotifyThreshold,
-			BalanceNotifyExtraEmails:   snapshot.User.BalanceNotifyExtraEmails,
-			TotalRecharged:             snapshot.User.TotalRecharged,
-			RPMLimit:                   snapshot.User.RPMLimit,
-			UserGroupRPMOverride:       snapshot.User.UserGroupRPMOverride,
-			UserGroupDeniedModels:      snapshot.User.UserGroupDeniedModels,
+			ID:                          snapshot.User.ID,
+			Status:                      snapshot.User.Status,
+			Role:                        snapshot.User.Role,
+			Balance:                     snapshot.User.Balance,
+			Concurrency:                 snapshot.User.Concurrency,
+			AllowedGroups:               snapshot.User.AllowedGroups,
+			Email:                       snapshot.User.Email,
+			Username:                    snapshot.User.Username,
+			BalanceNotifyEnabled:        snapshot.User.BalanceNotifyEnabled,
+			RestrictPublicGroups:        snapshot.User.RestrictPublicGroups,
+			BalanceNotifyThresholdType:  snapshot.User.BalanceNotifyThresholdType,
+			BalanceNotifyThreshold:      snapshot.User.BalanceNotifyThreshold,
+			BalanceNotifyExtraEmails:    snapshot.User.BalanceNotifyExtraEmails,
+			TotalRecharged:              snapshot.User.TotalRecharged,
+			RPMLimit:                    snapshot.User.RPMLimit,
+			UserGroupRPMOverride:        snapshot.User.UserGroupRPMOverride,
+			UserGroupRPMOverrideGroupID: snapshot.User.UserGroupRPMOverrideGroupID,
+			UserGroupDeniedModels:       snapshot.User.UserGroupDeniedModels,
 		},
 	}
 	if snapshot.Group != nil {
