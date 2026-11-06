@@ -2769,7 +2769,8 @@ func supportsOpenAIReasoningEffortMax(model string) bool {
 
 // validateGPT61CompatRequest validates GPT-6.1 Sol/Terra effort selections,
 // including disabled thinking. Messages bridges run it on the converted body
-// after policy mapping; other compatibility paths run it after model mapping.
+// after model mapping and reasoning effort policy application; other
+// compatibility paths run it after model mapping.
 func validateGPT61CompatRequest(body []byte, model string) error {
 	if err := validateGPT61RawEffort(body, model); err != nil {
 		return err
@@ -2791,7 +2792,7 @@ func validateGPT61RawEffort(body []byte, model string) error {
 			return err
 		}
 	}
-	requestedModel := gjson.GetBytes(body, "model").String()
+	requestedModel := openai.CanonicalizeOpenAIModelAliasSpelling(gjson.GetBytes(body, "model").String())
 	for _, effort := range []string{"none", "minimal"} {
 		if strings.HasSuffix(strings.ToLower(requestedModel), "-"+effort) {
 			return openai.ValidateGPT61ReasoningEffort(model, effort)
