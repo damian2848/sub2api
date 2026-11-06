@@ -77,7 +77,7 @@ func (h *AsyncImageHandler) Submit(c *gin.Context) {
 
 	body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
 	if err != nil {
-		if handleRequestBodyReadError(c, err) {
+		if handleRequestBodyReadError(c, requestLogger(c, "handler.image_task.create"), err) {
 			return
 		}
 		status, message := requestBodyReadFailure(requestLogger(c, "handler.image_task.create"), c.Request, err)

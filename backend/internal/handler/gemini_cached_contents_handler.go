@@ -65,7 +65,7 @@ func (h *GatewayHandler) geminiCachedContentsPreamble(c *gin.Context, component 
 func readGeminiCachedContentBody(c *gin.Context) ([]byte, bool) {
 	body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
 	if err != nil {
-		if handleRequestBodyReadError(c, err) {
+		if handleRequestBodyReadError(c, requestLogger(c, "handler.gemini_cached_contents"), err) {
 			return nil, false
 		}
 		status, message := requestBodyReadFailure(requestLogger(c, "handler.gemini_cached_contents"), c.Request, err)

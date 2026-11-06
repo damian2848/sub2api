@@ -708,7 +708,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	bodyReadDone()
 	if err != nil {
-		if handleRequestBodyReadError(c, err) {
+		if handleRequestBodyReadError(c, reqLog, err) {
 			return
 		}
 		status, message := requestBodyReadFailure(reqLog, c.Request, err)
@@ -1537,7 +1537,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	bodyReadDone()
 	if err != nil {
-		if handleRequestBodyReadError(c, err) {
+		if handleRequestBodyReadError(c, reqLog, err) {
 			return
 		}
 		status, message := requestBodyReadFailure(reqLog, c.Request, err)

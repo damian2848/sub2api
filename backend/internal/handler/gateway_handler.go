@@ -147,7 +147,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	// 读取请求体
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	if err != nil {
-		if handleRequestBodyReadError(c, err) {
+		if handleRequestBodyReadError(c, reqLog, err) {
 			return
 		}
 		status, message := requestBodyReadFailure(reqLog, c.Request, err)
@@ -2255,7 +2255,7 @@ func (h *GatewayHandler) CountTokens(c *gin.Context) {
 	// 读取请求体
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	if err != nil {
-		if handleRequestBodyReadError(c, err) {
+		if handleRequestBodyReadError(c, reqLog, err) {
 			return
 		}
 		status, message := requestBodyReadFailure(reqLog, c.Request, err)

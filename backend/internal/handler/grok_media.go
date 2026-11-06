@@ -90,7 +90,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 	if endpoint.RequiresRequestBody() {
 		body, err = pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
 		if err != nil {
-			if handleRequestBodyReadError(c, err) {
+			if handleRequestBodyReadError(c, reqLog, err) {
 				return
 			}
 			status, message := requestBodyReadFailure(reqLog, c.Request, err)

@@ -623,7 +623,7 @@ func compositeTargetPlatformMiddleware(resolver *service.CompositeRouteResolver)
 
 		body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
 		if err != nil {
-			if middleware.RejectRequestBodyReadError(c, err) {
+			if middleware.RejectRequestBodyReadError(c, "middleware.composite_route", err) {
 				return
 			}
 			middleware.AbortWithRequestBodyReadFailure(c, "middleware.composite_route", err)
