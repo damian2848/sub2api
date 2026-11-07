@@ -9,6 +9,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// 普通连接测试的预算，与 TestConnection 非 Pelican 路径一致。
+func (s *AntigravityGatewayService) buildGeminiTestRequestWithPrompt(projectID, model, prompt string) ([]byte, error) {
+	return s.buildGeminiTestRequestWithBudget(projectID, model, prompt, antigravityTestMaxOutputTokens)
+}
+
+func (s *AntigravityGatewayService) buildClaudeTestRequest(projectID, mappedModel, prompt string) ([]byte, error) {
+	return s.buildClaudeTestRequestWithBudget(projectID, mappedModel, prompt, antigravityTestMaxOutputTokens)
+}
+
 func TestAntigravityConnectionTestModel(t *testing.T) {
 	t.Parallel()
 

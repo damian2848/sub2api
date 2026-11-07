@@ -483,12 +483,8 @@ func testConnectionHandleError(
 	return nil
 }
 
-// buildGeminiTestRequestWithPrompt 构建 Gemini 格式测试请求
-// 文本模型使用最小 token 消耗：输入 "." + maxOutputTokens: 1；图片模型使用图片生成配置
-func (s *AntigravityGatewayService) buildGeminiTestRequestWithPrompt(projectID, model, prompt string) ([]byte, error) {
-	return s.buildGeminiTestRequestWithBudget(projectID, model, prompt, antigravityTestMaxOutputTokens)
-}
-
+// buildGeminiTestRequestWithBudget 构建 Gemini 格式测试请求；图片模型使用图片生成配置。
+// 普通连接测试传 antigravityTestMaxOutputTokens，Pelican 测试传 pelicanClaudeMaxTokens。
 func (s *AntigravityGatewayService) buildGeminiTestRequestWithBudget(projectID, model, prompt string, maxTokens int) ([]byte, error) {
 	if isImageGenerationModel(model) {
 		imagePrompt := strings.TrimSpace(prompt)
@@ -549,12 +545,8 @@ func (s *AntigravityGatewayService) buildGeminiTestRequestWithBudget(projectID, 
 	return s.wrapV1InternalRequest(projectID, model, payloadBytes)
 }
 
-// buildClaudeTestRequest 构建 Claude 格式测试请求并转换为 Gemini 格式
-// 与其他平台一致：发送管理员输入的提示词（默认 "hi"），留出足够的输出 token 以便模型回答。
-func (s *AntigravityGatewayService) buildClaudeTestRequest(projectID, mappedModel, prompt string) ([]byte, error) {
-	return s.buildClaudeTestRequestWithBudget(projectID, mappedModel, prompt, antigravityTestMaxOutputTokens)
-}
-
+// buildClaudeTestRequestWithBudget 构建 Claude 格式测试请求并转换为 Gemini 格式。
+// 与其他平台一致：发送管理员输入的提示词（默认 "hi"），maxTokens 留出足够的输出空间。
 func (s *AntigravityGatewayService) buildClaudeTestRequestWithBudget(projectID, mappedModel, prompt string, maxTokens int) ([]byte, error) {
 	content, err := json.Marshal(antigravityTestPrompt(prompt))
 	if err != nil {
