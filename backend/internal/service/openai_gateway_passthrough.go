@@ -1738,6 +1738,11 @@ func (s *OpenAIGatewayService) handleOpenAIStreamTerminalAccountSideEffects(
 		s.handleGrokAccountUpstreamError(withGrokTeamRateLimitModel(ctx, firstNonEmpty(canonicalModel...)), account, statusCode, nil, payload)
 		return statusCode, false
 	}
+	// Only OpenAI treats a stream-level 503 as an account-side signal; Grok is
+	// handled above and other platforms keep their own capacity handling.
+	if statusCode == http.StatusServiceUnavailable && (account == nil || account.Platform != PlatformOpenAI) {
+		return statusCode, false
+	}
 	switch statusCode {
 	case http.StatusForbidden:
 		if !openAIStream403AccountFailure(payload, message) {
