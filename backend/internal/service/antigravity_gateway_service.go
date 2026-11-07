@@ -396,13 +396,18 @@ func (s *AntigravityGatewayService) TestConnectionWithPrompt(ctx context.Context
 	// 构建请求体
 	var requestBody []byte
 	// Pelican 分组测智通过 context 传递题目；普通账号测试仍使用默认探针。
-	if options, ok := pelicanTestOptionsFromContext(ctx); ok && strings.TrimSpace(prompt) == "" {
-		prompt = options.prompt
+	// Pelican 需要完整输出预算；普通测试只给模型留出回答空间。
+	maxOutputTokens := antigravityTestMaxOutputTokens
+	if options, ok := pelicanTestOptionsFromContext(ctx); ok {
+		maxOutputTokens = pelicanClaudeMaxTokens
+		if strings.TrimSpace(prompt) == "" {
+			prompt = options.prompt
+		}
 	}
 	if shouldUseAntigravityGeminiTestRequest(modelID, mappedModel) {
-		requestBody, err = s.buildGeminiTestRequestWithPrompt(projectID, mappedModel, prompt)
+		requestBody, err = s.buildGeminiTestRequestWithBudget(projectID, mappedModel, prompt, maxOutputTokens)
 	} else {
-		requestBody, err = s.buildClaudeTestRequest(projectID, mappedModel, prompt)
+		requestBody, err = s.buildClaudeTestRequestWithBudget(projectID, mappedModel, prompt, maxOutputTokens)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("构建请求失败: %w", err)
@@ -481,6 +486,10 @@ func testConnectionHandleError(
 // buildGeminiTestRequestWithPrompt 构建 Gemini 格式测试请求
 // 文本模型使用最小 token 消耗：输入 "." + maxOutputTokens: 1；图片模型使用图片生成配置
 func (s *AntigravityGatewayService) buildGeminiTestRequestWithPrompt(projectID, model, prompt string) ([]byte, error) {
+	return s.buildGeminiTestRequestWithBudget(projectID, model, prompt, antigravityTestMaxOutputTokens)
+}
+
+func (s *AntigravityGatewayService) buildGeminiTestRequestWithBudget(projectID, model, prompt string, maxTokens int) ([]byte, error) {
 	if isImageGenerationModel(model) {
 		imagePrompt := strings.TrimSpace(prompt)
 		if imagePrompt == "" {
@@ -511,7 +520,7 @@ func (s *AntigravityGatewayService) buildGeminiTestRequestWithPrompt(projectID, 
 		return s.wrapV1InternalRequest(projectID, model, payloadBytes)
 	}
 
-	textPrompt, maxTokens := antigravityTestPromptAndMaxTokens(prompt)
+	textPrompt := antigravityTestPrompt(prompt)
 	payload := map[string]any{
 		"contents": []map[string]any{
 			{
@@ -543,8 +552,11 @@ func (s *AntigravityGatewayService) buildGeminiTestRequestWithPrompt(projectID, 
 // buildClaudeTestRequest 构建 Claude 格式测试请求并转换为 Gemini 格式
 // 与其他平台一致：发送管理员输入的提示词（默认 "hi"），留出足够的输出 token 以便模型回答。
 func (s *AntigravityGatewayService) buildClaudeTestRequest(projectID, mappedModel, prompt string) ([]byte, error) {
-	textPrompt, maxTokens := antigravityTestPromptAndMaxTokens(prompt)
-	content, err := json.Marshal(textPrompt)
+	return s.buildClaudeTestRequestWithBudget(projectID, mappedModel, prompt, antigravityTestMaxOutputTokens)
+}
+
+func (s *AntigravityGatewayService) buildClaudeTestRequestWithBudget(projectID, mappedModel, prompt string, maxTokens int) ([]byte, error) {
+	content, err := json.Marshal(antigravityTestPrompt(prompt))
 	if err != nil {
 		return nil, err
 	}
@@ -577,16 +589,6 @@ func (s *AntigravityGatewayService) getClaudeTransformOptions(ctx context.Contex
 const antigravityTestMaxOutputTokens = 256
 
 // antigravityTestPrompt is the admin's test prompt, or "hi" like the other platforms' tests.
-// antigravityTestPromptAndMaxTokens keeps the upstream default test ("hi" with
-// a short answer budget) and gives explicit prompts, such as the Pelican
-// showcase, the full Claude output budget.
-func antigravityTestPromptAndMaxTokens(prompt string) (string, int) {
-	if strings.TrimSpace(prompt) != "" {
-		return antigravityTestPrompt(prompt), pelicanClaudeMaxTokens
-	}
-	return antigravityTestPrompt(prompt), antigravityTestMaxOutputTokens
-}
-
 func antigravityTestPrompt(prompt string) string {
 	if trimmed := strings.TrimSpace(prompt); trimmed != "" {
 		return trimmed

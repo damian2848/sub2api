@@ -178,6 +178,17 @@ func (r *mcpRouteSettingsRepo) GetValue(_ context.Context, key string) (string, 
 	return "", service.ErrSettingNotFound
 }
 
+// GetMultiple backs the fork's Codex harvest change detection in UpdateSettings.
+func (r *mcpRouteSettingsRepo) GetMultiple(_ context.Context, keys []string) (map[string]string, error) {
+	out := make(map[string]string, len(keys))
+	for _, key := range keys {
+		if value, ok := r.values[key]; ok {
+			out[key] = value
+		}
+	}
+	return out, nil
+}
+
 func (r *mcpRouteSettingsRepo) SetMultiple(_ context.Context, values map[string]string) error {
 	for key, value := range values {
 		r.values[key] = value
