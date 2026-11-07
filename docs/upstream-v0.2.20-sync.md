@@ -72,6 +72,7 @@
 | `govulncheck ./...` | 代码可达漏洞 0 |
 | `go vet ./...`、`go vet -tags unit ./...` | 通过 |
 | `go test -tags=unit ./...` | 全部通过 |
+| `go test -tags=integration ./...`（本地 Docker） | 第三次全量串行运行全部通过。前两次全量运行中 `internal/repository` 的 15 个 `TestRegional*` 失败，单独跑该包两次、单独跑用例均通过；这些文件本次零改动，属 fork 原有的偶发问题。`internal/mihomo` 在 macOS 上偶发失败（本地无 mihomo 内核），CI 覆盖 |
 | 前端 `typecheck`、`lint:check` | 通过；1 个 warning 为 fork 原有 SettingsView 测试的未使用变量 |
 | 前端 `vitest run`（全部） | 498 个文件、4483 个用例通过，9 个原有 skip |
 | 前端 `build` | 通过 |
