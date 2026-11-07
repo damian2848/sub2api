@@ -1587,7 +1587,7 @@ func TestConvertClaudeMessagesToGeminiGenerateContent_ConvertsDocuments(t *testi
 		{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERg=="}},
 		{"type":"document","source":{"type":"text","media_type":"text/plain","data":"plain notes"}},
 		{"type":"text","text":"summarize"}]}]}`)
-	out, err := convertClaudeMessagesToGeminiGenerateContent(body)
+	out, err := convertClaudeMessagesToGeminiGenerateContent(body, "")
 	require.NoError(t, err)
 	var req struct {
 		Contents []struct {

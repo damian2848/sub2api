@@ -198,7 +198,13 @@ func ProvideHTTPServer(cfg *config.Config, router *gin.Engine, lifecycle *Lifecy
 		}
 	}
 
-	httpHandler = pkghttputil.WithBodyReadTimeout(httpHandler, time.Duration(cfg.Gateway.RequestBodyReadTimeoutSeconds)*time.Second)
+	// server.request_body_idle_timeout (fork) already arms a per-read deadline and
+	// reports os.ErrDeadlineExceeded, which the shared classifier maps to 408.
+	// Stacking upstream's per-read deadline on the same connection would make
+	// the two re-arm each other, so it only applies when the idle timeout is off.
+	if cfg.Server.RequestBodyIdleTimeout <= 0 {
+		httpHandler = pkghttputil.WithBodyReadTimeout(httpHandler, time.Duration(cfg.Gateway.RequestBodyReadTimeoutSeconds)*time.Second)
+	}
 	httpHandler = pkghttputil.WithWriteTimeout(httpHandler, time.Duration(cfg.Gateway.DownstreamWriteTimeoutSeconds)*time.Second)
 	server.Handler = lifecycle.Wrap(httpHandler)
 	return server
