@@ -1100,7 +1100,7 @@ describe('UseKeyModal', () => {
         expect(configToml).toContain('[model_providers.OpenAI]\nname = "OpenAI"\nbase_url = "https://example.com/v1"\nmodel_catalog_url = "https://example.com/v1/models"')
         expect(configToml).not.toContain('model_catalog_json')
         expect(configToml).toContain('[features]\napi_key_model_discovery = true')
-        expect(configToml).toContain('requires_openai_auth = true')
+        expect(configToml).toContain('requires_openai_auth = false')
         expect(configToml).not.toContain('client_version')
         expect(wrapper.find('[data-testid="codex-model-catalog"]').exists()).toBe(true)
 
