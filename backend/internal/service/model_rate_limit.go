@@ -6,12 +6,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 )
 
 const (
 	modelRateLimitsKey                 = "model_rate_limits"
 	antigravityGeminiModelRateLimitKey = "antigravity:gemini"
+	antigravityArgonModelRateLimitKey  = "antigravity:gemini:argon"
 	openAIImageGenerationRateLimitKey  = "openai:image_generation"
 	openAICodexSparkRateLimitReason    = "openai_codex_spark_rate_limit"
 	// anthropicFableRateLimitKey 是 Anthropic 7d_oi（Fable 专属 7d 窗口）限流的
@@ -80,9 +82,7 @@ func (a *Account) modelRateLimitKeysForRequest(ctx context.Context, requestedMod
 	keys := []string{modelKey}
 	switch a.Platform {
 	case PlatformAntigravity:
-		if isAntigravityGeminiModel(modelKey) && !isAntigravityGeminiImageModel(modelKey) && modelKey != antigravityGeminiModelRateLimitKey {
-			keys = append(keys, antigravityGeminiModelRateLimitKey)
-		}
+		return antigravityModelRateLimitReadKeys(a, modelKey)
 	case PlatformOpenAI:
 		if openAIImageGenerationRateLimitApplies(ctx, requestedModel, modelKey) && modelKey != openAIImageGenerationRateLimitKey {
 			keys = append(keys, openAIImageGenerationRateLimitKey)
@@ -159,16 +159,49 @@ func isAntigravityGeminiModel(model string) bool {
 	return strings.HasPrefix(normalizeAntigravityModelName(model), "gemini-")
 }
 
-func antigravityModelRateLimitKeys(model string) []string {
+// antigravityModelRateLimitKeys 返回 Antigravity 模型级 429 写入的限流 scope。
+// fork 只写最终模型本身：模型级 429 并不说明共享配额桶包含哪些模型（即使是
+// QUOTA_EXHAUSTED，Argon 也可能有独立的桶），因此从不按 Gemini 前缀推断家族
+// scope。这样 Pro 账号的 Argon 冷却天然不会波及其他 Gemini 模型（上游
+// 7796a2d57 的意图），反之亦然。account 参数与上游签名保持一致。
+func antigravityModelRateLimitKeys(_ *Account, model string) []string {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return nil
 	}
-	// A model-level 429 does not identify the members of a shared quota bucket.
-	// This applies even to QUOTA_EXHAUSTED: Argon can have a separate bucket.
-	// Keep existing explicit family scopes readable, but never infer a new one
-	// from the Gemini model prefix.
 	return []string{model}
+}
+
+// antigravityModelRateLimitReadKeys 返回调度时需要检查的限流 scope：模型本身，
+// 加上仍可读取的显式家族 scope。Pro 套餐的 Argon 有独立配额池，Argon 变体读取
+// antigravity:gemini:argon，而不受共享 antigravity:gemini scope 影响；Ultra 与
+// 未知套餐保留共享 Gemini scope。
+func antigravityModelRateLimitReadKeys(account *Account, model string) []string {
+	keys := antigravityModelRateLimitKeys(account, model)
+	if len(keys) == 0 {
+		return nil
+	}
+	model = keys[0]
+	if isAntigravityGeminiModel(model) && !isAntigravityGeminiImageModel(model) && model != antigravityGeminiModelRateLimitKey && model != antigravityArgonModelRateLimitKey {
+		familyKey := antigravityGeminiModelRateLimitKey
+		if isAntigravityProPlanAccount(account) && isAntigravityArgonModel(model) {
+			familyKey = antigravityArgonModelRateLimitKey
+		}
+		keys = append(keys, familyKey)
+	}
+	return keys
+}
+
+func isAntigravityProPlanAccount(account *Account) bool {
+	if account == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(antigravity.TierIDToPlanType(account.GetCredential("plan_type"))), "Pro")
+}
+
+func isAntigravityArgonModel(model string) bool {
+	normalized := normalizeAntigravityModelName(model)
+	return normalized == "gemini-4-argon" || strings.HasPrefix(normalized, "gemini-4-argon-")
 }
 
 func isAntigravityGeminiImageModel(model string) bool {
