@@ -90,7 +90,8 @@ func TestExcelBPSCacheCreationAsInputBilling(t *testing.T) {
 					if tt.option != nil {
 						extra["openai_excel_bps_cache_creation_as_input"] = tt.option
 					}
-					original := OpenAIUsage{InputTokens: tt.input, CacheCreationInputTokens: tt.creation, CacheReadInputTokens: tt.read, OutputTokens: tt.output}
+					// Report an OpenAI 30m/12h split of the writes; it must follow the aggregate.
+					original := OpenAIUsage{InputTokens: tt.input, CacheCreationInputTokens: tt.creation, CacheCreation30mInputTokens: tt.creation - tt.creation/4, CacheCreation12hInputTokens: tt.creation / 4, CacheReadInputTokens: tt.read, OutputTokens: tt.output}
 					result := &OpenAIForwardResult{RequestID: "resp_bps_billing", UpstreamEndpoint: "/basispoints/api/responses", Usage: original, Model: "gpt-6-astra", Stream: stream, Duration: time.Second}
 					input := &OpenAIRecordUsageInput{
 						Result: result, APIKey: &APIKey{ID: 1001}, User: &User{ID: 2001},
@@ -106,12 +107,15 @@ func TestExcelBPSCacheCreationAsInputBilling(t *testing.T) {
 					log := usageRepo.lastLog
 					require.Equal(t, tt.wantInput, log.InputTokens)
 					require.Equal(t, tt.wantCreation, log.CacheCreationTokens)
+					require.Equal(t, tt.wantCreation-tt.wantCreation/4, log.CacheCreation30mTokens)
+					require.Equal(t, tt.wantCreation/4, log.CacheCreation12hTokens)
 					require.Equal(t, tt.read, log.CacheReadTokens)
 					require.Equal(t, tt.output, log.OutputTokens)
 					require.Equal(t, tt.input+tt.output, log.TotalTokens())
 					require.Equal(t, stream, log.Stream)
 					wantInputCost := float64(tt.wantInput) * 5e-6
-					wantCreationCost := float64(tt.wantCreation) * 6.25e-6
+					// 30m writes use the card's cache-write price; GPT-6 Astra 12h writes use 2.5x input.
+					wantCreationCost := float64(tt.wantCreation-tt.wantCreation/4)*6.25e-6 + float64(tt.wantCreation/4)*12.5e-6
 					wantReadCost := float64(tt.read) * 0.5e-6
 					wantOutputCost := float64(tt.output) * 30e-6
 					wantTotal := wantInputCost + wantCreationCost + wantReadCost + wantOutputCost

@@ -15,7 +15,7 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-const excelBPSUsageWithCreation = `{"input_tokens":1000,"output_tokens":50,"total_tokens":1050,"input_tokens_details":{"cached_tokens":100,"cache_write_tokens":200,"cache_creation_tokens":200},"prompt_tokens_details":{"cached_tokens":100,"cache_write_tokens":200,"cache_creation_tokens":200},"cache_creation_input_tokens":200,"cache_write_input_tokens":200,"cache_creation_tokens":200,"cache_write_tokens":200,"cache_creation":{"ephemeral_5m_input_tokens":150,"ephemeral_1h_input_tokens":50},"output_tokens_details":{"reasoning_tokens":3},"extension":9007199254740993}`
+const excelBPSUsageWithCreation = `{"input_tokens":1000,"output_tokens":50,"total_tokens":1050,"input_tokens_details":{"cached_tokens":100,"cache_write_tokens":200,"cache_creation_tokens":200,"cache_write_tokens_details":{"ttl_30m_tokens":120,"ttl_12h_tokens":80}},"prompt_tokens_details":{"cached_tokens":100,"cache_write_tokens":200,"cache_creation_tokens":200},"cache_creation_input_tokens":200,"cache_write_input_tokens":200,"cache_creation_tokens":200,"cache_write_tokens":200,"cache_creation":{"ephemeral_5m_input_tokens":150,"ephemeral_1h_input_tokens":50},"output_tokens_details":{"reasoning_tokens":3},"extension":9007199254740993}`
 
 func TestExcelBPSCacheCreationAsInputDownstreamUsage(t *testing.T) {
 	for _, path := range []string{"/v1/responses", "/v1/responses/compact"} {
@@ -34,6 +34,8 @@ func TestExcelBPSCacheCreationAsInputDownstreamUsage(t *testing.T) {
 					result, err := svc.Forward(context.Background(), c, account, body)
 					require.NoError(t, err)
 					require.Equal(t, 200, result.Usage.CacheCreationInputTokens, "retain the upstream measurement for local billing")
+					require.Equal(t, 120, result.Usage.CacheCreation30mInputTokens, "retain the upstream 30m split for local billing")
+					require.Equal(t, 80, result.Usage.CacheCreation12hInputTokens, "retain the upstream 12h split for local billing")
 					response := rec.Body.Bytes()
 					if stream {
 						for _, line := range strings.Split(rec.Body.String(), "\n") {
@@ -63,6 +65,10 @@ func TestExcelBPSCacheCreationAsInputDownstreamUsage(t *testing.T) {
 					if enabled {
 						require.Zero(t, usage.Get("cache_creation.ephemeral_5m_input_tokens").Int())
 						require.Zero(t, usage.Get("cache_creation.ephemeral_1h_input_tokens").Int())
+						require.Zero(t, usage.Get("input_tokens_details.cache_write_tokens_details.ttl_30m_tokens").Int())
+						require.Zero(t, usage.Get("input_tokens_details.cache_write_tokens_details.ttl_12h_tokens").Int())
+						require.Zero(t, downstream.CacheCreation30mInputTokens)
+						require.Zero(t, downstream.CacheCreation12hInputTokens)
 					} else {
 						require.JSONEq(t, excelBPSUsageWithCreation, usage.Raw)
 					}

@@ -189,10 +189,15 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	// OpenAI input_tokens 是总输入，包含缓存读取和缓存写入明细。
 	// 将三类 token 拆成互斥桶，避免缓存写入同时按普通输入和 cache_write 重复计费。
 	cacheCreationTokens := result.Usage.CacheCreationInputTokens
+	cacheCreation30mTokens := result.Usage.CacheCreation30mInputTokens
+	cacheCreation12hTokens := result.Usage.CacheCreation12hInputTokens
 	if account.IsExcelBPSCacheCreationAsInputEnabled() && result.UpstreamEndpoint == "/basispoints/api/responses" {
 		// Total input already includes cache creation. Retain those tokens in the
 		// ordinary input bucket without changing the original upstream usage.
+		// The 30m/12h split belongs to the same writes, so it is dropped as well.
 		cacheCreationTokens = 0
+		cacheCreation30mTokens = 0
+		cacheCreation12hTokens = 0
 	}
 	actualInputTokens := result.Usage.InputTokens - result.Usage.CacheReadInputTokens - cacheCreationTokens
 	if actualInputTokens < 0 {
@@ -201,13 +206,15 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 
 	// Calculate cost
 	tokens := UsageTokens{
-		InputTokens:          actualInputTokens,
-		ImageInputTokens:     max(result.Usage.ImageInputTokens-result.Usage.ImageCacheReadTokens, 0),
-		ImageCacheReadTokens: result.Usage.ImageCacheReadTokens,
-		OutputTokens:         result.Usage.OutputTokens,
-		CacheCreationTokens:  cacheCreationTokens,
-		CacheReadTokens:      result.Usage.CacheReadInputTokens,
-		ImageOutputTokens:    result.Usage.ImageOutputTokens,
+		InputTokens:            actualInputTokens,
+		ImageInputTokens:       max(result.Usage.ImageInputTokens-result.Usage.ImageCacheReadTokens, 0),
+		ImageCacheReadTokens:   result.Usage.ImageCacheReadTokens,
+		OutputTokens:           result.Usage.OutputTokens,
+		CacheCreationTokens:    cacheCreationTokens,
+		CacheCreation30mTokens: cacheCreation30mTokens,
+		CacheCreation12hTokens: cacheCreation12hTokens,
+		CacheReadTokens:        result.Usage.CacheReadInputTokens,
+		ImageOutputTokens:      result.Usage.ImageOutputTokens,
 	}
 
 	// Keep candidate fallback, response-model selection and Free Fast on one policy snapshot.
@@ -421,6 +428,8 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		InputTokens:              actualInputTokens,
 		OutputTokens:             result.Usage.OutputTokens,
 		CacheCreationTokens:      cacheCreationTokens,
+		CacheCreation30mTokens:   cacheCreation30mTokens,
+		CacheCreation12hTokens:   cacheCreation12hTokens,
 		CacheReadTokens:          result.Usage.CacheReadInputTokens,
 		ImageInputTokens:         result.Usage.ImageInputTokens,
 		ImageOutputTokens:        result.Usage.ImageOutputTokens,
