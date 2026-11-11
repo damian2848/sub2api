@@ -1799,6 +1799,12 @@ type GatewaySchedulingConfig struct {
 	// 兜底层账户选择策略: "last_used"(按最后使用时间排序，默认) 或 "random"(随机)
 	FallbackSelectionMode string `mapstructure:"fallback_selection_mode"`
 
+	// FallbackProbeHardSlots 开启后（默认 true），兜底排队前按优先级探测负载快照里
+	// 还有真实并发槽位（current < concurrency）的账号并当场抢槽；load_factor 只决定
+	// Layer 2 的满载判断，不再拦住有空硬槽的账号。抢不到才回到原排队逻辑（只排首位账号，不外溢）。
+	// 关闭后恢复旧行为：Layer 3 直接给首位账号出等待计划。
+	FallbackProbeHardSlots bool `mapstructure:"fallback_probe_hard_slots"`
+
 	// PreferSoonestReset 开启后，负载感知选择会优先选用「会话窗口最早重置」的账号
 	// （use-it-or-lose-it：先用尽即将重置的账号，保留重置时间还很久的账号）。
 	// 默认 false，保持原有「优先级 → 负载率 → LRU」行为不变。
@@ -2927,6 +2933,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.scheduling.fallback_wait_timeout", 30*time.Second)
 	viper.SetDefault("gateway.scheduling.fallback_max_waiting", 100)
 	viper.SetDefault("gateway.scheduling.fallback_selection_mode", "last_used")
+	viper.SetDefault("gateway.scheduling.fallback_probe_hard_slots", true)
 	viper.SetDefault("gateway.scheduling.prefer_soonest_reset", false)
 	viper.SetDefault("gateway.scheduling.load_batch_enabled", true)
 	viper.SetDefault("gateway.scheduling.load_batch_cache_ttl_ms", 200)

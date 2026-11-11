@@ -714,6 +714,9 @@ func (s *GatewayService) selectAccountWithLoadAwareness(ctx context.Context, gro
 	}
 
 	loadMap, err := s.concurrencyService.GetAccountsLoadBatch(ctx, accountLoads)
+	// Layer 2 已经抢过槽（或抢到后被会话限制拒绝）的账号，Layer 3 探测时跳过，
+	// 避免负载快照缓存期内对同一账号重复执行抢槽 Lua。
+	var layer2Tried map[int64]struct{}
 	if err != nil {
 		if result, ok, legacyErr := s.tryAcquireByLegacyOrder(ctx, candidates, groupID, sessionHash, preferOAuth); legacyErr != nil {
 			return nil, legacyErr
@@ -766,6 +769,10 @@ func (s *GatewayService) selectAccountWithLoadAwareness(ctx context.Context, gro
 
 			// 移除已尝试的账号，重新进行分层过滤
 			selectedID := selected.account.ID
+			if layer2Tried == nil {
+				layer2Tried = make(map[int64]struct{}, len(available))
+			}
+			layer2Tried[selectedID] = struct{}{}
 			newAvailable := make([]accountWithLoad, 0, len(available)-1)
 			for _, acc := range available {
 				if acc.account.ID != selectedID {
@@ -778,6 +785,36 @@ func (s *GatewayService) selectAccountWithLoadAwareness(ctx context.Context, gro
 
 	// ============ Layer 3: 兜底排队 ============
 	s.sortCandidatesForFallback(candidates, preferOAuth, cfg.FallbackSelectionMode)
+
+	// 负载率按 load_factor 计算，这里的账号只是“显示满载”，可能还有真实并发槽位。
+	// 排队前按优先级逐个抢槽；已知占满 concurrency 的账号不产生 Redis 调用。
+	// gateway.scheduling.fallback_probe_hard_slots=false 时跳过，恢复直接排队。
+	if cfg.FallbackProbeHardSlots {
+		for _, acc := range candidates {
+			if _, tried := layer2Tried[acc.ID]; tried {
+				continue
+			}
+			if !fallbackAccountHasFreeSlot(acc, loadMap[acc.ID]) {
+				continue
+			}
+			result, err := s.tryAcquireAccountSlot(ctx, acc.ID, acc.Concurrency)
+			if err != nil || !result.Acquired {
+				continue
+			}
+			// 会话数量限制检查
+			if !s.checkAndRegisterSession(ctx, acc, sessionHash) {
+				result.ReleaseFunc() // 释放槽位，继续尝试下一个账号
+				continue
+			}
+			if sessionHash != "" && s.cache != nil {
+				_ = s.bindGatewayStickySessionDuringSelection(ctx, groupID, sessionHash, acc.ID)
+			}
+			return s.newSelectionResult(ctx, acc, true, result.ReleaseFunc, nil)
+		}
+	}
+
+	// 全部占满时只在排序首位账号排队，队列已满由调用方立即返回。
+	// 不外溢到后续账号的队列：慢账号排不到，请求只会干等到超时再失败。
 	for _, acc := range candidates {
 		// 会话数量限制检查（等待计划也需要占用会话配额）
 		if !s.checkAndRegisterSession(ctx, acc, sessionHash) {
@@ -791,6 +828,16 @@ func (s *GatewayService) selectAccountWithLoadAwareness(ctx context.Context, gro
 		})
 	}
 	return nil, ErrNoAvailableAccounts
+}
+
+// fallbackAccountHasFreeSlot 判断负载快照里账号是否还有真实并发槽位。
+// 负载查询失败时 load 为 nil，此时 tryAcquireByLegacyOrder 已逐个尝试过。
+// Concurrency <= 0 表示不限并发。
+func fallbackAccountHasFreeSlot(acc *Account, load *AccountLoadInfo) bool {
+	if load == nil {
+		return false
+	}
+	return acc.Concurrency <= 0 || load.CurrentConcurrency < acc.Concurrency
 }
 
 func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth bool) (*AccountSelectionResult, bool, error) {
@@ -828,6 +875,7 @@ func (s *GatewayService) schedulingConfig() config.GatewaySchedulingConfig {
 		StickySessionWaitTimeout: 45 * time.Second,
 		FallbackWaitTimeout:      30 * time.Second,
 		FallbackMaxWaiting:       100,
+		FallbackProbeHardSlots:   true,
 		LoadBatchEnabled:         true,
 		SlotCleanupInterval:      30 * time.Second,
 	}

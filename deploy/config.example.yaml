@@ -674,6 +674,11 @@ gateway:
     # Fallback max waiting queue size
     # 兜底最大排队长度
     fallback_max_waiting: 100
+    # Before queueing, try accounts whose real slots are free (current < concurrency),
+    # in priority order. false = old behaviour: queue on the first candidate at once.
+    # 兜底排队前按优先级探测真实空闲并发槽位（在途 < 并发数）的账号并当场抢槽；
+    # 抢不到仍只在首位账号排队。false 恢复旧行为（直接排队）。
+    fallback_probe_hard_slots: true
     # Prefer the account whose session window resets soonest (use-it-or-lose-it).
     # 负载感知选择时优先用尽「会话窗口最早重置」的账号；false 保持
     # 原有「优先级 → 负载率 → LRU」行为（默认）。
