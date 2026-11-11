@@ -98,16 +98,18 @@ func (s *GatewayService) SelectAccountForModelWithExclusions(ctx context.Context
 // metadataUserID: 用于客户端亲和调度，从中提取客户端 ID
 // sub2apiUserID: 系统用户 ID，用于二维亲和调度
 func (s *GatewayService) selectAccountWithLoadAwareness(ctx context.Context, groupID *int64, sessionHash string, requestedModel string, excludedIDs map[int64]struct{}, metadataUserID string, sub2apiUserID int64) (*AccountSelectionResult, error) {
-	// 调试日志：记录调度入口参数
-	excludedIDsList := make([]int64, 0, len(excludedIDs))
-	for id := range excludedIDs {
-		excludedIDsList = append(excludedIDsList, id)
+	// 调试日志：记录调度入口参数（仅 Debug 开启时才构建排除列表）
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		excludedIDsList := make([]int64, 0, len(excludedIDs))
+		for id := range excludedIDs {
+			excludedIDsList = append(excludedIDsList, id)
+		}
+		slog.Debug("account_scheduling_starting",
+			"group_id", derefGroupID(groupID),
+			"model", requestedModel,
+			"session", shortSessionHash(sessionHash),
+			"excluded_ids", excludedIDsList)
 	}
-	slog.Debug("account_scheduling_starting",
-		"group_id", derefGroupID(groupID),
-		"model", requestedModel,
-		"session", shortSessionHash(sessionHash),
-		"excluded_ids", excludedIDsList)
 
 	cfg := s.schedulingConfig()
 
@@ -140,8 +142,8 @@ func (s *GatewayService) selectAccountWithLoadAwareness(ctx context.Context, gro
 		}
 	}
 
-	// [DEBUG-STICKY] 调度器入口日志
-	slog.Info("sticky.scheduler_entry",
+	// 粘性会话排障日志（Debug 级）
+	slog.Debug("sticky.scheduler_entry",
 		"group_id", derefGroupID(groupID),
 		"session_hash", shortSessionHash(sessionHash),
 		"sticky_account_id", stickyAccountID,

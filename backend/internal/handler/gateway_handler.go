@@ -298,10 +298,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	}
 	sessionHash := h.gatewayService.GenerateSessionHash(parsedReq)
 
-	// [DEBUG-STICKY] 打印会话 hash 生成结果
-	reqLog.Info("sticky.session_hash_generated",
-		zap.String("session_hash", sessionHash),
-		zap.String("metadata_user_id_raw", parsedReq.MetadataUserID),
+	// 粘性会话排障日志（Debug 级，不记录原始 metadata.user_id）
+	reqLog.Debug("sticky.session_hash_generated",
+		zap.String("session_hash", service.ShortSessionHash(sessionHash)),
+		zap.Int("metadata_user_id_len", len(parsedReq.MetadataUserID)),
 	)
 
 	// 获取平台：优先使用强制平台（/antigravity 路由），其次使用 composite 解析出的目标平台，否则使用分组平台
@@ -322,9 +322,8 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	var sessionBoundAccountID int64
 	if sessionKey != "" {
 		sessionBoundAccountID, _ = h.gatewayService.GetCachedSessionAccountID(c.Request.Context(), apiKey.GroupID, sessionKey)
-		// [DEBUG-STICKY] 打印粘性会话查询结果
-		reqLog.Info("sticky.cache_lookup",
-			zap.String("session_key", sessionKey),
+		reqLog.Debug("sticky.cache_lookup",
+			zap.String("session_key", service.ShortSessionHash(sessionKey)),
 			zap.Int64("bound_account_id", sessionBoundAccountID),
 		)
 		if sessionBoundAccountID > 0 {
@@ -336,7 +335,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			c.Request = c.Request.WithContext(ctx)
 		}
 	} else {
-		reqLog.Info("sticky.no_session_key", zap.String("session_hash", sessionHash))
+		reqLog.Debug("sticky.no_session_key", zap.String("session_hash", service.ShortSessionHash(sessionHash)))
 	}
 	// 判断是否真的绑定了粘性会话：有 sessionKey 且已经绑定到某个账号
 	hasBoundSession := sessionKey != "" && sessionBoundAccountID > 0
@@ -762,8 +761,8 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			}
 
 			// 选择支持该模型的账号
-			reqLog.Info("sticky.selecting_account",
-				zap.String("session_key", sessionKey),
+			reqLog.Debug("sticky.selecting_account",
+				zap.String("session_key", service.ShortSessionHash(sessionKey)),
 				zap.Int64("sticky_bound_account_id", sessionBoundAccountID),
 				zap.Bool("has_bound_session", hasBoundSession),
 				zap.Int("failed_account_count", len(fs.FailedAccountIDs)),
@@ -815,8 +814,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			account := selection.Account
 			setOpsSelectedAccount(c, account.ID, account.Platform)
 
-			// [DEBUG-STICKY] 打印账号选择结果
-			reqLog.Info("sticky.account_selected",
+			reqLog.Debug("sticky.account_selected",
 				zap.Int64("selected_account_id", account.ID),
 				zap.String("account_name", account.Name),
 				zap.Bool("slot_acquired", selection.Acquired),
