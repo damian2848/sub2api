@@ -824,17 +824,19 @@ type GatewayService struct {
 	userGroupRateSF       singleflight.Group
 	modelsListCache       *gocache.Cache
 	modelsListCacheTTL    time.Duration
-	settingService        *SettingService
-	responseHeaderFilter  *responseheaders.CompiledHeaderFilter
-	debugModelRouting     atomic.Bool
-	debugClaudeMimic      atomic.Bool
-	channelService        *ChannelService
-	resolver              *ModelPricingResolver
-	compositeResolver     *CompositeRouteResolver
-	debugGatewayBodyFile  atomic.Pointer[os.File] // non-nil when SUB2API_DEBUG_GATEWAY_BODY is set
-	tlsFPProfileService   *TLSFingerprintProfileService
-	balanceNotifyService  *BalanceNotifyService
-	userPlatformQuotaRepo UserPlatformQuotaRepository
+	// modelAvailabilityCandidates 缓存选号失败诊断的候选账号（零值可用）。
+	modelAvailabilityCandidates modelAvailabilityCandidateCache
+	settingService              *SettingService
+	responseHeaderFilter        *responseheaders.CompiledHeaderFilter
+	debugModelRouting           atomic.Bool
+	debugClaudeMimic            atomic.Bool
+	channelService              *ChannelService
+	resolver                    *ModelPricingResolver
+	compositeResolver           *CompositeRouteResolver
+	debugGatewayBodyFile        atomic.Pointer[os.File] // non-nil when SUB2API_DEBUG_GATEWAY_BODY is set
+	tlsFPProfileService         *TLSFingerprintProfileService
+	balanceNotifyService        *BalanceNotifyService
+	userPlatformQuotaRepo       UserPlatformQuotaRepository
 }
 
 // NewGatewayService creates a new GatewayService

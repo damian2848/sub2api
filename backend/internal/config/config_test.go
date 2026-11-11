@@ -117,6 +117,13 @@ func TestLoadDefaultModelsListReadMaxBytes(t *testing.T) {
 	require.Equal(t, DefaultModelsListReadMaxBytes, cfg.Gateway.ModelsListReadMaxBytes)
 }
 
+func TestLoadDefaultModelAvailabilityDiagnosisCacheTTL(t *testing.T) {
+	resetViperWithJWTSecret(t)
+	cfg, err := Load()
+	require.NoError(t, err)
+	require.Equal(t, 1500, cfg.Gateway.ModelAvailabilityDiagnosisCacheTTLMillis)
+}
+
 func TestLoadDefaultMinOutputTokens(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	cfg, err := Load()
@@ -2272,6 +2279,16 @@ func TestValidateConfigErrors(t *testing.T) {
 			name:    "gateway models list cache ttl range",
 			mutate:  func(c *Config) { c.Gateway.ModelsListCacheTTLSeconds = 31 },
 			wantErr: "gateway.models_list_cache_ttl_seconds",
+		},
+		{
+			name:    "gateway model availability diagnosis cache ttl range",
+			mutate:  func(c *Config) { c.Gateway.ModelAvailabilityDiagnosisCacheTTLMillis = 5001 },
+			wantErr: "gateway.model_availability_diagnosis_cache_ttl_ms",
+		},
+		{
+			name:    "gateway model availability diagnosis cache ttl negative",
+			mutate:  func(c *Config) { c.Gateway.ModelAvailabilityDiagnosisCacheTTLMillis = -1 },
+			wantErr: "gateway.model_availability_diagnosis_cache_ttl_ms",
 		},
 		{
 			name:    "gateway scheduling sticky waiting",

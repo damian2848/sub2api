@@ -161,7 +161,7 @@ func (s *GatewayService) DiagnoseModelAvailabilityForPlatform(
 		includeGrouped = true
 	}
 
-	accounts, err := s.accountRepo.ListModelAvailabilityCandidates(ctx, queryGroupID, platforms, includeGrouped)
+	accounts, err := s.modelAvailabilityCandidates.list(ctx, s.accountRepo, resolveModelAvailabilityDiagnosisCacheTTL(s.cfg), queryGroupID, platforms, includeGrouped)
 	if err != nil {
 		// Conservative fallback: pretend everything is fine so the caller
 		// returns 503 (we don't want to flip to 404 just because a lookup

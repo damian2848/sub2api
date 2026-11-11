@@ -560,13 +560,15 @@ type OpenAIGatewayService struct {
 	openaiCodexTurnStateOrigins sync.Map
 	openaiCodexTurnStateWrites  atomic.Uint64
 	// openaiCodexTickets: accountID\x00model → *openAICodexTicket，292 长度门票。
-	astraCandyMu                   sync.Mutex
-	astraCandySeen                 map[[32]byte]time.Time
-	astraCandyRunning              int
-	openaiCodexTickets             sync.Map
-	openaiCodexTicketStateMu       sync.Mutex
-	openaiCodexTicketCursors       sync.Map // codexHarvestTier -> *atomic.Uint64
-	openaiCodexTicketFlight        singleflight.Group
+	astraCandyMu             sync.Mutex
+	astraCandySeen           map[[32]byte]time.Time
+	astraCandyRunning        int
+	openaiCodexTickets       sync.Map
+	openaiCodexTicketStateMu sync.Mutex
+	openaiCodexTicketCursors sync.Map // codexHarvestTier -> *atomic.Uint64
+	openaiCodexTicketFlight  singleflight.Group
+	// modelAvailabilityCandidates 缓存选号失败诊断的候选账号（零值可用）。
+	modelAvailabilityCandidates    modelAvailabilityCandidateCache
 	openaiCodexTicketProbeCooldown sync.Map // accountID\x00model -> time.Time
 	openaiCodexTicketChatHold      sync.Map // accountID -> *int64 in-flight bound chats
 	openaiCodexTicketLifecycleMu   sync.Mutex

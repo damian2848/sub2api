@@ -44,8 +44,10 @@ func (s *OpenAIGatewayService) DiagnoseModelAvailabilityForPlatform(
 		queryGroupID = nil
 		includeGrouped = true
 	}
-	accounts, err := s.accountRepo.ListModelAvailabilityCandidates(
+	accounts, err := s.modelAvailabilityCandidates.list(
 		ctx,
+		s.accountRepo,
+		resolveModelAvailabilityDiagnosisCacheTTL(s.cfg),
 		queryGroupID,
 		[]string{platform},
 		includeGrouped,

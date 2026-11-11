@@ -1398,6 +1398,10 @@ type GatewayConfig struct {
 	UserGroupRateCacheTTLSeconds int `mapstructure:"user_group_rate_cache_ttl_seconds"`
 	// ModelsListCacheTTLSeconds: /v1/models 模型列表短缓存 TTL（秒）
 	ModelsListCacheTTLSeconds int `mapstructure:"models_list_cache_ttl_seconds"`
+	// ModelAvailabilityDiagnosisCacheTTLMillis: 选号失败时模型可用性诊断的候选账号短缓存 TTL（毫秒）。
+	// 同一分组/平台范围在 TTL 内共享一次仓储查询（并发请求经 singleflight 合并），
+	// 避免 429/503 风暴时每个失败请求都全量拉取分组账号。0 关闭缓存，回到每次直查。
+	ModelAvailabilityDiagnosisCacheTTLMillis int `mapstructure:"model_availability_diagnosis_cache_ttl_ms"`
 
 	// UserMessageQueue: 用户消息串行队列配置
 	// 对 role:"user" 的真实用户消息实施账号级串行化 + RPM 自适应延迟
@@ -2982,6 +2986,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.usage_record.auto_scale_cooldown_seconds", 10)
 	viper.SetDefault("gateway.user_group_rate_cache_ttl_seconds", 30)
 	viper.SetDefault("gateway.models_list_cache_ttl_seconds", 15)
+	viper.SetDefault("gateway.model_availability_diagnosis_cache_ttl_ms", 1500)
 	// TLS指纹伪装配置（默认关闭，需要账号级别单独启用）
 	// 用户消息串行队列默认值
 	viper.SetDefault("gateway.user_message_queue.enabled", false)
@@ -4126,6 +4131,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.ModelsListCacheTTLSeconds < 10 || c.Gateway.ModelsListCacheTTLSeconds > 30 {
 		return fmt.Errorf("gateway.models_list_cache_ttl_seconds must be between 10-30")
+	}
+	if c.Gateway.ModelAvailabilityDiagnosisCacheTTLMillis < 0 || c.Gateway.ModelAvailabilityDiagnosisCacheTTLMillis > 5000 {
+		return fmt.Errorf("gateway.model_availability_diagnosis_cache_ttl_ms must be between 0-5000")
 	}
 	if c.Gateway.Scheduling.StickySessionMaxWaiting <= 0 {
 		return fmt.Errorf("gateway.scheduling.sticky_session_max_waiting must be positive")
