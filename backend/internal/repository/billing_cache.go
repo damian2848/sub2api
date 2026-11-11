@@ -97,12 +97,17 @@ var (
 		return 1
 	`)
 
-	// updateRateLimitUsageScript atomically increments all three rate limit usage counters
-	// with window expiration checking. If a window has expired, its usage is reset to cost
-	// (instead of accumulated) and the window timestamp is updated, matching the DB-side
-	// IncrementRateLimitUsage semantics.
+	// updateRateLimitUsageScript adds one cost to the three cached rate limit usage counters.
+	//
+	// The cache never opens or rolls a window itself. The DB is the source of truth for
+	// window starts, and it does not use "now" for all of them: the 1d and 7d windows
+	// start at date_trunc('day', NOW()). A window opened here at the current second would
+	// outlive the DB window by up to a day and reject requests the DB still allows. So
+	// when any window is unopened or expired, the entry is dropped and the next check
+	// reloads the windows the billing transaction just wrote.
 	//
 	// ARGV: [1]=cost, [2]=ttl_seconds, [3]=now_unix, [4]=window_5h_seconds, [5]=window_1d_seconds, [6]=window_7d_seconds
+	// Returns 1 when the counters were incremented, 0 when the entry was absent or dropped.
 	updateRateLimitUsageScript = redis.NewScript(`
 		local exists = redis.call('EXISTS', KEYS[1])
 		if exists == 0 then
@@ -110,27 +115,22 @@ var (
 		end
 		local cost = tonumber(ARGV[1])
 		local now = tonumber(ARGV[3])
-		local win5h = tonumber(ARGV[4])
-		local win1d = tonumber(ARGV[5])
-		local win7d = tonumber(ARGV[6])
 
-		-- Helper: check if window is expired and update usage + window accordingly
-		-- Returns nothing, modifies the hash in-place.
-		local function update_window(usage_field, window_field, window_duration)
+		local function window_live(window_field, window_duration)
 			local w = tonumber(redis.call('HGET', KEYS[1], window_field) or 0)
-			if w == 0 or (now - w) >= window_duration then
-				-- Window expired or never started: reset usage to cost, start new window
-				redis.call('HSET', KEYS[1], usage_field, tostring(cost))
-				redis.call('HSET', KEYS[1], window_field, tostring(now))
-			else
-				-- Window still valid: accumulate
-				redis.call('HINCRBYFLOAT', KEYS[1], usage_field, cost)
-			end
+			return w ~= nil and w > 0 and (now - w) < window_duration
 		end
 
-		update_window('usage_5h', 'window_5h', win5h)
-		update_window('usage_1d', 'window_1d', win1d)
-		update_window('usage_7d', 'window_7d', win7d)
+		if not (window_live('window_5h', tonumber(ARGV[4]))
+			and window_live('window_1d', tonumber(ARGV[5]))
+			and window_live('window_7d', tonumber(ARGV[6]))) then
+			redis.call('DEL', KEYS[1])
+			return 0
+		end
+
+		redis.call('HINCRBYFLOAT', KEYS[1], 'usage_5h', cost)
+		redis.call('HINCRBYFLOAT', KEYS[1], 'usage_1d', cost)
+		redis.call('HINCRBYFLOAT', KEYS[1], 'usage_7d', cost)
 		redis.call('EXPIRE', KEYS[1], ARGV[2])
 		return 1
 	`)
