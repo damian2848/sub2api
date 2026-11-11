@@ -40,6 +40,9 @@ const (
 	// schedulerFallbackFlightMaxTimeout 只在未配置 db_fallback_timeout_seconds 时生效：
 	// 共享回退加载脱离了单个请求的取消信号，需要一个兜底上限。
 	schedulerFallbackFlightMaxTimeout = 30 * time.Second
+	// outboxStuckEventDefaultThreshold 是未配置 outbox_lag_rebuild_seconds 时，同一 outbox
+	// 事件连续失败多久后打一次 ERROR 的阈值。
+	outboxStuckEventDefaultThreshold = time.Minute
 )
 
 // batchSeenKey tracks completed per-platform rebuilds and group lifecycle work
@@ -152,6 +155,12 @@ type SchedulerSnapshotService struct {
 
 	// fallbackFlight 合并同一桶的并发 DB 回退；emptyBucketUntil 记录 DB 确认为空的桶
 	// （SchedulerBucket -> time.Time）。nowFn 仅供测试注入时钟。
+	// outboxStuck* 记录连续处理失败的 outbox 事件，仅用于告警观测。
+	outboxStuckMu      sync.Mutex
+	outboxStuckEventID int64
+	outboxStuckSince   time.Time
+	outboxStuckLogged  bool
+
 	fallbackFlight   singleflight.Group
 	emptyBucketUntil sync.Map
 	nowFn            func() time.Time
@@ -524,40 +533,105 @@ func (s *SchedulerSnapshotService) pollOutbox() {
 	}
 
 	seen := make(map[batchSeenKey]struct{})
+	lastHandled := watermark
 	for _, event := range events {
 		eventCtx, cancel := context.WithTimeout(context.Background(), outboxEventTimeout)
 		err := s.handleOutboxEvent(eventCtx, event, seen)
 		cancel()
 		if err != nil {
 			logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] outbox handle failed: id=%d type=%s err=%v", event.ID, event.EventType, err)
+			s.observeOutboxStuckEvent(event, err)
+			// 事件按 id 顺序处理，失败点之前的事件已完整成功：把水位推进到最后一个成功事件，
+			// 避免下一轮整批重放；无论是否推进都做 lag 检查，让卡住时的告警和 lag 重建照常触发。
+			s.commitOutboxProgress(watermark, lastHandled)
 			return
 		}
+		lastHandled = event.ID
 	}
+	s.clearOutboxStuckEvent()
+	s.commitOutboxProgress(watermark, lastHandled)
+}
 
-	lastID := events[len(events)-1].ID
-	var wmErr error
-	for i := range 3 {
-		wmCtx, wmCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		wmErr = s.cache.SetOutboxWatermark(wmCtx, lastID)
-		wmCancel()
-		if wmErr == nil {
-			break
+// commitOutboxProgress 在 lastHandled 超过原水位时写水位（3 次重试）并清理已消费行，
+// 然后按下一条待消费事件做 lag 检查。水位写失败时不清理也不做 lag 检查，与原有语义一致：
+// 只有水位成功推进（或无需推进）后，lag 才按 lastHandled 计算。
+func (s *SchedulerSnapshotService) commitOutboxProgress(watermark, lastHandled int64) {
+	if lastHandled > watermark {
+		var wmErr error
+		for i := range 3 {
+			wmCtx, wmCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			wmErr = s.cache.SetOutboxWatermark(wmCtx, lastHandled)
+			wmCancel()
+			if wmErr == nil {
+				break
+			}
+			if i < 2 {
+				time.Sleep(200 * time.Millisecond)
+			}
 		}
-		if i < 2 {
-			time.Sleep(200 * time.Millisecond)
+		if wmErr != nil {
+			logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] outbox watermark write failed: %v", wmErr)
+			return
 		}
+		s.cleanupConsumedOutbox(lastHandled)
 	}
-	if wmErr != nil {
-		logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] outbox watermark write failed: %v", wmErr)
-		return
-	}
-	s.cleanupConsumedOutbox(lastID)
 
 	// 只有 watermark 成功推进后，当前批次才算已消费。延迟必须按下一条待消费事件计算，
 	// 否则本批次处理越慢，越容易误触发一次更慢的全量重建，形成正反馈。
 	lagCtx, lagCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	s.checkOutboxLag(lagCtx, lastID)
+	s.checkOutboxLag(lagCtx, lastHandled)
 	lagCancel()
+}
+
+// observeOutboxStuckEvent 只做观测：同一事件连续失败超过阈值时打一次 ERROR，不跳过事件。
+func (s *SchedulerSnapshotService) observeOutboxStuckEvent(event SchedulerOutboxEvent, err error) {
+	now := s.currentTime()
+	threshold := outboxStuckEventDefaultThreshold
+	if s.cfg != nil && s.cfg.Gateway.Scheduling.OutboxLagRebuildSeconds > 0 {
+		threshold = time.Duration(s.cfg.Gateway.Scheduling.OutboxLagRebuildSeconds) * time.Second
+	}
+
+	s.outboxStuckMu.Lock()
+	if s.outboxStuckEventID != event.ID {
+		s.outboxStuckEventID = event.ID
+		s.outboxStuckSince = now
+		s.outboxStuckLogged = false
+	}
+	stuckFor := now.Sub(s.outboxStuckSince)
+	shouldLog := !s.outboxStuckLogged && stuckFor >= threshold
+	if shouldLog {
+		s.outboxStuckLogged = true
+	}
+	s.outboxStuckMu.Unlock()
+
+	if !shouldLog {
+		return
+	}
+	logger.LegacyPrintf("service.scheduler_snapshot",
+		"[ERROR] [Scheduler] outbox event stuck: id=%d type=%s group_id=%s account_id=%s stuck_for=%s err=%v",
+		event.ID, event.EventType, formatOptionalInt64(event.GroupID), formatOptionalInt64(event.AccountID), stuckFor.Truncate(time.Second), err)
+}
+
+func (s *SchedulerSnapshotService) clearOutboxStuckEvent() {
+	s.outboxStuckMu.Lock()
+	s.outboxStuckEventID = 0
+	s.outboxStuckSince = time.Time{}
+	s.outboxStuckLogged = false
+	s.outboxStuckMu.Unlock()
+}
+
+// outboxStuckEventSnapshot 返回当前卡住的事件 id 与是否已告警（测试用）。
+func (s *SchedulerSnapshotService) outboxStuckEventSnapshot() (int64, bool) {
+	s.outboxStuckMu.Lock()
+	defer s.outboxStuckMu.Unlock()
+	return s.outboxStuckEventID, s.outboxStuckLogged
+}
+
+func formatOptionalInt64(v *int64) string {
+	if v == nil {
+		return "-"
+	}
+	return strconv.FormatInt(*v, 10)
 }
 
 func (s *SchedulerSnapshotService) cleanupConsumedOutbox(watermark int64) {
