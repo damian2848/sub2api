@@ -212,19 +212,49 @@ func runMainServer() {
 	if delay := time.Duration(cfg.Server.ShutdownDrainDelay) * time.Second; delay > 0 {
 		time.Sleep(delay)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout())
+	drainServer(app.Server, app.Lifecycle, cfg.Server.ShutdownTimeout(), postCloseReleaseTimeout)
+	log.Println("Server exited")
+	mihomo.CloseAll()
+}
+
+// postCloseReleaseTimeout bounds how long shutdown waits, after Server.Close
+// has cancelled the remaining request contexts, for those handlers to run
+// their deferred slot releases and wait-count decrements. Without it the
+// process exits while they race main, and their Redis members/counters linger
+// for the slot TTL (or indefinitely for refreshed wait counters).
+const postCloseReleaseTimeout = 3 * time.Second
+
+type drainableServer interface {
+	Shutdown(context.Context) error
+	Close() error
+}
+
+type drainableLifecycle interface {
+	Wait(context.Context) error
+}
+
+func drainServer(srv drainableServer, lifecycle drainableLifecycle, shutdownTimeout, postCloseTimeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	if err := app.Server.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(ctx); err != nil {
 		log.Printf("Server forced to shutdown: %v", err)
 	}
 
-	if err := app.Lifecycle.Wait(ctx); err != nil {
+	drained := true
+	if err := lifecycle.Wait(ctx); err != nil {
+		drained = false
 		log.Printf("Active request drain deadline reached: %v", err)
 	}
-	if err := app.Server.Close(); err != nil {
+	if err := srv.Close(); err != nil {
 		log.Printf("Closing server connections: %v", err)
 	}
-	log.Println("Server exited")
-	mihomo.CloseAll()
+	if drained || postCloseTimeout <= 0 {
+		return
+	}
+	postCtx, postCancel := context.WithTimeout(context.Background(), postCloseTimeout)
+	defer postCancel()
+	if err := lifecycle.Wait(postCtx); err != nil {
+		log.Printf("Handlers still active after close; remaining slots are released during cleanup: %v", err)
+	}
 }
