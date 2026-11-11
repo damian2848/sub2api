@@ -91,3 +91,48 @@ func TestHasEligibleExcelBPSAlternativeSkipsStickyAndNative(t *testing.T) {
 	wrongPlatform.Platform = PlatformGrok
 	require.False(t, scheduler.hasEligibleExcelBPSAlternative(context.Background(), req, sticky.ID, []Account{wrongPlatform}))
 }
+
+// count_tokens shares the session hash with the main request and goes through
+// the legacy sticky path. A BPS account that cannot serve the request must not
+// make it drop the native binding and rebind the session to another account.
+func TestOpenAITokenCountStickyYieldsOnlyToEligibleBPS(t *testing.T) {
+	const sessionHash = "sticky_bps_token_count"
+	const cacheKey = "openai:" + sessionHash
+	for _, tc := range []struct {
+		name      string
+		cooldown  bool
+		wantYield bool
+	}{
+		{name: "available BPS takes over", wantYield: true},
+		{name: "BPS 429 cooldown keeps native sticky", cooldown: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			groupID := int64(5302)
+			bps := Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true,
+				Concurrency: 1, Priority: 10, GroupIDs: []int64{groupID}, Extra: map[string]any{"openai_excel_bps": true}}
+			native := Account{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
+				Concurrency: 1, Priority: 20, GroupIDs: []int64{groupID}}
+			otherNative := Account{ID: 3, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Status: StatusActive, Schedulable: true,
+				Concurrency: 1, Priority: 5, GroupIDs: []int64{groupID}}
+			cache := &schedulerTestGatewayCache{sessionBindings: map[string]int64{cacheKey: native.ID}}
+			svc := &OpenAIGatewayService{
+				cfg: &config.Config{}, cache: cache,
+				accountRepo: schedulerTestOpenAIAccountRepo{accounts: []Account{bps, native, otherNative}},
+			}
+			if tc.cooldown {
+				svc.excelBPSCooldownUntil.Store(bps.ID, time.Now().Add(time.Minute))
+			}
+
+			account, err := svc.SelectAccountForTokenCount(context.Background(), &groupID, sessionHash, "gpt-6-astra", "", PlatformOpenAI)
+			require.NoError(t, err)
+			require.NotNil(t, account)
+			if tc.wantYield {
+				require.Equal(t, bps.ID, account.ID)
+				return
+			}
+			require.Equal(t, native.ID, account.ID, "the session stays on its bound account")
+			require.Zero(t, cache.deletedSessions[cacheKey], "an unavailable BPS account must not clear the binding")
+			require.Equal(t, native.ID, cache.sessionBindings[cacheKey])
+		})
+	}
+}

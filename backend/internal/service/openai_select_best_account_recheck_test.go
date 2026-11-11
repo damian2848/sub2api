@@ -119,9 +119,40 @@ func TestSelectBestAccount_AllRejectedKeepsFullFilterStats(t *testing.T) {
 	require.Equal(t, int64(2), calls.Load())
 }
 
-func TestSelectBestAccount_DBRecheckBudget(t *testing.T) {
+// The privacy gate, channel restriction and profit veto are only decided on the
+// rechecked copy, so the ranked walk must not stop at a recheck cap: an account
+// further down than the cap is still selected when everything above it is
+// rejected by the DB.
+func TestSelectBestAccount_SelectsBeyondTheProbeLimit(t *testing.T) {
 	groupID := int64(93105)
-	accounts := newSelectBestAccountRecheckTestAccounts(groupID, openAIAccountSelectionProbeLimit+10)
+	total := openAIAccountSelectionProbeLimit + 10
+	accounts := newSelectBestAccountRecheckTestAccounts(groupID, total)
+	dbAccounts := append([]Account(nil), accounts...)
+	last := accounts[0].ID
+	for i := range accounts {
+		if accounts[i].Priority > accounts[0].Priority || (accounts[i].Priority == accounts[0].Priority && accounts[i].ID > last) {
+			last = accounts[i].ID
+		}
+	}
+	// Only one account is still schedulable in the DB; every other one is
+	// rejected at recheck time.
+	keep := last
+	for i := range dbAccounts {
+		dbAccounts[i].Schedulable = dbAccounts[i].ID == keep
+	}
+	svc, calls := newSelectBestAccountRecheckTestService(accounts, dbAccounts)
+
+	account, err := svc.SelectAccountForModelWithExclusions(context.Background(), &groupID, "", "", nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	require.Equal(t, keep, account.ID)
+	require.Greater(t, calls.Load(), int64(openAIAccountSelectionProbeLimit), "the walk continued past the probe limit")
+}
+
+func TestSelectBestAccount_AllRejectedWalksEveryCandidate(t *testing.T) {
+	groupID := int64(93106)
+	total := openAIAccountSelectionProbeLimit + 10
+	accounts := newSelectBestAccountRecheckTestAccounts(groupID, total)
 	dbAccounts := append([]Account(nil), accounts...)
 	for i := range dbAccounts {
 		dbAccounts[i].Schedulable = false
@@ -130,5 +161,5 @@ func TestSelectBestAccount_DBRecheckBudget(t *testing.T) {
 
 	_, err := svc.SelectAccountForModelWithExclusions(context.Background(), &groupID, "", "", nil)
 	require.ErrorIs(t, err, ErrNoAvailableAccounts)
-	require.Equal(t, int64(openAIAccountSelectionProbeLimit), calls.Load())
+	require.Equal(t, int64(total), calls.Load())
 }

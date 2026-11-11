@@ -702,33 +702,7 @@ func (s *defaultOpenAIAccountScheduler) hasEligibleExcelBPSAlternative(
 	}
 	for i := range candidates {
 		candidate := &candidates[i]
-		if !candidate.IsExcelBPSEnabledForModel(req.RequestedModel) {
-			continue
-		}
-		if candidate.ID == stickyID {
-			continue
-		}
-		if req.ExcludedIDs != nil {
-			if _, excluded := req.ExcludedIDs[candidate.ID]; excluded {
-				continue
-			}
-		}
-		if !candidate.IsSchedulable() {
-			continue
-		}
-		if candidate.Platform != NormalizeOpenAICompatiblePlatform(req.Platform) || !candidate.IsOpenAICompatible() {
-			continue
-		}
-		if s.service.isExcelBPSModelCoolingDown(candidate, req.RequestedModel) {
-			continue
-		}
-		if s.service.isExcelBPSCoolingDown(candidate, req.RequestedModel) {
-			continue
-		}
-		if s.service.isOpenAIAccountRequestRuntimeBlocked(candidate, req.RequestedModel, req.RequireCompact) {
-			continue
-		}
-		if !s.service.openAIAccountMatchesSchedulingGroup(candidate, req.GroupID) {
+		if !s.service.excelBPSAlternativeBaseEligible(candidate, stickyID, req.GroupID, req.Platform, req.RequestedModel, req.RequireCompact, req.ExcludedIDs) {
 			continue
 		}
 		if !s.isAccountRequestCompatible(ctx, candidate, req) {
@@ -740,6 +714,53 @@ func (s *defaultOpenAIAccountScheduler) hasEligibleExcelBPSAlternative(
 		return true
 	}
 	return false
+}
+
+// excelBPSAlternativeBaseEligible holds the checks shared by every sticky path
+// that yields a native binding to BPS: the candidate is a BPS account for the
+// model, is not the sticky account, is not excluded by this request's failover,
+// is schedulable on this platform and group, and is neither cooling down nor
+// runtime-blocked.
+func (s *OpenAIGatewayService) excelBPSAlternativeBaseEligible(
+	candidate *Account,
+	stickyID int64,
+	groupID *int64,
+	platform string,
+	requestedModel string,
+	requireCompact bool,
+	excludedIDs map[int64]struct{},
+) bool {
+	if s == nil || candidate == nil {
+		return false
+	}
+	// The cheap BPS flag goes first: most candidates are native.
+	if !candidate.IsExcelBPSEnabledForModel(requestedModel) {
+		return false
+	}
+	if candidate.ID == stickyID {
+		return false
+	}
+	if excludedIDs != nil {
+		if _, excluded := excludedIDs[candidate.ID]; excluded {
+			return false
+		}
+	}
+	if !candidate.IsSchedulable() {
+		return false
+	}
+	if candidate.Platform != NormalizeOpenAICompatiblePlatform(platform) || !candidate.IsOpenAICompatible() {
+		return false
+	}
+	if s.isExcelBPSModelCoolingDown(candidate, requestedModel) {
+		return false
+	}
+	if s.isExcelBPSCoolingDown(candidate, requestedModel) {
+		return false
+	}
+	if s.isOpenAIAccountRequestRuntimeBlocked(candidate, requestedModel, requireCompact) {
+		return false
+	}
+	return s.openAIAccountMatchesSchedulingGroup(candidate, groupID)
 }
 
 func openAIStickyAccountMatchesGroup(account *Account, groupID *int64) bool {

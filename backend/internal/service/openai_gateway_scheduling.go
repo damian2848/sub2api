@@ -1032,11 +1032,22 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 	// account instead of silently forwarding this turn to /v1/responses.
 	if platform == PlatformOpenAI && strings.TrimSpace(requestedModel) != "" && !account.IsExcelBPSEnabledForModel(requestedModel) {
 		if candidates, listErr := s.listSchedulableAccountsForRequest(ctx, groupID, platform, requestedModel, requireCompact, excludedIDs); listErr == nil {
+			// Yield only to a BPS account that could serve this request. A BPS
+			// account that is cooling down, excluded or unschedulable is dropped
+			// by selection anyway, so clearing the binding for it only moves the
+			// session (and its prompt cache) to another native account. This
+			// path also serves count_tokens, which shares the session hash with
+			// the main request.
 			for i := range candidates {
-				if candidates[i].ID != account.ID && candidates[i].IsExcelBPSEnabledForModel(requestedModel) {
-					_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
-					return nil
+				candidate := &candidates[i]
+				if !s.excelBPSAlternativeBaseEligible(candidate, account.ID, groupID, platform, requestedModel, requireCompact, excludedIDs) {
+					continue
 				}
+				if !isOpenAICompatibleAccountEligibleForRequest(ctx, candidate, groupID, platform, requestedModel, false, requiredCapability) {
+					continue
+				}
+				_ = s.deleteStickySessionAccountID(ctx, groupID, sessionHash)
+				return nil
 			}
 		}
 	}
@@ -1103,50 +1114,45 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 		return nil, compactBlocked, filterStats
 	}
 
-	// evaluate runs the full per-account admission. allowRecheck is consulted
-	// right before the DB recheck; returning false stops the whole selection.
-	evaluate := func(acc *Account, allowRecheck func() bool) (fresh *Account, compactTier int, stop bool) {
+	// evaluate runs the full per-account admission.
+	evaluate := func(acc *Account) (fresh *Account, compactTier int) {
 		fresh = s.resolveFreshSchedulableOpenAIAccountBeforeProfit(ctx, acc, groupID, platform, requestedModel, false, requiredCapability, requireCompact)
 		if fresh == nil {
 			filterStats.exclude("ineligible")
-			return nil, 0, false
-		}
-		if !allowRecheck() {
-			return nil, 0, true
+			return nil, 0
 		}
 		fresh = s.recheckSelectedOpenAIAccountFromDBBeforeProfit(ctx, fresh, groupID, platform, requestedModel, false, requiredCapability, requireCompact)
 		if fresh == nil {
 			filterStats.exclude("ineligible")
-			return nil, 0, false
+			return nil, 0
 		}
 		if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
 			filterStats.exclude("channel_restricted")
-			return nil, 0, false
+			return nil, 0
 		}
 		if vetoed, reason := openAIProfitControlVetoReason(ctx, fresh); vetoed {
 			filterStats.exclude(reason)
-			return nil, 0, false
+			return nil, 0
 		}
 		if requireCompact {
 			compactTier = openAICompactSupportTier(fresh)
 			if compactTier == 0 {
 				compactBlocked = true
 				filterStats.exclude("compact_unsupported")
-				return nil, 0, false
+				return nil, 0
 			}
 		}
-		return fresh, compactTier, false
+		return fresh, compactTier
 	}
 
 	if requireCompact {
 		// Compact capability (openai_compact_*) is not part of the scheduler
 		// snapshot projection, so the listed copies cannot rank by tier. Keep
 		// the full pass and rank on the rechecked DB copies.
-		alwaysRecheck := func() bool { return true }
 		eligible := make([]*Account, 0, len(candidates))
 		compactTiers := make(map[int64]int, len(candidates))
 		for _, acc := range candidates {
-			fresh, tier, _ := evaluate(acc, alwaysRecheck)
+			fresh, tier := evaluate(acc)
 			if fresh == nil {
 				continue
 			}
@@ -1162,33 +1168,27 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 
 	// Phase 2: rank on the listed copies, then admit in order and return the
 	// first account that passes the snapshot re-read and the DB recheck.
+	//
+	// There is no cap on rechecks here. The privacy gate, the channel
+	// restriction and the profit veto are only decided on the rechecked copy,
+	// so a cap would turn "the first N ranked accounts are vetoed" into "no
+	// available accounts" while a usable account sits further down. The usual
+	// cost is one recheck; the worst case is the full pass this replaced.
 	s.sortOpenAIBestAccountCandidates(ctx, candidates, requestedModel, nil, preferLowUpstreamRate)
-	budget := newOpenAISelectionProbeBudget()
-	budget.enableLimit()
-	allowRecheck := func() bool {
-		if s.schedulerSnapshot == nil || s.accountRepo == nil {
-			return true
-		}
-		return budget.recordRecheck()
-	}
 	for i, acc := range candidates {
-		fresh, _, stop := evaluate(acc, allowRecheck)
-		if stop || fresh != nil {
-			// Unspecified image sizes are selected rank by rank, and the next
-			// rank is discovered through eligibility vetoes. Keep discovering
-			// it on the candidates this early exit skipped (in memory only).
-			if openAIImageSizePreferencePassActive(ctx) {
-				for _, rest := range candidates[i+1:] {
-					_ = openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx, rest, groupID, platform, requestedModel, false, requiredCapability)
-				}
+		fresh, _ := evaluate(acc)
+		if fresh == nil {
+			continue
+		}
+		// Unspecified image sizes are selected rank by rank, and the next
+		// rank is discovered through eligibility vetoes. Keep discovering
+		// it on the candidates this early exit skipped (in memory only).
+		if openAIImageSizePreferencePassActive(ctx) {
+			for _, rest := range candidates[i+1:] {
+				_ = openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx, rest, groupID, platform, requestedModel, false, requiredCapability)
 			}
 		}
-		if stop {
-			break
-		}
-		if fresh != nil {
-			return fresh, compactBlocked, filterStats
-		}
+		return fresh, compactBlocked, filterStats
 	}
 	return nil, compactBlocked, filterStats
 }
@@ -1554,6 +1554,7 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		}
 		return recheckBudget.recordRecheck()
 	}
+	recheckBudgetExhausted := false
 	releaseAcquired := func(result *AcquireResult) {
 		if result != nil && result.ReleaseFunc != nil {
 			result.ReleaseFunc()
@@ -1570,7 +1571,15 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			releaseAcquired(result)
 			return nil, false
 		}
+		// The privacy gate is also decided on the snapshot copy. Check it before
+		// spending a DB recheck: a pool of accounts without privacy set would
+		// otherwise use up the budget on rechecks that cannot pass.
+		if s.openAIGroupRequiresPrivacySet(ctx, groupID) && !fresh.IsPrivacySet() {
+			releaseAcquired(result)
+			return nil, false
+		}
 		if !allowLegacyRecheck() {
+			recheckBudgetExhausted = true
 			releaseAcquired(result)
 			return nil, true
 		}
@@ -1712,7 +1721,9 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			return nil, selectErr
 		} else if selection != nil {
 			return selection, nil
-		} else if attempted {
+		} else if attempted && !recheckBudgetExhausted {
+			// A second round with fresh load only helps when the first one ran
+			// out of free slots, not when it ran out of recheck budget.
 			if freshLoadMap, loadErr := s.concurrencyService.GetAccountsLoadBatchFresh(ctx, accountLoads); loadErr == nil {
 				if selection, _, selectErr := tryAcquireFromLoadMap(freshLoadMap); selectErr != nil {
 					return nil, selectErr
