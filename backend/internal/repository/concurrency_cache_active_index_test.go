@@ -52,7 +52,8 @@ func newActiveIndexFixture(t *testing.T) *activeIndexFixture {
 	client.AddHook(counter)
 	t.Cleanup(func() { _ = client.Close() })
 	// 1 minute slot TTL, 30s wait TTL.
-	cache := NewConcurrencyCache(client, 1, 30).(*concurrencyCache)
+	cache, ok := NewConcurrencyCache(client, 1, 30).(*concurrencyCache)
+	require.True(t, ok)
 	return &activeIndexFixture{server: server, client: client, cache: cache, counter: counter}
 }
 
