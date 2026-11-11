@@ -377,3 +377,57 @@ func TestSelectAccountFallbackSkipsAccountsTriedInLayer2(t *testing.T) {
 	require.Equal(t, fallbackSlowAccount, result.Account.ID)
 	require.Equal(t, []int64{fallbackBigAccount, fallbackSlowAccount}, cache.acquireAttempts)
 }
+
+// Requests already queued on an account retry with backoff; a new arrival that
+// grabbed a slot freed there would jump ahead of them. The probe leaves that
+// slot to the queue and only uses slots not already owed to waiters.
+func TestSelectAccountFallbackDoesNotJumpAheadOfQueuedRequests(t *testing.T) {
+	now := time.Now()
+	cache := &fallbackSlotCache{
+		inFlight: map[int64]int{fallbackSlowAccount: 29, fallbackBigAccount: 120, fallbackSmallAccount: 5},
+		waiting:  map[int64]int{fallbackSlowAccount: 100},
+	}
+	svc := newFallbackSlotsService(cache, &mockGatewayCacheForPlatform{},
+		fallbackGeminiAccount(fallbackSlowAccount, 1, 30, 1, now.Add(-time.Hour)),
+		fallbackGeminiAccount(fallbackBigAccount, 1, 120, 15, now),
+		fallbackGeminiAccount(fallbackSmallAccount, 2, 10, 1, now),
+	)
+
+	result := selectFallbackSlotsAccount(t, svc, context.Background(), "")
+
+	require.True(t, result.Acquired, "slots on accounts without waiters are still probed")
+	require.Equal(t, fallbackSmallAccount, result.Account.ID)
+	require.Equal(t, 29, cache.load(fallbackSlowAccount), "the slot freed on the queued account stays for its waiters")
+	require.NotContains(t, cache.acquireAttempts, fallbackSlowAccount)
+}
+
+// When the only free slots are owed to queued requests, the new request queues
+// behind them on the first candidate instead of acquiring.
+func TestSelectAccountFallbackQueuesBehindWaitersWhenFreeSlotsAreOwed(t *testing.T) {
+	now := time.Now()
+	cache := &fallbackSlotCache{
+		inFlight: map[int64]int{fallbackSlowAccount: 29, fallbackBigAccount: 118},
+		waiting:  map[int64]int{fallbackSlowAccount: 1, fallbackBigAccount: 2},
+	}
+	svc := newFallbackSlotsService(cache, &mockGatewayCacheForPlatform{},
+		fallbackGeminiAccount(fallbackSlowAccount, 1, 30, 1, now.Add(-time.Hour)),
+		fallbackGeminiAccount(fallbackBigAccount, 1, 120, 15, now),
+	)
+
+	result := selectFallbackSlotsAccount(t, svc, context.Background(), "")
+
+	require.False(t, result.Acquired)
+	require.NotNil(t, result.WaitPlan)
+	require.Equal(t, fallbackSlowAccount, result.Account.ID)
+	require.Empty(t, cache.acquireAttempts)
+}
+
+func TestFallbackAccountHasFreeSlotCountsWaiters(t *testing.T) {
+	acc := &Account{Concurrency: 30}
+	require.False(t, fallbackAccountHasFreeSlot(acc, nil))
+	require.True(t, fallbackAccountHasFreeSlot(acc, &AccountLoadInfo{CurrentConcurrency: 29}))
+	require.False(t, fallbackAccountHasFreeSlot(acc, &AccountLoadInfo{CurrentConcurrency: 29, WaitingCount: 1}))
+	require.True(t, fallbackAccountHasFreeSlot(acc, &AccountLoadInfo{CurrentConcurrency: 27, WaitingCount: 2}))
+	require.False(t, fallbackAccountHasFreeSlot(acc, &AccountLoadInfo{CurrentConcurrency: 30}))
+	require.True(t, fallbackAccountHasFreeSlot(&Account{Concurrency: 0}, &AccountLoadInfo{CurrentConcurrency: 5, WaitingCount: 9}))
+}

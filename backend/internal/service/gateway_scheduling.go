@@ -832,14 +832,23 @@ func (s *GatewayService) selectAccountWithLoadAwareness(ctx context.Context, gro
 	return nil, ErrNoAvailableAccounts
 }
 
-// fallbackAccountHasFreeSlot 判断负载快照里账号是否还有真实并发槽位。
+// fallbackAccountHasFreeSlot 判断负载快照里账号是否还有排队请求之外的真实并发槽位。
 // 负载查询失败时 load 为 nil，此时 tryAcquireByLegacyOrder 已逐个尝试过。
 // Concurrency <= 0 表示不限并发。
+// 已排队的请求按退避重试抢槽，新请求在这里直接抢会插到它们前面，
+// 所以空槽要扣掉 WaitingCount：只有在途+排队仍小于 concurrency 才算空闲。
 func fallbackAccountHasFreeSlot(acc *Account, load *AccountLoadInfo) bool {
 	if load == nil {
 		return false
 	}
-	return acc.Concurrency <= 0 || load.CurrentConcurrency < acc.Concurrency
+	if acc.Concurrency <= 0 {
+		return true
+	}
+	waiting := load.WaitingCount
+	if waiting < 0 {
+		waiting = 0
+	}
+	return load.CurrentConcurrency+waiting < acc.Concurrency
 }
 
 func (s *GatewayService) tryAcquireByLegacyOrder(ctx context.Context, candidates []*Account, groupID *int64, sessionHash string, preferOAuth bool) (*AccountSelectionResult, bool, error) {
