@@ -70,6 +70,12 @@ func TestWSUserSlotAcquisitionRemainsCancellable(t *testing.T) {
 		// and a cancelled user acquisition must not leak the key handle.
 		require.Equal(t, 1, cache.apiKeyTrackCalls)
 		require.Equal(t, 1, cache.apiKeyReleaseCalls)
+		// The cancelled caller returned immediately; the detached admission
+		// script ends on its own short budget and its ambiguous member is
+		// compensated by exact ID instead of lingering until the slot TTL.
+		time.Sleep(3 * time.Second)
+		synctest.Wait()
+		require.Equal(t, 1, cache.userReleaseCalls)
 	})
 }
 

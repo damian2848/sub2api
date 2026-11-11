@@ -194,9 +194,15 @@ func TestAntigravityRetryWait_ClientCancellationAndLateAcquisition(t *testing.T)
 				}
 				helper := NewConcurrencyHelper(service.NewConcurrencyService(cache), SSEPingFormatNone, 0)
 				started := false
-				_, err := helper.acquireAccountSlotBeforeRetryDeadline(c, 1, 1, 120*time.Second, &started, time.Now().Add(time.Second))
+				start := time.Now()
+				_, err := helper.acquireAccountSlotBeforeRetryDeadline(c, 1, 1, 120*time.Second, &started, start.Add(time.Second))
 				if acquired {
 					require.ErrorIs(t, err, errAntigravityRetryWaitExhausted)
+					// The caller leaves at its own deadline; the slow admission
+					// finishes on its detached context and is released exactly.
+					require.Equal(t, time.Second, time.Since(start))
+					time.Sleep(2 * time.Second)
+					synctest.Wait()
 					require.Equal(t, 1, cache.releases[1])
 					require.NoError(t, ctx.Err())
 				} else {

@@ -143,7 +143,11 @@ func TestGeminiAccountWait_CacheDeadlineEndsOnlyCurrentSlice(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				c, _ := newHelperTestContext(http.MethodPost, "/")
 				cache := newGeminiWaitCache()
+				var acquireCalls int
 				cache.acquire = func(ctx context.Context, _ int64) (bool, error) {
+					cache.mu.Lock()
+					acquireCalls++
+					cache.mu.Unlock()
 					<-ctx.Done()
 					return false, ctx.Err()
 				}
@@ -173,6 +177,12 @@ func TestGeminiAccountWait_CacheDeadlineEndsOnlyCurrentSlice(t *testing.T) {
 				require.Equal(t, map[int64]int{1: 1}, cache.increments)
 				require.Equal(t, cache.increments, cache.decrements)
 				require.NoError(t, c.Request.Context().Err())
+				// Each hung admission ends on its detached budget and its
+				// ambiguous member is compensated by exact ID.
+				time.Sleep(3 * time.Second)
+				synctest.Wait()
+				require.Positive(t, acquireCalls)
+				require.Equal(t, acquireCalls, cache.releases[1])
 			})
 		})
 	}
@@ -185,7 +195,11 @@ func TestGeminiAccountWait_CacheCancellationPreservesParentCancellation(t *testi
 		defer cancel()
 		c.Request = c.Request.WithContext(ctx)
 		cache := newGeminiWaitCache()
+		var acquireCalls int
 		cache.acquire = func(ctx context.Context, _ int64) (bool, error) {
+			cache.mu.Lock()
+			acquireCalls++
+			cache.mu.Unlock()
 			<-ctx.Done()
 			return false, ctx.Err()
 		}
@@ -201,6 +215,10 @@ func TestGeminiAccountWait_CacheCancellationPreservesParentCancellation(t *testi
 		require.Equal(t, 100*time.Millisecond, time.Since(start))
 		require.Equal(t, map[int64]int{1: 1}, cache.increments)
 		require.Equal(t, cache.increments, cache.decrements)
+		time.Sleep(3 * time.Second)
+		synctest.Wait()
+		require.Equal(t, 1, acquireCalls)
+		require.Equal(t, 1, cache.releases[1], "the in-flight admission is compensated after the client left")
 	})
 }
 

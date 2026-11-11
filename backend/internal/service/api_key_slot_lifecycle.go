@@ -74,27 +74,10 @@ func keepAPIKeySlotState(ctx context.Context, cache APIKeyConcurrencyCache, apiK
 func releaseAPIKeySlot(cache APIKeyConcurrencyCache, apiKeyID int64, requestID string) {
 	// An ambiguous write or delete is safe to compensate with the same exact ID.
 	// Bound the entire cleanup, including backoff, independently of the request.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		opCtx, stop := context.WithTimeout(ctx, time.Second)
-		err = cache.ReleaseAPIKeySlot(opCtx, apiKeyID, requestID)
-		stop()
-		if err == nil {
-			return
-		}
-		if attempt < 2 {
-			timer := time.NewTimer(time.Duration(attempt+1) * 100 * time.Millisecond)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-			case <-timer.C:
-			}
-		}
-		if ctx.Err() != nil {
-			break
-		}
+	err := releaseExactSlotWithRetry(5*time.Second, func(ctx context.Context) error {
+		return cache.ReleaseAPIKeySlot(ctx, apiKeyID, requestID)
+	})
+	if err != nil {
+		logger.LegacyPrintf("service.concurrency", "Warning: failed to release api key slot for %d (req=%s) after bounded retries: %v", apiKeyID, requestID, err)
 	}
-	logger.LegacyPrintf("service.concurrency", "Warning: failed to release api key slot for %d (req=%s) after bounded retries: %v", apiKeyID, requestID, err)
 }

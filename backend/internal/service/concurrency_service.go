@@ -360,7 +360,15 @@ func (s *ConcurrencyService) AcquireAccountSlot(ctx context.Context, accountID i
 	// Generate unique request ID for this slot
 	requestID := generateRequestID()
 
-	acquired, err := s.cache.AcquireAccountSlot(ctx, accountID, maxConcurrency, requestID)
+	acquired, err := admitSlotDetached(ctx,
+		func(opCtx context.Context) (bool, error) {
+			return s.cache.AcquireAccountSlot(opCtx, accountID, maxConcurrency, requestID)
+		},
+		func(opCtx context.Context) error {
+			return s.cache.ReleaseAccountSlot(opCtx, accountID, requestID)
+		},
+		func() string { return fmt.Sprintf("account slot %d (req=%s)", accountID, requestID) },
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -400,7 +408,15 @@ func (s *ConcurrencyService) AcquireUserSlot(ctx context.Context, userID int64, 
 	// Generate unique request ID for this slot
 	requestID := generateRequestID()
 
-	acquired, err := s.cache.AcquireUserSlot(ctx, userID, maxConcurrency, requestID)
+	acquired, err := admitSlotDetached(ctx,
+		func(opCtx context.Context) (bool, error) {
+			return s.cache.AcquireUserSlot(opCtx, userID, maxConcurrency, requestID)
+		},
+		func(opCtx context.Context) error {
+			return s.cache.ReleaseUserSlot(opCtx, userID, requestID)
+		},
+		func() string { return fmt.Sprintf("user slot %d (req=%s)", userID, requestID) },
+	)
 	if err != nil {
 		return nil, err
 	}
