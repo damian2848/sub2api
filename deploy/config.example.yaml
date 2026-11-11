@@ -683,6 +683,11 @@ gateway:
     # result only if a slot was taken on the spot; otherwise keep the 429.
     # 首选账号等待队列已满时排除它重选一次，只接受当场抢到槽位的账号，抢不到仍返回 429。
     queue_full_reselect: true
+    # Gemini 429 whose account cooldown outlasts the same-account backoff (16s) fails over
+    # immediately instead of retrying the same account; short RetryInfo cooldowns still retry.
+    # Gemini 429 写入的账号冷却长于同号退避上限（16s）时直接换号，不再同号重试；
+    # 短 RetryInfo 冷却仍同号重试。false 恢复旧行为。
+    gemini_long_cooldown_skip_same_account_retry: true
     # Prefer the account whose session window resets soonest (use-it-or-lose-it).
     # 负载感知选择时优先用尽「会话窗口最早重置」的账号；false 保持
     # 原有「优先级 → 负载率 → LRU」行为（默认）。

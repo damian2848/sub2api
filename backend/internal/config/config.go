@@ -1810,6 +1810,12 @@ type GatewaySchedulingConfig struct {
 	// 不会把排队转到其他账号的队列。
 	QueueFullReselect bool `mapstructure:"queue_full_reselect"`
 
+	// GeminiLongCooldownSkipSameAccountRetry 开启后（默认 true），Gemini（非 Antigravity）
+	// 上游 429 写入的账号冷却长于同号退避上限（16s）时，不再在同一账号上退避重试，
+	// 直接交给 failover 换号；短 RetryInfo 冷却仍按 max_same_account_retries_gemini 同号重试。
+	// 关闭后恢复旧行为（写冷却后仍同号重试至次数用尽）。
+	GeminiLongCooldownSkipSameAccountRetry bool `mapstructure:"gemini_long_cooldown_skip_same_account_retry"`
+
 	// PreferSoonestReset 开启后，负载感知选择会优先选用「会话窗口最早重置」的账号
 	// （use-it-or-lose-it：先用尽即将重置的账号，保留重置时间还很久的账号）。
 	// 默认 false，保持原有「优先级 → 负载率 → LRU」行为不变。
@@ -2940,6 +2946,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.scheduling.fallback_selection_mode", "last_used")
 	viper.SetDefault("gateway.scheduling.fallback_probe_hard_slots", true)
 	viper.SetDefault("gateway.scheduling.queue_full_reselect", true)
+	viper.SetDefault("gateway.scheduling.gemini_long_cooldown_skip_same_account_retry", true)
 	viper.SetDefault("gateway.scheduling.prefer_soonest_reset", false)
 	viper.SetDefault("gateway.scheduling.load_batch_enabled", true)
 	viper.SetDefault("gateway.scheduling.load_batch_cache_ttl_ms", 200)

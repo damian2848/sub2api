@@ -138,8 +138,11 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 	var resp *http.Response
 	// checkedPolicy 是循环内对当前 resp 的错误策略检查结果，未检查时为 nil。
 	var checkedPolicy *ErrorPolicyResult
+	// rateLimitApplied 表示当前 resp 的 429 已在循环内写过账号冷却，循环后不再重复处理。
+	rateLimitApplied := false
 	maxAttempts := s.geminiMaxAttemptsPerAccount()
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		rateLimitApplied = false
 		upstreamReq, idHeader, err := buildReq(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -177,7 +180,17 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 				break
 			}
 			if resp.StatusCode == http.StatusTooManyRequests {
-				s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+				persisted, resetAt := s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+				rateLimitApplied = true
+				if s.geminiLongCooldownSkipsSameAccountRetry(persisted, resetAt) {
+					logger.LegacyPrintf("service.gemini_chat_completions", "Gemini account %d: 429 cooldown until %v exceeds same-account backoff, failing over without retry", account.ID, resetAt.Format(time.RFC3339))
+					resp = &http.Response{
+						StatusCode: resp.StatusCode,
+						Header:     resp.Header.Clone(),
+						Body:       io.NopCloser(bytes.NewReader(respBody)),
+					}
+					break
+				}
 			}
 			if attempt < maxAttempts {
 				upstreamReqID := resp.Header.Get(requestIDHeader)
@@ -198,7 +211,9 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 					Message:            upstreamMsg,
 				})
 				logger.LegacyPrintf("service.gemini_chat_completions", "Gemini account %d: upstream status %d, retry %d/%d", account.ID, resp.StatusCode, attempt, maxAttempts)
-				sleepGeminiBackoff(attempt)
+				if err := sleepGeminiBackoff(ctx, attempt); err != nil {
+					return nil, err
+				}
 				continue
 			}
 			resp = &http.Response{
@@ -231,7 +246,8 @@ func (s *GeminiMessagesCompatService) forwardClaudeBodyAsChatCompletions(
 		}
 		// 与 messages 兼容层一致：只有 None / Matched 才走账号状态处理。
 		// Skipped（池模式、或自定义错误码未命中）与 TempUnscheduled 已由策略层裁决完毕。
-		if policy == ErrorPolicyNone || policy == ErrorPolicyMatched {
+		// 循环内已写过该 429 冷却时不再重复写。
+		if (policy == ErrorPolicyNone || policy == ErrorPolicyMatched) && !rateLimitApplied {
 			s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
 		}
 		evBody := unwrapIfNeeded(account.Type == AccountTypeOAuth, respBody)

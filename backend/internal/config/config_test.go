@@ -537,6 +537,9 @@ func TestLoadDefaultSchedulingConfig(t *testing.T) {
 	if !cfg.Gateway.Scheduling.QueueFullReselect {
 		t.Fatalf("QueueFullReselect = false, want true")
 	}
+	if !cfg.Gateway.Scheduling.GeminiLongCooldownSkipSameAccountRetry {
+		t.Fatalf("GeminiLongCooldownSkipSameAccountRetry = false, want true")
+	}
 	if !cfg.Gateway.Scheduling.LoadBatchEnabled {
 		t.Fatalf("LoadBatchEnabled = false, want true")
 	}

@@ -760,11 +760,14 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	var resp *http.Response
 	// checkedPolicy 是循环内对当前 resp 的错误策略检查结果，未检查时为 nil。
 	var checkedPolicy *ErrorPolicyResult
+	// rateLimitApplied 表示当前 resp 的 429 已在循环内写过账号冷却，循环后不再重复处理。
+	rateLimitApplied := false
 	signatureRetryStage := 0
 	maxAttempts := s.geminiMaxAttemptsPerAccount()
 	// 签名降级重发不占用同号重试次数：每进入一个降级阶段，循环上限随之顺延一次。
 	for attempt := 1; attempt <= maxAttempts+signatureRetryStage; attempt++ {
 		checkedPolicy = nil
+		rateLimitApplied = false
 		upstreamReq, idHeader, err := buildReq(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -845,7 +848,9 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 					logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: detected signature-related 400, retrying with downgraded Claude blocks (%s)", account.ID, stageName)
 					// 降级只改写历史块，思考参数沿用客户端原始请求。
 					geminiReq = applyGeminiCompatThinkingConfig(retryGeminiReq, originalClaudeBody, mappedModel, includeThoughts)
-					sleepGeminiBackoff(1)
+					if err := sleepGeminiBackoff(ctx, 1); err != nil {
+						return nil, err
+					}
 					continue
 				}
 			}
@@ -881,7 +886,17 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			}
 			if resp.StatusCode == 429 {
 				// Apply account-scoped 429 handling early so concurrent requests avoid a rate-limited account.
-				s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+				persisted, resetAt := s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+				rateLimitApplied = true
+				if s.geminiLongCooldownSkipsSameAccountRetry(persisted, resetAt) {
+					logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: 429 cooldown until %v exceeds same-account backoff, failing over without retry", account.ID, resetAt.Format(time.RFC3339))
+					resp = &http.Response{
+						StatusCode: resp.StatusCode,
+						Header:     resp.Header.Clone(),
+						Body:       io.NopCloser(bytes.NewReader(respBody)),
+					}
+					break
+				}
 			}
 			retryAttempt := attempt - signatureRetryStage
 			if retryAttempt < maxAttempts {
@@ -913,7 +928,9 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 				})
 
 				logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: upstream status %d, retry %d/%d", account.ID, resp.StatusCode, retryAttempt, maxAttempts)
-				sleepGeminiBackoff(retryAttempt)
+				if err := sleepGeminiBackoff(ctx, retryAttempt); err != nil {
+					return nil, err
+				}
 				continue
 			}
 			// Final attempt: surface the upstream error body (mapped below) instead of a generic retry error.
@@ -984,8 +1001,10 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			}
 		}
 
-		// ErrorPolicyNone → 原有逻辑
-		s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+		// ErrorPolicyNone → 原有逻辑（循环内已写过该 429 的冷却时不再重复写）
+		if !rateLimitApplied {
+			s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+		}
 		// 精确匹配服务端配置类 400 错误，触发 failover + 临时封禁
 		if resp.StatusCode == http.StatusBadRequest {
 			msg400 := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
@@ -1319,9 +1338,12 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	var resp *http.Response
 	// checkedPolicy 是循环内对当前 resp 的错误策略检查结果，未检查时为 nil。
 	var checkedPolicy *ErrorPolicyResult
+	// rateLimitApplied 表示当前 resp 的 429 已在循环内写过账号冷却，循环后不再重复处理。
+	rateLimitApplied := false
 	maxAttempts := s.geminiMaxAttemptsPerAccount()
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		checkedPolicy = nil
+		rateLimitApplied = false
 		upstreamReq, idHeader, err := buildReq(ctx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -1390,7 +1412,17 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				break
 			}
 			if resp.StatusCode == 429 {
-				s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+				persisted, resetAt := s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+				rateLimitApplied = true
+				if s.geminiLongCooldownSkipsSameAccountRetry(persisted, resetAt) {
+					logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: 429 cooldown until %v exceeds same-account backoff, failing over without retry", account.ID, resetAt.Format(time.RFC3339))
+					resp = &http.Response{
+						StatusCode: resp.StatusCode,
+						Header:     resp.Header.Clone(),
+						Body:       io.NopCloser(bytes.NewReader(respBody)),
+					}
+					break
+				}
 			}
 			if attempt < maxAttempts {
 				upstreamReqID := resp.Header.Get(requestIDHeader)
@@ -1421,7 +1453,9 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				})
 
 				logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: upstream status %d, retry %d/%d", account.ID, resp.StatusCode, attempt, maxAttempts)
-				sleepGeminiBackoff(attempt)
+				if err := sleepGeminiBackoff(ctx, attempt); err != nil {
+					return nil, err
+				}
 				continue
 			}
 			if action == "countTokens" {
@@ -1534,8 +1568,10 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 			}
 		}
 
-		// ErrorPolicyNone → 原有逻辑
-		s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+		// ErrorPolicyNone → 原有逻辑（循环内已写过该 429 的冷却时不再重复写）
+		if !rateLimitApplied {
+			s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+		}
 		// 精确匹配服务端配置类 400 错误，触发 failover + 临时封禁
 		if resp.StatusCode == http.StatusBadRequest {
 			msg400 := strings.ToLower(strings.TrimSpace(extractUpstreamErrorMessage(respBody)))
@@ -1915,7 +1951,10 @@ func (s *GeminiMessagesCompatService) recordGeminiNativeUpstreamError(c *gin.Con
 	return upstreamMsg
 }
 
-func sleepGeminiBackoff(attempt int) {
+// geminiBackoffDelay 可在测试中替换，用于验证退避等待对 ctx 取消的响应。
+var geminiBackoffDelay = geminiBackoffDuration
+
+func geminiBackoffDuration(attempt int) time.Duration {
 	delay := geminiRetryBaseDelay * time.Duration(1<<uint(attempt-1))
 	if delay > geminiRetryMaxDelay {
 		delay = geminiRetryMaxDelay
@@ -1928,7 +1967,38 @@ func sleepGeminiBackoff(attempt int) {
 	if sleepFor < 0 {
 		sleepFor = 0
 	}
-	time.Sleep(sleepFor)
+	return sleepFor
+}
+
+// sleepGeminiBackoff 按指数退避等待，ctx 取消（客户端断开）时立即返回 ctx 错误，
+// 不再占着账号并发槽睡满整个退避时间。
+func sleepGeminiBackoff(ctx context.Context, attempt int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	sleepFor := geminiBackoffDelay(attempt)
+	if sleepFor <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(sleepFor)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// geminiLongCooldownSkipsSameAccountRetry 判断 429 写入的账号冷却是否长于剩余同号退避上限：
+// 冷却期内同号重试不会成功（且成功也不会清除冷却），直接交给 failover 换号。
+// 短 RetryInfo 冷却（如 retry in 2s）保持原有同号退避重试。
+// 由 gateway.scheduling.gemini_long_cooldown_skip_same_account_retry 控制（默认开启）。
+func (s *GeminiMessagesCompatService) geminiLongCooldownSkipsSameAccountRetry(persisted bool, resetAt time.Time) bool {
+	if !persisted || s == nil || s.cfg == nil || !s.cfg.Gateway.Scheduling.GeminiLongCooldownSkipSameAccountRetry {
+		return false
+	}
+	return time.Until(resetAt) > geminiRetryMaxDelay
 }
 
 var (
@@ -3210,26 +3280,28 @@ func asInt(v any) (int, bool) {
 	}
 }
 
-func (s *GeminiMessagesCompatService) handleGeminiUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, body []byte) {
+// handleGeminiUpstreamError 处理上游错误对账号状态的影响。persisted 表示写入了账号级 429 冷却，
+// resetAt 为写入的冷却到期时间；池模式、Vertex 共享容量、自定义错误码未命中、第三方 apikey 等不写冷却的情况返回 false。
+func (s *GeminiMessagesCompatService) handleGeminiUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, body []byte) (persisted bool, resetAt time.Time) {
 	// 遵守自定义错误码策略：未命中则跳过所有限流处理
 	if !account.ShouldHandleErrorCode(statusCode) {
-		return
+		return false, time.Time{}
 	}
 	if s.rateLimitService != nil && (statusCode == 401 || statusCode == 403 || statusCode == 529) {
 		s.rateLimitService.HandleUpstreamError(ctx, account, statusCode, headers, body)
-		return
+		return false, time.Time{}
 	}
 	if statusCode != 429 {
-		return
+		return false, time.Time{}
 	}
 	// 池模式账号不写账号级限流：账号留在池内，由 failover / 同号重试消化 429。
 	// 自定义错误码优先级高于池模式，开启后仍按其命中结果标记。
 	if account.IsPoolMode() && !account.IsCustomErrorCodesEnabled() {
-		return
+		return false, time.Time{}
 	}
 	if account.IsGeminiThirdPartyAPIKey() {
 		s.handleGeminiThirdParty429(ctx, account, body)
-		return
+		return false, time.Time{}
 	}
 
 	oauthType := account.GeminiOAuthType()
@@ -3237,8 +3309,8 @@ func (s *GeminiMessagesCompatService) handleGeminiUpstreamError(ctx context.Cont
 	projectID := strings.TrimSpace(account.GetCredential("project_id"))
 	isCodeAssist := account.IsGeminiCodeAssist()
 
-	resetAt := ParseGeminiRateLimitResetTime(body)
-	if resetAt == nil {
+	parsedReset := ParseGeminiRateLimitResetTime(body)
+	if parsedReset == nil {
 		// 根据账号类型使用不同的默认重置时间
 		var ra time.Time
 		if isCodeAssist || oauthType == "google_one" {
@@ -3258,7 +3330,7 @@ func (s *GeminiMessagesCompatService) handleGeminiUpstreamError(ctx context.Cont
 			// 由请求内的同号退避重试与换号消化。
 			if isVertexSharedCapacity429(body) {
 				logger.LegacyPrintf("service.gemini_messages_compat", "[Gemini 429] Account %d (Vertex service account, project=%s) shared capacity exhausted, account stays schedulable", account.ID, projectID)
-				return
+				return false, time.Time{}
 			}
 			// 项目配额、预留吞吐等账号自身的限速是短窗口 RPM/TPM，无每日配额，短冷却后即可恢复
 			ra = time.Now().Add(geminiVertexFallbackCooldown)
@@ -3274,15 +3346,21 @@ func (s *GeminiMessagesCompatService) handleGeminiUpstreamError(ctx context.Cont
 				logger.LegacyPrintf("service.gemini_messages_compat", "[Gemini 429] Account %d rate limited, fallback to 5min", account.ID)
 			}
 		}
-		_ = s.accountRepo.SetRateLimited(ctx, account.ID, ra)
-		return
+		if err := s.accountRepo.SetRateLimited(ctx, account.ID, ra); err != nil {
+			return false, time.Time{}
+		}
+		return true, ra
 	}
 
 	// 使用解析到的重置时间
-	resetTime := time.Unix(*resetAt, 0)
-	_ = s.accountRepo.SetRateLimited(ctx, account.ID, resetTime)
+	resetTime := time.Unix(*parsedReset, 0)
+	err := s.accountRepo.SetRateLimited(ctx, account.ID, resetTime)
 	logger.LegacyPrintf("service.gemini_messages_compat", "[Gemini 429] Account %d rate limited until %v (oauth_type=%s, tier=%s)",
 		account.ID, resetTime, oauthType, tierID)
+	if err != nil {
+		return false, time.Time{}
+	}
+	return true, resetTime
 }
 
 // isVertexSharedCapacity429 判断 Vertex 429 是否为按量付费共享容量不足：RESOURCE_EXHAUSTED、
