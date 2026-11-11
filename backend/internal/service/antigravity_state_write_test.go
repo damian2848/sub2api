@@ -181,3 +181,100 @@ func TestAntigravityModelRateLimit_FailedWriteIsNotDeduplicated(t *testing.T) {
 	require.True(t, svc.setAntigravityModelRateLimits(context.Background(), repo, newStateWriteTestAccount(705), "gemini-3-flash", "[test]", 429, resetAt, false))
 	require.Equal(t, 2, repo.calls(), "a failed write must not suppress the retry")
 }
+
+// 出窗口的旧记录不能被沿用：DB 里的长冷却可能已被管理员/测试恢复清掉，
+// 之后一次短冷却写入只能记录它自己的 reset，否则会吞掉随后更长的冷却。
+func TestAntigravityModelRateLimit_RecordsOnlyResetActuallyWritten(t *testing.T) {
+	var w antigravityModelRateLimitWriter
+	writes := 0
+	doWrite := func() bool { writes++; return true }
+	key := antigravityModelRateLimitWriteKey(706, "gemini-3-flash")
+	now := time.Now()
+
+	ok, skipped := w.write(706, "gemini-3-flash", now.Add(5*time.Hour), doWrite)
+	require.True(t, ok)
+	require.False(t, skipped)
+
+	// 模拟窗口过期（期间冷却被清除），再来一次短冷却。
+	w.mu.Lock()
+	rec := w.recent[key]
+	rec.writtenAt = time.Now().Add(-antigravityModelRateLimitDedupWindow - time.Second)
+	w.recent[key] = rec
+	w.mu.Unlock()
+	short := time.Now().Add(time.Minute)
+	ok, skipped = w.write(706, "gemini-3-flash", short, doWrite)
+	require.True(t, ok)
+	require.False(t, skipped)
+	w.mu.Lock()
+	require.True(t, w.recent[key].resetAt.Equal(short), "record must hold the reset just written, not the stale longer one")
+	w.mu.Unlock()
+
+	// 窗口内更长的配额冷却必须照写。
+	ok, skipped = w.write(706, "gemini-3-flash", now.Add(4*time.Hour), doWrite)
+	require.True(t, ok)
+	require.False(t, skipped)
+	require.Equal(t, 3, writes)
+}
+
+// doWrite panic 时 inflight 必须被清理、done 必须关闭：后续写入不能永久阻塞，且会重新自己写。
+func TestAntigravityModelRateLimit_PanickingWriteReleasesFlight(t *testing.T) {
+	var w antigravityModelRateLimitWriter
+	resetAt := time.Now().Add(time.Minute)
+	key := antigravityModelRateLimitWriteKey(707, "gemini-3-flash")
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	panicked := make(chan any, 1)
+	go func() {
+		defer func() { panicked <- recover() }()
+		w.write(707, "gemini-3-flash", resetAt, func() bool {
+			close(started)
+			<-release
+			panic("boom")
+		})
+	}()
+	<-started
+
+	// 一个等待者在 panic 之前已挂在同一 flight 上。
+	waiterDone := make(chan [2]bool, 1)
+	waiterWrites := 0
+	go func() {
+		ok, skipped := w.write(707, "gemini-3-flash", resetAt, func() bool { waiterWrites++; return true })
+		waiterDone <- [2]bool{ok, skipped}
+	}()
+	// 给等待者时间进入 write 并挂到 flight 上（即使没来得及，也走同样的断言）。
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	select {
+	case p := <-panicked:
+		require.Equal(t, "boom", p, "panic must still propagate to the caller")
+	case <-time.After(2 * time.Second):
+		t.Fatal("panicking writer did not return")
+	}
+	select {
+	case res := <-waiterDone:
+		require.True(t, res[0])
+		require.False(t, res[1], "waiter must write itself after the in-flight write panicked")
+		require.Equal(t, 1, waiterWrites)
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter blocked forever on a panicked flight")
+	}
+
+	w.mu.Lock()
+	_, stillInflight := w.inflight[key]
+	w.mu.Unlock()
+	require.False(t, stillInflight)
+
+	// 之后的新写入也不阻塞（被等待者的成功写入去重）。
+	done := make(chan struct{})
+	go func() {
+		w.write(707, "gemini-3-flash", resetAt, func() bool { return true })
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("subsequent write blocked")
+	}
+}

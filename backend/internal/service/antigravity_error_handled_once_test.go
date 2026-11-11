@@ -60,6 +60,14 @@ func newErrorHandledAccount(id int64) *Account {
 	}
 }
 
+// modelRateLimitWriteAttempts 返回冷却写入器被调用的次数（含被去重跳过的）。
+// 只看仓储层写入次数无法发现 errorHandled 透传失效：第二次写会被去重器吞掉。
+func modelRateLimitWriteAttempts(svc *AntigravityGatewayService) int {
+	svc.modelRateLimitWriter.mu.Lock()
+	defer svc.modelRateLimitWriter.mu.Unlock()
+	return svc.modelRateLimitWriter.attempts
+}
+
 func TestAntigravityGeneric429_CooldownWrittenOncePerForwardPath(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -82,6 +90,7 @@ func TestAntigravityGeneric429_CooldownWrittenOncePerForwardPath(t *testing.T) {
 		require.Equal(t, http.StatusTooManyRequests, failoverErr.StatusCode)
 		require.Equal(t, 1, upstream.calls)
 		require.Len(t, repo.modelRateLimitCalls, 1, "generic 429 must write the model cooldown exactly once")
+		require.Equal(t, 1, modelRateLimitWriteAttempts(svc), "the cooldown write must be requested once, not requested twice and deduplicated")
 		require.Empty(t, repo.rateCalls)
 	})
 
@@ -110,6 +119,7 @@ func TestAntigravityGeneric429_CooldownWrittenOncePerForwardPath(t *testing.T) {
 		require.Equal(t, http.StatusTooManyRequests, failoverErr.StatusCode)
 		require.Equal(t, 1, upstream.calls)
 		require.Len(t, repo.modelRateLimitCalls, 1, "generic 429 must write the model cooldown exactly once")
+		require.Equal(t, 1, modelRateLimitWriteAttempts(svc), "the cooldown write must be requested once, not requested twice and deduplicated")
 		require.Empty(t, repo.rateCalls)
 	})
 
@@ -129,6 +139,7 @@ func TestAntigravityGeneric429_CooldownWrittenOncePerForwardPath(t *testing.T) {
 		require.Equal(t, http.StatusTooManyRequests, failoverErr.StatusCode)
 		require.Equal(t, 1, upstream.calls)
 		require.Len(t, repo.modelRateLimitCalls, 1, "generic 429 must write the model cooldown exactly once")
+		require.Equal(t, 1, modelRateLimitWriteAttempts(svc), "the cooldown write must be requested once, not requested twice and deduplicated")
 		require.Empty(t, repo.rateCalls)
 	})
 }

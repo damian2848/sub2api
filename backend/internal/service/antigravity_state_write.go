@@ -46,6 +46,9 @@ type antigravityModelRateLimitWriter struct {
 	mu       sync.Mutex
 	recent   map[string]antigravityModelRateLimitWrite
 	inflight map[string]*antigravityModelRateLimitFlight
+	// attempts 统计进入 write 的次数，包含被去重跳过的。写库次数区分不了
+	// 「上层只调用了一次」和「调用了两次、第二次被去重」，回归测试看这个计数。
+	attempts int
 }
 
 func antigravityModelRateLimitWriteKey(accountID int64, modelKey string) string {
@@ -62,6 +65,9 @@ func (w *antigravityModelRateLimitWriter) covers(rec antigravityModelRateLimitWr
 // 而是复用了窗口内或同时在途的、不短于本次的写入结果。
 func (w *antigravityModelRateLimitWriter) write(accountID int64, modelKey string, resetAt time.Time, doWrite func() bool) (ok bool, skipped bool) {
 	key := antigravityModelRateLimitWriteKey(accountID, modelKey)
+	w.mu.Lock()
+	w.attempts++
+	w.mu.Unlock()
 	for {
 		now := time.Now()
 		w.mu.Lock()
@@ -85,11 +91,19 @@ func (w *antigravityModelRateLimitWriter) write(accountID int64, modelKey string
 		w.inflight[key] = flight
 		w.mu.Unlock()
 
-		flight.ok = doWrite()
+		w.runFlight(key, flight, doWrite)
+		return flight.ok, false
+	}
+}
 
+// runFlight 执行在途写入并收尾。收尾放在 defer 里：doWrite panic 时 inflight 条目也会被清掉、
+// done 也会关闭，等待者不会永久阻塞（flight.ok 保持 false，等待者会重新判断并自己写）。
+func (w *antigravityModelRateLimitWriter) runFlight(key string, flight *antigravityModelRateLimitFlight, doWrite func() bool) {
+	defer func() {
 		w.mu.Lock()
 		delete(w.inflight, key)
 		if flight.ok {
+			now := time.Now()
 			if w.recent == nil {
 				w.recent = make(map[string]antigravityModelRateLimitWrite)
 			}
@@ -100,14 +114,12 @@ func (w *antigravityModelRateLimitWriter) write(accountID int64, modelKey string
 					}
 				}
 			}
-			rec := antigravityModelRateLimitWrite{resetAt: resetAt, writtenAt: time.Now()}
-			if prev, exists := w.recent[key]; exists && prev.resetAt.After(rec.resetAt) {
-				rec.resetAt = prev.resetAt
-			}
-			w.recent[key] = rec
+			// 只记录本次实际写入的 reset，不和旧记录取较长值：窗口内不长于旧记录的写入已被 covers 跳过，
+			// 能走到这里的要么比旧记录长，要么旧记录已出窗口（DB 里的值可能已被管理员清除，不能沿用）。
+			w.recent[key] = antigravityModelRateLimitWrite{resetAt: flight.resetAt, writtenAt: now}
 		}
 		w.mu.Unlock()
 		close(flight.done)
-		return flight.ok, false
-	}
+	}()
+	flight.ok = doWrite()
 }
