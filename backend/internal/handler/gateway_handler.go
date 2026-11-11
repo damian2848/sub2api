@@ -482,7 +482,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					reselectAttempted := !queueFullReselected
 					if !queueFullReselected {
 						queueFullReselected = true
-						alternative = h.reselectAfterAccountQueueFull(c.Request.Context(), apiKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, account.ID, "", int64(0))
+						alternative = h.reselectAfterAccountQueueFull(c.Request.Context(), apiKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, account.ID, sessionBoundAccountID, "", int64(0))
 					}
 					reqLog.Info("gateway.account_wait_queue_full",
 						zap.Int64("account_id", account.ID),
@@ -502,6 +502,10 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					account = alternative.Account
 					accountReleaseFunc = alternative.ReleaseFunc
 					setOpsSelectedAccount(c, account.ID, account.Platform)
+					admissionBudget.observeAccount(account)
+					if interceptWarmupAfterReselect(c, selection, body, reqModel, parsedReq.MaxTokens, isClaudeCodeClient, reqStream) {
+						return
+					}
 				}
 				if !selection.Acquired {
 					if err == nil && canWait {
@@ -846,7 +850,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			// 调度器在返回选号/等待计划前已为该账号注册会话（checkAndRegisterSession）。
 			// 在排队前就登记，确保队列满 429、等待超时等提前 return 的路径也会被
 			// defer 立即释放，而不是占着 max_sessions 槽直到空闲超时。
-			sessionSlotAccounts[account.ID] = account
+			// 会话已粘在该账号上时，注册早于本请求、同会话的其他在途请求还依赖它
+			// （UnregisterSession 不计引用），排队失败不能删。
+			if account.ID != sessionBoundAccountID {
+				sessionSlotAccounts[account.ID] = account
+			}
 
 			// 3. 获取账号并发槽位
 			accountReleaseFunc := selection.ReleaseFunc
@@ -871,7 +879,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					reselectAttempted := !queueFullReselected
 					if !queueFullReselected {
 						queueFullReselected = true
-						alternative = h.reselectAfterAccountQueueFull(c.Request.Context(), currentAPIKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, account.ID, parsedReq.MetadataUserID, subject.UserID)
+						alternative = h.reselectAfterAccountQueueFull(c.Request.Context(), currentAPIKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, account.ID, sessionBoundAccountID, parsedReq.MetadataUserID, subject.UserID)
 					}
 					reqLog.Info("gateway.account_wait_queue_full",
 						zap.Int64("account_id", account.ID),
@@ -887,14 +895,21 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						zap.Int64("from_account_id", account.ID),
 						zap.Int64("to_account_id", alternative.Account.ID),
 					)
-					// 首选账号不再承接本请求，立即释放它在选号时注册的会话
-					h.gatewayService.ReleaseAccountSession(context.Background(), account, sessionKey)
+					// 首选账号不再承接本请求，立即释放它在选号时注册的会话（粘性账号上的既有注册除外）
+					if account.ID != sessionBoundAccountID {
+						h.gatewayService.ReleaseAccountSession(context.Background(), account, sessionKey)
+					}
 					delete(sessionSlotAccounts, account.ID)
 					selection = alternative
 					account = alternative.Account
 					accountReleaseFunc = alternative.ReleaseFunc
 					setOpsSelectedAccount(c, account.ID, account.Platform)
-					sessionSlotAccounts[account.ID] = account
+					if account.ID != sessionBoundAccountID {
+						sessionSlotAccounts[account.ID] = account
+					}
+					if interceptWarmupAfterReselect(c, selection, body, reqModel, parsedReq.MaxTokens, isClaudeCodeClient, reqStream) {
+						return
+					}
 				}
 				if !selection.Acquired {
 					if err == nil && canWait {

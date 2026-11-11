@@ -287,3 +287,82 @@ func TestGatewayHandlerMessages_GeminiQueueFullReselectsWithoutQueueing(t *testi
 	require.Equal(t, map[int64]int{queueFullPrimaryAccount: 1}, helperCache.increments)
 	require.Equal(t, 2, gatewayCache.attemptsFor(queueFullSecondaryAccount), "the reselection probes the next account once more")
 }
+
+// The warmup intercept ran only against the primary account. When the queue-full
+// reselection moves the request to an account that intercepts warmups, the
+// warmup is answered locally there too instead of being sent upstream.
+func TestGatewayHandlerMessages_QueueFullReselectReappliesWarmupIntercept(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	group := &service.Group{ID: 2305, Hydrated: true, Platform: service.PlatformAnthropic, Status: service.StatusActive}
+	secondary := queueFullAccount(queueFullSecondaryAccount, 2, group.ID, service.AccountTypeAPIKey, nil)
+	secondary.Credentials["intercept_warmup_requests"] = true
+	accounts := []*service.Account{
+		queueFullAccount(queueFullPrimaryAccount, 1, group.ID, service.AccountTypeAPIKey, nil),
+		secondary,
+	}
+	gatewayCache := &scriptedSlotCache{
+		script:   map[int64][]bool{queueFullSecondaryAccount: {false, true}},
+		attempts: map[int64]int{},
+	}
+	helperCache := &queueFullHelperCache{increments: map[int64]int{}}
+	upstream := &recordingUpstream{}
+	h, cleanup := newQueueFullReselectHandler(t, group, accounts, gatewayCache, helperCache, newRecordingSessionLimitCache(), upstream, true)
+	defer cleanup()
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	body := `{"model":"claude-sonnet-4-5","max_tokens":64,"messages":[{"role":"user","content":[{"type":"text","text":"Warmup"}]}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req.WithContext(context.WithValue(req.Context(), ctxkey.Group, group))
+	groupID := group.ID
+	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{ID: 3305, UserID: 4305, GroupID: &groupID, Status: service.StatusActive, Group: group, User: &service.User{ID: 4305, Concurrency: 10, Balance: 100}})
+	c.Set(string(middleware.ContextKeyUser), middleware.AuthSubject{UserID: 4305, Concurrency: 10})
+	h.Messages(c)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Empty(t, upstream.calls(), "the warmup must not reach the reselected account's upstream")
+	require.Equal(t, map[int64]int{queueFullPrimaryAccount: 1}, helperCache.increments)
+}
+
+// A discarded wait plan normally gives back the session it registered, but not
+// when the session was already bound to that account: UnregisterSession is not
+// reference counted, so it would drop a registration other in-flight requests
+// of the same session still rely on.
+func TestReselectAfterAccountQueueFull_KeepsSessionOnBoundAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	limited := map[string]any{"max_sessions": 2}
+	for _, tc := range []struct {
+		name        string
+		bound       int64
+		wantRelease bool
+	}{
+		{name: "unbound session is released", bound: 0, wantRelease: true},
+		{name: "bound session is kept", bound: queueFullSecondaryAccount, wantRelease: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			group := &service.Group{ID: 2306, Hydrated: true, Platform: service.PlatformAnthropic, Status: service.StatusActive}
+			accounts := []*service.Account{
+				queueFullAccount(queueFullPrimaryAccount, 1, group.ID, service.AccountTypeOAuth, limited),
+				queueFullAccount(queueFullSecondaryAccount, 2, group.ID, service.AccountTypeOAuth, limited),
+			}
+			gatewayCache := &scriptedSlotCache{script: map[int64][]bool{}, attempts: map[int64]int{}}
+			sessions := newRecordingSessionLimitCache()
+			h, cleanup := newQueueFullReselectHandler(t, group, accounts, gatewayCache, &queueFullHelperCache{increments: map[int64]int{}}, sessions, &recordingUpstream{}, true)
+			defer cleanup()
+
+			groupID := group.ID
+			ctx := context.WithValue(context.Background(), ctxkey.Group, group)
+			got := h.reselectAfterAccountQueueFull(ctx, &groupID, "sess-bound", "claude-sonnet-4-5", nil, queueFullPrimaryAccount, tc.bound, "", 0)
+
+			require.Nil(t, got, "a wait plan on the next account is never used")
+			registered, unregistered := sessions.snapshot(queueFullSecondaryAccount)
+			require.Len(t, registered, 1)
+			if tc.wantRelease {
+				require.Equal(t, registered, unregistered)
+			} else {
+				require.Empty(t, unregistered)
+			}
+		})
+	}
+}
