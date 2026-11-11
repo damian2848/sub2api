@@ -1429,10 +1429,8 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 					} else {
 						result, err := s.tryAcquireAccountSlot(ctx, accountID, account.Concurrency)
 						if err == nil && result != nil && result.Acquired {
-							selection, selectErr := s.newAcquiredSelectionResult(ctx, account, result.ReleaseFunc, result.RequestID)
-							if selectErr != nil {
-								return nil, selectErr
-							}
+							// account 已是 DB 复核后的完整副本，直接用，不再回快照 hydrate（多一次往返，还会换回较旧的快照副本）。
+							selection := newOpenAIAcquiredRecheckedSelection(ctx, account, result)
 							_ = s.refreshStickySessionTTL(ctx, groupID, sessionHash, openaiStickySessionTTL)
 							return markStickySessionHit(selection, true), nil
 						}
@@ -1544,6 +1542,61 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		})
 	}
 
+	// 先抢槽再复核：抢不到槽的候选不再付快照重读 + DB 复核的代价（load_factor > concurrency 时
+	// LoadRate<100 的候选可能硬槽已满）。L2 两轮共用一个复核预算；抢槽成功且复核通过的直接返回
+	// DB 副本，不再回快照 hydrate。L3 等待计划保持原样。
+	recheckBudget := newOpenAISelectionProbeBudget()
+	recheckBudget.enableLimit()
+	allowLegacyRecheck := func() bool {
+		// 没有快照或仓库时复核不查 DB，不计入预算（与高级调度器 consumeOpenAISelectionDBRecheck 一致）。
+		if s.schedulerSnapshot == nil || s.accountRepo == nil {
+			return true
+		}
+		return recheckBudget.recordRecheck()
+	}
+	releaseAcquired := func(result *AcquireResult) {
+		if result != nil && result.ReleaseFunc != nil {
+			result.ReleaseFunc()
+		}
+	}
+	// admitByAcquireFirst 返回 (选号结果, 是否因预算耗尽需要停止)。
+	admitByAcquireFirst := func(acc *Account) (*AccountSelectionResult, bool) {
+		result, err := s.tryAcquireAccountSlot(ctx, acc.ID, acc.Concurrency)
+		if err != nil || result == nil || !result.Acquired {
+			return nil, false
+		}
+		fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, groupID, platform, requestedModel, false, requiredCapability, requireCompact)
+		if fresh == nil {
+			releaseAcquired(result)
+			return nil, false
+		}
+		if !allowLegacyRecheck() {
+			releaseAcquired(result)
+			return nil, true
+		}
+		fresh = s.recheckSelectedOpenAIAccountFromDB(ctx, fresh, groupID, platform, requestedModel, requireCompact, requiredCapability)
+		if fresh == nil {
+			releaseAcquired(result)
+			return nil, false
+		}
+		if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
+			releaseAcquired(result)
+			return nil, false
+		}
+		if fresh.Concurrency != acc.Concurrency {
+			// 槽位按旧并发上限抢的，DB 里上限已变：按新上限重抢。
+			releaseAcquired(result)
+			result, err = s.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
+			if err != nil || result == nil || !result.Acquired {
+				return nil, false
+			}
+		}
+		if sessionHash != "" && !stickySpillover && !gatewayProfitControlGateActive(ctx) {
+			_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
+		}
+		return newOpenAIAcquiredRecheckedSelection(ctx, fresh, result), false
+	}
+
 	tryAcquireFromLoadMap := func(loadMap map[int64]*AccountLoadInfo) (*AccountSelectionResult, bool, error) {
 		var available []accountWithLoad
 		for _, acc := range candidates {
@@ -1618,27 +1671,16 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 		}
 
 		for _, item := range selectionOrder {
-			fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, item.account, groupID, platform, requestedModel, false, requiredCapability, requireCompact)
-			if fresh == nil {
+			// 负载快照里硬槽已满的候选不去抢（Concurrency<=0 表示不限并发）。
+			if item.account.Concurrency > 0 && item.loadInfo.CurrentConcurrency >= item.account.Concurrency {
 				continue
 			}
-			fresh = s.recheckSelectedOpenAIAccountFromDB(ctx, fresh, groupID, platform, requestedModel, requireCompact, requiredCapability)
-			if fresh == nil {
-				continue
-			}
-			if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
-				continue
-			}
-			result, err := s.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
-			if err == nil && result != nil && result.Acquired {
-				selection, selectErr := s.newAcquiredSelectionResult(ctx, fresh, result.ReleaseFunc, result.RequestID)
-				if selectErr != nil {
-					return nil, true, selectErr
-				}
-				if sessionHash != "" && !stickySpillover && !gatewayProfitControlGateActive(ctx) {
-					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
-				}
+			selection, stop := admitByAcquireFirst(item.account)
+			if selection != nil {
 				return selection, true, nil
+			}
+			if stop {
+				break
 			}
 		}
 		return nil, true, nil
@@ -1657,27 +1699,12 @@ func (s *OpenAIGatewayService) selectAccountWithLoadAwareness(ctx context.Contex
 			ordered = prioritizeOpenAICompactAccounts(ordered)
 		}
 		for _, acc := range ordered {
-			fresh := s.resolveFreshSchedulableOpenAIAccount(ctx, acc, groupID, platform, requestedModel, false, requiredCapability, requireCompact)
-			if fresh == nil {
-				continue
-			}
-			fresh = s.recheckSelectedOpenAIAccountFromDB(ctx, fresh, groupID, platform, requestedModel, requireCompact, requiredCapability)
-			if fresh == nil {
-				continue
-			}
-			if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
-				continue
-			}
-			result, err := s.tryAcquireAccountSlot(ctx, fresh.ID, fresh.Concurrency)
-			if err == nil && result != nil && result.Acquired {
-				selection, selectErr := s.newAcquiredSelectionResult(ctx, fresh, result.ReleaseFunc, result.RequestID)
-				if selectErr != nil {
-					return nil, selectErr
-				}
-				if sessionHash != "" && !stickySpillover && !gatewayProfitControlGateActive(ctx) {
-					_ = s.setStickySessionAccountID(ctx, groupID, sessionHash, fresh.ID, openaiStickySessionTTL)
-				}
+			selection, stop := admitByAcquireFirst(acc)
+			if selection != nil {
 				return selection, nil
+			}
+			if stop {
+				break
 			}
 		}
 	} else {
@@ -1992,6 +2019,18 @@ func (s *OpenAIGatewayService) newSelectionResult(ctx context.Context, account *
 		AccountRequestID: requestID,
 		WaitPlan:         waitPlan,
 	}), nil
+}
+
+// newOpenAIAcquiredRecheckedSelection 用 DB 复核后的完整副本构造已抢槽的选号结果。
+// 与 newAcquiredSelectionResult 不同，它不再回快照 hydrate：那样多一次往返，
+// 还会把刚复核过的账号换回可能更旧的快照副本。
+func newOpenAIAcquiredRecheckedSelection(ctx context.Context, account *Account, result *AcquireResult) *AccountSelectionResult {
+	return attachSelectionProfitGate(ctx, &AccountSelectionResult{
+		Account:          account,
+		Acquired:         true,
+		ReleaseFunc:      result.ReleaseFunc,
+		AccountRequestID: result.RequestID,
+	})
 }
 
 func (s *OpenAIGatewayService) newAcquiredSelectionResult(ctx context.Context, account *Account, release func(), requestID string) (*AccountSelectionResult, error) {
