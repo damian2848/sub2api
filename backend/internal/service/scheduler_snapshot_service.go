@@ -14,6 +14,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -32,6 +33,13 @@ const (
 	outboxRebuildRetryBaseDelay           = 5 * time.Second
 	outboxRebuildRetryMaxDelay            = 5 * time.Minute
 	outboxMaxIDErrorLogSampleInterval     = time.Minute
+
+	// schedulerEmptyBucketTTL 是「DB 已确认该桶为空」的进程内负缓存时长。Redis 对空快照
+	// 不建 ZSET，读侧无法和「未构建」区分，没有它时空桶的每个请求都会回退查库。
+	schedulerEmptyBucketTTL = time.Second
+	// schedulerFallbackFlightMaxTimeout 只在未配置 db_fallback_timeout_seconds 时生效：
+	// 共享回退加载脱离了单个请求的取消信号，需要一个兜底上限。
+	schedulerFallbackFlightMaxTimeout = 30 * time.Second
 )
 
 // batchSeenKey tracks completed per-platform rebuilds and group lifecycle work
@@ -142,6 +150,12 @@ type SchedulerSnapshotService struct {
 	outboxLagWarningActive       bool
 	outboxMaxIDErrorLastLoggedAt time.Time
 
+	// fallbackFlight 合并同一桶的并发 DB 回退；emptyBucketUntil 记录 DB 确认为空的桶
+	// （SchedulerBucket -> time.Time）。nowFn 仅供测试注入时钟。
+	fallbackFlight   singleflight.Group
+	emptyBucketUntil sync.Map
+	nowFn            func() time.Time
+
 	fullRebuildRunMu     sync.Mutex
 	fullRebuildStateMu   sync.Mutex
 	fullRebuildRequested uint64
@@ -227,8 +241,6 @@ func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, 
 	useMixed := (platform == PlatformAnthropic || platform == PlatformGemini) && !hasForcePlatform
 	mode := s.resolveMode(platform, hasForcePlatform)
 	bucket := s.bucketFor(groupID, platform, mode)
-	var writeToken SchedulerBucketWriteToken
-	canPublish := false
 	if err := ctx.Err(); err != nil {
 		return nil, useMixed, err
 	}
@@ -247,20 +259,62 @@ func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, 
 		return derefAccounts(cached), useMixed, nil
 	}
 
+	cacheMiss := false
 	if s.cache != nil {
 		cached, hit, err := s.cache.GetSnapshot(ctx, bucket)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, useMixed, ctxErr
 		}
 		if err != nil {
+			// Redis 故障时不查负缓存，照常回退，避免把所有请求短路成空。
 			logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] cache read failed: bucket=%s err=%v", bucket.String(), err)
 		} else if hit {
 			return derefAccounts(cached), useMixed, nil
+		} else {
+			cacheMiss = true
 		}
-		token, err := s.cache.CaptureBucketWriteToken(ctx, bucket)
+	}
+	// 非空快照命中永远优先；负缓存只抑制「DB 刚确认为空」的桶的重复回退。
+	if cacheMiss && s.bucketKnownEmpty(bucket) {
+		return []Account{}, useMixed, nil
+	}
+
+	accounts, err := s.loadFallbackAccountsShared(ctx, bucket, useMixed, cacheMiss)
+	if err != nil {
+		return nil, useMixed, err
+	}
+	return accounts, useMixed, nil
+}
+
+// loadFallbackAccountsShared 用 singleflight 合并同一桶的并发 DB 回退。leader 脱离请求取消
+// 信号运行（受回退超时约束），follower 各自监听自己的 ctx。返回的顶层切片由调用方独占；
+// 账号内的 map 与快照命中路径一样是共享的，调用方不得原地修改。
+func (s *SchedulerSnapshotService) loadFallbackAccountsShared(ctx context.Context, bucket SchedulerBucket, useMixed bool, cacheMiss bool) ([]Account, error) {
+	key := bucket.String() + "|mixed=" + strconv.FormatBool(useMixed)
+	leaderCtx := context.WithoutCancel(ctx)
+	ch := s.fallbackFlight.DoChan(key, func() (any, error) {
+		return s.loadFallbackAccounts(leaderCtx, bucket, useMixed, cacheMiss)
+	})
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-ch:
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, useMixed, ctxErr
+			return nil, ctxErr
 		}
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		accounts, _ := res.Val.([]Account)
+		return append(make([]Account, 0, len(accounts)), accounts...), nil
+	}
+}
+
+func (s *SchedulerSnapshotService) loadFallbackAccounts(ctx context.Context, bucket SchedulerBucket, useMixed bool, cacheMiss bool) ([]Account, error) {
+	var writeToken SchedulerBucketWriteToken
+	canPublish := false
+	if s.cache != nil {
+		token, err := s.cache.CaptureBucketWriteToken(ctx, bucket)
 		if err != nil {
 			if errors.Is(err, ErrSchedulerBucketRetired) || errors.Is(err, ErrSchedulerBucketWriteFenced) {
 				slog.Debug("[Scheduler] cache publish fenced", "bucket", bucket.String())
@@ -274,18 +328,15 @@ func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, 
 	}
 
 	if err := s.guardFallback(ctx); err != nil {
-		return nil, useMixed, err
+		return nil, err
 	}
 
-	fallbackCtx, cancel := s.withFallbackTimeout(ctx)
+	fallbackCtx, cancel := s.withFallbackFlightTimeout(ctx)
 	defer cancel()
 
 	accounts, err := s.loadAccountsFromDB(fallbackCtx, bucket, useMixed)
 	if err != nil {
-		return nil, useMixed, err
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, useMixed, ctxErr
+		return nil, err
 	}
 
 	if s.cache != nil && canPublish {
@@ -298,7 +349,31 @@ func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, 
 		}
 	}
 
-	return accounts, useMixed, nil
+	// 只有 Redis 正常返回未命中、且 DB 成功确认为空时才写负缓存；DB 出错不写。
+	if cacheMiss && len(accounts) == 0 {
+		s.emptyBucketUntil.Store(bucket, s.currentTime().Add(schedulerEmptyBucketTTL))
+	}
+	return accounts, nil
+}
+
+func (s *SchedulerSnapshotService) bucketKnownEmpty(bucket SchedulerBucket) bool {
+	v, ok := s.emptyBucketUntil.Load(bucket)
+	if !ok {
+		return false
+	}
+	until, _ := v.(time.Time)
+	if s.currentTime().Before(until) {
+		return true
+	}
+	s.emptyBucketUntil.CompareAndDelete(bucket, v)
+	return false
+}
+
+func (s *SchedulerSnapshotService) currentTime() time.Time {
+	if s.nowFn != nil {
+		return s.nowFn()
+	}
+	return time.Now()
 }
 
 func (s *SchedulerSnapshotService) GetAccount(ctx context.Context, accountID int64) (*Account, error) {
@@ -1662,6 +1737,15 @@ func (s *SchedulerSnapshotService) withFallbackTimeout(ctx context.Context) (con
 		}
 	}
 	return context.WithTimeout(ctx, timeout)
+}
+
+// withFallbackFlightTimeout 用于脱离请求取消信号的共享回退：优先用配置的回退超时，
+// 未配置时用兜底上限，避免 leader 无限期占用 DB 连接。
+func (s *SchedulerSnapshotService) withFallbackFlightTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if s.cfg != nil && s.cfg.Gateway.Scheduling.DbFallbackTimeoutSeconds > 0 {
+		return s.withFallbackTimeout(ctx)
+	}
+	return context.WithTimeout(ctx, schedulerFallbackFlightMaxTimeout)
 }
 
 func (s *SchedulerSnapshotService) isRunModeSimple() bool {
