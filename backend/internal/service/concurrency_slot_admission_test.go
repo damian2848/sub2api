@@ -69,33 +69,55 @@ func (c *admissionRecordingCache) snapshot() (acquired, released []string) {
 	return append([]string(nil), c.acquiredIDs...), append([]string(nil), c.releasedIDs...)
 }
 
+func (c *admissionRecordingCache) userSnapshot() (acquired, released []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.userAcquired...), append([]string(nil), c.userReleased...)
+}
+
+// waitForSlotCompensation lets every background compensation in the synctest
+// bubble run to completion (its retries and backoff are bounded by the budget).
+func waitForSlotCompensation() {
+	synctest.Wait()
+	time.Sleep(slotCompensationBudget)
+	synctest.Wait()
+}
+
 func TestAcquireAccountSlot_CacheErrorCompensatesExactMember(t *testing.T) {
-	cache := &admissionRecordingCache{acquire: func(context.Context) (bool, error) {
-		// The script ran but its reply was lost.
-		return false, context.DeadlineExceeded
-	}}
-	svc := NewConcurrencyService(cache)
+	synctest.Test(t, func(t *testing.T) {
+		cache := &admissionRecordingCache{acquire: func(context.Context) (bool, error) {
+			// The script ran but its reply was lost.
+			return false, context.DeadlineExceeded
+		}}
+		svc := NewConcurrencyService(cache)
 
-	result, err := svc.AcquireAccountSlot(context.Background(), 7, 3)
-	require.ErrorIs(t, err, context.DeadlineExceeded, "the original error must be returned unchanged")
-	require.Nil(t, result)
+		result, err := svc.AcquireAccountSlot(context.Background(), 7, 3)
+		require.ErrorIs(t, err, context.DeadlineExceeded, "the original error must be returned unchanged")
+		require.Nil(t, result)
 
-	acquired, released := cache.snapshot()
-	require.Len(t, acquired, 1)
-	require.Equal(t, acquired, released, "the ambiguous member must be removed by its exact request ID")
+		waitForSlotCompensation()
+		acquired, released := cache.snapshot()
+		require.Len(t, acquired, 1)
+		require.Equal(t, acquired, released, "the ambiguous member must be removed by its exact request ID")
+	})
 }
 
 func TestAcquireUserSlot_CacheErrorCompensatesExactMember(t *testing.T) {
-	cache := &admissionRecordingCache{acquire: func(context.Context) (bool, error) {
-		return false, errors.New("i/o timeout")
-	}}
-	svc := NewConcurrencyService(cache)
+	synctest.Test(t, func(t *testing.T) {
+		cache := &admissionRecordingCache{acquire: func(context.Context) (bool, error) {
+			return false, errors.New("i/o timeout")
+		}}
+		svc := NewConcurrencyService(cache)
 
-	result, err := svc.AcquireUserSlot(context.Background(), 9, 2)
-	require.EqualError(t, err, "i/o timeout")
-	require.Nil(t, result)
-	require.Len(t, cache.userAcquired, 1)
-	require.Equal(t, cache.userAcquired, cache.userReleased)
+		result, err := svc.AcquireUserSlot(context.Background(), 9, 2)
+		require.EqualError(t, err, "i/o timeout")
+		require.Nil(t, result)
+
+		waitForSlotCompensation()
+		acquired, released := cache.userSnapshot()
+		require.Len(t, acquired, 1)
+		require.Equal(t, acquired, released)
+	})
 }
 
 func TestAcquireAccountSlot_CompensationRetriesTransientReleaseFailure(t *testing.T) {
@@ -108,11 +130,61 @@ func TestAcquireAccountSlot_CompensationRetriesTransientReleaseFailure(t *testin
 
 		_, err := svc.AcquireAccountSlot(context.Background(), 1, 1)
 		require.Error(t, err)
+		waitForSlotCompensation()
 		acquired, released := cache.snapshot()
 		require.Len(t, released, 3, "two transient failures are retried within the bounded budget")
 		for _, id := range released {
 			require.Equal(t, acquired[0], id)
 		}
+	})
+}
+
+// blockingReleaseCache fails every admission fast (Redis refusing connections)
+// and makes every release hang until its context ends (Redis stuck), the worst
+// case for compensation latency.
+type blockingReleaseCache struct {
+	admissionRecordingCache
+	releaseCalls int
+}
+
+func (c *blockingReleaseCache) ReleaseAccountSlot(ctx context.Context, _ int64, requestID string) error {
+	c.mu.Lock()
+	c.releaseCalls++
+	c.releasedIDs = append(c.releasedIDs, requestID)
+	c.mu.Unlock()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestAcquireAccountSlot_ErrorReturnsWithoutWaitingForCompensation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cache := &blockingReleaseCache{}
+		cache.acquire = func(context.Context) (bool, error) { return false, errors.New("connection refused") }
+		svc := NewConcurrencyService(cache)
+
+		start := time.Now()
+		for i := 0; i < 20; i++ { // a scheduler loop walking 20 candidates
+			result, err := svc.AcquireAccountSlot(context.Background(), int64(i), 1)
+			require.EqualError(t, err, "connection refused", "the original error is returned unchanged")
+			require.Nil(t, result)
+		}
+		require.Zero(t, time.Since(start), "admission errors must not wait for compensation on the caller goroutine")
+
+		// Compensation still runs for every ambiguous member, in the background.
+		synctest.Wait()
+		acquired, released := cache.snapshot()
+		require.Len(t, acquired, 20)
+		require.ElementsMatch(t, acquired, released, "each ambiguous member gets its exact compensation")
+
+		// Every compensation goroutine gives up within its budget; synctest.Test
+		// would report a deadlock if any of them leaked.
+		time.Sleep(slotCompensationBudget)
+		synctest.Wait()
+		cache.mu.Lock()
+		calls := cache.releaseCalls
+		cache.mu.Unlock()
+		require.Equal(t, 20*2, calls, "two 1s attempts fit in the 2s budget per member")
+		require.Equal(t, start.Add(slotCompensationBudget), time.Now())
 	})
 }
 

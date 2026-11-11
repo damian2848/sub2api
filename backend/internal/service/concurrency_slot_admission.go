@@ -30,6 +30,9 @@ type slotAdmissionResult struct {
 //
 // Any admission error is treated as ambiguous: the script may have executed even
 // though its reply was lost, and ZREM of a unique request ID is idempotent.
+// Compensation always runs on its own goroutine, never on the caller's: each
+// such goroutine finishes within slotCompensationBudget (plus at most one
+// in-flight release call), so none can outlive a hung Redis indefinitely.
 func admitSlotDetached(
 	ctx context.Context,
 	acquire func(context.Context) (bool, error),
@@ -54,7 +57,11 @@ func admitSlotDetached(
 	select {
 	case res := <-done:
 		if res.err != nil {
-			compensateSlotAdmission(release, describe)
+			// Compensate in the background: the exact-member ZREM is idempotent
+			// and self-bounded by slotCompensationBudget, so the caller (often a
+			// scheduler loop trying the next candidate) gets the original error
+			// immediately instead of waiting out retries against a sick Redis.
+			go compensateSlotAdmission(release, describe)
 			return false, res.err
 		}
 		return res.acquired, nil
