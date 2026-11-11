@@ -579,7 +579,7 @@ func provideCleanup(
 
 		parallelSteps := []cleanupStep{
 			{"OpsErrorLogWorkers", func() error {
-				// Flush queued/batched ops error logs before infraSteps close Ent.
+
 				if !handler.StopOpsErrorLogWorkers() {
 					return errors.New("ops error log drain timeout")
 				}
@@ -653,8 +653,7 @@ func provideCleanup(
 				return nil
 			}},
 			{"ConcurrencyOutstanding", func() error {
-				// Runs before Redis closes: release slot members and wait
-				// counts still held by handlers that outlived the drain.
+
 				if concurrencyService != nil {
 					releaseCtx, releaseCancel := context.WithTimeout(ctx, 3*time.Second)
 					concurrencyService.ReleaseOutstanding(releaseCtx)
