@@ -207,27 +207,29 @@ func (s *AntigravityGatewayService) checkErrorPolicy(ctx context.Context, accoun
 
 // applyErrorPolicy 应用错误策略结果，返回是否应终止当前循环及应返回的状态码。
 // ErrorPolicySkipped 时 outStatus 为 500（前端约定：未命中的错误返回 500）。
-func (s *AntigravityGatewayService) applyErrorPolicy(p antigravityRetryLoopParams, statusCode int, headers http.Header, respBody []byte) (handled bool, outStatus int, retErr error) {
+// errorHandled 表示已经为该错误写过冷却/错误状态（模型限流或 p.handleError），
+// 上层 Forward 不应再对同一响应调用 handleUpstreamError。
+func (s *AntigravityGatewayService) applyErrorPolicy(p antigravityRetryLoopParams, statusCode int, headers http.Header, respBody []byte) (handled bool, outStatus int, errorHandled bool, retErr error) {
 	modelKey := resolveFinalAntigravityModelKey(p.ctx, p.account, p.requestedModel)
 	switch s.checkErrorPolicy(p.ctx, p.account, statusCode, respBody, modelKey) {
 	case ErrorPolicySkipped:
 		if s.handleAntigravityModelRateLimitBeforePolicy(p, statusCode, headers, respBody) {
-			return true, statusCode, nil
+			return true, statusCode, true, nil
 		}
-		return true, http.StatusInternalServerError, nil
+		return true, http.StatusInternalServerError, false, nil
 	case ErrorPolicyMatched:
 		if s.handleAntigravityModelRateLimitBeforePolicy(p, statusCode, headers, respBody) {
-			return true, statusCode, nil
+			return true, statusCode, true, nil
 		}
 		_ = p.handleError(p.ctx, p.prefix, p.account, statusCode, headers, respBody,
 			p.requestedModel, p.groupID, p.sessionHash, p.isStickySession)
-		return true, statusCode, nil
+		return true, statusCode, true, nil
 	case ErrorPolicyTempUnscheduled:
 		slog.Info("temp_unschedulable_matched",
 			"prefix", p.prefix, "status_code", statusCode, "account_id", p.account.ID)
-		return true, statusCode, &AntigravityAccountSwitchError{OriginalAccountID: p.account.ID, RateLimitedModel: p.requestedModel, IsStickySession: p.isStickySession}
+		return true, statusCode, false, &AntigravityAccountSwitchError{OriginalAccountID: p.account.ID, RateLimitedModel: p.requestedModel, IsStickySession: p.isStickySession}
 	}
-	return false, statusCode, nil
+	return false, statusCode, false, nil
 }
 
 func (s *AntigravityGatewayService) handleAntigravityModelRateLimitBeforePolicy(p antigravityRetryLoopParams, statusCode int, headers http.Header, respBody []byte) bool {

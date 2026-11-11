@@ -212,6 +212,10 @@ func antigravityModelCooldownResetAt(body []byte, fallback time.Duration) time.T
 // antigravityRetryLoopResult 重试循环的结果
 type antigravityRetryLoopResult struct {
 	resp *http.Response
+	// errorHandled reports that the loop already ran p.handleError (cooldown /
+	// error-state writes) for the error response in resp. Forward paths must not
+	// call handleUpstreamError again for the same response.
+	errorHandled bool
 }
 
 // resolveAntigravityForwardBaseURL 解析转发用 base URL。
@@ -264,6 +268,8 @@ type smartRetryResult struct {
 	resp        *http.Response
 	err         error
 	switchError *AntigravityAccountSwitchError // 模型限流时返回账号切换信号
+	// errorHandled 表示 resp 对应的错误已经调用过 p.handleError。
+	errorHandled bool
 }
 
 // handleSmartRetry 处理 OAuth 账号的智能重试逻辑
@@ -413,6 +419,7 @@ func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParam
 						Header:     resp.Header.Clone(),
 						Body:       io.NopCloser(bytes.NewReader(respBody)),
 					},
+					errorHandled: true,
 				}
 			}
 
@@ -449,7 +456,7 @@ func (s *AntigravityGatewayService) handleSmartRetry(p antigravityRetryLoopParam
 			// account instead of continuing the shared-capacity retry loop.
 			if retryResp.StatusCode == http.StatusTooManyRequests && isModelCapacityExhausted {
 				p.handleError(p.ctx, p.prefix, p.account, retryResp.StatusCode, retryResp.Header, lastRetryBody, p.requestedModel, p.groupID, p.sessionHash, p.isStickySession)
-				return &smartRetryResult{action: smartRetryActionBreakWithResp, resp: &http.Response{StatusCode: retryResp.StatusCode, Header: retryResp.Header.Clone(), Body: io.NopCloser(bytes.NewReader(lastRetryBody))}}
+				return &smartRetryResult{action: smartRetryActionBreakWithResp, resp: &http.Response{StatusCode: retryResp.StatusCode, Header: retryResp.Header.Clone(), Body: io.NopCloser(bytes.NewReader(lastRetryBody))}, errorHandled: true}
 			}
 
 			// 解析新的重试信息，用于下次重试的等待时间（MODEL_CAPACITY_EXHAUSTED 使用固定循环，跳过）
@@ -628,7 +635,7 @@ func (s *AntigravityGatewayService) handleSingleAccountRetryInPlace(
 		p.retryBudget.recordResponse(retryResp, lastRetryBody)
 		if retryResp.StatusCode == http.StatusTooManyRequests {
 			p.handleError(p.ctx, p.prefix, p.account, retryResp.StatusCode, retryResp.Header, lastRetryBody, p.requestedModel, p.groupID, p.sessionHash, p.isStickySession)
-			return &smartRetryResult{action: smartRetryActionBreakWithResp, resp: &http.Response{StatusCode: retryResp.StatusCode, Header: retryResp.Header.Clone(), Body: io.NopCloser(bytes.NewReader(lastRetryBody))}}
+			return &smartRetryResult{action: smartRetryActionBreakWithResp, resp: &http.Response{StatusCode: retryResp.StatusCode, Header: retryResp.Header.Clone(), Body: io.NopCloser(bytes.NewReader(lastRetryBody))}, errorHandled: true}
 		}
 
 		// 解析新的重试信息，更新下次等待时间
@@ -718,6 +725,7 @@ func (s *AntigravityGatewayService) antigravityRetryLoop(p antigravityRetryLoopP
 
 	var resp *http.Response
 	var usedBaseURL string
+	errorHandled := false
 	logBody := p.settingService != nil && p.settingService.cfg != nil && p.settingService.cfg.Gateway.LogUpstreamErrorBody
 	maxBytes := 2048
 	if p.settingService != nil && p.settingService.cfg != nil && p.settingService.cfg.Gateway.LogUpstreamErrorBodyMaxBytes > 0 {
@@ -795,10 +803,11 @@ urlFallbackLoop:
 				}
 
 				// ★ 统一入口：自定义错误码 + 临时不可调度
-				if handled, outStatus, policyErr := s.applyErrorPolicy(p, resp.StatusCode, resp.Header, respBody); handled {
+				if handled, outStatus, policyHandledErr, policyErr := s.applyErrorPolicy(p, resp.StatusCode, resp.Header, respBody); handled {
 					if policyErr != nil {
 						return nil, policyErr
 					}
+					errorHandled = policyHandledErr
 					resp = &http.Response{
 						StatusCode: outStatus,
 						Header:     resp.Header.Clone(),
@@ -823,6 +832,7 @@ urlFallbackLoop:
 							return nil, smartResult.switchError
 						}
 						resp = smartResult.resp
+						errorHandled = smartResult.errorHandled
 						break urlFallbackLoop
 					}
 					// smartRetryActionContinue: 继续默认重试逻辑
@@ -855,6 +865,7 @@ urlFallbackLoop:
 
 					// 重试用尽，标记账户限流
 					p.handleError(p.ctx, p.prefix, p.account, resp.StatusCode, resp.Header, respBody, p.requestedModel, p.groupID, p.sessionHash, p.isStickySession)
+					errorHandled = true
 					logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d rate_limited base_url=%s body=%s", p.prefix, resp.StatusCode, baseURL, truncateForLog(respBody, 200))
 					resp = &http.Response{
 						StatusCode: resp.StatusCode,
@@ -940,7 +951,7 @@ urlFallbackLoop:
 		s.resetInternal500Counter(p.ctx, p.prefix, p.account.ID)
 	}
 
-	return &antigravityRetryLoopResult{resp: resp}, nil
+	return &antigravityRetryLoopResult{resp: resp, errorHandled: errorHandled && resp != nil && resp.StatusCode >= 400}, nil
 }
 
 // shouldRetryAntigravityError 判断是否应该重试

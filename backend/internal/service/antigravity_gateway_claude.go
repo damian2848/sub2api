@@ -144,6 +144,9 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		return nil, s.writeClaudeError(c, http.StatusBadGateway, "upstream_error", "Upstream request failed after retries")
 	}
 	resp := result.resp
+	// errorHandled 跟踪“当前 resp 的错误是否已在重试循环中写过冷却”，
+	// 整流重试替换 resp 时同步替换，避免对同一 429 重复写入。
+	errorHandled := result.errorHandled
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 400 {
@@ -281,6 +284,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 						Header:     retryResp.Header.Clone(),
 						Body:       io.NopCloser(bytes.NewReader(retryBody)),
 					}
+					errorHandled = retryResult.errorHandled
 					break
 				}
 
@@ -291,6 +295,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 					Header:     retryResp.Header.Clone(),
 					Body:       io.NopCloser(bytes.NewReader(retryBody)),
 				}
+				errorHandled = retryResult.errorHandled
 			}
 		}
 
@@ -364,6 +369,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 									Header:     retryResp.Header.Clone(),
 									Body:       io.NopCloser(bytes.NewReader(retryBody)),
 								}
+								errorHandled = retryResult.errorHandled
 							}
 						} else {
 							logger.LegacyPrintf("service.antigravity_gateway", "Antigravity account %d: budget rectifier retry failed: %v", account.ID, retryErr)
@@ -403,7 +409,9 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 				}
 			}
 
-			s.handleUpstreamError(ctx, prefix, account, resp.StatusCode, resp.Header, respBody, originalModel, 0, "", isStickySession)
+			if !errorHandled {
+				s.handleUpstreamError(ctx, prefix, account, resp.StatusCode, resp.Header, respBody, originalModel, 0, "", isStickySession)
+			}
 
 			// 精确匹配服务端配置类 400 错误，触发同账号重试 + failover
 			if resp.StatusCode == http.StatusBadRequest {

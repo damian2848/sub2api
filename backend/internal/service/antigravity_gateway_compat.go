@@ -244,7 +244,7 @@ func (s *AntigravityGatewayService) forwardAntigravityCompat(
 		return nil, s.handleAntigravityCompatTransportError(c, err)
 	}
 
-	return s.consumeAntigravityCompatResponse(ctx, c, account, call, result.resp)
+	return s.consumeAntigravityCompatResponse(ctx, c, account, call, result.resp, result.errorHandled)
 }
 
 func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
@@ -437,10 +437,11 @@ func (s *AntigravityGatewayService) consumeAntigravityCompatResponse(
 	account *Account,
 	call *antigravityCompatUpstreamCall,
 	resp *http.Response,
+	errorHandled bool,
 ) (*ForwardResult, error) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= http.StatusBadRequest {
-		return nil, s.handleAntigravityCompatHTTPError(ctx, c, account, call, resp)
+		return nil, s.handleAntigravityCompatHTTPError(ctx, c, account, call, resp, errorHandled)
 	}
 
 	requestID := resp.Header.Get("x-request-id")
@@ -501,20 +502,24 @@ func (s *AntigravityGatewayService) handleAntigravityCompatHTTPError(
 	account *Account,
 	call *antigravityCompatUpstreamCall,
 	resp *http.Response,
+	errorHandled bool,
 ) error {
 	body := s.readUpstreamErrorBody(resp)
-	s.handleUpstreamError(
-		ctx,
-		call.prefix,
-		account,
-		resp.StatusCode,
-		resp.Header,
-		body,
-		call.request.originalModel,
-		0,
-		"",
-		false,
-	)
+	// 重试循环已为该错误写过冷却时不再重复处理（见 antigravityRetryLoopResult.errorHandled）。
+	if !errorHandled {
+		s.handleUpstreamError(
+			ctx,
+			call.prefix,
+			account,
+			resp.StatusCode,
+			resp.Header,
+			body,
+			call.request.originalModel,
+			0,
+			"",
+			false,
+		)
+	}
 	if s.shouldFailoverUpstreamError(resp.StatusCode) {
 		message := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractAntigravityErrorMessage(body)))
 		event := OpsUpstreamErrorEvent{

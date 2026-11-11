@@ -541,11 +541,14 @@ func TestApplyErrorPolicy(t *testing.T) {
 				isStickySession: true,
 			}
 
-			handled, outStatus, retErr := svc.applyErrorPolicy(p, tt.statusCode, http.Header{}, tt.body)
+			handled, outStatus, errorHandled, retErr := svc.applyErrorPolicy(p, tt.statusCode, http.Header{}, tt.body)
 
 			require.Equal(t, tt.expectedHandled, handled, "handled mismatch")
 			require.Equal(t, tt.expectedStatus, outStatus, "outStatus mismatch")
 			require.Equal(t, tt.handleErrorCalls, handleErrorCount, "handleError call count mismatch")
+			// errorHandled must be reported exactly when handleError already ran,
+			// so Forward paths skip their own handleUpstreamError for that response.
+			require.Equal(t, tt.handleErrorCalls > 0, errorHandled, "errorHandled mismatch")
 
 			if tt.expectedSwitchErr {
 				var switchErr *AntigravityAccountSwitchError
@@ -602,9 +605,10 @@ func TestApplyErrorPolicy_GeminiRateLimitBypassesCustomSkip(t *testing.T) {
 		},
 	}
 
-	handled, outStatus, retErr := svc.applyErrorPolicy(p, http.StatusTooManyRequests, http.Header{}, body)
+	handled, outStatus, errorHandled, retErr := svc.applyErrorPolicy(p, http.StatusTooManyRequests, http.Header{}, body)
 
 	require.True(t, handled)
+	require.True(t, errorHandled, "model rate limit written before policy must mark the error handled")
 	require.Equal(t, http.StatusTooManyRequests, outStatus)
 	require.NoError(t, retErr)
 	require.Len(t, repo.modelRateLimitCalls, 1)
