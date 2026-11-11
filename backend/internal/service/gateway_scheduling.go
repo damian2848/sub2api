@@ -876,9 +876,18 @@ func (s *GatewayService) schedulingConfig() config.GatewaySchedulingConfig {
 		FallbackWaitTimeout:      30 * time.Second,
 		FallbackMaxWaiting:       100,
 		FallbackProbeHardSlots:   true,
+		QueueFullReselect:        true,
 		LoadBatchEnabled:         true,
 		SlotCleanupInterval:      30 * time.Second,
 	}
+}
+
+// QueueFullReselectEnabled 返回 gateway.scheduling.queue_full_reselect（未配置时默认开启）。
+func (s *GatewayService) QueueFullReselectEnabled() bool {
+	if s == nil {
+		return false
+	}
+	return s.schedulingConfig().QueueFullReselect
 }
 
 func (s *GatewayService) withGroupContext(ctx context.Context, group *Group) context.Context {

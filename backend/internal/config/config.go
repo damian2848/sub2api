@@ -1805,6 +1805,11 @@ type GatewaySchedulingConfig struct {
 	// 关闭后恢复旧行为：Layer 3 直接给首位账号出等待计划。
 	FallbackProbeHardSlots bool `mapstructure:"fallback_probe_hard_slots"`
 
+	// QueueFullReselect 开启后（默认 true），/v1/messages 的首选账号等待队列已满时，
+	// 排除该账号重新选号一次，只接受当场抢到真实槽位的账号；抢不到维持原 429。
+	// 不会把排队转到其他账号的队列。
+	QueueFullReselect bool `mapstructure:"queue_full_reselect"`
+
 	// PreferSoonestReset 开启后，负载感知选择会优先选用「会话窗口最早重置」的账号
 	// （use-it-or-lose-it：先用尽即将重置的账号，保留重置时间还很久的账号）。
 	// 默认 false，保持原有「优先级 → 负载率 → LRU」行为不变。
@@ -2934,6 +2939,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.scheduling.fallback_max_waiting", 100)
 	viper.SetDefault("gateway.scheduling.fallback_selection_mode", "last_used")
 	viper.SetDefault("gateway.scheduling.fallback_probe_hard_slots", true)
+	viper.SetDefault("gateway.scheduling.queue_full_reselect", true)
 	viper.SetDefault("gateway.scheduling.prefer_soonest_reset", false)
 	viper.SetDefault("gateway.scheduling.load_batch_enabled", true)
 	viper.SetDefault("gateway.scheduling.load_batch_cache_ttl_ms", 200)

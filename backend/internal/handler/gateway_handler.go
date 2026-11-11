@@ -345,6 +345,8 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 		fs := NewFailoverState(h.maxAccountSwitchesGemini, hasBoundSession)
 		admissionBudget := newGeminiAdmissionBudget()
 		admissionRejected := false
+		// 本请求是否已因账号等待队列满而重选过（每请求最多一次）
+		queueFullReselected := false
 		handleAdmissionFailure := func(err error) {
 			if failoverClientGone(c) {
 				return
@@ -476,43 +478,64 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				if err != nil {
 					reqLog.Warn("gateway.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 				} else if !canWait {
+					// 队列已满：排除该账号重选一次，只接受当场抢到槽位的账号；不把排队转到别的账号。
+					var alternative *service.AccountSelectionResult
+					reselectAttempted := !queueFullReselected
+					if !queueFullReselected {
+						queueFullReselected = true
+						alternative = h.reselectAfterAccountQueueFull(c.Request.Context(), apiKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, account.ID, "", int64(0))
+					}
 					reqLog.Info("gateway.account_wait_queue_full",
 						zap.Int64("account_id", account.ID),
 						zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
+						zap.Bool("reselect_attempted", reselectAttempted),
+						zap.Bool("reselected", alternative != nil),
 					)
-					h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, "Too many pending requests, please retry later", streamStarted)
-					return
-				}
-				if err == nil && canWait {
-					accountWaitCounted = true
-				}
-				releaseWait := func() {
-					if accountWaitCounted {
-						h.concurrencyHelper.DecrementAccountWaitCount(c.Request.Context(), account.ID)
-						accountWaitCounted = false
-					}
-				}
-
-				accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithRetryBudget(
-					c,
-					account.ID,
-					selection.WaitPlan.MaxConcurrency,
-					selection.WaitPlan.Timeout,
-					reqStream,
-					&streamStarted,
-				)
-				if err != nil {
-					reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-					releaseWait()
-					if errors.Is(err, errAntigravityRetryWaitExhausted) && fs.LastFailoverErr != nil {
-						h.handleFailoverExhausted(c, fs.LastFailoverErr, service.PlatformGemini, streamStarted)
+					if alternative == nil {
+						h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, "Too many pending requests, please retry later", streamStarted)
 						return
 					}
-					h.handleConcurrencyError(c, err, "account", streamStarted)
-					return
+					reqLog.Info("gateway.account_wait_queue_full_reselected",
+						zap.Int64("from_account_id", account.ID),
+						zap.Int64("to_account_id", alternative.Account.ID),
+					)
+					selection = alternative
+					account = alternative.Account
+					accountReleaseFunc = alternative.ReleaseFunc
+					setOpsSelectedAccount(c, account.ID, account.Platform)
 				}
-				// Slot acquired: no longer waiting in queue.
-				releaseWait()
+				if !selection.Acquired {
+					if err == nil && canWait {
+						accountWaitCounted = true
+					}
+					releaseWait := func() {
+						if accountWaitCounted {
+							h.concurrencyHelper.DecrementAccountWaitCount(c.Request.Context(), account.ID)
+							accountWaitCounted = false
+						}
+					}
+
+					accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithRetryBudget(
+						c,
+						account.ID,
+						selection.WaitPlan.MaxConcurrency,
+						selection.WaitPlan.Timeout,
+						reqStream,
+						&streamStarted,
+					)
+					if err != nil {
+						reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+						releaseWait()
+						if errors.Is(err, errAntigravityRetryWaitExhausted) && fs.LastFailoverErr != nil {
+							h.handleFailoverExhausted(c, fs.LastFailoverErr, service.PlatformGemini, streamStarted)
+							return
+						}
+						h.handleConcurrencyError(c, err, "account", streamStarted)
+						return
+					}
+					// Slot acquired: no longer waiting in queue.
+					releaseWait()
+				}
 			}
 			if err := h.revalidateGeminiWebAdmission(c, selection, admissionBudget, apiKey.GroupID, reqModel); err != nil {
 				reqLog.Info("gateway.account_admission_rejected", zap.Int64("account_id", account.ID), zap.Error(err))
@@ -714,6 +737,8 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 	// 受限的账号被失败请求的 session hash 卡满整个空闲窗口，后续新会话全部被拒。
 	// 成功请求保持既有空闲超时语义（会话按最后活动时间过期）。
 	sessionSlotAccounts := make(map[int64]*service.Account)
+	// 本请求是否已因账号等待队列满而重选过（每请求最多一次）
+	queueFullReselected := false
 	upstreamServedSession := false
 	defer func() {
 		if upstreamServedSession {
@@ -839,43 +864,68 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				if err != nil {
 					reqLog.Warn("gateway.account_wait_counter_increment_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 				} else if !canWait {
+					// 队列已满：排除该账号重选一次，只接受当场抢到槽位的账号；不把排队转到别的账号。
+					var alternative *service.AccountSelectionResult
+					reselectAttempted := !queueFullReselected
+					if !queueFullReselected {
+						queueFullReselected = true
+						alternative = h.reselectAfterAccountQueueFull(c.Request.Context(), currentAPIKey.GroupID, sessionKey, reqModel, fs.FailedAccountIDs, account.ID, parsedReq.MetadataUserID, subject.UserID)
+					}
 					reqLog.Info("gateway.account_wait_queue_full",
 						zap.Int64("account_id", account.ID),
 						zap.Int("max_waiting", selection.WaitPlan.MaxWaiting),
+						zap.Bool("reselect_attempted", reselectAttempted),
+						zap.Bool("reselected", alternative != nil),
 					)
-					h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, "Too many pending requests, please retry later", streamStarted)
-					return
-				}
-				if err == nil && canWait {
-					accountWaitCounted = true
-				}
-				releaseWait := func() {
-					if accountWaitCounted {
-						h.concurrencyHelper.DecrementAccountWaitCount(c.Request.Context(), account.ID)
-						accountWaitCounted = false
-					}
-				}
-
-				accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithRetryBudget(
-					c,
-					account.ID,
-					selection.WaitPlan.MaxConcurrency,
-					selection.WaitPlan.Timeout,
-					reqStream,
-					&streamStarted,
-				)
-				if err != nil {
-					reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
-					releaseWait()
-					if errors.Is(err, errAntigravityRetryWaitExhausted) && fs.LastFailoverErr != nil {
-						h.handleFailoverExhausted(c, fs.LastFailoverErr, platform, streamStarted)
+					if alternative == nil {
+						h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", gatewayQueueFullCode, "Too many pending requests, please retry later", streamStarted)
 						return
 					}
-					h.handleConcurrencyError(c, err, "account", streamStarted)
-					return
+					reqLog.Info("gateway.account_wait_queue_full_reselected",
+						zap.Int64("from_account_id", account.ID),
+						zap.Int64("to_account_id", alternative.Account.ID),
+					)
+					// 首选账号不再承接本请求，立即释放它在选号时注册的会话
+					h.gatewayService.ReleaseAccountSession(context.Background(), account, sessionKey)
+					delete(sessionSlotAccounts, account.ID)
+					selection = alternative
+					account = alternative.Account
+					accountReleaseFunc = alternative.ReleaseFunc
+					setOpsSelectedAccount(c, account.ID, account.Platform)
+					sessionSlotAccounts[account.ID] = account
 				}
-				// Slot acquired: no longer waiting in queue.
-				releaseWait()
+				if !selection.Acquired {
+					if err == nil && canWait {
+						accountWaitCounted = true
+					}
+					releaseWait := func() {
+						if accountWaitCounted {
+							h.concurrencyHelper.DecrementAccountWaitCount(c.Request.Context(), account.ID)
+							accountWaitCounted = false
+						}
+					}
+
+					accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithRetryBudget(
+						c,
+						account.ID,
+						selection.WaitPlan.MaxConcurrency,
+						selection.WaitPlan.Timeout,
+						reqStream,
+						&streamStarted,
+					)
+					if err != nil {
+						reqLog.Warn("gateway.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+						releaseWait()
+						if errors.Is(err, errAntigravityRetryWaitExhausted) && fs.LastFailoverErr != nil {
+							h.handleFailoverExhausted(c, fs.LastFailoverErr, platform, streamStarted)
+							return
+						}
+						h.handleConcurrencyError(c, err, "account", streamStarted)
+						return
+					}
+					// Slot acquired: no longer waiting in queue.
+					releaseWait()
+				}
 			}
 			// 终检与准入后绑定使用选号结果携带的门（见 responses 同名注释）。
 			admissionCtx := service.ContextWithSelectionProfitGate(c.Request.Context(), selection)
