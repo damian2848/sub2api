@@ -1371,13 +1371,11 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 		repoUpdates.GroupRateMultiplier = input.GroupRateMultiplier
 	}
 	if input.LoadFactor != nil {
-		if *input.LoadFactor <= 0 {
-			repoUpdates.LoadFactor = nil // 0 或负数表示清除
-		} else if *input.LoadFactor > 10000 {
+		if *input.LoadFactor > 10000 {
 			return nil, errors.New("load_factor must be <= 10000")
-		} else {
-			repoUpdates.LoadFactor = input.LoadFactor
 		}
+		// 0 或负数表示清除，由仓储层写成 NULL；这里传 nil 会变成“不修改”
+		repoUpdates.LoadFactor = input.LoadFactor
 	}
 	if input.Status != "" {
 		repoUpdates.Status = &input.Status
