@@ -240,11 +240,7 @@ func (s *BillingCacheService) cacheWriteWorker(ch <-chan cacheWriteTask) {
 				}
 			}
 		case cacheWriteUpdateRateLimitUsage:
-			if s.cache != nil {
-				if err := s.cache.UpdateAPIKeyRateLimitUsage(ctx, task.apiKeyID, task.amount); err != nil {
-					logger.LegacyPrintf("service.billing_cache", "Warning: update rate limit usage cache failed for api key %d: %v", task.apiKeyID, err)
-				}
-			}
+			s.updateAPIKeyRateLimitUsageCache(ctx, task.apiKeyID, task.amount)
 		}
 		cancel()
 	}
@@ -726,11 +722,38 @@ func (s *BillingCacheService) QueueUpdateAPIKeyRateLimitUsage(apiKeyID int64, co
 	if s.cache == nil {
 		return
 	}
-	s.enqueueCacheWrite(cacheWriteTask{
+	// 队列满时同步回退：丢掉增量会让预检读到的窗口用量偏低（缓存 TTL 7 天且
+	// 每次增量都会续期），限速可能被绕过直到窗口过期。
+	if s.enqueueCacheWrite(cacheWriteTask{
 		kind:     cacheWriteUpdateRateLimitUsage,
 		apiKeyID: apiKeyID,
 		amount:   cost,
-	})
+	}) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), cacheWriteTimeout)
+	defer cancel()
+	s.updateAPIKeyRateLimitUsageCache(ctx, apiKeyID, cost)
+}
+
+// updateAPIKeyRateLimitUsageCache 把限速窗口增量写入 Redis。写失败时 best-effort
+// 删除该 Key 的限速缓存，迫使下一次预检从 DB（扣费事务已落库的准确值）回源，
+// 而不是继续读一个少算了这笔费用的缓存。
+func (s *BillingCacheService) updateAPIKeyRateLimitUsageCache(ctx context.Context, apiKeyID int64, cost float64) {
+	if s.cache == nil {
+		return
+	}
+	err := s.cache.UpdateAPIKeyRateLimitUsage(ctx, apiKeyID, cost)
+	if err == nil {
+		return
+	}
+	logger.LegacyPrintf("service.billing_cache", "Warning: update rate limit usage cache failed for api key %d: %v", apiKeyID, err)
+	// 原 ctx 可能已因超时失效，删除用独立的短超时上下文。
+	invalidateCtx, cancel := context.WithTimeout(context.Background(), cacheWriteTimeout)
+	defer cancel()
+	if invErr := s.cache.InvalidateAPIKeyRateLimit(invalidateCtx, apiKeyID); invErr != nil {
+		logger.LegacyPrintf("service.billing_cache", "Warning: invalidate rate limit cache after failed update for api key %d: %v", apiKeyID, invErr)
+	}
 }
 
 // IncrementUserPlatformQuotaUsage 同步累加 user × platform usage 到 Redis 缓存。
