@@ -1008,9 +1008,12 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				return finalizeStream()
 			}
 			_ = resp.Body.Close()
-			for ev := range events {
-				markEventProcessed(ev)
-			}
+			// 必须在出队时归还 queueBudget：close(done) 要等本函数返回才执行，
+			// 若这里不 release，生产者 acquire 下一行（Body 关闭后 scanner 缓冲里的
+			// 完整行仍会先吐出）可能因预算耗尽永久阻塞，events 不关闭，handler 卡死。
+			drainSSEEventQueue(events, queueBudget,
+				func(ev scanEvent) int { return len(ev.line) },
+				markEventProcessed)
 			return resultWithUsage(), s.newOpenAIFirstOutputTimeoutError(
 				ctx, c, account, opsUpstreamProxyID(account), opsUpstreamProxyName(account),
 				startTime, originalModel, reasoningEffort,

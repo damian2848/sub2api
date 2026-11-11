@@ -74,6 +74,19 @@ func (b *sseQueueBudget) release(size int) {
 	}
 }
 
+// drainSSEEventQueue consumes events until the producer closes the channel,
+// releasing queue budget on every dequeue exactly like the normal read path.
+// Callers that abandon a stream while the producer is still running (and
+// before done is closed) must drain through this helper; otherwise the
+// producer can block forever in acquire once unreleased weight exhausts the
+// budget, and the channel never closes.
+func drainSSEEventQueue[T any](events <-chan T, budget *sseQueueBudget, lineLen func(T) int, onDequeue func(T)) {
+	for ev := range events {
+		budget.release(lineLen(ev))
+		onDequeue(ev)
+	}
+}
+
 var errSSETransportLimit = errors.New("upstream SSE transport limit exceeded")
 
 type sseEventLimits struct {
