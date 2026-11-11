@@ -3,12 +3,15 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"strings"
+	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 )
 
 type usageBillingRepository struct {
@@ -19,7 +22,7 @@ func NewUsageBillingRepository(_ *dbent.Client, sqlDB *sql.DB) service.UsageBill
 	return &usageBillingRepository{db: sqlDB}
 }
 
-func (r *usageBillingRepository) Apply(ctx context.Context, cmd *service.UsageBillingCommand) (_ *service.UsageBillingApplyResult, err error) {
+func (r *usageBillingRepository) Apply(ctx context.Context, cmd *service.UsageBillingCommand) (*service.UsageBillingApplyResult, error) {
 	if cmd == nil {
 		return &service.UsageBillingApplyResult{}, nil
 	}
@@ -32,6 +35,68 @@ func (r *usageBillingRepository) Apply(ctx context.Context, cmd *service.UsageBi
 		return nil, service.ErrUsageBillingRequestIDRequired
 	}
 
+	// 有界重试瞬时 DB 错误。整笔扣费（含 usage_billing_dedup 认领）在同一事务里：
+	// 未提交的尝试不留下任何效果；Commit 返回错误但实际已提交时，重放会命中
+	// dedup（同一指纹）并返回 Applied=false，因此重试不会重复扣费。
+	for attempt := 0; ; attempt++ {
+		result, err := r.applyOnce(ctx, cmd)
+		if err == nil {
+			if attempt > 0 {
+				logger.LegacyPrintf("repository.usage_billing", "[UsageBilling] apply succeeded after retry: request_id=%s api_key=%d attempts=%d applied=%v", cmd.RequestID, cmd.APIKeyID, attempt+1, result != nil && result.Applied)
+			}
+			return result, nil
+		}
+		if !isRetryableUsageBillingError(err) || ctx.Err() != nil {
+			if attempt > 0 {
+				logger.LegacyPrintf("repository.usage_billing", "[UsageBilling] apply failed after retry, usage not billed: request_id=%s api_key=%d attempts=%d err=%v", cmd.RequestID, cmd.APIKeyID, attempt+1, err)
+			}
+			return nil, err
+		}
+		if attempt >= len(usageBillingApplyRetryBackoffs) {
+			logger.LegacyPrintf("repository.usage_billing", "[UsageBilling] apply retries exhausted, usage not billed: request_id=%s api_key=%d attempts=%d err=%v", cmd.RequestID, cmd.APIKeyID, attempt+1, err)
+			return nil, err
+		}
+		logger.LegacyPrintf("repository.usage_billing", "[UsageBilling] transient apply error, retrying: request_id=%s api_key=%d attempt=%d err=%v", cmd.RequestID, cmd.APIKeyID, attempt+1, err)
+		timer := time.NewTimer(usageBillingApplyRetryBackoffs[attempt])
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, err
+		case <-timer.C:
+		}
+	}
+}
+
+// usageBillingApplyRetryBackoffs 是 Apply 遇到瞬时错误后的退避序列（最多再试
+// len 次）。所有尝试共用调用方 ctx 的截止时间，不会延长 worker 占用上限。
+var usageBillingApplyRetryBackoffs = []time.Duration{50 * time.Millisecond, 200 * time.Millisecond}
+
+// isRetryableUsageBillingError 只认可重放安全且可能自愈的瞬时错误：连接失效、
+// 死锁/串行化冲突、连接类 SQLSTATE（08xxx）与 admin_shutdown。超时
+// （context.DeadlineExceeded）、连接数打满（53300）和业务错误都不重试，避免
+// DB 过载时放大负载。
+func isRetryableUsageBillingError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, driver.ErrBadConn) {
+		return true
+	}
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		switch pqErr.Code {
+		case "40P01", "40001", "57P01":
+			return true
+		}
+		return pqErr.Code.Class() == "08"
+	}
+	return false
+}
+
+func (r *usageBillingRepository) applyOnce(ctx context.Context, cmd *service.UsageBillingCommand) (_ *service.UsageBillingApplyResult, err error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
