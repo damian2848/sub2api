@@ -607,10 +607,36 @@
                 </p>
               </div>
 
+              <div
+                v-if="referenceAccountOptions.length > 0"
+                class="mb-3"
+                data-testid="bulk-model-reference-account"
+              >
+                <label class="input-label" for="bulk-edit-model-reference-account">
+                  {{ t('admin.accounts.bulkModelReferenceAccount') }}
+                </label>
+                <select
+                  id="bulk-edit-model-reference-account"
+                  v-model="referenceAccountId"
+                  class="input"
+                  :disabled="!enableModelRestriction"
+                >
+                  <option
+                    v-for="option in referenceAccountOptions"
+                    :key="option.id"
+                    :value="option.id"
+                  >
+                    {{ option.label }}
+                  </option>
+                </select>
+                <p class="input-hint">{{ t('admin.accounts.bulkModelReferenceAccountHint') }}</p>
+              </div>
+
               <ModelWhitelistSelector
                 v-model="allowedModels"
                 :model-mappings="modelMappings"
                 :platforms="modelCatalogPlatforms"
+                :account-id="referenceAccountId"
               />
 
               <p class="text-xs text-gray-500 dark:text-gray-400">
@@ -1764,6 +1790,8 @@ interface Props {
     previewCount?: number
     selectedPlatforms?: AccountPlatform[]
     selectedTypes?: AccountType[]
+    // Target accounts the caller already has loaded; candidates for the model tools' reference account.
+    referenceAccounts?: { id: number; name: string; platform: AccountPlatform }[]
   }
   proxies: ProxyConfig[]
   groups: AdminGroup[]
@@ -1868,6 +1896,34 @@ const allAnthropicOAuthOrSetupToken = computed(() => {
 
 const modelCatalogPlatforms = computed(() =>
   getModelCatalogPlatforms(targetSelectedPlatforms.value, targetSelectedTypes.value)
+)
+
+// The whitelist's upstream sync and model tests call one concrete account, so a
+// bulk edit borrows one of its targets for them; saving still applies to all targets.
+const MAX_REFERENCE_ACCOUNT_OPTIONS = 100
+const referenceAccountOptions = computed(() => {
+  const options = (props.target?.referenceAccounts ?? []).map(account => ({
+    id: account.id,
+    label: isMixedPlatform.value ? `${account.name} (${account.platform})` : account.name
+  }))
+  if (targetMode.value === 'selected') {
+    // Selections can span pages the caller has not loaded; those are known by ID only.
+    const listed = new Set(options.map(option => option.id))
+    for (const id of props.accountIds) {
+      if (!listed.has(id)) options.push({ id, label: `#${id}` })
+    }
+  }
+  return options.slice(0, MAX_REFERENCE_ACCOUNT_OPTIONS)
+})
+const referenceAccountId = ref<number | undefined>()
+watch(
+  referenceAccountOptions,
+  options => {
+    if (!options.some(option => option.id === referenceAccountId.value)) {
+      referenceAccountId.value = options[0]?.id
+    }
+  },
+  { immediate: true }
 )
 
 const filteredPresets = computed(() => {

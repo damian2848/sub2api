@@ -595,12 +595,14 @@ const accountGroupsForRow = (account: Pick<AccountListItem, 'group_ids'>): Admin
 }
 const accountTableRef = ref<HTMLElement | null>(null)
 const dataTableRef = ref<InstanceType<typeof DataTable> | null>(null)
+type BulkEditReferenceAccount = Pick<Account, 'id' | 'name' | 'platform'>
 type AccountBulkEditTarget =
   | {
       mode: 'selected'
       accountIds: number[]
       selectedPlatforms: AccountPlatform[]
       selectedTypes: AccountType[]
+      referenceAccounts: BulkEditReferenceAccount[]
     }
   | {
       mode: 'filtered'
@@ -618,6 +620,7 @@ type AccountBulkEditTarget =
       previewCount: number
       selectedPlatforms: AccountPlatform[]
       selectedTypes: AccountType[]
+      referenceAccounts: BulkEditReferenceAccount[]
     }
 const selPlatforms = computed<AccountPlatform[]>(() => {
   const platforms = new Set(
@@ -2215,12 +2218,16 @@ const collectSelectionMetadata = (rows: Account[]) => {
   return { selectedPlatforms, selectedTypes }
 }
 
+const toBulkEditReferenceAccounts = (rows: Account[]): BulkEditReferenceAccount[] =>
+  rows.map(({ id, name, platform }) => ({ id, name, platform }))
+
 const openBulkEditSelected = () => {
   bulkEditTarget.value = {
     mode: 'selected',
     accountIds: [...selIds.value],
     selectedPlatforms: [...selPlatforms.value],
-    selectedTypes: [...selTypes.value]
+    selectedTypes: [...selTypes.value],
+    referenceAccounts: toBulkEditReferenceAccounts(accounts.value.filter(a => isSelected(a.id)))
   }
   showBulkEdit.value = true
 }
@@ -2234,7 +2241,8 @@ const openBulkEditFiltered = async () => {
     filters,
     previewCount: preview.total,
     selectedPlatforms,
-    selectedTypes
+    selectedTypes,
+    referenceAccounts: toBulkEditReferenceAccounts(preview.items)
   }
   showBulkEdit.value = true
 }

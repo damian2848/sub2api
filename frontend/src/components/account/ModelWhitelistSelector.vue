@@ -8,8 +8,9 @@
       >
         <div class="grid grid-cols-2 gap-1.5">
           <span
-            v-for="model in modelValue"
+            v-for="model in displayModels"
             :key="model"
+            data-testid="selected-model"
             class="inline-flex items-center justify-between gap-1 rounded bg-gray-100 px-2 py-1 text-xs text-gray-700 dark:bg-dark-600 dark:text-gray-300"
           >
             <span class="flex items-center gap-1 truncate">
@@ -288,6 +289,32 @@ const availableOptions = computed(() => {
   return allModels.filter(model => allowedModels.has(model.value))
 })
 
+// Chips follow the built-in catalog order (what "fill related" produces), then
+// models outside the catalog in the order they were added. The stored order
+// depends on how a whitelist was saved, so without this the same whitelist
+// looks different in the single-account and bulk editors.
+const displayModels = computed(() => {
+  const catalog =
+    normalizedPlatforms.value.length > 0
+      ? normalizedPlatforms.value.flatMap(platform => getModelsByPlatform(platform))
+      : allModels.map(model => model.value)
+  const rank = new Map<string, number>()
+  for (const model of catalog) {
+    if (!rank.has(model)) rank.set(model, rank.size)
+  }
+  return props.modelValue
+    .map((model, index) => ({ model, index }))
+    .sort((a, b) => {
+      const rankA = rank.get(a.model)
+      const rankB = rank.get(b.model)
+      if (rankA !== undefined && rankB !== undefined) return rankA - rankB
+      if (rankA !== undefined) return -1
+      if (rankB !== undefined) return 1
+      return a.index - b.index
+    })
+    .map(entry => entry.model)
+})
+
 const filteredModels = computed(() => {
   const query = searchQuery.value.toLowerCase().trim()
   if (!query) return availableOptions.value
@@ -495,7 +522,8 @@ const iqTestDetail = (model: string) => {
 const testModels = async () => {
   if (isTestingModels.value || isTestingIQModels.value || !props.accountId) return
   const accountId = props.accountId
-  const models = [...props.modelValue]
+  // Run top to bottom as displayed, so progress fills the list in reading order.
+  const models = [...displayModels.value]
   if (models.length === 0) return
 
   const abort = new AbortController()
@@ -552,7 +580,8 @@ const testModels = async () => {
 const testIQModels = async () => {
   if (isTestingIQModels.value || isTestingModels.value || !props.accountId) return
   const accountId = props.accountId
-  const models = [...props.modelValue]
+  // Run top to bottom as displayed, so progress fills the list in reading order.
+  const models = [...displayModels.value]
   if (models.length === 0) return
 
   const abort = new AbortController()

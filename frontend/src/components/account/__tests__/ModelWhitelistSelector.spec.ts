@@ -546,6 +546,32 @@ describe('ModelWhitelistSelector', () => {
     expect(showWarning).toHaveBeenCalled()
   })
 
+  it('shows selected models in catalog order with custom models last, however they were stored', async () => {
+    const { getModelsByPlatform } = await import('@/composables/useModelWhitelist')
+    const catalog = getModelsByPlatform('antigravity')
+    const [first, second, third] = catalog
+    // Stored alphabetically / appended later, as a saved account mapping comes back.
+    const stored = ['zz-custom', third, 'aa-custom', first, second]
+    const wrapper = mountSelector({ platform: 'antigravity', modelValue: stored })
+
+    const chips = wrapper.findAll('[data-testid="selected-model"]').map(chip => chip.text())
+    expect(chips).toEqual([first, second, third, 'zz-custom', 'aa-custom'])
+    // Display only: the bound value is not rewritten.
+    expect(wrapper.emitted('update:modelValue')).toBeUndefined()
+  })
+
+  it('tests models in the order they are displayed', async () => {
+    const { getModelsByPlatform } = await import('@/composables/useModelWhitelist')
+    const [first, second] = getModelsByPlatform('antigravity')
+    testAccountModel.mockResolvedValue({ success: true })
+    const wrapper = mountSelector({ platform: 'antigravity', accountId: 7, modelValue: ['custom-model', second, first] })
+
+    await wrapper.get('[data-testid="test-models"]').trigger('click')
+    await flushPromises()
+
+    expect(testAccountModel.mock.calls.map(call => call[1])).toEqual([first, second, 'custom-model'])
+  })
+
   it('hides the model test button when there is no saved account', () => {
     const wrapper = mountSelector({ modelValue: ['good-model'] })
     expect(wrapper.find('[data-testid="test-models"]').exists()).toBe(false)

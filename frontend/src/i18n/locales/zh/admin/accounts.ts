@@ -1152,6 +1152,8 @@ export default {
       bulkModelMappingUpdateMode: '模型配置更新方式',
       bulkModelMappingMerge: '追加／更新，保留其他配置',
       bulkModelMappingReplace: '替换全部模型配置',
+      bulkModelReferenceAccount: '参照账号',
+      bulkModelReferenceAccountHint: '“同步上游支持的模型”“测试”“测试智商”通过这个账号发起，结果只代表该账号；保存时仍应用到全部目标账号。',
       bulkModelMappingMergeHint: '仅添加或更新本次填写的模型；各账号其他白名单和映射保持不变。已有同名映射优先于白名单。',
       bulkModelMappingReplaceHint: '将所选账号的白名单和映射全部替换为本次配置；两边留空则恢复系统默认。',
       geminiWebDefaultModelsHint: '未设置自定义配置时，使用默认的 3 个模型和 4 个别名。',

@@ -1034,6 +1034,8 @@ export default {
       bulkModelMappingUpdateMode: 'Model configuration update mode',
       bulkModelMappingMerge: 'Add or update, keeping other settings',
       bulkModelMappingReplace: 'Replace all model settings',
+      bulkModelReferenceAccount: 'Reference account',
+      bulkModelReferenceAccountHint: 'Upstream model sync and model tests run through this account, so their results reflect this account only. Saving still applies to every target account.',
       bulkModelMappingMergeHint: 'Only add or update models entered here. Other whitelist entries and mappings on each account remain unchanged. Existing aliases take precedence over whitelist entries with the same name.',
       bulkModelMappingReplaceHint: 'Replace the selected accounts’ entire whitelist and mappings with this configuration. Leave both empty to restore system defaults.',
       geminiWebDefaultModelsHint: 'Without a custom configuration, the 3 default models and 4 aliases apply.',
