@@ -44,7 +44,7 @@ server:
 - `/health` 用作 liveness，只反映进程 HTTP 服务存活。
 - `/readyz` 用作 readiness：正常模式检查 PostgreSQL 和 Redis。默认共享 1 秒预算；使用远程共享依赖的 gateway 可将 `server.readiness_timeout_seconds` 设置为有界值（例如 3），依赖不可用时仍返回 503，不返回内部错误或凭据。
 - 未完成配置的 setup 模式对 /readyz 返回 503，避免把前端 SPA 的 200 当成准备就绪。
-- SIGTERM 到达后立即撤销 readiness，新业务请求返回 503/Retry-After，已有处理器继续运行；先等待 drain delay，再在 graceful timeout 内排空 HTTP 和仍在处理中的 hijacked/WS handler。到期后关闭剩余连接（取消请求上下文），再最多等待 3 秒让这些处理器执行各自的槽位释放和等待计数递减，然后进入清理流程。容器宽限期（Compose `stop_grace_period` 默认 10 秒）应不少于 drain delay + graceful timeout + 3 秒 + 清理余量。
+- SIGTERM 到达后立即撤销 readiness，新业务请求返回 503/Retry-After，已有处理器继续运行；先等待 drain delay，再在 graceful timeout 内排空 HTTP 和仍在处理中的 hijacked/WS handler。到期后关闭剩余连接（取消请求上下文），再最多等待 3 秒让这些处理器执行各自的槽位释放和等待计数递减，然后进入清理流程；清理阶段（Redis 关闭前）还会按精确成员释放本进程仍登记在册的账号/用户槽位和等待计数（例如未随 Close 结束的 hijacked WS 处理器所持有的），只动本进程自己的条目。容器宽限期（Compose `stop_grace_period` 默认 10 秒）应不少于 drain delay + graceful timeout + 3 秒 + 清理余量。
 - 示例为 10 秒撤流等待、240 秒请求排空、320 秒 Pod 宽限期。宽限期要覆盖两个阶段和后台清理余量。更长的流需要更大的预算；本功能不保证无限长连接不中断，也不会将已经输出的请求自动重放到另一个 Pod。
 
 `server.readiness_timeout_seconds` 支持 YAML 或 `SERVER_READINESS_TIMEOUT_SECONDS` 环境变量，重启生效；省略或设为 `0` 保持 1 秒，显式值允许 `1..60` 秒。这是 PostgreSQL 与 Redis 顺序检查的总预算。先测量真实依赖操作的耗时，再决定是否调整；仅连接 SSH 本地转发监听端口的耗时无法反映远端数据库往返。

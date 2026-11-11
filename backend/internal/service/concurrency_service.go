@@ -240,6 +240,10 @@ type ConcurrencyService struct {
 	// apiKeyQueuePolicy is the immutable process policy for key-level waiting.
 	apiKeyQueuePolicy atomic.Pointer[APIKeyQueuePolicy]
 	apiKeyQueueStop   *apiKeyQueueStopState
+
+	// outstanding tracks this process's own slot members and wait increments
+	// so shutdown can release what handlers could not (see ReleaseOutstanding).
+	outstanding outstandingLedger
 }
 
 type cachedAccountLoadBatch struct {
@@ -374,10 +378,15 @@ func (s *ConcurrencyService) AcquireAccountSlot(ctx context.Context, accountID i
 	}
 
 	if acquired {
+		key := outstandingSlotKey{kind: outstandingAccount, id: accountID, requestID: requestID}
+		s.outstanding.addSlot(key)
 		return &AcquireResult{
 			Acquired:  true,
 			RequestID: requestID,
 			ReleaseFunc: func() {
+				if !s.outstanding.takeSlot(key) {
+					return // already released (repeated call or shutdown flush)
+				}
 				bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				if err := s.cache.ReleaseAccountSlot(bgCtx, accountID, requestID); err != nil {
@@ -422,10 +431,15 @@ func (s *ConcurrencyService) AcquireUserSlot(ctx context.Context, userID int64, 
 	}
 
 	if acquired {
+		key := outstandingSlotKey{kind: outstandingUser, id: userID, requestID: requestID}
+		s.outstanding.addSlot(key)
 		return &AcquireResult{
 			Acquired:  true,
 			RequestID: requestID,
 			ReleaseFunc: func() {
+				if !s.outstanding.takeSlot(key) {
+					return // already released (repeated call or shutdown flush)
+				}
 				bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				defer cancel()
 				if err := s.cache.ReleaseUserSlot(bgCtx, userID, requestID); err != nil {
@@ -571,9 +585,13 @@ func (s *ConcurrencyService) IncrementWaitCount(ctx context.Context, userID int6
 
 	result, err := s.cache.IncrementWaitCount(ctx, userID, maxWait)
 	if err != nil {
-		// On error, allow the request to proceed (fail open)
+		// On error, allow the request to proceed (fail open). The increment may
+		// still have executed, so it stays paired with the caller's decrement.
 		logger.LegacyPrintf("service.concurrency", "Warning: increment wait count failed for user %d: %v", userID, err)
-		return true, nil
+		result = true
+	}
+	if result {
+		s.outstanding.addWait(outstandingWaitKey{kind: outstandingUser, id: userID})
 	}
 	return result, nil
 }
@@ -583,6 +601,9 @@ func (s *ConcurrencyService) IncrementWaitCount(ctx context.Context, userID int6
 func (s *ConcurrencyService) DecrementWaitCount(ctx context.Context, userID int64) {
 	if s.cache == nil {
 		return
+	}
+	if !s.outstanding.takeWait(outstandingWaitKey{kind: outstandingUser, id: userID}) {
+		return // already decremented by the shutdown flush
 	}
 
 	// Use background context to ensure decrement even if original context is cancelled
@@ -602,8 +623,13 @@ func (s *ConcurrencyService) IncrementAccountWaitCount(ctx context.Context, acco
 
 	result, err := s.cache.IncrementAccountWaitCount(ctx, accountID, maxWait)
 	if err != nil {
+		// Fail open; the increment may still have executed, so it stays paired
+		// with the caller's decrement.
 		logger.LegacyPrintf("service.concurrency", "Warning: increment wait count failed for account %d: %v", accountID, err)
-		return true, nil
+		result = true
+	}
+	if result {
+		s.outstanding.addWait(outstandingWaitKey{kind: outstandingAccount, id: accountID})
 	}
 	return result, nil
 }
@@ -612,6 +638,9 @@ func (s *ConcurrencyService) IncrementAccountWaitCount(ctx context.Context, acco
 func (s *ConcurrencyService) DecrementAccountWaitCount(ctx context.Context, accountID int64) {
 	if s.cache == nil {
 		return
+	}
+	if !s.outstanding.takeWait(outstandingWaitKey{kind: outstandingAccount, id: accountID}) {
+		return // already decremented by the shutdown flush
 	}
 
 	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

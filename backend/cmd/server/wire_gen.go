@@ -644,6 +644,16 @@ func provideCleanup(
 				}
 				return nil
 			}},
+			{"ConcurrencyOutstanding", func() error {
+				// Runs before Redis closes: release slot members and wait
+				// counts still held by handlers that outlived the drain.
+				if concurrencyService != nil {
+					releaseCtx, releaseCancel := context.WithTimeout(ctx, 3*time.Second)
+					concurrencyService.ReleaseOutstanding(releaseCtx)
+					releaseCancel()
+				}
+				return nil
+			}},
 			{"PromptAuditService", func() error {
 				if promptAudit != nil {
 					return promptAudit.Shutdown(ctx)
