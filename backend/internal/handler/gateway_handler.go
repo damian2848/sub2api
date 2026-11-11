@@ -816,6 +816,11 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				}
 			}
 
+			// 调度器在返回选号/等待计划前已为该账号注册会话（checkAndRegisterSession）。
+			// 在排队前就登记，确保队列满 429、等待超时等提前 return 的路径也会被
+			// defer 立即释放，而不是占着 max_sessions 槽直到空闲超时。
+			sessionSlotAccounts[account.ID] = account
+
 			// 3. 获取账号并发槽位
 			accountReleaseFunc := selection.ReleaseFunc
 			if !selection.Acquired {
