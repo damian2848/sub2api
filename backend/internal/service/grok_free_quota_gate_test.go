@@ -68,7 +68,7 @@ func TestFilterGrokFreeQuotaAccountsOnlyBlocksExplicitFreeOAuth(t *testing.T) {
 		1: {Tokens: 475_000}, // 95% of 500k
 	}}
 	// Clear shared cache for deterministic unit tests.
-	openaiGrokFreeQuotaGateCache = sync.Map{}
+	resetGrokFreeQuotaGateCacheForTest()
 	scheduler := &defaultOpenAIAccountScheduler{service: &OpenAIGatewayService{cfg: grokFreeQuotaTestConfig(), usageLogRepo: repo}}
 	accounts := []Account{
 		{ID: 1, Platform: PlatformGrok, Type: AccountTypeOAuth, Credentials: map[string]any{"subscription_tier": "FREE"}},
@@ -96,7 +96,7 @@ func TestFilterGrokFreeQuotaAccountsOnlyBlocksExplicitFreeOAuth(t *testing.T) {
 
 func TestFilterGrokFreeQuotaAccountsStatsFailureFailsOpen(t *testing.T) {
 	repo := &grokFreeQuotaUsageRepoStub{err: errors.New("usage database unavailable")}
-	openaiGrokFreeQuotaGateCache = sync.Map{}
+	resetGrokFreeQuotaGateCacheForTest()
 	scheduler := &defaultOpenAIAccountScheduler{service: &OpenAIGatewayService{cfg: grokFreeQuotaTestConfig(), usageLogRepo: repo}}
 	accounts := []Account{{
 		ID: 1, Platform: PlatformGrok, Type: AccountTypeOAuth,
@@ -136,7 +136,7 @@ func TestFilterGrokFreeQuotaAccountsRecoversAfterRollingUsageFalls(t *testing.T)
 	repo := &grokFreeQuotaUsageRepoStub{stats: map[int64]*usagestats.AccountStats{
 		1: {Tokens: 490_000},
 	}}
-	openaiGrokFreeQuotaGateCache = sync.Map{}
+	resetGrokFreeQuotaGateCacheForTest()
 	scheduler := &defaultOpenAIAccountScheduler{service: &OpenAIGatewayService{cfg: grokFreeQuotaTestConfig(), usageLogRepo: repo}}
 	accounts := []Account{{
 		ID: 1, Platform: PlatformGrok, Type: AccountTypeOAuth,
@@ -198,7 +198,7 @@ func TestIsExplicitGrokFreeOAuthAccount_OnlyExactFree(t *testing.T) {
 func TestOpenAIAccountSchedulerLoadBalanceAppliesGrokFreeQuotaGate(t *testing.T) {
 	cfg := grokFreeQuotaTestConfig()
 	cfg.RunMode = config.RunModeSimple
-	openaiGrokFreeQuotaGateCache = sync.Map{}
+	resetGrokFreeQuotaGateCacheForTest()
 	accounts := []Account{
 		{ID: 1, Platform: PlatformGrok, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 1, Credentials: map[string]any{"subscription_tier": "free"}},
 		{ID: 2, Platform: PlatformGrok, Type: AccountTypeOAuth, Status: StatusActive, Schedulable: true, Concurrency: 1, Credentials: map[string]any{"subscription_tier": "pro"}},
@@ -238,7 +238,7 @@ func TestGrokFreeQuotaGateIsSchedulerOnlyAdminPathUnfiltered(t *testing.T) {
 	repo := &grokFreeQuotaUsageRepoStub{stats: map[int64]*usagestats.AccountStats{
 		9: {Tokens: 500_000},
 	}}
-	openaiGrokFreeQuotaGateCache = sync.Map{}
+	resetGrokFreeQuotaGateCacheForTest()
 	scheduler := &defaultOpenAIAccountScheduler{service: &OpenAIGatewayService{cfg: grokFreeQuotaTestConfig(), usageLogRepo: repo}}
 	overGate := Account{ID: 9, Platform: PlatformGrok, Type: AccountTypeOAuth, Credentials: map[string]any{"subscription_tier": "FREE"}}
 	require.Eventually(t, func() bool {
@@ -324,7 +324,7 @@ func countFreeQuotaRefreshInFlightRoots() int {
 // usage_logs aggregation per poll, and leaked one freeQuotaRefreshInFlight root
 // per call.
 func TestGrokMediaVideoPollingSharesFreeQuotaGateCache(t *testing.T) {
-	openaiGrokFreeQuotaGateCache = sync.Map{}
+	resetGrokFreeQuotaGateCacheForTest()
 	groupID := int64(24)
 	owner := Account{
 		ID: 71, Platform: PlatformGrok, Type: AccountTypeOAuth,
@@ -376,4 +376,23 @@ func TestGrokMediaVideoPollingSharesFreeQuotaGateCache(t *testing.T) {
 	calls := repo.calls
 	repo.mu.Unlock()
 	require.Equal(t, 1, calls, "fresh shared cache must serve every poll within the TTL")
+}
+
+// resetGrokFreeQuotaGateCacheForTest empties the process-wide gate cache in
+// place. Assigning a new sync.Map would race with a refresh goroutine that an
+// earlier test left running, and would leave that test's in-flight markers
+// behind, so the next test's refresh for the same account ID is coalesced away.
+func resetGrokFreeQuotaGateCacheForTest() {
+	openaiGrokFreeQuotaGateCache.Range(func(key, _ any) bool {
+		openaiGrokFreeQuotaGateCache.Delete(key)
+		return true
+	})
+	if root, ok := freeQuotaRefreshInFlight.Load(&openaiGrokFreeQuotaGateCache); ok {
+		if m, ok := root.(*sync.Map); ok {
+			m.Range(func(key, _ any) bool {
+				m.Delete(key)
+				return true
+			})
+		}
+	}
 }
