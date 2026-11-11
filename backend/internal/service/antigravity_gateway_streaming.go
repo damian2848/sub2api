@@ -2,6 +2,7 @@ package service
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 type antigravityStreamResult struct {
@@ -112,6 +114,30 @@ func handleStreamReadError(err error, clientDisconnected bool, prefix string) (d
 		return true, true
 	}
 	return false, false
+}
+
+// geminiMalformedFunctionCallMarker 用于在流式 chunk 上做廉价预筛。
+var geminiMalformedFunctionCallMarker = []byte("MALFORMED_FUNCTION_CALL")
+
+// detectGeminiMalformedFunctionCall 判断 Gemini 响应 chunk 的 candidates[0].finishReason
+// 是否为 MALFORMED_FUNCTION_CALL，命中时返回 candidates[0].content 的原始 JSON（不存在则为空串）。
+// 先 bytes.Contains 预筛，绝大多数 chunk 不含该标记，直接跳过；命中后再用 gjson 精确定位，
+// 避免为一行日志把每个（可能 MB 级的 inlineData / 长思考）chunk 完整解码成 map。
+func detectGeminiMalformedFunctionCall(inner []byte) (string, bool) {
+	if len(inner) == 0 || !bytes.Contains(inner, geminiMalformedFunctionCallMarker) {
+		return "", false
+	}
+	if !gjson.ValidBytes(inner) {
+		return "", false
+	}
+	cand := gjson.GetBytes(inner, "candidates.0")
+	if fr := cand.Get("finishReason"); fr.Type != gjson.String || fr.Str != "MALFORMED_FUNCTION_CALL" {
+		return "", false
+	}
+	if content := cand.Get("content"); content.Exists() {
+		return content.Raw, true
+	}
+	return "", true
 }
 
 func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context, resp *http.Response, startTime time.Time) (*antigravityStreamResult, error) {
@@ -276,20 +302,11 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 				if u := extractGeminiUsage(inner); u != nil {
 					usage = u
 				}
-				var parsed map[string]any
-				if json.Unmarshal(inner, &parsed) == nil {
-					// Check for MALFORMED_FUNCTION_CALL
-					if candidates, ok := parsed["candidates"].([]any); ok && len(candidates) > 0 {
-						if cand, ok := candidates[0].(map[string]any); ok {
-							if fr, ok := cand["finishReason"].(string); ok && fr == "MALFORMED_FUNCTION_CALL" {
-								logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] MALFORMED_FUNCTION_CALL detected in forward stream")
-								if content, ok := cand["content"]; ok {
-									if b, err := json.Marshal(content); err == nil {
-										logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Malformed content: %s", string(b))
-									}
-								}
-							}
-						}
+				// Check for MALFORMED_FUNCTION_CALL（只为打日志，不能对每个 chunk 整体解析）
+				if content, ok := detectGeminiMalformedFunctionCall(inner); ok {
+					logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] MALFORMED_FUNCTION_CALL detected in forward stream")
+					if content != "" {
+						logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Malformed content: %s", content)
 					}
 				}
 
