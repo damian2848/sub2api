@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
@@ -1284,32 +1285,37 @@ func prepareUsageLogInsert(log *service.UsageLog) usageLogInsertPrepared {
 	subscriptionID := nullInt64(log.SubscriptionID)
 	duration := nullInt(log.DurationMs)
 	firstToken := nullInt(log.FirstTokenMs)
-	userAgent := nullString(log.UserAgent)
-	ipAddress := nullString(log.IPAddress)
-	imageSize := nullString(log.ImageSize)
-	imageInputSize := nullString(log.ImageInputSize)
-	imageOutputSize := nullString(log.ImageOutputSize)
-	imageSizeSource := nullString(log.ImageSizeSource)
+	// 所有有列宽上限的文本列都先清洗（非法 UTF-8 / NUL / 超长）。一条毒行会让整批
+	// INSERT 失败、退化为逐行重写并最终丢失，而扣费此前已提交。request_id 参与
+	// dedup key，保持原样不处理。
+	userAgent := nullUsageLogText(log.UserAgent, usageLogUserAgentMaxLen)
+	ipAddress := nullUsageLogText(log.IPAddress, usageLogIPAddressMaxLen)
+	imageSize := nullUsageLogText(log.ImageSize, usageLogImageSizeMaxLen)
+	imageInputSize := nullUsageLogText(log.ImageInputSize, usageLogImageDimensionMaxLen)
+	imageOutputSize := nullUsageLogText(log.ImageOutputSize, usageLogImageDimensionMaxLen)
+	imageSizeSource := nullUsageLogText(log.ImageSizeSource, usageLogImageSizeSourceMaxLen)
 	imageSizeBreakdown := nullStringIntMapJSON(log.ImageSizeBreakdown)
-	videoResolution := nullString(log.VideoResolution)
+	videoResolution := nullUsageLogText(log.VideoResolution, usageLogVideoResolutionMaxLen)
 	videoDurationSeconds := nullInt(log.VideoDurationSeconds)
-	serviceTier := nullString(log.ServiceTier)
-	reasoningEffort := nullString(log.ReasoningEffort)
-	requestedReasoningEffort := nullString(log.RequestedReasoningEffort)
-	inboundEndpoint := nullString(log.InboundEndpoint)
-	upstreamEndpoint := nullString(log.UpstreamEndpoint)
+	serviceTier := nullUsageLogText(log.ServiceTier, usageLogServiceTierMaxLen)
+	reasoningEffort := nullUsageLogText(log.ReasoningEffort, usageLogReasoningEffortMaxLen)
+	requestedReasoningEffort := nullUsageLogText(log.RequestedReasoningEffort, usageLogReasoningEffortMaxLen)
+	inboundEndpoint := nullUsageLogText(log.InboundEndpoint, usageLogEndpointMaxLen)
+	upstreamEndpoint := nullUsageLogText(log.UpstreamEndpoint, usageLogEndpointMaxLen)
 	channelID := nullInt64(log.ChannelID)
-	modelMappingChain := nullString(log.ModelMappingChain)
-	billingTier := nullString(log.BillingTier)
-	billingMode := nullString(log.BillingMode)
-	upstreamRequestID := nullString(log.UpstreamRequestID)
-	sessionID := nullString(log.SessionID)
+	modelMappingChain := nullUsageLogText(log.ModelMappingChain, usageLogModelMappingChainMaxLen)
+	billingTier := nullUsageLogText(log.BillingTier, usageLogBillingTierMaxLen)
+	billingMode := nullUsageLogText(log.BillingMode, usageLogBillingModeMaxLen)
+	upstreamRequestID := nullUsageLogText(log.UpstreamRequestID, usageLogUpstreamRequestIDMaxLen)
+	sessionID := nullUsageLogText(log.SessionID, usageLogSessionIDMaxLen)
+	model := sanitizeUsageLogText(log.Model, usageLogModelMaxLen)
 	requestedModel := strings.TrimSpace(log.RequestedModel)
 	if requestedModel == "" {
 		requestedModel = strings.TrimSpace(log.Model)
 	}
-	upstreamModel := nullString(log.UpstreamModel)
-	upstreamResponseModel := nullString(log.UpstreamResponseModel)
+	requestedModel = sanitizeUsageLogText(requestedModel, usageLogModelMaxLen)
+	upstreamModel := nullUsageLogText(log.UpstreamModel, usageLogModelMaxLen)
+	upstreamResponseModel := nullUsageLogText(log.UpstreamResponseModel, usageLogUpstreamResponseModelMaxLen)
 	upstreamModelMismatch := nullBool(log.UpstreamModelMismatch)
 
 	var requestIDArg any
@@ -1327,7 +1333,7 @@ func prepareUsageLogInsert(log *service.UsageLog) usageLogInsertPrepared {
 			log.APIKeyID,
 			log.AccountID,
 			requestIDArg,
-			log.Model,
+			model,
 			nullString(&requestedModel),
 			upstreamModel,
 			upstreamResponseModel,
@@ -1389,6 +1395,65 @@ func prepareUsageLogInsert(log *service.UsageLog) usageLogInsertPrepared {
 			createdAt,
 		},
 	}
+}
+
+// usage_logs 文本列的列宽（字符数，Postgres VARCHAR(n) 按字符计）。来源：
+// migrations 001/028/029/031/046/070/074/075/077/084/087/136/172/187/194/231/232。
+const (
+	usageLogModelMaxLen                 = 100
+	usageLogUpstreamResponseModelMaxLen = 200
+	usageLogUserAgentMaxLen             = 512
+	usageLogIPAddressMaxLen             = 45
+	usageLogImageSizeMaxLen             = 10
+	usageLogImageDimensionMaxLen        = 32
+	usageLogImageSizeSourceMaxLen       = 16
+	usageLogVideoResolutionMaxLen       = 10
+	usageLogServiceTierMaxLen           = 16
+	usageLogReasoningEffortMaxLen       = 20
+	usageLogEndpointMaxLen              = 128
+	usageLogModelMappingChainMaxLen     = 500
+	usageLogBillingTierMaxLen           = 50
+	usageLogBillingModeMaxLen           = 20
+	usageLogUpstreamRequestIDMaxLen     = 128
+	usageLogSessionIDMaxLen             = 255
+)
+
+// sanitizeUsageLogText makes a value safe for a usage_logs VARCHAR(maxRunes)
+// column: invalid UTF-8 and NUL bytes are dropped (Postgres rejects both) and the
+// result is truncated to maxRunes characters on a rune boundary. Values that are
+// already valid and short enough are returned unchanged without allocating.
+func sanitizeUsageLogText(s string, maxRunes int) string {
+	if len(s) <= maxRunes && utf8.ValidString(s) && strings.IndexByte(s, 0) < 0 {
+		return s
+	}
+	s = strings.ToValidUTF8(s, "")
+	if strings.IndexByte(s, 0) >= 0 {
+		s = strings.ReplaceAll(s, "\x00", "")
+	}
+	if maxRunes <= 0 {
+		return ""
+	}
+	if len(s) <= maxRunes {
+		return s
+	}
+	count := 0
+	for i := range s {
+		if count == maxRunes {
+			return s[:i]
+		}
+		count++
+	}
+	return s
+}
+
+// nullUsageLogText is nullString with sanitizeUsageLogText applied; a value that
+// becomes empty after sanitizing is stored as NULL, like an empty input.
+func nullUsageLogText(v *string, maxRunes int) sql.NullString {
+	if v == nil || *v == "" {
+		return sql.NullString{}
+	}
+	cleaned := sanitizeUsageLogText(*v, maxRunes)
+	return nullString(&cleaned)
 }
 
 func usageLogBatchKey(requestID string, apiKeyID int64) string {
