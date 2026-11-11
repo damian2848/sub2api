@@ -194,6 +194,16 @@ func openAIImageSizeVetoReason(ctx context.Context, account *Account) (bool, str
 	return true, openAIImageSizeTierUnsupportedReason
 }
 
+// openAIImageSizePreferencePassActive 报告 ctx 是否处于未指定尺寸的偏好层级轮次。这类轮次靠资格判定里的
+// openAIImageSizeVetoReason 记录后续层级，提前返回的选号仍需对未评估的候选做一遍判定。
+func openAIImageSizePreferencePassActive(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	pass, _ := ctx.Value(openAIImageSizePassCtxKey{}).(*openAIImageSizePass)
+	return pass != nil && pass.tier == ""
+}
+
 // openAIImageSizeRoutingUsesPreference 报告 ctx 记录的生图尺寸是否按偏好层级逐层选号（未传、auto 或无法识别的尺寸）。
 func openAIImageSizeRoutingUsesPreference(ctx context.Context) bool {
 	size, ok := openAIImageSizeRoutingFromContext(ctx)

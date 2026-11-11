@@ -1059,20 +1059,27 @@ func (s *OpenAIGatewayService) tryStickySessionHit(ctx context.Context, groupID 
 // selectBestAccount 从候选账号中选择最佳账号（优先级 + LRU）。
 // 返回 nil 表示无可用账号。
 //
+// 选号分两段：先只用列表副本做廉价的内存过滤并按既有比较器排序，再按排序顺序
+// 逐个做快照重读 + DB 复核（以及渠道限制、利润否决），第一个通过的直接返回 DB 副本。
+// 这样粘性未命中时（新会话、count_tokens、models 列表）不再对池里每个账号都查一次 DB。
+// DB 复核次数受 openAIAccountSelectionProbeLimit 约束。requireCompact 时 compact 能力
+// 不在快照投影里，仍按旧做法逐个复核后按 DB 副本的 compact tier 排序。
+//
 // selectBestAccount selects the best account from candidates (priority + LRU).
 // Returns nil if no available account. The second return reports whether at
 // least one candidate was filtered out solely because it lacks compact support
 // (only meaningful when the legacy /responses/compact requireCompact flag is
-// true); the third contains deterministic
-// exclusion diagnostics for the evaluated snapshot.
+// true); the third contains deterministic exclusion diagnostics for the
+// evaluated candidates (identical to a full pass whenever nothing is selected
+// and the recheck budget was not exhausted).
 func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *int64, platform string, accounts []Account, requestedModel string, excludedIDs map[int64]struct{}, requireCompact bool, requiredCapability OpenAIEndpointCapability, preferLowUpstreamRate bool) (*Account, bool, openAISelectionFilterStats) {
 	platform = NormalizeOpenAICompatiblePlatform(platform)
 	compactBlocked := false
 	filterStats := openAISelectionFilterStats{pool: len(accounts)}
 	needsUpstreamCheck := s.needsUpstreamChannelRestrictionCheck(ctx, groupID)
-	eligible := make([]*Account, 0, len(accounts))
-	compactTiers := make(map[int64]int, len(accounts))
 
+	// Phase 1: cheap in-memory filters on the listed copies.
+	candidates := make([]*Account, 0, len(accounts))
 	for i := range accounts {
 		acc := &accounts[i]
 
@@ -1090,49 +1097,114 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 			filterStats.exclude(excelBPSRateLimitedFilterReason)
 			continue
 		}
+		candidates = append(candidates, acc)
+	}
+	if len(candidates) == 0 {
+		return nil, compactBlocked, filterStats
+	}
 
-		fresh := s.resolveFreshSchedulableOpenAIAccountBeforeProfit(ctx, acc, groupID, platform, requestedModel, false, requiredCapability, requireCompact)
+	// evaluate runs the full per-account admission. allowRecheck is consulted
+	// right before the DB recheck; returning false stops the whole selection.
+	evaluate := func(acc *Account, allowRecheck func() bool) (fresh *Account, compactTier int, stop bool) {
+		fresh = s.resolveFreshSchedulableOpenAIAccountBeforeProfit(ctx, acc, groupID, platform, requestedModel, false, requiredCapability, requireCompact)
 		if fresh == nil {
 			filterStats.exclude("ineligible")
-			continue
+			return nil, 0, false
+		}
+		if !allowRecheck() {
+			return nil, 0, true
 		}
 		fresh = s.recheckSelectedOpenAIAccountFromDBBeforeProfit(ctx, fresh, groupID, platform, requestedModel, false, requiredCapability, requireCompact)
 		if fresh == nil {
 			filterStats.exclude("ineligible")
-			continue
+			return nil, 0, false
 		}
 		if needsUpstreamCheck && s.isUpstreamModelRestrictedByChannel(ctx, *groupID, fresh, requestedModel, requireCompact) {
 			filterStats.exclude("channel_restricted")
-			continue
+			return nil, 0, false
 		}
 		if vetoed, reason := openAIProfitControlVetoReason(ctx, fresh); vetoed {
 			filterStats.exclude(reason)
-			continue
+			return nil, 0, false
 		}
-		compactTier := 0
 		if requireCompact {
 			compactTier = openAICompactSupportTier(fresh)
 			if compactTier == 0 {
 				compactBlocked = true
 				filterStats.exclude("compact_unsupported")
-				continue
+				return nil, 0, false
 			}
 		}
-
-		eligible = append(eligible, fresh)
-		compactTiers[fresh.ID] = compactTier
+		return fresh, compactTier, false
 	}
 
-	if len(eligible) == 0 {
-		return nil, compactBlocked, filterStats
+	if requireCompact {
+		// Compact capability (openai_compact_*) is not part of the scheduler
+		// snapshot projection, so the listed copies cannot rank by tier. Keep
+		// the full pass and rank on the rechecked DB copies.
+		alwaysRecheck := func() bool { return true }
+		eligible := make([]*Account, 0, len(candidates))
+		compactTiers := make(map[int64]int, len(candidates))
+		for _, acc := range candidates {
+			fresh, tier, _ := evaluate(acc, alwaysRecheck)
+			if fresh == nil {
+				continue
+			}
+			eligible = append(eligible, fresh)
+			compactTiers[fresh.ID] = tier
+		}
+		if len(eligible) == 0 {
+			return nil, compactBlocked, filterStats
+		}
+		s.sortOpenAIBestAccountCandidates(ctx, eligible, requestedModel, compactTiers, preferLowUpstreamRate)
+		return eligible[0], compactBlocked, filterStats
 	}
+
+	// Phase 2: rank on the listed copies, then admit in order and return the
+	// first account that passes the snapshot re-read and the DB recheck.
+	s.sortOpenAIBestAccountCandidates(ctx, candidates, requestedModel, nil, preferLowUpstreamRate)
+	budget := newOpenAISelectionProbeBudget()
+	budget.enableLimit()
+	allowRecheck := func() bool {
+		if s.schedulerSnapshot == nil || s.accountRepo == nil {
+			return true
+		}
+		return budget.recordRecheck()
+	}
+	for i, acc := range candidates {
+		fresh, _, stop := evaluate(acc, allowRecheck)
+		if stop || fresh != nil {
+			// Unspecified image sizes are selected rank by rank, and the next
+			// rank is discovered through eligibility vetoes. Keep discovering
+			// it on the candidates this early exit skipped (in memory only).
+			if openAIImageSizePreferencePassActive(ctx) {
+				for _, rest := range candidates[i+1:] {
+					_ = openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx, rest, groupID, platform, requestedModel, false, requiredCapability)
+				}
+			}
+		}
+		if stop {
+			break
+		}
+		if fresh != nil {
+			return fresh, compactBlocked, filterStats
+		}
+	}
+	return nil, compactBlocked, filterStats
+}
+
+// sortOpenAIBestAccountCandidates orders selectBestAccount candidates: BPS
+// accounts for the requested model first, then compact tier (when tiers are
+// given), low upstream rate (when enabled), RPM headroom within a priority, and
+// finally priority + LRU.
+func (s *OpenAIGatewayService) sortOpenAIBestAccountCandidates(ctx context.Context, accounts []*Account, requestedModel string, compactTiers map[int64]int, preferLowUpstreamRate bool) {
 	rateOrder := openAILegacyUpstreamRateOrder{}
 	if preferLowUpstreamRate {
-		rateOrder = newOpenAILegacyUpstreamRateOrder(eligible, time.Now(), s.openAIOAuthSchedulingRateMultiplier(ctx))
+		rateOrder = newOpenAILegacyUpstreamRateOrder(accounts, time.Now(), s.openAIOAuthSchedulingRateMultiplier(ctx))
 	}
 	bpsPreferred := strings.TrimSpace(requestedModel) != ""
-	sort.SliceStable(eligible, func(i, j int) bool {
-		a, b := eligible[i], eligible[j]
+	sort.SliceStable(accounts, func(i, j int) bool {
+		a, b := accounts[i], accounts[j]
 		if bpsPreferred {
 			aBPS := a.IsExcelBPSEnabledForModel(requestedModel)
 			bBPS := b.IsExcelBPSEnabledForModel(requestedModel)
@@ -1140,7 +1212,7 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 				return aBPS
 			}
 		}
-		if requireCompact && compactTiers[a.ID] != compactTiers[b.ID] {
+		if compactTiers != nil && compactTiers[a.ID] != compactTiers[b.ID] {
 			return compactTiers[a.ID] > compactTiers[b.ID]
 		}
 		if rateCmp := rateOrder.compare(a, b); rateCmp != 0 {
@@ -1154,7 +1226,6 @@ func (s *OpenAIGatewayService) selectBestAccount(ctx context.Context, groupID *i
 		}
 		return s.isBetterAccount(a, b)
 	})
-	return eligible[0], compactBlocked, filterStats
 }
 
 // isBetterAccount 判断 candidate 是否比 current 更优。
