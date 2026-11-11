@@ -123,6 +123,9 @@ type BillingCacheService struct {
 	stopped            atomic.Bool
 	balanceLoadSF      singleflight.Group
 	quotaLoadSF        singleflight.Group
+	// rateLimitResetInFlight 按 API Key 去重异步窗口重置，避免窗口刚过期时
+	// 并发请求各自起 goroutine 打出 N 个相同的 UPDATE + DEL。
+	rateLimitResetInFlight sync.Map
 	// 丢弃日志节流计数器（减少高负载下日志噪音）
 	cacheWriteDropFullCount     uint64
 	cacheWriteDropFullLastLog   int64
@@ -638,47 +641,38 @@ func (s *BillingCacheService) checkAPIKeyRateLimitsWithPending(ctx context.Conte
 	return s.evaluateRateLimits(ctx, apiKey, cacheData.Usage5h, cacheData.Usage1d, cacheData.Usage7d, w5h, w1d, w7d, pending)
 }
 
+// windowStartedAndExpired reports whether a rate-limit window has actually been
+// opened and has since expired. A nil window has never been opened: its usage is
+// treated as 0 for limit checks (see IsWindowExpired), but there is nothing for
+// ResetRateLimitWindows to reset, so it must not trigger a DB reset.
+func windowStartedAndExpired(windowStart *time.Time, duration time.Duration) bool {
+	return windowStart != nil && time.Since(*windowStart) >= duration
+}
+
 // evaluateRateLimits checks usage (plus pending) against limits, triggering async resets for expired windows.
 func (s *BillingCacheService) evaluateRateLimits(ctx context.Context, apiKey *APIKey, usage5h, usage1d, usage7d float64, w5h, w1d, w7d *time.Time, pending float64) error {
 	needsReset := false
 
-	// Reset expired windows in-memory for check purposes
+	// Reset expired (or never-opened) windows in-memory for check purposes.
+	// Only windows that were opened and have expired need a DB reset; resetting
+	// a NULL window is a no-op UPDATE that would also drop the cache entry and
+	// force the next request to reload from DB, looping forever.
 	if IsWindowExpired(w5h, RateLimitWindow5h) {
 		usage5h = 0
-		needsReset = true
+		needsReset = needsReset || windowStartedAndExpired(w5h, RateLimitWindow5h)
 	}
 	if IsWindowExpired(w1d, RateLimitWindow1d) {
 		usage1d = 0
-		needsReset = true
+		needsReset = needsReset || windowStartedAndExpired(w1d, RateLimitWindow1d)
 	}
 	if IsWindowExpired(w7d, RateLimitWindow7d) {
 		usage7d = 0
-		needsReset = true
+		needsReset = needsReset || windowStartedAndExpired(w7d, RateLimitWindow7d)
 	}
 
-	// Trigger async DB reset if any window expired
+	// Trigger async DB reset if any window expired (deduplicated per key).
 	if needsReset {
-		keyID := apiKey.ID
-		go func() {
-			resetCtx, cancel := context.WithTimeout(context.Background(), cacheWriteTimeout)
-			defer cancel()
-			if s.apiKeyRateLimitLoader != nil {
-				// Use the repo directly - reset then reload cache
-				if loader, ok := s.apiKeyRateLimitLoader.(interface {
-					ResetRateLimitWindows(ctx context.Context, id int64) error
-				}); ok {
-					if err := loader.ResetRateLimitWindows(resetCtx, keyID); err != nil {
-						logger.LegacyPrintf("service.billing_cache", "Warning: reset rate limit windows failed for api key %d: %v", keyID, err)
-					}
-				}
-			}
-			// Invalidate cache so next request loads fresh data
-			if s.cache != nil {
-				if err := s.cache.InvalidateAPIKeyRateLimit(resetCtx, keyID); err != nil {
-					logger.LegacyPrintf("service.billing_cache", "Warning: invalidate rate limit cache failed for api key %d: %v", keyID, err)
-				}
-			}
-		}()
+		s.triggerRateLimitWindowReset(apiKey.ID)
 	}
 
 	// Check limits
@@ -695,6 +689,36 @@ func (s *BillingCacheService) evaluateRateLimits(ctx context.Context, apiKey *AP
 		return ErrAPIKeyRateLimit7dExceeded
 	}
 	return nil
+}
+
+// triggerRateLimitWindowReset asynchronously resets expired DB windows and drops
+// the Redis entry so the next check reloads fresh data. At most one reset per
+// API key is in flight at a time; concurrent callers skip.
+func (s *BillingCacheService) triggerRateLimitWindowReset(keyID int64) {
+	if _, loaded := s.rateLimitResetInFlight.LoadOrStore(keyID, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		defer s.rateLimitResetInFlight.Delete(keyID)
+		resetCtx, cancel := context.WithTimeout(context.Background(), cacheWriteTimeout)
+		defer cancel()
+		if s.apiKeyRateLimitLoader != nil {
+			// Use the repo directly - reset then reload cache
+			if loader, ok := s.apiKeyRateLimitLoader.(interface {
+				ResetRateLimitWindows(ctx context.Context, id int64) error
+			}); ok {
+				if err := loader.ResetRateLimitWindows(resetCtx, keyID); err != nil {
+					logger.LegacyPrintf("service.billing_cache", "Warning: reset rate limit windows failed for api key %d: %v", keyID, err)
+				}
+			}
+		}
+		// Invalidate cache so next request loads fresh data
+		if s.cache != nil {
+			if err := s.cache.InvalidateAPIKeyRateLimit(resetCtx, keyID); err != nil {
+				logger.LegacyPrintf("service.billing_cache", "Warning: invalidate rate limit cache failed for api key %d: %v", keyID, err)
+			}
+		}
+	}()
 }
 
 // QueueUpdateAPIKeyRateLimitUsage asynchronously updates rate limit usage in the cache.
