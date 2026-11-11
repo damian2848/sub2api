@@ -1815,6 +1815,118 @@ describe('bulk BPS defaults integration', () => {
 })
 
 
+describe('model tools reference account', () => {
+  const antigravityProps = { selectedPlatforms: ['antigravity'], selectedTypes: ['oauth'] }
+  const selector = (wrapper: ReturnType<typeof mountModal>) =>
+    wrapper.get('#bulk-edit-model-restriction-body').getComponent(ModelWhitelistSelector)
+  const picker = (wrapper: ReturnType<typeof mountModal>) =>
+    wrapper.get<HTMLSelectElement>('#bulk-edit-model-reference-account')
+  const openWhitelist = async (wrapper: ReturnType<typeof mountModal>, models: string[]) => {
+    await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+    selector(wrapper).vm.$emit('update:modelValue', models)
+    await nextTick()
+  }
+
+  it('offers the same per-account model tools as the single-account editor', async () => {
+    const wrapper = mountModal({
+      ...antigravityProps,
+      accountIds: [11, 12],
+      target: {
+        mode: 'selected',
+        ...antigravityProps,
+        referenceAccounts: [
+          { id: 11, name: 'first@example.com', platform: 'antigravity' },
+          { id: 12, name: 'second@example.com', platform: 'antigravity' }
+        ]
+      }
+    })
+    await openWhitelist(wrapper, ['gemini-3-flash'])
+
+    expect(picker(wrapper).findAll('option').map(option => option.text()))
+      .toEqual(['first@example.com', 'second@example.com'])
+    expect(selector(wrapper).props('accountId')).toBe(11)
+    for (const tool of ['sync-upstream-models', 'test-models', 'test-iq-models', 'clear-unavailable-models']) {
+      expect(wrapper.find(`#bulk-edit-model-restriction-body [data-testid="${tool}"]`).exists()).toBe(true)
+    }
+
+    await picker(wrapper).setValue('12')
+    expect(selector(wrapper).props('accountId')).toBe(12)
+    wrapper.unmount()
+  })
+
+  it('falls back to account IDs for selected accounts the caller has not loaded', async () => {
+    const wrapper = mountModal({
+      ...antigravityProps,
+      accountIds: [21, 22, 23],
+      target: {
+        mode: 'selected',
+        ...antigravityProps,
+        referenceAccounts: [{ id: 22, name: 'loaded@example.com', platform: 'antigravity' }]
+      }
+    })
+    await openWhitelist(wrapper, ['gemini-3-flash'])
+
+    expect(picker(wrapper).findAll('option').map(option => option.text()))
+      .toEqual(['loaded@example.com', '#21', '#23'])
+    expect(selector(wrapper).props('accountId')).toBe(22)
+    wrapper.unmount()
+  })
+
+  it('uses the previewed accounts of a filtered target', async () => {
+    const wrapper = mountModal({
+      ...antigravityProps,
+      accountIds: [],
+      target: {
+        mode: 'filtered',
+        filters: { platform: 'antigravity' },
+        previewCount: 300,
+        ...antigravityProps,
+        referenceAccounts: [{ id: 31, name: 'preview@example.com', platform: 'antigravity' }]
+      }
+    })
+    await openWhitelist(wrapper, ['gemini-3-flash'])
+
+    expect(selector(wrapper).props('accountId')).toBe(31)
+    expect(wrapper.find('#bulk-edit-model-restriction-body [data-testid="test-models"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('keeps the per-account tools hidden when no target account is known', async () => {
+    const wrapper = mountModal({
+      ...antigravityProps,
+      accountIds: [],
+      target: { mode: 'filtered', filters: {}, previewCount: 0, ...antigravityProps }
+    })
+    await openWhitelist(wrapper, ['gemini-3-flash'])
+
+    expect(wrapper.find('[data-testid="bulk-model-reference-account"]').exists()).toBe(false)
+    expect(selector(wrapper).props('accountId')).toBeUndefined()
+    expect(wrapper.find('#bulk-edit-model-restriction-body [data-testid="test-models"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('labels reference accounts with their platform when targets span platforms', async () => {
+    const mixed = { selectedPlatforms: ['antigravity', 'gemini'], selectedTypes: ['oauth'] }
+    const wrapper = mountModal({
+      ...mixed,
+      accountIds: [41, 42],
+      target: {
+        mode: 'selected',
+        ...mixed,
+        referenceAccounts: [
+          { id: 41, name: 'a@example.com', platform: 'antigravity' },
+          { id: 42, name: 'g@example.com', platform: 'gemini' }
+        ]
+      }
+    })
+    await wrapper.get('#bulk-edit-model-restriction-enabled').setValue(true)
+
+    expect(picker(wrapper).findAll('option').map(option => option.text()))
+      .toEqual(['a@example.com (antigravity)', 'g@example.com (gemini)'])
+    wrapper.unmount()
+  })
+})
+
 describe('family group membership', () => {
   it.each(['家庭 A', ''])('assigns or removes selected accounts using an explicit extra update: %s', async (name) => {
     vi.mocked(adminAPI.accounts.bulkUpdate).mockResolvedValue({ success: 2, failed: 0 } as any)
