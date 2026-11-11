@@ -5,6 +5,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -139,4 +140,36 @@ func TestGeminiForward_ClientCancelDuringBackoffReturnsImmediately(t *testing.T)
 	require.ErrorIs(t, err, context.Canceled)
 	require.Less(t, time.Since(start), time.Second, "退避等待应随 ctx 取消立即结束")
 	require.Equal(t, 1, upstream.calls)
+}
+
+// countTokens 遇到长冷却 429：冷却照写一次，但不换号，直接返回本地估算的 200
+// （与同号重试用尽后的原有兜底一致，避免 Gemini SDK / CLI 预检计数失败）。
+func TestGeminiForwardNative_CountTokensLongCooldownReturnsEstimate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, tc := range []struct {
+		name      string
+		skip      bool
+		wantCalls int
+	}{
+		{name: "skip_on", skip: true, wantCalls: 1},
+		{name: "skip_off", skip: false, wantCalls: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, upstream, repo := newGemini429Service(t, tc.skip, 1,
+				geminiSequenceUpstreamResponse{status: http.StatusTooManyRequests, body: gemini429LongCooldownBody})
+			c, rec := newGeminiNativeTestContext(t)
+
+			result, err := svc.ForwardNative(context.Background(), c, geminiSameAccountRetryTestAccount(), "gemini-2.5-flash", "countTokens", false,
+				[]byte(`{"contents":[{"role":"user","parts":[{"text":"hello world"}]}]}`))
+
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			require.Equal(t, http.StatusOK, rec.Code)
+			var payload map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+			require.Contains(t, payload, "totalTokens")
+			require.Equal(t, tc.wantCalls, upstream.calls)
+			require.Len(t, repo.rateLimitedCalls, tc.wantCalls, "每个上游 429 写一次冷却")
+		})
+	}
 }

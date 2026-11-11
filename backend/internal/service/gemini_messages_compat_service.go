@@ -1415,6 +1415,11 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				persisted, resetAt := s.handleGeminiUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
 				rateLimitApplied = true
 				if s.geminiLongCooldownSkipsSameAccountRetry(persisted, resetAt) {
+					// countTokens 原本在同号重试用尽后返回本地估算的 200（避免 SDK 预检失败）；
+					// 长冷却已写入账号状态，不必等重试，直接返回估算。
+					if action == "countTokens" {
+						return s.geminiCountTokensEstimateResult(c, body, originalModel, mappedModel, startTime), nil
+					}
 					logger.LegacyPrintf("service.gemini_messages_compat", "Gemini account %d: 429 cooldown until %v exceeds same-account backoff, failing over without retry", account.ID, resetAt.Format(time.RFC3339))
 					resp = &http.Response{
 						StatusCode: resp.StatusCode,
@@ -1459,17 +1464,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 				continue
 			}
 			if action == "countTokens" {
-				estimated := estimateGeminiCountTokens(body)
-				c.JSON(http.StatusOK, map[string]any{"totalTokens": estimated})
-				return &ForwardResult{
-					RequestID:     "",
-					Usage:         ClaudeUsage{},
-					Model:         originalModel,
-					UpstreamModel: mappedModel,
-					Stream:        false,
-					Duration:      time.Since(startTime),
-					FirstTokenMs:  nil,
-				}, nil
+				return s.geminiCountTokensEstimateResult(c, body, originalModel, mappedModel, startTime), nil
 			}
 			// Final attempt: surface the upstream error body (passed through below) instead of a generic retry error.
 			resp = &http.Response{
@@ -4275,4 +4270,16 @@ func (s *GeminiMessagesCompatService) extractImageInputSize(body []byte) string 
 	}
 
 	return ""
+}
+
+// geminiCountTokensEstimateResult 在上游 countTokens 不可用时返回本地估算的 200。
+func (s *GeminiMessagesCompatService) geminiCountTokensEstimateResult(c *gin.Context, body []byte, originalModel, mappedModel string, startTime time.Time) *ForwardResult {
+	c.JSON(http.StatusOK, map[string]any{"totalTokens": estimateGeminiCountTokens(body)})
+	return &ForwardResult{
+		Usage:         ClaudeUsage{},
+		Model:         originalModel,
+		UpstreamModel: mappedModel,
+		Stream:        false,
+		Duration:      time.Since(startTime),
+	}
 }
