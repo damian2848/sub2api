@@ -458,6 +458,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 					handleAdmissionFailure(err)
 					return
 				}
+				// 排队期间可能换到了另一个账号：对它重做预热/建议模式拦截检查，
+				// 否则开启了拦截的备选账号仍会把预热请求发到上游并计费。
+				if selection.Account.ID != queuedAccountID &&
+					interceptWarmupAfterReselect(c, selection, body, reqModel, parsedReq.MaxTokens, isClaudeCodeClient, reqStream) {
+					return
+				}
 				account = selection.Account
 				accountReleaseFunc = selection.ReleaseFunc
 				setOpsSelectedAccount(c, account.ID, account.Platform)
