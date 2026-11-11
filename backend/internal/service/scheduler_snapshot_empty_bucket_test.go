@@ -215,3 +215,58 @@ func TestSchedulerSnapshotFallbackFollowerHonorsOwnCancellation(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(1), again[0].ID)
 }
+
+type schedulerPanickingRepo struct {
+	AccountRepository
+	calls atomic.Int32
+}
+
+func (r *schedulerPanickingRepo) ListSchedulableUngroupedByPlatform(context.Context, string) ([]Account, error) {
+	r.calls.Add(1)
+	panic("corrupt account row")
+}
+
+// singleflight re-panics on a fresh goroutine when DoChan has waiters, which
+// no request-level recovery can catch. The shared load must turn a panic into
+// an error for the requests that waited on it.
+func TestSchedulerSnapshotFallbackPanicBecomesError(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	repo := &schedulerPanickingRepo{}
+	svc := newSchedulerEmptyBucketService(&schedulerEmptyBucketCache{}, repo, &now)
+
+	for range 2 {
+		accounts, _, err := svc.ListSchedulableAccounts(context.Background(), nil, PlatformOpenAI, false)
+		require.ErrorContains(t, err, "scheduler snapshot fallback panic")
+		require.Nil(t, accounts)
+	}
+	require.Equal(t, int32(2), repo.calls.Load(), "a panicking load is not negative-cached")
+}
+
+// The empty-bucket window is counted from when the DB was queried, not from
+// when the (possibly slow) query returned.
+func TestSchedulerSnapshotEmptyBucketWindowStartsAtQuery(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	repo := &schedulerEmptyBucketRepo{}
+	svc := newSchedulerEmptyBucketService(&schedulerEmptyBucketCache{}, repo, &now)
+	queryStart := now
+	var once sync.Once
+	svc.nowFn = func() time.Time {
+		current := now
+		// The clock jumps while the query is in flight.
+		once.Do(func() { now = now.Add(2 * schedulerEmptyBucketTTL) })
+		return current
+	}
+
+	_, _, err := svc.ListSchedulableAccounts(context.Background(), nil, PlatformOpenAI, false)
+	require.NoError(t, err)
+	require.Equal(t, int32(1), repo.calls.Load())
+	until, ok := svc.emptyBucketUntil.Load(SchedulerBucket{GroupID: 0, Platform: PlatformOpenAI, Mode: SchedulerModeSingle})
+	if ok {
+		require.Equal(t, queryStart.Add(schedulerEmptyBucketTTL), until)
+	}
+
+	// The window already elapsed during the slow query, so the next request reloads.
+	_, _, err = svc.ListSchedulableAccounts(context.Background(), nil, PlatformOpenAI, false)
+	require.NoError(t, err)
+	require.Equal(t, int32(2), repo.calls.Load())
+}

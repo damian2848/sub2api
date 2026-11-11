@@ -36,10 +36,14 @@ const (
 
 	// schedulerEmptyBucketTTL 是「DB 已确认该桶为空」的进程内负缓存时长。Redis 对空快照
 	// 不建 ZSET，读侧无法和「未构建」区分，没有它时空桶的每个请求都会回退查库。
-	schedulerEmptyBucketTTL = time.Second
+	// 刻意取短：靠时间流逝恢复的账号（限流到期，没有 outbox 事件）在这段时间内不可见，
+	// 池恢复等待在冷却结束后 100~300ms 重选，窗口再长就会把那次重选挡掉。并发回退已由
+	// singleflight 合并，250ms 下每个空桶每秒最多查库 4 次。
+	schedulerEmptyBucketTTL = 250 * time.Millisecond
 	// schedulerFallbackFlightMaxTimeout 只在未配置 db_fallback_timeout_seconds 时生效：
 	// 共享回退加载脱离了单个请求的取消信号，需要一个兜底上限。
-	schedulerFallbackFlightMaxTimeout = 30 * time.Second
+	// 取短：加载越久，查到的结果在发布时越旧，越可能盖掉期间 outbox 重建出的新快照。
+	schedulerFallbackFlightMaxTimeout = 5 * time.Second
 	// outboxStuckEventDefaultThreshold 是未配置 outbox_lag_rebuild_seconds 时，同一 outbox
 	// 事件连续失败多久后打一次 ERROR 的阈值。
 	outboxStuckEventDefaultThreshold = time.Minute
@@ -301,7 +305,19 @@ func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, 
 func (s *SchedulerSnapshotService) loadFallbackAccountsShared(ctx context.Context, bucket SchedulerBucket, useMixed bool, cacheMiss bool) ([]Account, error) {
 	key := bucket.String() + "|mixed=" + strconv.FormatBool(useMixed)
 	leaderCtx := context.WithoutCancel(ctx)
-	ch := s.fallbackFlight.DoChan(key, func() (any, error) {
+	ch := s.fallbackFlight.DoChan(key, func() (val any, err error) {
+		// singleflight 对 DoChan 里的 panic 会在新 goroutine 里重新抛出，请求级 recovery
+		// 中间件接不住，整个进程会退出。转成错误，只影响等待这次加载的请求。
+		defer func() {
+			if r := recover(); r != nil {
+				logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] db fallback panic: bucket=%s panic=%v", bucket.String(), r)
+				val, err = nil, fmt.Errorf("scheduler snapshot fallback panic: %v", r)
+			}
+		}()
+		// 上一个共享加载可能刚确认该桶为空：调用方查过负缓存之后、进入这里之前它才结束。
+		if cacheMiss && s.bucketKnownEmpty(bucket) {
+			return []Account{}, nil
+		}
 		return s.loadFallbackAccounts(leaderCtx, bucket, useMixed, cacheMiss)
 	})
 	select {
@@ -343,6 +359,8 @@ func (s *SchedulerSnapshotService) loadFallbackAccounts(ctx context.Context, buc
 	fallbackCtx, cancel := s.withFallbackFlightTimeout(ctx)
 	defer cancel()
 
+	// 负缓存的有效期从查询开始时刻算：数据反映的是那一刻的状态，查询耗时不应延长它。
+	loadStartedAt := s.currentTime()
 	accounts, err := s.loadAccountsFromDB(fallbackCtx, bucket, useMixed)
 	if err != nil {
 		return nil, err
@@ -360,7 +378,7 @@ func (s *SchedulerSnapshotService) loadFallbackAccounts(ctx context.Context, buc
 
 	// 只有 Redis 正常返回未命中、且 DB 成功确认为空时才写负缓存；DB 出错不写。
 	if cacheMiss && len(accounts) == 0 {
-		s.emptyBucketUntil.Store(bucket, s.currentTime().Add(schedulerEmptyBucketTTL))
+		s.emptyBucketUntil.Store(bucket, loadStartedAt.Add(schedulerEmptyBucketTTL))
 	}
 	return accounts, nil
 }
@@ -618,13 +636,6 @@ func (s *SchedulerSnapshotService) clearOutboxStuckEvent() {
 	s.outboxStuckSince = time.Time{}
 	s.outboxStuckLogged = false
 	s.outboxStuckMu.Unlock()
-}
-
-// outboxStuckEventSnapshot 返回当前卡住的事件 id 与是否已告警（测试用）。
-func (s *SchedulerSnapshotService) outboxStuckEventSnapshot() (int64, bool) {
-	s.outboxStuckMu.Lock()
-	defer s.outboxStuckMu.Unlock()
-	return s.outboxStuckEventID, s.outboxStuckLogged
 }
 
 func formatOptionalInt64(v *int64) string {

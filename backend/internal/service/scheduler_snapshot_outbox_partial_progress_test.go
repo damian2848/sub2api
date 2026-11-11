@@ -119,3 +119,10 @@ func TestSchedulerSnapshotPollOutboxObservesStuckEventWithoutSkipping(t *testing
 	require.Zero(t, id)
 	require.False(t, logged)
 }
+
+// outboxStuckEventSnapshot 返回当前卡住的事件 id 与是否已告警。
+func (s *SchedulerSnapshotService) outboxStuckEventSnapshot() (int64, bool) {
+	s.outboxStuckMu.Lock()
+	defer s.outboxStuckMu.Unlock()
+	return s.outboxStuckEventID, s.outboxStuckLogged
+}
