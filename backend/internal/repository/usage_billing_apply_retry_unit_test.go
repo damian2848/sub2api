@@ -8,6 +8,10 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -108,6 +112,58 @@ func TestUsageBillingApply_AmbiguousCommitRetryDoesNotDoubleCharge(t *testing.T)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.False(t, result.Applied, "replay of a committed charge must be a dedup hit")
+	require.True(t, result.ReplayedCommittedAttempt, "the caller must learn that an unseen attempt committed")
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// A reset connection during Commit is what a DB restart or a proxy RST looks
+// like through lib/pq: a raw *net.OpError, not ErrBadConn.
+func TestUsageBillingApply_RetriesConnectionResetOnCommit(t *testing.T) {
+	withFastUsageBillingRetries(t)
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	expectClaimSucceeds(mock)
+	mock.ExpectCommit().WillReturnError(&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET})
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(usageBillingClaimSQL).
+		WithArgs(usageBillingRetryRequestID, usageBillingRetryAPIKeyID, usageBillingRetryFP).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(usageBillingExistingFPSQL).
+		WithArgs(usageBillingRetryRequestID, usageBillingRetryAPIKeyID).
+		WillReturnRows(sqlmock.NewRows([]string{"request_fingerprint"}).AddRow(usageBillingRetryFP))
+	mock.ExpectRollback()
+
+	repo := &usageBillingRepository{db: db}
+	result, err := repo.Apply(context.Background(), newRetryTestCommand())
+	require.NoError(t, err)
+	require.False(t, result.Applied)
+	require.True(t, result.ReplayedCommittedAttempt)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+// A first-attempt dedup hit is an ordinary duplicate request, not a replay.
+func TestUsageBillingApply_FirstAttemptDuplicateIsNotAReplay(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(usageBillingClaimSQL).
+		WithArgs(usageBillingRetryRequestID, usageBillingRetryAPIKeyID, usageBillingRetryFP).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(usageBillingExistingFPSQL).
+		WithArgs(usageBillingRetryRequestID, usageBillingRetryAPIKeyID).
+		WillReturnRows(sqlmock.NewRows([]string{"request_fingerprint"}).AddRow(usageBillingRetryFP))
+	mock.ExpectRollback()
+
+	repo := &usageBillingRepository{db: db}
+	result, err := repo.Apply(context.Background(), newRetryTestCommand())
+	require.NoError(t, err)
+	require.False(t, result.Applied)
+	require.False(t, result.ReplayedCommittedAttempt)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -187,6 +243,9 @@ func TestIsRetryableUsageBillingError(t *testing.T) {
 		&pq.Error{Code: "08000"},
 		&pq.Error{Code: "08006"},
 		fmt.Errorf("wrapped: %w", &pq.Error{Code: "08003"}),
+		&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET},
+		&net.OpError{Op: "write", Net: "tcp", Err: syscall.EPIPE},
+		fmt.Errorf("wrapped: %w", io.ErrUnexpectedEOF),
 	}
 	for _, err := range retryable {
 		require.True(t, isRetryableUsageBillingError(err), "%v should be retryable", err)
@@ -201,6 +260,8 @@ func TestIsRetryableUsageBillingError(t *testing.T) {
 		&pq.Error{Code: "53300"},
 		&pq.Error{Code: "23505"},
 		&pq.Error{Code: "57014"},
+		&net.OpError{Op: "read", Net: "tcp", Err: os.ErrDeadlineExceeded},
+		io.EOF,
 		errors.New("boom"),
 	}
 	for _, err := range notRetryable {

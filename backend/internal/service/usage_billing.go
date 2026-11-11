@@ -168,11 +168,16 @@ type AccountQuotaState struct {
 }
 
 type UsageBillingApplyResult struct {
-	Applied              bool
-	APIKeyQuotaExhausted bool
-	NewBalance           *float64           // post-deduction balance (nil = no balance deduction)
-	BalanceOverdrafted   bool               // true when the sufficient-balance guard missed and debt was still recorded
-	QuotaState           *AccountQuotaState // post-increment quota state (nil = no quota increment)
+	Applied bool
+	// ReplayedCommittedAttempt is set with Applied=false when a retried Apply hit
+	// the dedup row: an earlier attempt of this same call may have committed
+	// while reporting an error. The billing is in the DB, but no caller synced
+	// the caches for it, so they must be dropped and reloaded.
+	ReplayedCommittedAttempt bool
+	APIKeyQuotaExhausted     bool
+	NewBalance               *float64           // post-deduction balance (nil = no balance deduction)
+	BalanceOverdrafted       bool               // true when the sufficient-balance guard missed and debt was still recorded
+	QuotaState               *AccountQuotaState // post-increment quota state (nil = no quota increment)
 }
 
 // BatchImageBalanceHoldCommand describes an idempotent balance hold operation.

@@ -378,6 +378,9 @@ func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog
 	}
 
 	if result == nil || !result.Applied {
+		if result != nil && result.ReplayedCommittedAttempt {
+			invalidateBillingCachesAfterReplayedCommit(billingCtx, p, deps)
+		}
 		deps.deferredService.ScheduleLastUsedUpdate(p.Account.ID)
 		return false, nil
 	}
@@ -390,6 +393,31 @@ func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog
 
 	finalizePostUsageBilling(billingCtx, p, deps, result)
 	return true, nil
+}
+
+// invalidateBillingCachesAfterReplayedCommit drops the caches that the normal
+// post-billing step would have updated. It runs when the billing transaction
+// committed on an attempt whose result was lost: the DB holds the charge, but
+// the rate-limit, balance, subscription and auth caches still show the state
+// before it. Dropping them makes the next check reload from the DB.
+func invalidateBillingCachesAfterReplayedCommit(ctx context.Context, p *postUsageBillingParams, deps *billingDeps) {
+	if p == nil || deps == nil {
+		return
+	}
+	if cache := deps.billingCacheService; cache != nil {
+		if p.APIKey != nil {
+			_ = cache.InvalidateAPIKeyRateLimit(ctx, p.APIKey.ID)
+		}
+		if p.User != nil {
+			_ = cache.InvalidateUserBalance(ctx, p.User.ID)
+			if p.IsSubscriptionBill && p.Subscription != nil {
+				_ = cache.InvalidateSubscription(ctx, p.User.ID, p.Subscription.GroupID)
+			}
+		}
+	}
+	if invalidator, ok := p.APIKeyService.(apiKeyAuthCacheInvalidator); ok && p.APIKey != nil && p.APIKey.Key != "" {
+		invalidator.InvalidateAuthCacheByKey(ctx, p.APIKey.Key)
+	}
 }
 
 func finalizePostUsageBilling(ctx context.Context, p *postUsageBillingParams, deps *billingDeps, result *UsageBillingApplyResult) {

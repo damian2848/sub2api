@@ -736,6 +736,9 @@ func (s *BillingCacheService) QueueUpdateAPIKeyRateLimitUsage(apiKeyID int64, co
 	s.updateAPIKeyRateLimitUsageCache(ctx, apiKeyID, cost)
 }
 
+// rateLimitInvalidateAfterFailedUpdateTimeout 限制限速增量写失败后的兜底删除。
+const rateLimitInvalidateAfterFailedUpdateTimeout = 500 * time.Millisecond
+
 // updateAPIKeyRateLimitUsageCache 把限速窗口增量写入 Redis。写失败时 best-effort
 // 删除该 Key 的限速缓存，迫使下一次预检从 DB（扣费事务已落库的准确值）回源，
 // 而不是继续读一个少算了这笔费用的缓存。
@@ -748,8 +751,9 @@ func (s *BillingCacheService) updateAPIKeyRateLimitUsageCache(ctx context.Contex
 		return
 	}
 	logger.LegacyPrintf("service.billing_cache", "Warning: update rate limit usage cache failed for api key %d: %v", apiKeyID, err)
-	// 原 ctx 可能已因超时失效，删除用独立的短超时上下文。
-	invalidateCtx, cancel := context.WithTimeout(context.Background(), cacheWriteTimeout)
+	// 原 ctx 可能已因超时失效，删除用独立的上下文。预算取短：队列和用量任务池都满时
+	// 这一步会落在请求 goroutine 上，Redis 不可用时不能再占一个完整的写超时。
+	invalidateCtx, cancel := context.WithTimeout(context.Background(), rateLimitInvalidateAfterFailedUpdateTimeout)
 	defer cancel()
 	if invErr := s.cache.InvalidateAPIKeyRateLimit(invalidateCtx, apiKeyID); invErr != nil {
 		logger.LegacyPrintf("service.billing_cache", "Warning: invalidate rate limit cache after failed update for api key %d: %v", apiKeyID, invErr)

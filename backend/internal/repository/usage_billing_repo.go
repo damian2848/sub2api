@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"io"
+	"net"
 	"strings"
 	"time"
 
@@ -43,6 +45,12 @@ func (r *usageBillingRepository) Apply(ctx context.Context, cmd *service.UsageBi
 		if err == nil {
 			if attempt > 0 {
 				logger.LegacyPrintf("repository.usage_billing", "[UsageBilling] apply succeeded after retry: request_id=%s api_key=%d attempts=%d applied=%v", cmd.RequestID, cmd.APIKeyID, attempt+1, result != nil && result.Applied)
+				// A replay that hits the dedup row means an earlier attempt committed
+				// even though it reported an error. The caller did not see that
+				// attempt's result, so it must refresh the caches it would have synced.
+				if result != nil && !result.Applied {
+					result.ReplayedCommittedAttempt = true
+				}
 			}
 			return result, nil
 		}
@@ -72,9 +80,9 @@ func (r *usageBillingRepository) Apply(ctx context.Context, cmd *service.UsageBi
 var usageBillingApplyRetryBackoffs = []time.Duration{50 * time.Millisecond, 200 * time.Millisecond}
 
 // isRetryableUsageBillingError 只认可重放安全且可能自愈的瞬时错误：连接失效、
-// 死锁/串行化冲突、连接类 SQLSTATE（08xxx）与 admin_shutdown。超时
-// （context.DeadlineExceeded）、连接数打满（53300）和业务错误都不重试，避免
-// DB 过载时放大负载。
+// 连接被重置或中途断开、死锁/串行化冲突、连接类 SQLSTATE（08xxx）与 admin_shutdown。
+// 超时（context.DeadlineExceeded、网络层超时）、连接数打满（53300）和业务错误都不重试，
+// 避免 DB 过载时放大负载。
 func isRetryableUsageBillingError(err error) bool {
 	if err == nil {
 		return false
@@ -83,6 +91,15 @@ func isRetryableUsageBillingError(err error) bool {
 		return false
 	}
 	if errors.Is(err, driver.ErrBadConn) {
+		return true
+	}
+	// lib/pq 对 DB 重启或中间代理发 RST 造成的 connection reset / broken pipe 原样返回
+	// *net.OpError，对读到一半断开返回 io.ErrUnexpectedEOF，两者都不是 ErrBadConn。
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return !opErr.Timeout()
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
 	var pqErr *pq.Error
