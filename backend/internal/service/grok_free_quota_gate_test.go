@@ -158,13 +158,13 @@ func TestFilterGrokFreeQuotaAccountsRecoversAfterRollingUsageFalls(t *testing.T)
 
 	// Expire entry → miss fails open and schedules refresh with recovered usage.
 	// Clear in-flight markers so a refresh is allowed after we force-expire the entry.
-	if root, ok := freeQuotaRefreshInFlight.Load(&scheduler.grokFreeQuotaGateCache); ok {
+	if root, ok := freeQuotaRefreshInFlight.Load(&openaiGrokFreeQuotaGateCache); ok {
 		if m, ok := root.(*sync.Map); ok {
 			m.Delete(int64(1))
 		}
 	}
 	callsBeforeExpire := repo.calls
-	scheduler.grokFreeQuotaGateCache.Store(int64(1), grokFreeQuotaGateCacheEntry{
+	openaiGrokFreeQuotaGateCache.Store(int64(1), grokFreeQuotaGateCacheEntry{
 		tokens: 490_000, checkedAt: time.Now().Add(-2 * time.Minute), known: true, // TTL=60s → stale
 	})
 	// Hot path fail-open while refresh is in flight.
@@ -308,4 +308,72 @@ func accountIDs(accounts []Account) []int64 {
 		ids = append(ids, accounts[i].ID)
 	}
 	return ids
+}
+
+func countFreeQuotaRefreshInFlightRoots() int {
+	n := 0
+	freeQuotaRefreshInFlight.Range(func(any, any) bool {
+		n++
+		return true
+	})
+	return n
+}
+
+// Per-request schedulers (media video polling, guardian fallback) must share the
+// process-wide gate cache: a fresh cache per call missed every time, queued a
+// usage_logs aggregation per poll, and leaked one freeQuotaRefreshInFlight root
+// per call.
+func TestGrokMediaVideoPollingSharesFreeQuotaGateCache(t *testing.T) {
+	openaiGrokFreeQuotaGateCache = sync.Map{}
+	groupID := int64(24)
+	owner := Account{
+		ID: 71, Platform: PlatformGrok, Type: AccountTypeOAuth,
+		Status: StatusActive, Schedulable: true, Concurrency: 50, GroupIDs: []int64{groupID},
+		Credentials: map[string]any{"subscription_tier": "free"},
+	}
+	repo := &grokFreeQuotaUsageRepoStub{stats: map[int64]*usagestats.AccountStats{71: {Tokens: 1_000}}}
+	var acquired, released []int64
+	cfg := grokFreeQuotaTestConfig()
+	cfg.Gateway.Scheduling.StickySessionWaitTimeout = time.Second
+	cfg.Gateway.Scheduling.StickySessionMaxWaiting = 3
+	svc := &OpenAIGatewayService{
+		accountRepo: schedulerTestOpenAIAccountRepo{accounts: []Account{owner}},
+		cache:       &schedulerTestGatewayCache{}, cfg: cfg, usageLogRepo: repo,
+		concurrencyService: NewConcurrencyService(schedulerTestConcurrencyCache{
+			acquireResults: map[int64]bool{71: true},
+			acquiredIDs:    &acquired, releasedIDs: &released,
+		}),
+	}
+	ctx := context.Background()
+	require.NoError(t, svc.BindGrokMediaVideoRequestAccount(ctx, &groupID, "task", 10, 20, 71))
+	sessionHash := GrokMediaVideoRequestSessionHash("task", 10, 20)
+
+	poll := func() {
+		selection, _, err := svc.SelectGrokMediaVideoRequestAccount(ctx, &groupID, sessionHash, 71, "")
+		require.NoError(t, err)
+		require.Equal(t, int64(71), selection.Account.ID)
+		selection.ReleaseFunc()
+	}
+	poll()
+	require.Eventually(t, func() bool {
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+		return repo.calls >= 1
+	}, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		_, ok := openaiGrokFreeQuotaGateCache.Load(int64(71))
+		return ok
+	}, 2*time.Second, 10*time.Millisecond)
+
+	rootsBefore := countFreeQuotaRefreshInFlightRoots()
+	for range 200 {
+		poll()
+	}
+	require.Equal(t, rootsBefore, countFreeQuotaRefreshInFlightRoots(), "polling must not leak in-flight roots")
+	// Give any (incorrectly) spawned refresh goroutines a chance to land.
+	time.Sleep(50 * time.Millisecond)
+	repo.mu.Lock()
+	calls := repo.calls
+	repo.mu.Unlock()
+	require.Equal(t, 1, calls, "fresh shared cache must serve every poll within the TTL")
 }

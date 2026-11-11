@@ -105,11 +105,17 @@ func isExplicitGrokFreeOAuthAccount(account *Account) bool {
 // FREE Grok OAuth accounts on the OpenAI scheduling hot path.
 // Missing or failed statistics always fail open; upstream quota/rate-limit
 // handling remains authoritative. Admin quota/import probes never call this.
+//
+// The advanced scheduler shares the process-wide openaiGrokFreeQuotaGateCache
+// with the legacy OpenAI path. A per-scheduler cache broke for the short-lived
+// schedulers built per request (media video polling, guardian fallback): every
+// call missed, spawned a usage_logs aggregation, and left a permanent
+// freeQuotaRefreshInFlight root keyed by the throwaway cache pointer.
 func (s *defaultOpenAIAccountScheduler) filterGrokFreeQuotaAccounts(ctx context.Context, accounts []Account) []Account {
 	if s == nil || s.service == nil {
 		return accounts
 	}
-	return filterGrokFreeQuotaAccountsCore(ctx, s.service.cfg, s.service.usageLogRepo, &s.grokFreeQuotaGateCache, accounts)
+	return filterGrokFreeQuotaAccountsCore(ctx, s.service.cfg, s.service.usageLogRepo, &openaiGrokFreeQuotaGateCache, accounts)
 }
 
 // filterGrokFreeQuotaAccountsForGateway applies the same soft gate on Gateway
@@ -122,8 +128,11 @@ func (s *GatewayService) filterGrokFreeQuotaAccountsForGateway(ctx context.Conte
 	return filterGrokFreeQuotaAccountsCore(ctx, s.cfg, s.usageLogRepo, &gatewayGrokFreeQuotaGateCache, accounts)
 }
 
-// Shared caches for non-advanced-scheduler selection paths.
-// Advanced scheduler keeps per-instance sync.Map on defaultOpenAIAccountScheduler.
+// Shared, process-wide caches: gateway (Anthropic-compatible) selection uses
+// gatewayGrokFreeQuotaGateCache; every OpenAI-compatible path, including the
+// advanced scheduler and its per-request instances, uses
+// openaiGrokFreeQuotaGateCache. freeQuotaRefreshInFlight is keyed by cache
+// pointer, so only these long-lived maps may be passed to the core filter.
 var gatewayGrokFreeQuotaGateCache sync.Map
 var openaiGrokFreeQuotaGateCache sync.Map
 
