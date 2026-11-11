@@ -123,7 +123,12 @@ func startOpsErrorLogWorkers() {
 	}
 
 	workerCount, queueSize := opsErrorLogConfig()
-	opsErrorLogQueue = make(chan opsErrorLogJob, queueSize)
+	// Workers must hold their own reference to the queue: stopOpsErrorLogWorkers
+	// closes the channel and then sets the package variable to nil. Reading the
+	// global would make a worker that loops back block forever on a nil channel,
+	// so the drain would time out and drop the final batch.
+	queue := make(chan opsErrorLogJob, queueSize)
+	opsErrorLogQueue = queue
 	opsErrorLogQueueLen.Store(0)
 	opsErrorLogQueueBytes.Store(0)
 
@@ -132,7 +137,7 @@ func startOpsErrorLogWorkers() {
 		go func() {
 			defer opsErrorLogWorkersWg.Done()
 			for {
-				job, ok := <-opsErrorLogQueue
+				job, ok := <-queue
 				if !ok {
 					return
 				}
@@ -145,7 +150,7 @@ func startOpsErrorLogWorkers() {
 			batchLoop:
 				for len(batch) < opsErrorLogBatchSize {
 					select {
-					case nextJob, ok := <-opsErrorLogQueue:
+					case nextJob, ok := <-queue:
 						if !ok {
 							if !timer.Stop() {
 								select {
@@ -270,6 +275,10 @@ func normalizeOpsPersistentUserAgent(value string) string {
 	return truncateString(strings.TrimSpace(strings.ToValidUTF8(value, "")), opsErrorLogMaxUserAgentBytes)
 }
 
+// StopOpsErrorLogWorkers stops accepting new ops error logs, closes the queue and
+// waits (up to opsErrorLogDrainTimeout) for workers to flush queued and batched
+// entries. It is called once from the server cleanup; later calls return the
+// first result. Returns false if the drain timed out.
 func StopOpsErrorLogWorkers() bool {
 	opsErrorLogStopOnce.Do(func() {
 		opsErrorLogShutdownOnce.Do(func() {

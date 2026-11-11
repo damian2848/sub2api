@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"github.com/Wei-Shaw/sub2api/internal/requestcapture"
 	"log"
 	"net/http"
@@ -173,6 +174,13 @@ func provideCleanup(
 
 		// 应用层清理步骤可并行执行，基础设施资源（Redis/Ent）最后按顺序关闭。
 		parallelSteps := []cleanupStep{
+			{"OpsErrorLogWorkers", func() error {
+				// Flush queued/batched ops error logs before infraSteps close Ent.
+				if !handler.StopOpsErrorLogWorkers() {
+					return errors.New("ops error log drain timeout")
+				}
+				return nil
+			}},
 			{"BPSWarmPool", func() error {
 				if openAIGateway != nil {
 					openAIGateway.StopBPS403Recovery()

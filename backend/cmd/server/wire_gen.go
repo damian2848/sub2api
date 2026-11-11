@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
@@ -577,6 +578,13 @@ func provideCleanup(
 		}
 
 		parallelSteps := []cleanupStep{
+			{"OpsErrorLogWorkers", func() error {
+				// Flush queued/batched ops error logs before infraSteps close Ent.
+				if !handler.StopOpsErrorLogWorkers() {
+					return errors.New("ops error log drain timeout")
+				}
+				return nil
+			}},
 			{"BPSWarmPool", func() error {
 				if openAIGateway != nil {
 					openAIGateway.StopBPS403Recovery()
