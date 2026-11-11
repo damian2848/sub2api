@@ -235,6 +235,23 @@ func (h *ConcurrencyHelper) DecrementAccountWaitCount(ctx context.Context, accou
 	h.concurrencyService.DecrementAccountWaitCount(ctx, accountID)
 }
 
+// withAccountWaitCount 在账号等待队列计数下执行 acquire，与 /v1/messages 的排队写法一致：
+// 先 IncrementAccountWaitCount，队列已满返回 *WaitQueueFullError（调用方经
+// handleConcurrencyError 映射为 429 gateway_queue_full）；计数器出错时 fail-open，
+// 不计数直接等待。acquire 返回（抢到槽位或失败）后立即归还计数。
+// 这样排队请求能计入调度器看到的 WaitingCount，并受 WaitPlan.MaxWaiting 约束。
+func (h *ConcurrencyHelper) withAccountWaitCount(ctx context.Context, accountID int64, maxWaiting int, acquire func() (func(), error)) (func(), error) {
+	canWait, err := h.IncrementAccountWaitCount(ctx, accountID, maxWaiting)
+	if err != nil {
+		return acquire()
+	}
+	if !canWait {
+		return nil, &WaitQueueFullError{SlotType: "account"}
+	}
+	defer h.DecrementAccountWaitCount(ctx, accountID)
+	return acquire()
+}
+
 // TryAcquireUserSlot 尝试立即获取用户并发槽位。
 // 返回值: (releaseFunc, acquired, error)
 func (h *ConcurrencyHelper) TryAcquireUserSlot(ctx context.Context, userID int64, maxConcurrency int) (func(), bool, error) {

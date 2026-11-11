@@ -292,14 +292,17 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				h.chatCompletionsErrorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
 				return
 			}
-			accountReleaseFunc, err = h.concurrencyHelper.AcquireAccountSlotWithRetryBudget(
-				c,
-				account.ID,
-				selection.WaitPlan.MaxConcurrency,
-				selection.WaitPlan.Timeout,
-				reqStream,
-				&streamStarted,
-			)
+			waitPlan := selection.WaitPlan
+			accountReleaseFunc, err = h.concurrencyHelper.withAccountWaitCount(c.Request.Context(), account.ID, waitPlan.MaxWaiting, func() (func(), error) {
+				return h.concurrencyHelper.AcquireAccountSlotWithRetryBudget(
+					c,
+					account.ID,
+					waitPlan.MaxConcurrency,
+					waitPlan.Timeout,
+					reqStream,
+					&streamStarted,
+				)
+			})
 			if err != nil {
 				reqLog.Warn("gateway.cc.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 				if errors.Is(err, errAntigravityRetryWaitExhausted) && fs.LastFailoverErr != nil {

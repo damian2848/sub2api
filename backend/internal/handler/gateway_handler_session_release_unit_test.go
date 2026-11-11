@@ -107,7 +107,7 @@ func (c *slotConcurrencyCache) waitCounts() (int, int) {
 	return c.waitIncrements, c.waitDecrements
 }
 
-func newSessionReleaseTestHandler(t *testing.T, group *service.Group, account *service.Account, gatewayCache, helperCache service.ConcurrencyCache, sessions service.SessionLimitCache) (*GatewayHandler, func()) {
+func newWaitPlanTestHandler(t *testing.T, group *service.Group, account *service.Account, gatewayCache, helperCache service.ConcurrencyCache, sessions service.SessionLimitCache) (*GatewayHandler, func()) {
 	t.Helper()
 
 	cfg := &config.Config{RunMode: config.RunModeSimple}
@@ -140,7 +140,7 @@ func newSessionReleaseTestHandler(t *testing.T, group *service.Group, account *s
 	return h, billingCacheSvc.Stop
 }
 
-func runSessionReleaseMessages(t *testing.T, h *GatewayHandler, group *service.Group, body string) *httptest.ResponseRecorder {
+func runWaitPlanMessages(t *testing.T, h *GatewayHandler, group *service.Group, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -183,14 +183,14 @@ func TestGatewayHandlerMessages_QueueFullReleasesRegisteredSession(t *testing.T)
 	group := &service.Group{ID: 2101, Hydrated: true, Platform: service.PlatformAnthropic, Status: service.StatusActive}
 	account := sessionLimitedOAuthAccount(group.ID, map[string]any{"access_token": "tok"})
 	sessions := newRecordingSessionLimitCache()
-	h, cleanup := newSessionReleaseTestHandler(t, group, account,
+	h, cleanup := newWaitPlanTestHandler(t, group, account,
 		&slotConcurrencyCache{acquireAccount: false},
 		&slotConcurrencyCache{acquireAccount: false, canWait: false},
 		sessions,
 	)
 	defer cleanup()
 
-	rec := runSessionReleaseMessages(t, h, group, sessionReleaseBody)
+	rec := runWaitPlanMessages(t, h, group, sessionReleaseBody)
 
 	require.Equal(t, http.StatusTooManyRequests, rec.Code)
 	require.Contains(t, rec.Body.String(), gatewayQueueFullCode)
@@ -205,14 +205,14 @@ func TestGatewayHandlerMessages_WaitTimeoutReleasesRegisteredSession(t *testing.
 	account := sessionLimitedOAuthAccount(group.ID, map[string]any{"access_token": "tok"})
 	sessions := newRecordingSessionLimitCache()
 	helperCache := &slotConcurrencyCache{acquireAccount: false, canWait: true}
-	h, cleanup := newSessionReleaseTestHandler(t, group, account,
+	h, cleanup := newWaitPlanTestHandler(t, group, account,
 		&slotConcurrencyCache{acquireAccount: false},
 		helperCache,
 		sessions,
 	)
 	defer cleanup()
 
-	rec := runSessionReleaseMessages(t, h, group, sessionReleaseBody)
+	rec := runWaitPlanMessages(t, h, group, sessionReleaseBody)
 
 	require.Equal(t, http.StatusTooManyRequests, rec.Code)
 	registered, unregistered := sessions.snapshot(account.ID)
@@ -230,14 +230,14 @@ func TestGatewayHandlerMessages_WarmupInterceptKeepsSession(t *testing.T) {
 	group := &service.Group{ID: 2103, Hydrated: true, Platform: service.PlatformAnthropic, Status: service.StatusActive}
 	account := sessionLimitedOAuthAccount(group.ID, map[string]any{"access_token": "tok", "intercept_warmup_requests": true})
 	sessions := newRecordingSessionLimitCache()
-	h, cleanup := newSessionReleaseTestHandler(t, group, account,
+	h, cleanup := newWaitPlanTestHandler(t, group, account,
 		&slotConcurrencyCache{acquireAccount: true},
 		&slotConcurrencyCache{acquireAccount: true, canWait: true},
 		sessions,
 	)
 	defer cleanup()
 
-	rec := runSessionReleaseMessages(t, h, group, `{"model":"claude-sonnet-4-5","max_tokens":64,"messages":[{"role":"user","content":[{"type":"text","text":"Warmup"}]}]}`)
+	rec := runWaitPlanMessages(t, h, group, `{"model":"claude-sonnet-4-5","max_tokens":64,"messages":[{"role":"user","content":[{"type":"text","text":"Warmup"}]}]}`)
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	registered, unregistered := sessions.snapshot(account.ID)

@@ -157,7 +157,10 @@ func (h *GatewayHandler) SystemOne(c *gin.Context) {
 				h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "No available accounts")
 				return
 			}
-			accountRelease, err = h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(c, account.ID, selection.WaitPlan.MaxConcurrency, selection.WaitPlan.Timeout, false, &streamStarted)
+			waitPlan := selection.WaitPlan
+			accountRelease, err = h.concurrencyHelper.withAccountWaitCount(c.Request.Context(), account.ID, waitPlan.MaxWaiting, func() (func(), error) {
+				return h.concurrencyHelper.AcquireAccountSlotWithWaitTimeout(c, account.ID, waitPlan.MaxConcurrency, waitPlan.Timeout, false, &streamStarted)
+			})
 			if err != nil {
 				reqLog.Warn("systemone.account_slot_acquire_failed", zap.Int64("account_id", account.ID), zap.Error(err))
 				h.handleConcurrencyError(c, err, "account", false)
