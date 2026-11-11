@@ -911,8 +911,9 @@ func (s *HTTPUpstreamSuite) TestAccountConcurrencyOverridesPoolSettings() {
 	entry := mustGetOrCreateClient(s.T(), svc, "", 1, 12)
 	transport, ok := entry.client.Transport.(*http.Transport)
 	require.True(s.T(), ok, "expected *http.Transport")
-	// 连接池参数应与并发数一致
-	require.Equal(s.T(), 12, transport.MaxConnsPerHost, "MaxConnsPerHost mismatch")
+	// 空闲连接参数与并发数一致；MaxConnsPerHost 额外留 accountConnHeadroom 给旁路请求
+	require.Equal(s.T(), 12+accountConnHeadroom, transport.MaxConnsPerHost, "MaxConnsPerHost mismatch")
+	require.Equal(s.T(), 14, transport.MaxConnsPerHost, "MaxConnsPerHost should be concurrency+2")
 	require.Equal(s.T(), 12, transport.MaxIdleConns, "MaxIdleConns mismatch")
 	require.Equal(s.T(), 12, transport.MaxIdleConnsPerHost, "MaxIdleConnsPerHost mismatch")
 }

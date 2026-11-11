@@ -55,6 +55,11 @@ const (
 	// defaultMaxConnsPerHost: 默认每主机最大连接数（含活跃连接）
 	// 达到上限后新请求会等待，而非无限创建连接
 	defaultMaxConnsPerHost = 240
+	// accountConnHeadroom: 账户隔离模式下 MaxConnsPerHost 在账户并发数之上额外放宽的连接数。
+	// 真实上游并发由调度层账号槽控制，连接池只做硬保护；上游实际只走 HTTP/1.1，
+	// 每个在途流独占一条连接，若上限恰好等于并发数，不占账号槽的旁路请求
+	// （count_tokens、Gemini Web 配额读取、账号测试等）会排在长流后面等连接。
+	accountConnHeadroom = 2
 	// defaultIdleConnTimeout: 默认空闲连接超时时间（90秒）
 	// 超时后连接会被关闭，释放系统资源（建议小于上游 LB 超时）
 	defaultIdleConnTimeout = 90 * time.Second
@@ -1034,7 +1039,8 @@ func (s *httpUpstreamService) clientIdleTTL() time.Duration {
 //   - poolSettings: 连接池配置
 //
 // 说明:
-//   - 账户隔离模式下，连接池大小与账户并发数对应
+//   - 账户隔离模式下，空闲连接上限与账户并发数对应，
+//     MaxConnsPerHost 为并发数 + accountConnHeadroom（给旁路请求留余量）
 //   - 这确保了单账户不会占用过多连接资源
 func (s *httpUpstreamService) resolvePoolSettings(isolation string, accountConcurrency int) poolSettings {
 	settings := defaultPoolSettings(s.cfg)
@@ -1042,7 +1048,8 @@ func (s *httpUpstreamService) resolvePoolSettings(isolation string, accountConcu
 	if (isolation == config.ConnectionPoolIsolationAccount || isolation == config.ConnectionPoolIsolationAccountProxy) && accountConcurrency > 0 {
 		settings.maxIdleConns = accountConcurrency
 		settings.maxIdleConnsPerHost = accountConcurrency
-		settings.maxConnsPerHost = accountConcurrency
+		// 留少量余量给不占账号槽的旁路请求，空闲连接上限仍与并发数一致。
+		settings.maxConnsPerHost = accountConcurrency + accountConnHeadroom
 	}
 	return settings
 }
