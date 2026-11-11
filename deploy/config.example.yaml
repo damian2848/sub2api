@@ -652,7 +652,7 @@ gateway:
   # one query. Range 0-5000; 0 disables the cache.
   # 选不到账号时用于区分 404（模型不可用）与 429/503 的候选账号短缓存（毫秒）。
   # 并发未命中合并为一次查询；范围 0-5000，0 关闭缓存。
-  model_availability_diagnosis_cache_ttl_ms: 1500
+  model_availability_diagnosis_cache_ttl_ms: 500
   # Log upstream error response body summary (safe/truncated; does not log request content)
   # 记录上游错误响应体摘要（安全/截断；不记录请求内容）
   log_upstream_error_body: true

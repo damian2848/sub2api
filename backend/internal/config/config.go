@@ -2986,7 +2986,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.usage_record.auto_scale_cooldown_seconds", 10)
 	viper.SetDefault("gateway.user_group_rate_cache_ttl_seconds", 30)
 	viper.SetDefault("gateway.models_list_cache_ttl_seconds", 15)
-	viper.SetDefault("gateway.model_availability_diagnosis_cache_ttl_ms", 1500)
+	viper.SetDefault("gateway.model_availability_diagnosis_cache_ttl_ms", 500)
 	// TLS指纹伪装配置（默认关闭，需要账号级别单独启用）
 	// 用户消息串行队列默认值
 	viper.SetDefault("gateway.user_message_queue.enabled", false)

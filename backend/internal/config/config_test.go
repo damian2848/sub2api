@@ -121,7 +121,7 @@ func TestLoadDefaultModelAvailabilityDiagnosisCacheTTL(t *testing.T) {
 	resetViperWithJWTSecret(t)
 	cfg, err := Load()
 	require.NoError(t, err)
-	require.Equal(t, 1500, cfg.Gateway.ModelAvailabilityDiagnosisCacheTTLMillis)
+	require.Equal(t, 500, cfg.Gateway.ModelAvailabilityDiagnosisCacheTTLMillis)
 }
 
 func TestLoadDefaultMinOutputTokens(t *testing.T) {

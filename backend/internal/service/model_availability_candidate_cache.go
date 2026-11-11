@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,7 +18,7 @@ import (
 const modelAvailabilityCandidateLoadTimeout = 5 * time.Second
 
 // resolveModelAvailabilityDiagnosisCacheTTL 返回诊断候选账号缓存的 TTL；0 表示关闭缓存。
-// 默认值（1500ms）由配置加载时的 viper 默认值提供；没有配置对象时关闭缓存。
+// 默认值（500ms）由配置加载时的 viper 默认值提供；没有配置对象时关闭缓存。
 func resolveModelAvailabilityDiagnosisCacheTTL(cfg *config.Config) time.Duration {
 	if cfg == nil || cfg.Gateway.ModelAvailabilityDiagnosisCacheTTLMillis <= 0 {
 		return 0
@@ -35,6 +36,10 @@ func resolveModelAvailabilityDiagnosisCacheTTL(cfg *config.Config) time.Duration
 // 每次读取都复制出调用方独占的账号副本，诊断的懒缓存只写副本。诊断本身用调用时的
 // 当前时间重新计算，已过期的限流时间点会被自然过滤。查询出错不写缓存。
 //
+// 缓存行带着运行期状态（账号限流时间、模型冷却、能力拒绝标记），TTL 内新写入的状态
+// 看不到：最后一个账号刚被限流时可能少报「全部限流」，刚记上或刚清除 model_not_found
+// 时 404 与 503 的判定可能晚一个 TTL。所以默认 TTL 取得很短。
+//
 // 零值可用。
 type modelAvailabilityCandidateCache struct {
 	mu      sync.Mutex
@@ -50,17 +55,11 @@ type modelAvailabilityCandidateEntry struct {
 func modelAvailabilityCandidateCacheKey(groupID *int64, platforms []string, includeGrouped bool) string {
 	sorted := slices.Clone(platforms)
 	slices.Sort(sorted)
-	var b strings.Builder
-	if groupID == nil {
-		b.WriteString("all")
-	} else {
-		b.WriteString(strconv.FormatInt(*groupID, 10))
+	scope := "all"
+	if groupID != nil {
+		scope = strconv.FormatInt(*groupID, 10)
 	}
-	b.WriteByte('|')
-	b.WriteString(strings.Join(sorted, ","))
-	b.WriteByte('|')
-	b.WriteString(strconv.FormatBool(includeGrouped))
-	return b.String()
+	return scope + "|" + strings.Join(sorted, ",") + "|" + strconv.FormatBool(includeGrouped)
 }
 
 // list 返回候选账号的独占副本。ttl<=0 时直接查询仓储。
@@ -80,7 +79,14 @@ func (c *modelAvailabilityCandidateCache) list(
 		return cloneModelAvailabilityCandidates(masters), nil
 	}
 
-	ch := c.flight.DoChan(key, func() (any, error) {
+	ch := c.flight.DoChan(key, func() (val any, err error) {
+		// singleflight 对 DoChan 里的 panic 会在新 goroutine 里重新抛出，请求级 recovery
+		// 接不住；转成错误，调用方按「诊断失败」保守处理。
+		defer func() {
+			if r := recover(); r != nil {
+				val, err = nil, fmt.Errorf("model availability candidate load panic: %v", r)
+			}
+		}()
 		// 前一个共享查询可能刚写入缓存。
 		if masters, ok := c.lookup(key, time.Now()); ok {
 			return masters, nil
@@ -113,7 +119,12 @@ func (c *modelAvailabilityCandidateCache) lookup(key string, now time.Time) ([]A
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.entries[key]
-	if !ok || !now.Before(entry.expiresAt) {
+	if !ok {
+		return nil, false
+	}
+	if !now.Before(entry.expiresAt) {
+		// 过期就释放：风暴结束后不再有写入，不能让整组账号行一直留在堆上。
+		delete(c.entries, key)
 		return nil, false
 	}
 	return entry.accounts, true

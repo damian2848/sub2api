@@ -180,3 +180,37 @@ func TestResolveModelAvailabilityDiagnosisCacheTTL(t *testing.T) {
 	cfg.Gateway.ModelAvailabilityDiagnosisCacheTTLMillis = 1500
 	require.Equal(t, 1500*time.Millisecond, resolveModelAvailabilityDiagnosisCacheTTL(cfg))
 }
+
+type candidatePanickingRepo struct {
+	AccountRepository
+}
+
+func (candidatePanickingRepo) ListModelAvailabilityCandidates(context.Context, *int64, []string, bool) ([]Account, error) {
+	panic("corrupt account row")
+}
+
+func TestModelAvailabilityCandidateCache_PanicBecomesError(t *testing.T) {
+	var cache modelAvailabilityCandidateCache
+	groupID := int64(6)
+	accounts, err := cache.list(context.Background(), candidatePanickingRepo{}, time.Second, &groupID, []string{PlatformAnthropic}, false)
+	require.ErrorContains(t, err, "model availability candidate load panic")
+	require.Nil(t, accounts)
+	require.Empty(t, cache.entries)
+}
+
+func TestModelAvailabilityCandidateCache_ExpiredEntryIsReleasedOnLookup(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		repo := &candidateCountingRepo{}
+		var cache modelAvailabilityCandidateCache
+		groupID := int64(8)
+		_, err := cache.list(context.Background(), repo, time.Second, &groupID, []string{PlatformAnthropic}, false)
+		require.NoError(t, err)
+		require.Len(t, cache.entries, 1)
+
+		time.Sleep(time.Second)
+		key := modelAvailabilityCandidateCacheKey(&groupID, []string{PlatformAnthropic}, false)
+		_, ok := cache.lookup(key, time.Now())
+		require.False(t, ok)
+		require.Empty(t, cache.entries, "an expired entry must not keep the group's account rows alive")
+	})
+}
