@@ -642,7 +642,24 @@ func (s *ConcurrencyService) DecrementAccountWaitCount(ctx context.Context, acco
 	if !s.outstanding.takeWait(outstandingWaitKey{kind: outstandingAccount, id: accountID}) {
 		return // already decremented by the shutdown flush
 	}
+	s.sendAccountWaitDecrement(accountID)
+}
 
+// DecrementAccountWaitCountAsync leaves the account wait queue without making
+// the caller wait for Redis, for callers that just won a slot and are about to
+// contact the upstream. Ownership is consumed synchronously, so this decrement
+// and a shutdown flush never both run; only the round trip is deferred.
+func (s *ConcurrencyService) DecrementAccountWaitCountAsync(accountID int64) {
+	if s == nil || s.cache == nil {
+		return
+	}
+	if !s.outstanding.takeWait(outstandingWaitKey{kind: outstandingAccount, id: accountID}) {
+		return
+	}
+	go s.sendAccountWaitDecrement(accountID)
+}
+
+func (s *ConcurrencyService) sendAccountWaitDecrement(accountID int64) {
 	bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

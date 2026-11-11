@@ -2799,8 +2799,12 @@ func (h *OpenAIGatewayHandler) acquireOpenAIAccountSlot(
 		return nil, openAISlotAcquireFailed
 	}
 
-	// Slot acquired: no longer waiting in queue.
-	releaseWait()
+	// Slot acquired: no longer waiting in queue. Leave it off the first-byte
+	// path; the decrement has its own context.
+	if accountWaitCounted {
+		h.concurrencyHelper.leaveAccountWaitQueueAsync(account.ID)
+		accountWaitCounted = false
+	}
 	// 分组利润控制：WaitPlan 排队成功后终检。排队期间账号倍率
 	// 可能上调，越线则释放槽位交由调用方排除重选，不绑定粘连。
 	latest, vetoed, reason := h.gatewayService.ProfitControlVetoLatest(ctx, account)

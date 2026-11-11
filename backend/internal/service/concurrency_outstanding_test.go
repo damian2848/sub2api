@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -177,4 +178,59 @@ func TestReleaseOutstanding_NilSafety(t *testing.T) {
 	var nilSvc *ConcurrencyService
 	nilSvc.ReleaseOutstanding(context.Background())
 	(&ConcurrencyService{}).ReleaseOutstanding(context.Background())
+}
+
+type blockingWaitDecrementCache struct {
+	*outstandingRecordingCache
+	entered chan struct{}
+	unblock chan struct{}
+}
+
+func (c *blockingWaitDecrementCache) DecrementAccountWaitCount(ctx context.Context, id int64) error {
+	c.entered <- struct{}{}
+	<-c.unblock
+	return c.outstandingRecordingCache.DecrementAccountWaitCount(ctx, id)
+}
+
+func TestDecrementAccountWaitCountAsync_DoesNotBlockCaller(t *testing.T) {
+	cache := &blockingWaitDecrementCache{
+		outstandingRecordingCache: newOutstandingRecordingCache(),
+		entered:                   make(chan struct{}, 1),
+		unblock:                   make(chan struct{}),
+	}
+	svc := NewConcurrencyService(cache)
+	ctx := context.Background()
+	ok, err := svc.IncrementAccountWaitCount(ctx, 21, 5)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	svc.DecrementAccountWaitCountAsync(21) // returns while Redis is still blocked
+	<-cache.entered
+	// Ownership was consumed synchronously: a shutdown flush racing the
+	// in-flight decrement must not decrement the same increment again.
+	svc.ReleaseOutstanding(ctx)
+	close(cache.unblock)
+	require.Eventually(t, func() bool {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		return cache.accountDecr[21] == 1
+	}, time.Second, time.Millisecond)
+	cache.mu.Lock()
+	require.Equal(t, map[int64]int{21: 1}, cache.accountDecr)
+	cache.mu.Unlock()
+}
+
+func TestDecrementAccountWaitCountAsync_SkipsAfterFlush(t *testing.T) {
+	cache := newOutstandingRecordingCache()
+	svc := NewConcurrencyService(cache)
+	ctx := context.Background()
+	_, err := svc.IncrementAccountWaitCount(ctx, 22, 5)
+	require.NoError(t, err)
+	svc.ReleaseOutstanding(ctx)
+	svc.DecrementAccountWaitCountAsync(22)
+	time.Sleep(20 * time.Millisecond)
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	require.Equal(t, map[int64]int{22: 1}, cache.accountDecr)
+	(*ConcurrencyService)(nil).DecrementAccountWaitCountAsync(1)
 }

@@ -532,8 +532,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						h.handleConcurrencyError(c, err, "account", streamStarted)
 						return
 					}
-					// Slot acquired: no longer waiting in queue.
-					releaseWait()
+					// Slot acquired: no longer waiting in queue. Leave it off
+					// the first-byte path; the decrement has its own context.
+					if accountWaitCounted {
+						h.concurrencyHelper.leaveAccountWaitQueueAsync(account.ID)
+						accountWaitCounted = false
+					}
 				}
 			}
 			if err := h.revalidateGeminiWebAdmission(c, selection, admissionBudget, apiKey.GroupID, reqModel); err != nil {
@@ -921,8 +925,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 						h.handleConcurrencyError(c, err, "account", streamStarted)
 						return
 					}
-					// Slot acquired: no longer waiting in queue.
-					releaseWait()
+					// Slot acquired: no longer waiting in queue. Leave it off
+					// the first-byte path; the decrement has its own context.
+					if accountWaitCounted {
+						h.concurrencyHelper.leaveAccountWaitQueueAsync(account.ID)
+						accountWaitCounted = false
+					}
 				}
 			}
 			// 终检与准入后绑定使用选号结果携带的门（见 responses 同名注释）。

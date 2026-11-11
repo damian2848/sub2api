@@ -235,6 +235,12 @@ func (h *ConcurrencyHelper) DecrementAccountWaitCount(ctx context.Context, accou
 	h.concurrencyService.DecrementAccountWaitCount(ctx, accountID)
 }
 
+// leaveAccountWaitQueueAsync decrements the account wait count off the
+// first-byte path once a queued request has won its slot.
+func (h *ConcurrencyHelper) leaveAccountWaitQueueAsync(accountID int64) {
+	h.concurrencyService.DecrementAccountWaitCountAsync(accountID)
+}
+
 // withAccountWaitCount 在账号等待队列计数下执行 acquire，与 /v1/messages 的排队写法一致：
 // 先 IncrementAccountWaitCount，队列已满返回 *WaitQueueFullError（调用方经
 // handleConcurrencyError 映射为 429 gateway_queue_full）；计数器出错时 fail-open，
