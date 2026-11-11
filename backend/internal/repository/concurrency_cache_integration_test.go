@@ -179,8 +179,21 @@ func (s *ConcurrencyCacheSuite) TestAccountActiveIndex_AcquireAndRelease() {
 
 	require.NoError(s.T(), s.cache.ReleaseAccountSlot(s.ctx, accountID, reqID))
 
+	// Release is a single ZREM; the entry stays until its score comes due.
 	_, err = s.rdb.ZScore(s.ctx, accountActiveIndexKey, member).Result()
-	require.ErrorIs(s.T(), err, redis.Nil, "index member should be removed after load drops to zero")
+	require.NoError(s.T(), err, "release leaves the index entry to the reconcile pass")
+	s.expireIndexMemberAndReconcile(accountActiveIndexKey, member)
+	_, err = s.rdb.ZScore(s.ctx, accountActiveIndexKey, member).Result()
+	require.ErrorIs(s.T(), err, redis.Nil, "reconcile removes the entry once load drops to zero")
+}
+
+// expireIndexMemberAndReconcile makes one index entry due and runs the
+// periodic reconcile, which drops entries whose real load is zero.
+func (s *ConcurrencyCacheSuite) expireIndexMemberAndReconcile(indexKey, member string) {
+	now, err := s.rawCache.redisUnixSeconds(s.ctx)
+	require.NoError(s.T(), err)
+	require.NoError(s.T(), s.rdb.ZAdd(s.ctx, indexKey, redis.Z{Score: float64(now - 1), Member: member}).Err())
+	require.NoError(s.T(), s.cache.CleanupExpiredAccountSlotKeys(s.ctx))
 }
 
 func (s *ConcurrencyCacheSuite) TestAccountActiveIndex_WaitLifecycle() {
@@ -197,7 +210,10 @@ func (s *ConcurrencyCacheSuite) TestAccountActiveIndex_WaitLifecycle() {
 	require.NoError(s.T(), s.cache.DecrementAccountWaitCount(s.ctx, accountID))
 
 	_, err = s.rdb.ZScore(s.ctx, accountActiveIndexKey, member).Result()
-	require.ErrorIs(s.T(), err, redis.Nil, "index member should be removed after wait drops to zero")
+	require.NoError(s.T(), err, "decrement leaves the index entry to the reconcile pass")
+	s.expireIndexMemberAndReconcile(accountActiveIndexKey, member)
+	_, err = s.rdb.ZScore(s.ctx, accountActiveIndexKey, member).Result()
+	require.ErrorIs(s.T(), err, redis.Nil, "reconcile removes the entry once wait drops to zero")
 }
 
 func (s *ConcurrencyCacheSuite) TestUserActiveIndex_AcquireAndRelease() {
@@ -215,7 +231,10 @@ func (s *ConcurrencyCacheSuite) TestUserActiveIndex_AcquireAndRelease() {
 	require.NoError(s.T(), s.cache.ReleaseUserSlot(s.ctx, userID, reqID))
 
 	_, err = s.rdb.ZScore(s.ctx, userActiveIndexKey, member).Result()
-	require.ErrorIs(s.T(), err, redis.Nil, "user index member should be removed after release")
+	require.NoError(s.T(), err, "release leaves the user index entry to the reconcile pass")
+	s.expireIndexMemberAndReconcile(userActiveIndexKey, member)
+	_, err = s.rdb.ZScore(s.ctx, userActiveIndexKey, member).Result()
+	require.ErrorIs(s.T(), err, redis.Nil, "reconcile removes the user entry after release")
 }
 
 func (s *ConcurrencyCacheSuite) TestAccountSlot_TTL() {

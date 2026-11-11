@@ -89,6 +89,21 @@ var (
 		local now = tonumber(timeResult[1])
 		local expireBefore = now - ttl
 
+		-- 可选 KEYS[3]/ARGV[4]：成功占槽时在同一次往返里标记活跃索引，
+		-- 只抬高 score（不覆盖更晚的到期时间），兼容所有 Redis 版本。
+		local function markActive()
+			local indexKey = KEYS[3]
+			local member = ARGV[4]
+			if indexKey == nil or member == nil then
+				return
+			end
+			local expireAt = now + ttl
+			local current = redis.call('ZSCORE', indexKey, member)
+			if current == false or tonumber(current) < expireAt then
+				redis.call('ZADD', indexKey, expireAt, member)
+			end
+		end
+
 		-- 清理过期槽位
 		redis.call('ZREMRANGEBYSCORE', key, '-inf', expireBefore)
 		redis.call('ZREMRANGEBYSCORE', liveKey, '-inf', now - 60)
@@ -98,6 +113,7 @@ var (
 		if exists ~= false then
 			redis.call('ZADD', key, now, requestID)
 			redis.call('EXPIRE', key, ttl)
+			markActive()
 			return {1, now}
 		end
 
@@ -106,6 +122,7 @@ var (
 		if count < maxConcurrency then
 			redis.call('ZADD', key, now, requestID)
 			redis.call('EXPIRE', key, ttl)
+			markActive()
 			return {1, now}
 		end
 
@@ -481,6 +498,16 @@ var (
 		-- Refresh TTL so long-running traffic doesn't expire active queue counters.
 		redis.call('EXPIRE', KEYS[1], ARGV[2])
 
+		-- Optional KEYS[2]/ARGV[3]: mark the active index in the same round trip,
+		-- only ever raising the score (a slot's longer expiry is kept).
+		if KEYS[2] ~= nil and ARGV[3] ~= nil then
+			local expireAt = now + tonumber(ARGV[2])
+			local currentScore = redis.call('ZSCORE', KEYS[2], ARGV[3])
+			if currentScore == false or tonumber(currentScore) < expireAt then
+				redis.call('ZADD', KEYS[2], expireAt, ARGV[3])
+			end
+		end
+
 		return {1, now}
 	`)
 
@@ -506,6 +533,16 @@ var (
 
 		-- Refresh TTL so long-running traffic doesn't expire active queue counters.
 		redis.call('EXPIRE', KEYS[1], ARGV[2])
+
+		-- Optional KEYS[2]/ARGV[3]: mark the active index in the same round trip,
+		-- only ever raising the score (a slot's longer expiry is kept).
+		if KEYS[2] ~= nil and ARGV[3] ~= nil then
+			local expireAt = now + tonumber(ARGV[2])
+			local currentScore = redis.call('ZSCORE', KEYS[2], ARGV[3])
+			if currentScore == false or tonumber(currentScore) < expireAt then
+				redis.call('ZADD', KEYS[2], expireAt, ARGV[3])
+			end
+		end
 
 		return {1, now}
 	`)
@@ -656,12 +693,9 @@ func (c *concurrencyCache) refreshAccountActiveIndex(ctx context.Context, accoun
 	c.refreshActiveIndex(ctx, accountActiveIndexKey, accountID, accountSlotKey(accountID), accountWaitKey(accountID))
 }
 
-func (c *concurrencyCache) refreshUserActiveIndex(ctx context.Context, userID int64) {
-	c.refreshActiveIndex(ctx, userActiveIndexKey, userID, userSlotKey(userID), waitQueueKey(userID))
-}
-
 // refreshActiveIndex 以 Redis 中的真实槽位/等待数为准重建索引状态。
-// 释放槽位、等待计数减少、清理过期成员后都会调用它，防止索引残留。
+// 只用于后台的单账号过期清理；请求路径上的释放/等待减一不再调用它
+// （索引 member 按 score 到期后由周期性 reconcile 按真实负载处理）。
 // 索引维护是 best-effort：失败只记日志，不影响主流程。
 func (c *concurrencyCache) refreshActiveIndex(ctx context.Context, indexKey string, id int64, slotKey, waitKey string) {
 	if c == nil || c.rdb == nil || id <= 0 {
@@ -832,25 +866,22 @@ func runScriptInt64Pair(ctx context.Context, rdb *redis.Client, script *redis.Sc
 func (c *concurrencyCache) AcquireAccountSlot(ctx context.Context, accountID int64, maxConcurrency int, requestID string) (bool, error) {
 	key := accountSlotKey(accountID)
 	// 时间戳在 Lua 脚本内使用 Redis TIME 命令获取，确保多实例时钟一致
-	result, now, err := runScriptInt64Pair(ctx, c.rdb, acquireScript, []string{key, liveAccountSlotKey(accountID)}, maxConcurrency, c.slotTTLSeconds, requestID)
+	// 成功占槽时脚本在同一次往返里标记活跃账号，后台清理即可从索引定位候选账号。
+	result, _, err := runScriptInt64Pair(ctx, c.rdb, acquireScript,
+		[]string{key, liveAccountSlotKey(accountID), accountActiveIndexKey},
+		maxConcurrency, c.slotTTLSeconds, requestID, strconv.FormatInt(accountID, 10))
 	if err != nil {
 		return false, err
-	}
-	if result == 1 {
-		// 成功占槽后标记活跃账号，后台清理即可从索引定位候选账号。
-		c.touchActiveIndexAt(ctx, accountActiveIndexKey, accountID, now+int64(c.slotTTLSeconds))
 	}
 	return result == 1, nil
 }
 
+// ReleaseAccountSlot only removes the exact member. The active index entry is
+// left to expire: its score already marks when the account needs another look,
+// and the periodic reconcile drops it once the real load is zero.
 func (c *concurrencyCache) ReleaseAccountSlot(ctx context.Context, accountID int64, requestID string) error {
 	key := accountSlotKey(accountID)
-	if err := c.rdb.ZRem(ctx, key, requestID).Err(); err != nil {
-		return err
-	}
-	// 释放后用真实负载刷新索引；若没有槽位和等待计数，会移除索引 member。
-	c.refreshAccountActiveIndex(ctx, accountID)
-	return nil
+	return c.rdb.ZRem(ctx, key, requestID).Err()
 }
 
 func (c *concurrencyCache) GetAccountConcurrency(ctx context.Context, accountID int64) (int, error) {
@@ -909,25 +940,20 @@ func (c *concurrencyCache) GetAccountConcurrencyBatch(ctx context.Context, accou
 func (c *concurrencyCache) AcquireUserSlot(ctx context.Context, userID int64, maxConcurrency int, requestID string) (bool, error) {
 	key := userSlotKey(userID)
 	// 时间戳在 Lua 脚本内使用 Redis TIME 命令获取，确保多实例时钟一致
-	result, now, err := runScriptInt64Pair(ctx, c.rdb, acquireScript, []string{key, liveUserSlotKey(userID)}, maxConcurrency, c.slotTTLSeconds, requestID)
+	result, _, err := runScriptInt64Pair(ctx, c.rdb, acquireScript,
+		[]string{key, liveUserSlotKey(userID), userActiveIndexKey},
+		maxConcurrency, c.slotTTLSeconds, requestID, strconv.FormatInt(userID, 10))
 	if err != nil {
 		return false, err
 	}
-	if result == 1 {
-		// 成功占槽后标记活跃用户，避免启动清理依赖全量 SCAN。
-		c.touchActiveIndexAt(ctx, userActiveIndexKey, userID, now+int64(c.slotTTLSeconds))
-	}
+	// 成功占槽时脚本已在同一次往返里标记活跃用户，避免启动清理依赖全量 SCAN。
 	return result == 1, nil
 }
 
+// ReleaseUserSlot only removes the exact member; see ReleaseAccountSlot.
 func (c *concurrencyCache) ReleaseUserSlot(ctx context.Context, userID int64, requestID string) error {
 	key := userSlotKey(userID)
-	if err := c.rdb.ZRem(ctx, key, requestID).Err(); err != nil {
-		return err
-	}
-	// 释放后按 Redis 中剩余负载修正索引状态。
-	c.refreshUserActiveIndex(ctx, userID)
-	return nil
+	return c.rdb.ZRem(ctx, key, requestID).Err()
 }
 
 func (c *concurrencyCache) GetUserConcurrency(ctx context.Context, userID int64) (int, error) {
@@ -1545,24 +1571,21 @@ func (c *concurrencyCache) GetAPIKeyConcurrencyBatch(ctx context.Context, apiKey
 
 func (c *concurrencyCache) IncrementWaitCount(ctx context.Context, userID int64, maxWait int) (bool, error) {
 	key := waitQueueKey(userID)
-	result, now, err := runScriptInt64Pair(ctx, c.rdb, incrementWaitScript, []string{key}, maxWait, c.waitQueueTTLSeconds)
+	// 等待队列也会让用户保持“活跃”（脚本在同一次往返里标记索引），
+	// 否则槽位为 0 时后台任务可能漏看等待计数。
+	result, _, err := runScriptInt64Pair(ctx, c.rdb, incrementWaitScript,
+		[]string{key, userActiveIndexKey}, maxWait, c.waitQueueTTLSeconds, strconv.FormatInt(userID, 10))
 	if err != nil {
 		return false, err
-	}
-	if result == 1 {
-		// 等待队列也会让用户保持“活跃”，否则槽位为 0 时后台任务可能漏看等待计数。
-		c.touchActiveIndexAt(ctx, userActiveIndexKey, userID, now+int64(c.waitQueueTTLSeconds))
 	}
 	return result == 1, nil
 }
 
+// DecrementWaitCount is a single round trip; the index entry expires on its own
+// score and the periodic reconcile removes it once the real load is zero.
 func (c *concurrencyCache) DecrementWaitCount(ctx context.Context, userID int64) error {
 	key := waitQueueKey(userID)
 	_, err := decrementWaitScript.Run(ctx, c.rdb, []string{key}).Result()
-	if err == nil {
-		// 等待数减少后重新判断是否还需要保留索引。
-		c.refreshUserActiveIndex(ctx, userID)
-	}
 	return err
 }
 
@@ -1570,24 +1593,19 @@ func (c *concurrencyCache) DecrementWaitCount(ctx context.Context, userID int64)
 
 func (c *concurrencyCache) IncrementAccountWaitCount(ctx context.Context, accountID int64, maxWait int) (bool, error) {
 	key := accountWaitKey(accountID)
-	result, now, err := runScriptInt64Pair(ctx, c.rdb, incrementAccountWaitScript, []string{key}, maxWait, c.waitQueueTTLSeconds)
+	// 账号级等待队列同样写入账号活跃索引（脚本内同一次往返），供清理任务使用。
+	result, _, err := runScriptInt64Pair(ctx, c.rdb, incrementAccountWaitScript,
+		[]string{key, accountActiveIndexKey}, maxWait, c.waitQueueTTLSeconds, strconv.FormatInt(accountID, 10))
 	if err != nil {
 		return false, err
-	}
-	if result == 1 {
-		// 账号级等待队列同样写入账号活跃索引，供负载查询和清理任务使用。
-		c.touchActiveIndexAt(ctx, accountActiveIndexKey, accountID, now+int64(c.waitQueueTTLSeconds))
 	}
 	return result == 1, nil
 }
 
+// DecrementAccountWaitCount is a single round trip; see DecrementWaitCount.
 func (c *concurrencyCache) DecrementAccountWaitCount(ctx context.Context, accountID int64) error {
 	key := accountWaitKey(accountID)
 	_, err := decrementWaitScript.Run(ctx, c.rdb, []string{key}).Result()
-	if err == nil {
-		// 等待计数归零后索引需要同步删除，避免后台任务反复处理空账号。
-		c.refreshAccountActiveIndex(ctx, accountID)
-	}
 	return err
 }
 
