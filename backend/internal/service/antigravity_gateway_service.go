@@ -129,6 +129,8 @@ type AntigravityGatewayService struct {
 	cache             GatewayCache // 用于模型级限流时清除粘性会话绑定
 	schedulerSnapshot *SchedulerSnapshotService
 	internal500Cache  Internal500CounterCache // INTERNAL 500 渐进惩罚计数器
+	// modelRateLimitWriter 合并同一账号×模型的并发冷却写入并在短窗口内去重。
+	modelRateLimitWriter antigravityModelRateLimitWriter
 }
 
 func (s *AntigravityGatewayService) upstreamErrorBodyReadLimit() int64 {

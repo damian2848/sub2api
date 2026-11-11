@@ -1117,13 +1117,24 @@ func (s *AntigravityGatewayService) setAntigravityModelRateLimits(ctx context.Co
 		return false
 	}
 
+	// 冷却写入不随客户端断开取消：拿到 429 后断开的请求也必须把账号摘出调度。
+	writeCtx, cancel := antigravityStateCtx(ctx)
+	defer cancel()
+
 	success := false
 	for _, key := range keys {
 		effectiveResetAt := resetAt
 		if existing := account.modelRateLimitResetAt(key); existing != nil && existing.After(effectiveResetAt) {
 			effectiveResetAt = *existing
 		}
-		if setModelRateLimitByModelName(ctx, repo, account.ID, key, prefix, statusCode, effectiveResetAt, afterSmartRetry) {
+		ok, skipped := s.modelRateLimitWriter.write(account.ID, key, effectiveResetAt, func() bool {
+			return setModelRateLimitByModelName(writeCtx, repo, account.ID, key, prefix, statusCode, effectiveResetAt, afterSmartRetry)
+		})
+		if skipped {
+			logger.LegacyPrintf("service.antigravity_gateway", "%s status=%d model_rate_limit_dedup model=%s account=%d reset_in=%v (recent or in-flight write covers it)",
+				prefix, statusCode, key, account.ID, time.Until(effectiveResetAt).Truncate(time.Second))
+		}
+		if ok {
 			s.updateAccountModelRateLimitInCache(ctx, account, key, effectiveResetAt)
 			success = true
 		}
@@ -1135,6 +1146,8 @@ func (s *AntigravityGatewayService) clearStickySession(ctx context.Context, grou
 	if s == nil || s.cache == nil || strings.TrimSpace(sessionHash) == "" {
 		return
 	}
+	ctx, cancel := antigravityStateCtx(ctx)
+	defer cancel()
 	if err := s.cache.DeleteSessionAccountID(ctx, groupID, sessionHash); err != nil {
 		logger.LegacyPrintf("service.antigravity_gateway", "[antigravity-Forward] sticky_session_clear_failed group_id=%d session=%s err=%v", groupID, shortSessionHash(sessionHash), err)
 	}
@@ -1448,6 +1461,10 @@ func (s *AntigravityGatewayService) handleUpstreamError(
 	if !account.ShouldHandleErrorCode(statusCode) {
 		return nil
 	}
+	// 账号状态写入（模型冷却、账号限流、错误状态、粘性会话清理）脱离请求 ctx：
+	// 客户端拿到 429 后断开不能让写入中途取消、账号继续可调度。上游请求本身仍用请求 ctx。
+	ctx, cancel := antigravityStateCtx(ctx)
+	defer cancel()
 	// 模型级限流处理（优先）
 	result := s.handleModelRateLimit(&handleModelRateLimitParams{
 		ctx:             ctx,
