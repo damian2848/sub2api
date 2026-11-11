@@ -117,12 +117,34 @@ var (
 	}
 )
 
+const (
+	// directDialTimeout bounds TCP connection establishment for direct
+	// (non-proxy) TLS fingerprint dials, matching the proxy dialers and the
+	// regular upstream transport dialer.
+	directDialTimeout = 10 * time.Second
+	// directDialKeepAlive matches the keep-alive used by the proxy dialers.
+	directDialKeepAlive = 30 * time.Second
+)
+
+// directTLSDialTimeout bounds TCP connect + uTLS handshake in
+// Dialer.DialTLSContext. http.Transport.TLSHandshakeTimeout does not apply to
+// DialTLSContext, so without this a black-holed SYN or a stalled handshake
+// would hold a MaxConnsPerHost slot until kernel retransmits give up (~130s).
+// Variable (not const) so unit tests can shorten it.
+var directTLSDialTimeout = 10 * time.Second
+
+// newDirectNetDialer returns the bounded net.Dialer used when NewDialer is
+// given no base dialer.
+func newDirectNetDialer() *net.Dialer {
+	return &net.Dialer{Timeout: directDialTimeout, KeepAlive: directDialKeepAlive}
+}
+
 // NewDialer creates a new TLS fingerprint dialer.
 // baseDialer is used for TCP connection establishment (supports proxy scenarios).
-// If baseDialer is nil, direct TCP dial is used.
+// If baseDialer is nil, direct TCP dial is used (bounded by directDialTimeout).
 func NewDialer(profile *Profile, baseDialer func(ctx context.Context, network, addr string) (net.Conn, error)) *Dialer {
 	if baseDialer == nil {
-		baseDialer = (&net.Dialer{}).DialContext
+		baseDialer = newDirectNetDialer().DialContext
 	}
 	return &Dialer{profile: profile, baseDialer: baseDialer}
 }
@@ -283,6 +305,9 @@ func (d *HTTPProxyDialer) DialTLSContext(ctx context.Context, network, addr stri
 // DialTLSContext establishes a TLS connection with the configured fingerprint.
 // This method is designed to be used as http.Transport.DialTLSContext.
 func (d *Dialer) DialTLSContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, directTLSDialTimeout)
+	defer cancel()
+
 	// Establish TCP connection using base dialer (supports proxy)
 	slog.Debug("tls_fingerprint_dialing_tcp", "addr", addr)
 	conn, err := d.baseDialer(ctx, network, addr)
