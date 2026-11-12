@@ -57,7 +57,7 @@ type schedulerEmptyBucketRepo struct {
 	err      error
 }
 
-func (r *schedulerEmptyBucketRepo) ListSchedulableUngroupedByPlatform(ctx context.Context, _ string) ([]Account, error) {
+func (r *schedulerEmptyBucketRepo) ListModelAvailabilityCandidates(ctx context.Context, _ *int64, _ []string, _ bool) ([]Account, error) {
 	if r.calls.Add(1) == 1 && r.entered != nil {
 		close(r.entered)
 	}
@@ -139,7 +139,7 @@ func TestSchedulerSnapshotEmptyBucketNonEmptySnapshotWins(t *testing.T) {
 
 	// outbox 在负缓存有效期内发布了非空快照，必须立即可见。
 	cache.mu.Lock()
-	cache.snapshot = []*Account{{ID: 7, Platform: PlatformOpenAI}}
+	cache.snapshot = []*Account{{ID: 7, Platform: PlatformOpenAI, Status: StatusActive, Schedulable: true}}
 	cache.mu.Unlock()
 	accounts, _, err := svc.ListSchedulableAccounts(context.Background(), nil, PlatformOpenAI, false)
 	require.NoError(t, err)
@@ -177,7 +177,7 @@ func TestSchedulerSnapshotFallbackFollowerHonorsOwnCancellation(t *testing.T) {
 	repo := &schedulerEmptyBucketRepo{
 		release:  make(chan struct{}),
 		entered:  make(chan struct{}),
-		accounts: []Account{{ID: 1, Platform: PlatformOpenAI}},
+		accounts: []Account{{ID: 1, Platform: PlatformOpenAI, Status: StatusActive, Schedulable: true}},
 	}
 	svc := newSchedulerEmptyBucketService(cache, repo, &now)
 
@@ -221,7 +221,7 @@ type schedulerPanickingRepo struct {
 	calls atomic.Int32
 }
 
-func (r *schedulerPanickingRepo) ListSchedulableUngroupedByPlatform(context.Context, string) ([]Account, error) {
+func (r *schedulerPanickingRepo) ListModelAvailabilityCandidates(context.Context, *int64, []string, bool) ([]Account, error) {
 	r.calls.Add(1)
 	panic("corrupt account row")
 }
