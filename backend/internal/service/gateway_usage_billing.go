@@ -369,13 +369,16 @@ func applyUsageBilling(ctx context.Context, requestID string, usageLog *UsageLog
 		return true, nil
 	}
 
-	billingCtx, cancel := detachedBillingContext(ctx)
-	defer cancel()
-
-	result, err := repo.Apply(billingCtx, cmd)
+	applyCtx, cancelApply := detachedBillingContext(ctx)
+	result, err := repo.Apply(applyCtx, cmd)
+	cancelApply()
 	if err != nil {
 		return false, err
 	}
+
+	// Apply 可能在按用户合并的结算通道中排队，结算后的缓存同步使用独立的超时。
+	billingCtx, cancel := detachedBillingContext(ctx)
+	defer cancel()
 
 	if result == nil || !result.Applied {
 		if result != nil && result.ReplayedCommittedAttempt {
