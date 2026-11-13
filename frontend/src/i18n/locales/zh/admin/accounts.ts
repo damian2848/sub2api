@@ -680,6 +680,10 @@ export default {
         quotaUsed: '已用',
         quotaSummaryUnavailable: '分组额度查询失败，当前数据可能不完整',
         quotaPeriodUnknown: '周期未知',
+        quotaRefreshFailedCached: '刷新失败，当前显示历史额度，不能确认剩余额度。',
+        quotaRefreshFailedUnknown: '刷新失败，当前额度未知。',
+        quotaObservedAt: '额度采样时间：',
+        quotaObservationUnknown: '未知（历史缓存）',
         estimatedTotalCost: '预计总费用 ${cost}',
         estimatedTotalCostTooltip: '根据当前窗口费用和使用率估算达到 100% 使用率时的总费用'
       },

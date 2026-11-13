@@ -125,6 +125,15 @@
 
     <!-- OpenAI Codex accounts: ticket status; usage querying remains OAuth-only. -->
     <template v-else-if="account.platform === 'openai' && (account.type === 'oauth' || account.type === 'setup-token')">
+      <div
+        v-if="error || usageInfo?.error || usageInfo?.error_code"
+        role="alert"
+        class="mb-1 text-[10px] text-amber-700 dark:text-amber-300"
+      >
+        {{ t(hasOpenAIQuotaObservation
+          ? 'admin.accounts.usageWindow.quotaRefreshFailedCached'
+          : 'admin.accounts.usageWindow.quotaRefreshFailedUnknown') }}
+      </div>
       <div v-if="codexTurnTickets.length" class="mb-1 space-y-0.5">
         <div
           v-for="ticket in codexTurnTickets"
@@ -143,6 +152,7 @@
           v-if="usageInfo?.five_hour"
           label="5h"
           :utilization="usageInfo.five_hour.utilization"
+          :utilization-unknown="usageInfo.five_hour.utilization_unknown"
           :resets-at="usageInfo.five_hour.resets_at"
           :window-stats="usageInfo.five_hour.window_stats"
           :show-now-when-idle="true"
@@ -152,12 +162,20 @@
           v-if="usageInfo?.seven_day"
           label="7d"
           :utilization="usageInfo.seven_day.utilization"
+          :utilization-unknown="usageInfo.seven_day.utilization_unknown"
           :resets-at="usageInfo.seven_day.resets_at"
           :window-stats="usageInfo.seven_day.window_stats"
           :estimated-total-cost="openAISevenDayEstimatedTotalCost"
           :show-now-when-idle="true"
           color="emerald"
         />
+        <div v-if="hasOpenAIQuotaObservation" class="text-[10px] text-gray-500 dark:text-gray-400">
+          {{ t('admin.accounts.usageWindow.quotaObservedAt') }}
+          <time v-if="usageInfo?.updated_at" :datetime="usageInfo.updated_at">
+            {{ formatDateTime(usageInfo.updated_at) }}
+          </time>
+          <span v-else>{{ t('admin.accounts.usageWindow.quotaObservationUnknown') }}</span>
+        </div>
         <!--
           Upstream codex /wham/usage quota query + reset. The local active-sampling
           refresh button is rendered via the pre-actions slot so the user sees a
@@ -768,7 +786,7 @@ import { adminAPI } from '@/api/admin'
 import type { Account, AccountUsageInfo, AntigravityQuotaBucket, GeminiCredentials, WindowStats } from '@/types'
 import { buildOpenAIUsageRefreshKey } from '@/utils/accountUsageRefresh'
 import { enqueueUsageRequest } from '@/utils/usageLoadQueue'
-import { formatCompactNumber } from '@/utils/format'
+import { formatCompactNumber, formatDateTime } from '@/utils/format'
 import { isOfficialGeminiBaseUrl } from '@/utils/geminiExplicitCache'
 import { supportsAccountQuota } from '@/utils/accountQuota'
 import UsageProgressBar from './UsageProgressBar.vue'
@@ -933,11 +951,17 @@ function formatCodexTicketRemaining(seconds: number) {
   return `${m}m${String(s).padStart(2, '0')}s`
 }
 
+const hasOpenAIQuotaObservation = computed(() => {
+  const windows = [usageInfo.value?.five_hour, usageInfo.value?.seven_day]
+  return windows.some(window => window && !window.utilization_unknown)
+})
+
 const openAISevenDayEstimatedTotalCost = computed(() => {
   const sevenDay = usageInfo.value?.seven_day
   const utilization = sevenDay?.utilization
   const currentCost = sevenDay?.window_stats?.cost
   if (
+    sevenDay?.utilization_unknown ||
     typeof utilization !== 'number' ||
     typeof currentCost !== 'number' ||
     !Number.isFinite(utilization) ||
@@ -1661,7 +1685,7 @@ const loadActiveUsage = async () => {
     _usageCache.set(accountID, { data: result, ts: Date.now() })
   } catch (e: any) {
     if (unmounted.value || props.account.id !== accountID || requestSequence !== usageRequestSequence) return
-    if (props.account.type === 'gemini_web' || props.account.platform === 'antigravity') error.value = t('common.error')
+    if (props.account.type === 'gemini_web' || props.account.platform === 'antigravity' || props.account.platform === 'openai') error.value = t('common.error')
     console.error('Failed to load active usage:', e)
   } finally {
     if (!unmounted.value) {

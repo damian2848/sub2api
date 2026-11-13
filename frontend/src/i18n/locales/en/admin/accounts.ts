@@ -2129,6 +2129,10 @@ export default {
         quotaUsed: 'Used',
         quotaSummaryUnavailable: 'Quota group query failed; displayed data may be incomplete',
         quotaPeriodUnknown: 'Unknown window',
+        quotaRefreshFailedCached: 'Refresh failed. Showing a previous observation; remaining quota is unconfirmed.',
+        quotaRefreshFailedUnknown: 'Refresh failed. Current quota is unknown.',
+        quotaObservedAt: 'Quota observed: ',
+        quotaObservationUnknown: 'Unknown (cached)',
         estimatedTotalCost: 'Est. total ${cost}',
         estimatedTotalCostTooltip: 'Estimated total cost at 100% utilization, based on current window cost and utilization'
       },

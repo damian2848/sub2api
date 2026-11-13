@@ -1583,6 +1583,7 @@ export interface WindowStats {
 
 export interface UsageProgress {
   utilization: number // Percentage (0-100+, 100 = 100%)
+  utilization_unknown?: boolean
   resets_at: string | null
   remaining_seconds: number
   resets_at_estimated?: boolean // 上游未给出重置时间，由本地用量记录推算
