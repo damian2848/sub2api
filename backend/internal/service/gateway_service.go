@@ -1548,7 +1548,7 @@ func (s *GatewayService) GetAvailableModels(ctx context.Context, groupID *int64,
 		// supplementUnmappedOpenAIModels contribute the default set. Mappings on
 		// the ordinary accounts in the same group still count.
 		mapping := acc.GetModelMapping()
-		if platform == PlatformOpenAI && acc.IsOpenAIPassthroughEnabled() {
+		if platform == PlatformOpenAI && acc.IsOpenAIPassthroughEnabled() && !acc.IsOpenAIPassthroughModelFilterEnabled() {
 			mapping = nil
 		}
 		for model := range mapping {
