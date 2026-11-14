@@ -1065,7 +1065,7 @@ func (s *GatewayService) handleStreamingResponse(ctx context.Context, resp *http
 				}
 			}
 		}
-		if clientModel != "" {
+		if clientModel != "" && eventType == "message_start" {
 			if msg, ok := event["message"].(map[string]any); ok {
 				if _, ok := msg["model"].(string); ok {
 					msg["model"] = clientModel
