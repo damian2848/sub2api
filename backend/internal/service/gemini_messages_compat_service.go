@@ -2328,6 +2328,7 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 	openToolIndex := -1
 	openToolID := ""
 	openToolName := ""
+	openToolUpstreamID := ""
 	var seenToolJSON geminiTextDelta
 
 	reader := newBoundedSSELineReader(resp.Body, s.cfg)
@@ -2525,9 +2526,7 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 				}
 
 				// If we receive streamed tool args in pieces, keep a single tool block open and emit deltas.
-				// Arguments that do not extend the open block are a separate call,
-				// such as two parallel calls of the same tool.
-				if openToolIndex >= 0 && (openToolName != name || !strings.HasPrefix(argsJSONText, seenToolJSON.seen.String())) {
+				if openToolIndex >= 0 && geminiToolCallStartsNewBlock(openToolUpstreamID, openToolName, seenToolJSON.seen.String(), fc) {
 					writeSSE(c.Writer, "content_block_stop", map[string]any{
 						"type":  "content_block_stop",
 						"index": openToolIndex,
@@ -2541,6 +2540,7 @@ func (s *GeminiMessagesCompatService) handleStreamingResponse(c *gin.Context, re
 					openToolID = "toolu_" + randomHex(8)
 					openToolIndex = nextBlockIndex
 					openToolName = name
+					openToolUpstreamID, _ = fc["id"].(string)
 					nextBlockIndex++
 					sawToolUse = true
 
