@@ -25,6 +25,11 @@ var (
 )
 
 const (
+	// schedulerSharedFallbackTimeout 是合并回源在未配置 db_fallback_timeout_seconds 时的时长上限；合并回源不随单个调用方取消。
+	schedulerSharedFallbackTimeout = 30 * time.Second
+)
+
+const (
 	outboxEventTimeout                    = 2 * time.Minute
 	schedulerOutboxCleanupBatch           = 5000
 	schedulerGroupLifecycleTimeout        = 30 * time.Second
@@ -274,7 +279,7 @@ func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, 
 
 	cacheMiss := false
 	if s.cache != nil {
-		cached, hit, err := s.cache.GetSnapshot(ctx, bucket)
+		cached, hit, err := s.readSnapshotAccounts(ctx, bucket)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, useMixed, ctxErr
 		}
@@ -282,7 +287,7 @@ func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, 
 			// Redis 故障时不查负缓存，照常回退，避免把所有请求短路成空。
 			logger.LegacyPrintf("service.scheduler_snapshot", "[Scheduler] cache read failed: bucket=%s err=%v", bucket.String(), err)
 		} else if hit {
-			return derefSchedulableAccounts(cached), useMixed, nil
+			return cached, useMixed, nil
 		} else {
 			cacheMiss = true
 		}
@@ -304,6 +309,35 @@ func (s *SchedulerSnapshotService) ListSchedulableAccounts(ctx context.Context, 
 		}
 	}
 	return eligible, useMixed, nil
+}
+
+// readSnapshotAccounts 读取 bucket 快照，只返回当前可调度的账号；缓存实现能直接返回值切片时直接使用该切片。
+// 快照缓存的是配置的账号池，限流、过载、临时不可调度等限时封禁在每次读取时判定，到期无需写入或 outbox 事件。
+func (s *SchedulerSnapshotService) readSnapshotAccounts(ctx context.Context, bucket SchedulerBucket) ([]Account, bool, error) {
+	if reader, ok := s.cache.(schedulerSnapshotValuesReader); ok {
+		accounts, hit, err := reader.GetSnapshotValues(ctx, bucket)
+		if err != nil || !hit {
+			return nil, false, err
+		}
+		// GetSnapshotValues 返回的切片由本次调用独占，可以原地压缩。
+		return compactSchedulableAccounts(accounts), true, nil
+	}
+	cached, hit, err := s.cache.GetSnapshot(ctx, bucket)
+	if err != nil || !hit {
+		return nil, false, err
+	}
+	return derefSchedulableAccounts(cached), true, nil
+}
+
+// compactSchedulableAccounts 原地保留当前可调度的账号。
+func compactSchedulableAccounts(accounts []Account) []Account {
+	out := accounts[:0]
+	for i := range accounts {
+		if accounts[i].IsSchedulable() {
+			out = append(out, accounts[i])
+		}
+	}
+	return out
 }
 
 // loadFallbackAccountsShared 用 singleflight 合并同一桶的并发 DB 回退。leader 脱离请求取消
@@ -374,7 +408,7 @@ func (s *SchedulerSnapshotService) loadFallbackAccounts(ctx context.Context, buc
 	}
 
 	if s.cache != nil && canPublish {
-		if err := s.cache.SetSnapshot(fallbackCtx, bucket, writeToken, accounts); err != nil {
+		if err := s.cache.SetSnapshot(ctx, bucket, writeToken, accounts); err != nil {
 			if errors.Is(err, ErrSchedulerBucketRetired) || errors.Is(err, ErrSchedulerBucketWriteFenced) {
 				slog.Debug("[Scheduler] cache publish fenced", "bucket", bucket.String())
 			} else {
