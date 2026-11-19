@@ -20,7 +20,11 @@ func useGeminiWebAnalyticsDir(t *testing.T) string {
 	dir := t.TempDir()
 	previous := geminiWebAnalyticsDir
 	geminiWebAnalyticsDir = func() string { return dir }
-	t.Cleanup(func() { geminiWebAnalyticsDir = previous })
+	t.Cleanup(func() {
+		// Background appends must finish before t.TempDir removes dir.
+		geminiWebAnalytics.pending.Wait()
+		geminiWebAnalyticsDir = previous
+	})
 	return dir
 }
 

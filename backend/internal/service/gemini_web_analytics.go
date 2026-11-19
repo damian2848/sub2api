@@ -45,6 +45,8 @@ type geminiWebAnalyticsWriter struct {
 	mu         sync.Mutex
 	prunedDay  string
 	lastFailed time.Time
+	// pending tracks background appends so tests can wait before removing dir.
+	pending sync.WaitGroup
 }
 
 // geminiWebAttemptRecord is one Gemini Web call (type "attempt") or one
@@ -242,7 +244,9 @@ func (w *geminiWebAnalyticsWriter) write(ctx context.Context, rec geminiWebAttem
 	}
 	dir := geminiWebAnalyticsDir()
 	l := logger.FromContext(ctx)
+	w.pending.Add(1)
 	go func() {
+		defer w.pending.Done()
 		defer func() { _ = recover() }()
 		if err := w.append(dir, rec.Time, line); err != nil {
 			w.mu.Lock()

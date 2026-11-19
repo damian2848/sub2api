@@ -87,10 +87,20 @@ func TestSchedulerSnapshotConfiguredMembership(t *testing.T) {
 						}
 						cache := NewSchedulerCache(testRedis(t))
 						svc := service.NewSchedulerSnapshotService(cache, nil, repo, nil, cfg)
+						// Other integration tests commit ungrouped accounts to the shared
+						// database; compare only the accounts this test created.
+						created := make(map[int64]bool)
+						for _, kinds := range ids {
+							for _, id := range kinds {
+								created[id] = true
+							}
+						}
 						accountIDs := func(accounts []service.Account) []int64 {
-							out := make([]int64, len(accounts))
+							out := make([]int64, 0, len(accounts))
 							for i := range accounts {
-								out[i] = accounts[i].ID
+								if created[accounts[i].ID] {
+									out = append(out, accounts[i].ID)
+								}
 							}
 							return out
 						}
@@ -112,9 +122,11 @@ func TestSchedulerSnapshotConfiguredMembership(t *testing.T) {
 						members, hit, err := cache.GetSnapshot(ctx, bucket)
 						require.NoError(t, err)
 						require.True(t, hit)
-						memberIDs := make([]int64, len(members))
+						memberIDs := make([]int64, 0, len(members))
 						for i := range members {
-							memberIDs[i] = members[i].ID
+							if created[members[i].ID] {
+								memberIDs = append(memberIDs, members[i].ID)
+							}
 						}
 						require.ElementsMatch(t, wantMembers, memberIDs, "the stored pool retains timed blocks without widening platform/group or manual eligibility")
 					})

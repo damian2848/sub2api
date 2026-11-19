@@ -21,11 +21,33 @@ func NewUserGroupRateRepository(sqlDB *sql.DB) service.UserGroupRateRepository {
 	return &userGroupRateRepository{sql: sqlDB, db: sqlDB}
 }
 
-func (r *userGroupRateRepository) beginTx(ctx context.Context) (*sql.Tx, error) {
-	if r == nil || r.db == nil {
+// userGroupRateTx is the write scope of a group sync: a fresh transaction, or
+// the caller's transaction when the repository is bound to one.
+type userGroupRateTx interface {
+	sqlExecutor
+	Commit() error
+	Rollback() error
+}
+
+// callerTx runs on a transaction the caller owns; commit and rollback stay with it.
+type callerTx struct{ sqlExecutor }
+
+func (callerTx) Commit() error   { return nil }
+func (callerTx) Rollback() error { return nil }
+
+func (r *userGroupRateRepository) beginTx(ctx context.Context) (userGroupRateTx, error) {
+	if r == nil {
 		return nil, fmt.Errorf("user group rate repository: database handle is not configured")
 	}
-	return r.db.BeginTx(ctx, nil)
+	if r.db != nil {
+		return r.db.BeginTx(ctx, nil)
+	}
+	if r.sql != nil {
+		// Without a *sql.DB the executor is already a transaction (repository
+		// bound to a caller's tx), which provides the same atomicity.
+		return callerTx{r.sql}, nil
+	}
+	return nil, fmt.Errorf("user group rate repository: database handle is not configured")
 }
 
 // dedupeGroupRateMultiplierEntries 按 user_id 去重，保留最后一次出现的值。
