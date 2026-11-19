@@ -263,3 +263,9 @@ func (w *claudeNotifyWriter) Write(p []byte) (int, error) {
 	}
 	return n, err
 }
+
+// WriteString keeps io.WriteString on the forwarding path observable; the
+// embedded recorder's own WriteString would bypass Write.
+func (w *claudeNotifyWriter) WriteString(s string) (int, error) {
+	return w.Write([]byte(s))
+}

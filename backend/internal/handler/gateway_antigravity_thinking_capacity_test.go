@@ -50,13 +50,13 @@ func TestGatewayAntigravityThinkingCapacity_ActualRoutesUseForwardedVariant(t *t
 		{"messages high budget", "messages", messages(`,"thinking":{"type":"enabled","budget_tokens":10240}`), "high", false},
 		{"messages Gemini branch", "messages", messages(`,"thinking":{"type":"enabled","budget_tokens":4096}`), "medium", true},
 		{"chat default", "chat_completions", chat(""), "high", false},
-		// The compatibility converter omits Claude thinking for effort=low,
-		// so the existing forwarder uses the default high variant in this case.
-		{"chat low effort keeps converter semantics", "chat_completions", chat(`,"reasoning_effort":"low"`), "high", false},
+		// The converter writes effort=low to output_config.effort without Claude
+		// thinking; forwarding reads it and selects the low variant.
+		{"chat low effort uses low variant", "chat_completions", chat(`,"reasoning_effort":"low"`), "low", false},
 		{"chat medium effort", "chat_completions", chat(`,"reasoning_effort":"medium"`), "medium", false},
 		{"chat nested medium effort", "chat_completions", chat(`,"reasoning":{"effort":"medium"}`), "medium", false},
 		{"responses default", "responses", responses(""), "high", false},
-		{"responses low effort keeps converter semantics", "responses", responses(`,"reasoning":{"effort":"low"}`), "high", false},
+		{"responses low effort uses low variant", "responses", responses(`,"reasoning":{"effort":"low"}`), "low", false},
 		{"responses medium effort", "responses", responses(`,"reasoning":{"effort":"medium"}`), "medium", false},
 		{"count tokens medium budget", "count_tokens", messages(`,"thinking":{"type":"enabled","budget_tokens":4096}`), "medium", false},
 	} {

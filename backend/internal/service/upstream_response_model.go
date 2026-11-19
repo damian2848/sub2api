@@ -243,14 +243,6 @@ func applyObservedUpstreamResponseModel(c *gin.Context, result *OpenAIForwardRes
 	result.UpstreamResponseModelConflict = observedUpstreamResponseModelConflict(c)
 }
 
-func applyObservedGatewayResponseModel(c *gin.Context, result *ForwardResult) {
-	if result == nil {
-		return
-	}
-	result.UpstreamResponseModel = observedUpstreamResponseModel(c)
-	result.UpstreamResponseModelConflict = observedUpstreamResponseModelConflict(c)
-}
-
 func observedUpstreamResponseModelConflict(c *gin.Context) bool {
 	return upstreamResponseModelObserverFromContext(c).Conflict()
 }

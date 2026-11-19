@@ -153,9 +153,9 @@ func TestAntigravityModelCooldown_BareModelUsesForwardedThinkingVariant(t *testi
 		{"native medium budget", "gemini", `{"contents":[{"parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":4096}}}`, "medium"},
 		{"messages disabled", "messages", `{"model":"gemini-3.8-flash","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"disabled"}}`, "low"},
 		{"messages medium", "messages", `{"model":"gemini-3.8-flash","messages":[{"role":"user","content":"hi"}],"thinking":{"type":"enabled","budget_tokens":4096}}`, "medium"},
-		{"chat low converts to default high", "chat_completions", `{"model":"gemini-3.8-flash","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"low"}`, "high"},
+		{"chat low uses low variant", "chat_completions", `{"model":"gemini-3.8-flash","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"low"}`, "low"},
 		{"chat nested reasoning wins", "chat_completions", `{"model":"gemini-3.8-flash","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high","reasoning":{"effort":"medium"}}`, "medium"},
-		{"responses low converts to default high", "responses", `{"model":"gemini-3.8-flash","input":"hi","reasoning":{"effort":"low"}}`, "high"},
+		{"responses low uses low variant", "responses", `{"model":"gemini-3.8-flash","input":"hi","reasoning":{"effort":"low"}}`, "low"},
 		{"responses medium", "responses", `{"model":"gemini-3.8-flash","input":"hi","reasoning":{"effort":"medium"}}`, "medium"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

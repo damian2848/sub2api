@@ -34,8 +34,9 @@ type antigravityThinkingLevelContextKey struct{}
 
 // WithAntigravityThinkingFromRequest lets scheduling use the same Gemini variant
 // as forwarding. Only Antigravity model resolution reads this context value.
-// OpenAI protocols reuse their actual converters: e.g. reasoning "low" produces
-// no Claude thinking config, so the Antigravity variant remains the default high.
+// OpenAI protocols reuse their actual converters and read the converted
+// output_config.effort like forwarding does, so reasoning "low" selects the low
+// variant. "messages_compat" is the converted Claude body of a compat request.
 func WithAntigravityThinkingFromRequest(ctx context.Context, body []byte, protocol string) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
@@ -44,7 +45,7 @@ func WithAntigravityThinkingFromRequest(ctx context.Context, body []byte, protoc
 	switch protocol {
 	case "gemini":
 		level = geminiThinkingLevelFromBody(body)
-	case "messages", "chat_completions", "responses":
+	case "messages", "messages_compat", "chat_completions", "responses":
 		// Read only fields that influence thinking. Avoid copying/converting large
 		// messages, tools, images or Responses input during account selection.
 		var probe struct {
@@ -56,6 +57,8 @@ func WithAntigravityThinkingFromRequest(ctx context.Context, body []byte, protoc
 		if json.Unmarshal(body, &probe) == nil {
 			if protocol == "messages" {
 				level = geminiThinkingLevelFromClaudeThinking(probe.Thinking)
+			} else if protocol == "messages_compat" {
+				level = geminiThinkingLevelFromClaudeBody(body, probe.Thinking)
 			} else {
 				request := &apicompat.ResponsesRequest{
 					Model: probe.Model, Reasoning: probe.Reasoning, Input: json.RawMessage(`[]`),
@@ -71,10 +74,16 @@ func WithAntigravityThinkingFromRequest(ctx context.Context, body []byte, protoc
 				}
 				if request != nil {
 					converted, err := apicompat.ResponsesToAnthropicRequest(request)
-					if err == nil && converted.Thinking != nil {
-						level = geminiThinkingLevelFromClaudeThinking(&antigravity.ThinkingConfig{
-							Type: converted.Thinking.Type, BudgetTokens: converted.Thinking.BudgetTokens,
-						})
+					if err == nil {
+						var thinking *antigravity.ThinkingConfig
+						if converted.Thinking != nil {
+							thinking = &antigravity.ThinkingConfig{
+								Type: converted.Thinking.Type, BudgetTokens: converted.Thinking.BudgetTokens,
+							}
+						}
+						// Match forwarding: the converted body carries output_config.effort.
+						convertedBody, _ := json.Marshal(converted)
+						level = geminiThinkingLevelFromClaudeBody(convertedBody, thinking)
 					}
 				}
 			}
