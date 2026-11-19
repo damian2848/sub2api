@@ -25,11 +25,6 @@ var (
 )
 
 const (
-	// schedulerSharedFallbackTimeout 是合并回源在未配置 db_fallback_timeout_seconds 时的时长上限；合并回源不随单个调用方取消。
-	schedulerSharedFallbackTimeout = 30 * time.Second
-)
-
-const (
 	outboxEventTimeout                    = 2 * time.Minute
 	schedulerOutboxCleanupBatch           = 5000
 	schedulerGroupLifecycleTimeout        = 30 * time.Second
@@ -329,7 +324,7 @@ func (s *SchedulerSnapshotService) readSnapshotAccounts(ctx context.Context, buc
 	return derefSchedulableAccounts(cached), true, nil
 }
 
-// compactSchedulableAccounts 原地保留当前可调度的账号。
+// compactSchedulableAccounts 原地保留当前可调度的账号；accounts 必须由调用方独占。
 func compactSchedulableAccounts(accounts []Account) []Account {
 	out := accounts[:0]
 	for i := range accounts {
@@ -337,6 +332,7 @@ func compactSchedulableAccounts(accounts []Account) []Account {
 			out = append(out, accounts[i])
 		}
 	}
+	clear(accounts[len(out):])
 	return out
 }
 
