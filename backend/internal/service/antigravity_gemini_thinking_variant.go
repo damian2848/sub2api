@@ -55,11 +55,12 @@ func WithAntigravityThinkingFromRequest(ctx context.Context, body []byte, protoc
 			Reasoning       *apicompat.ResponsesReasoning `json:"reasoning"`
 		}
 		if json.Unmarshal(body, &probe) == nil {
-			if protocol == "messages" {
+			switch protocol {
+			case "messages":
 				level = geminiThinkingLevelFromClaudeThinking(probe.Thinking)
-			} else if protocol == "messages_compat" {
+			case "messages_compat":
 				level = geminiThinkingLevelFromClaudeBody(body, probe.Thinking)
-			} else {
+			default:
 				request := &apicompat.ResponsesRequest{
 					Model: probe.Model, Reasoning: probe.Reasoning, Input: json.RawMessage(`[]`),
 				}
